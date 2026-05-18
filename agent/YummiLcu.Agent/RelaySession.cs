@@ -46,16 +46,36 @@ internal sealed class RelaySession : IAsyncDisposable
             Log?.Invoke($"브라우저 열기 실패: {ex.Message}");
         }
 
-        _ws = new ClientWebSocket();
-        await _ws.ConnectAsync(new Uri(_config.WsUrl(_sessionId)), ct);
+        var wsUrl = _config.WsUrl(_sessionId);
+        Log?.Invoke($"Relay 연결 시도: {_config.RelayPublicBaseUrl}");
+        try
+        {
+            _ws = new ClientWebSocket();
+            await _ws.ConnectAsync(new Uri(wsUrl), ct);
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"Relay WebSocket 실패: {ex.Message}");
+            Log?.Invoke("agent.json 의 RelayPublicBaseUrl 이 https://yummi.duckdns.org 인지 확인하세요.");
+            Log?.Invoke("(127.0.0.1:8790 은 이 PC에 Relay가 없으면 연결 거부됩니다)");
+            SetStatus("Relay 연결 실패");
+            return;
+        }
         Log?.Invoke("WebSocket 연결됨");
 
         _ = Task.Run(() => ReceiveLoopAsync(ct), ct);
 
         while (!ct.IsCancellationRequested)
         {
-            if (await PollAuthAsync(ct))
-                break;
+            try
+            {
+                if (await PollAuthAsync(ct))
+                    break;
+            }
+            catch (Exception ex)
+            {
+                Log?.Invoke($"인증 확인 실패: {ex.Message}");
+            }
             await Task.Delay(_config.AuthPollIntervalMs, ct);
         }
 

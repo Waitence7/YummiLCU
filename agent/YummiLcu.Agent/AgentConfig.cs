@@ -6,7 +6,7 @@ internal sealed class AgentConfig
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 
-    public string RelayPublicBaseUrl { get; set; } = "http://127.0.0.1:8790";
+    public string RelayPublicBaseUrl { get; set; } = "https://yummi.duckdns.org";
     public int AuthPollIntervalMs { get; set; } = 1500;
     /// <summary>lockfile 전체 경로.</summary>
     public string? LockfilePath { get; set; }
@@ -15,7 +15,7 @@ internal sealed class AgentConfig
     /// <summary>연결 시 기본 상메(𝗬𝘂𝗺𝗺𝗶 𝗖𝗹𝗶𝗲𝗻𝘁) 적용.</summary>
     public bool ApplyDefaultStatusOnConnect { get; set; } = true;
     /// <summary>시작 시 업데이트 확인 (예: https://yummi.duckdns.org/agent/version.json).</summary>
-    public string? UpdateManifestUrl { get; set; }
+    public string? UpdateManifestUrl { get; set; } = "https://yummi.duckdns.org/agent/version.json";
     public bool CheckUpdatesOnStartup { get; set; } = true;
     /// <summary>true면 새 버전 시 zip 받아 자동 교체·재시작.</summary>
     public bool AutoUpdateEnabled { get; set; } = true;

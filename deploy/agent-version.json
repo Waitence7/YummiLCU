@@ -1,5 +1,6 @@
 {
-  "version": "0.3.1",
+  "version": "0.3.2",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
-  "notes": "Build f75172e"
+  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.3.2.exe",
+  "notes": "Build 1102ebd"
 }
