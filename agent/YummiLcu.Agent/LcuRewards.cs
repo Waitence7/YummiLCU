@@ -8,7 +8,6 @@ internal static class LcuRewards
     {
         var lines = new List<string>();
         var ok = 0;
-        var fail = 0;
 
         ok += await ClaimLootNotificationsAsync(lcu, lines);
         ok += await ClaimMilestonesAsync(lcu, lines);

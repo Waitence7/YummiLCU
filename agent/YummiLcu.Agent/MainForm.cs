@@ -11,7 +11,7 @@ internal sealed class MainForm : Form
         AutoSize = true,
         MaximumSize = new Size(520, 0),
         ForeColor = Color.DarkOrange,
-        Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 10f, FontStyle.Bold),
+        Font = new Font(FontFamily.GenericSansSerif, 10f, FontStyle.Bold),
         Visible = false,
     };
     private readonly TextBox _lockfilePath = new() { Width = 340, PlaceholderText = "lockfile 경로" };

@@ -88,7 +88,7 @@ internal sealed class RelaySession : IAsyncDisposable
         action is "launch_client" or "play_ranked_solo" or "play_normal_draft";
 
     private static bool NeedsLcu(string action) =>
-        action is not "launch_client" and action is not "ping";
+        action != "launch_client" && action != "ping";
 
     public async Task<(bool Ok, string Message)> RunLocalCommandAsync(
         string action,
