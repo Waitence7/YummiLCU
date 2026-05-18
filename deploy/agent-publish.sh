@@ -2,7 +2,7 @@
 # VM에서 에이전트 zip 배포 + version.json 동기화 (한 번에)
 #
 #   ./deploy/agent-publish.sh                          # manifest만 csproj 버전으로 갱신
-#   ./deploy/agent-publish.sh /path/to/YummiAgent-win-x64-portable.zip
+#   ./deploy/agent-publish.sh /path/to/portable.zip [/path/to/YummiAgent-Setup-0.3.1.exe]
 #   AGENT_RELEASE_NOTES="솔랭 자동" ./deploy/agent-publish.sh ./YummiAgent.zip
 #
 set -euo pipefail
@@ -12,7 +12,9 @@ cd "$ROOT"
 CSPROJ="$ROOT/agent/YummiLcu.Agent/YummiLcu.Agent.csproj"
 MANIFEST="$ROOT/deploy/agent-version.json"
 ZIP_SRC="${1:-}"
+INSTALLER_SRC="${2:-}"
 ZIP_DST="${AGENT_ZIP_PATH:-/var/www/yummi-agent/YummiAgent.zip}"
+INSTALLER_DST_DIR="${AGENT_INSTALLER_DIR:-/var/www/yummi-agent}"
 PUBLIC="${AGENT_PUBLIC_URL:-https://yummi.duckdns.org}"
 NOTES="${AGENT_RELEASE_NOTES:-}"
 
@@ -55,6 +57,18 @@ print(json.dumps(data, ensure_ascii=False))
 PY
 
 # nginx가 읽을 수 있도록 /var/www 에도 복사 (home/ubuntu 는 www-data 접근 불가)
+if [[ -n "$INSTALLER_SRC" ]]; then
+  if [[ ! -f "$INSTALLER_SRC" ]]; then
+    echo "installer 없음: $INSTALLER_SRC" >&2
+    exit 1
+  fi
+  sudo mkdir -p "$INSTALLER_DST_DIR"
+  INSTALLER_NAME="YummiAgent-Setup-${VERSION}.exe"
+  sudo cp "$INSTALLER_SRC" "$INSTALLER_DST_DIR/$INSTALLER_NAME"
+  sudo chmod 644 "$INSTALLER_DST_DIR/$INSTALLER_NAME"
+  echo "installer → $INSTALLER_DST_DIR/$INSTALLER_NAME"
+fi
+
 PUBLIC_MANIFEST="${AGENT_MANIFEST_PATH:-/var/www/yummi-agent/agent-version.json}"
 sudo mkdir -p "$(dirname "$PUBLIC_MANIFEST")"
 sudo cp "$MANIFEST" "$PUBLIC_MANIFEST"

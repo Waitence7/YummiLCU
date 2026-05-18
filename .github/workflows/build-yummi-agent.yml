@@ -1,4 +1,4 @@
-# Windows 에이전트 포터블 빌드 + version.json + (선택) VM 배포
+# Windows 에이전트: 포터블 zip + Inno Setup 설치 프로그램 + VM 배포
 name: Build Yummi Agent (Windows)
 
 on:
@@ -25,6 +25,17 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Install Inno Setup 6
+        run: choco install innosetup -y --no-progress
+
+      - name: Read version from csproj
+        id: ver
+        shell: pwsh
+        run: |
+          [xml]$x = Get-Content agent/YummiLcu.Agent/YummiLcu.Agent.csproj
+          $v = $x.Project.PropertyGroup.Version
+          "version=$v" >> $env:GITHUB_OUTPUT
+
       - name: Publish (portable, self-contained)
         working-directory: agent/YummiLcu.Agent
         run: |
@@ -37,7 +48,13 @@ jobs:
           Copy-Item agent/agent.json.example `
             agent/YummiLcu.Agent/bin/Release/net8.0-windows/win-x64/publish/agent.json
 
-      - name: Zip artifact
+      - name: Build Inno Setup installer
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" }
+          & $iscc /DAppVersion=${{ steps.ver.outputs.version }} agent/installer/YummiAgent.iss
+
+      - name: Zip artifact (auto-update)
         run: |
           Compress-Archive -Path agent/YummiLcu.Agent/bin/Release/net8.0-windows/win-x64/publish/* `
             -DestinationPath YummiAgent-win-x64-portable.zip -Force
@@ -63,11 +80,16 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          name: YummiAgent-Setup
+          path: agent/installer/output/YummiAgent-Setup-${{ steps.ver.outputs.version }}.exe
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
           name: agent-version-json
           path: deploy/agent-version.json
           retention-days: 30
 
-  # job if 에서는 secrets 사용 불가 → Variables VM_DEPLOY_ENABLED=true 일 때만 실행
   deploy-vm:
     needs: build
     runs-on: ubuntu-latest
@@ -82,17 +104,29 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
+          name: YummiAgent-Setup
+
+      - uses: actions/download-artifact@v4
+        with:
           name: agent-version-json
           path: deploy
 
-      - name: Deploy zip + manifest to VM (SSH)
+      - name: Prepare deploy bundle
+        run: |
+          mkdir -p deploy-bundle
+          cp YummiAgent-win-x64-portable.zip deploy-bundle/
+          cp YummiAgent-Setup-*.exe deploy-bundle/ 2>/dev/null || cp *.exe deploy-bundle/
+          cp deploy/agent-version.json deploy-bundle/
+          ls -la deploy-bundle/
+
+      - name: Deploy to VM (SSH)
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           port: ${{ secrets.VM_PORT != '' && secrets.VM_PORT || '22' }}
-          source: "YummiAgent-win-x64-portable.zip,deploy/agent-version.json"
+          source: "deploy-bundle/*"
           target: "/tmp/yummi-agent-deploy"
           strip_components: 0
 
@@ -105,12 +139,18 @@ jobs:
           port: ${{ secrets.VM_PORT != '' && secrets.VM_PORT || '22' }}
           script: |
             set -e
+            VER=$(python3 -c "import json; print(json.load(open('/tmp/yummi-agent-deploy/agent-version.json'))['version'])")
             sudo mkdir -p /var/www/yummi-agent
             sudo cp /tmp/yummi-agent-deploy/YummiAgent-win-x64-portable.zip /var/www/yummi-agent/YummiAgent.zip
             sudo chmod 644 /var/www/yummi-agent/YummiAgent.zip
+            SETUP=$(ls /tmp/yummi-agent-deploy/YummiAgent-Setup-*.exe 2>/dev/null | head -1)
+            if [ -n "$SETUP" ]; then
+              sudo cp "$SETUP" "/var/www/yummi-agent/YummiAgent-Setup-${VER}.exe"
+              sudo chmod 644 "/var/www/yummi-agent/YummiAgent-Setup-${VER}.exe"
+            fi
             LCU="${{ secrets.VM_LCU_PATH != '' && secrets.VM_LCU_PATH || '/home/ubuntu/Yummi/YummiLcu' }}"
-            cp /tmp/yummi-agent-deploy/deploy/agent-version.json "$LCU/deploy/agent-version.json"
+            cp /tmp/yummi-agent-deploy/agent-version.json "$LCU/deploy/agent-version.json"
             sudo cp "$LCU/deploy/agent-version.json" /var/www/yummi-agent/agent-version.json
             sudo chmod 644 /var/www/yummi-agent/agent-version.json
             rm -rf /tmp/yummi-agent-deploy
-            echo "Deployed portable zip → /var/www/yummi-agent/YummiAgent.zip"
+            echo "Deployed zip + installer + manifest (v${VER})"

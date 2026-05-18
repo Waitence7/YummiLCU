@@ -11,10 +11,12 @@ $ver = $xml.Project.PropertyGroup.Version
 if (-not $ver) { throw "Version not found in csproj" }
 if (-not $Notes) { $Notes = "Yummi Agent $ver" }
 
+$base = $PublicUrl.TrimEnd('/')
 $obj = [ordered]@{
-    version = "$ver"
-    url     = "$($PublicUrl.TrimEnd('/'))/agent/YummiAgent.zip"
-    notes   = $Notes
+    version     = "$ver"
+    url         = "$base/agent/YummiAgent.zip"
+    installerUrl = "$base/agent/YummiAgent-Setup-$ver.exe"
+    notes       = $Notes
 }
 $json = $obj | ConvertTo-Json
 Set-Content -Path $Out -Value $json -Encoding UTF8

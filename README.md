@@ -43,7 +43,8 @@ Discord Developer Portal → OAuth2 Redirect: `https://<도메인>/auth/discord/
 
 ## 에이전트 (유저 PC)
 
-**포터블** zip을 아무 폴더에 풀고 `YummiLcu.Agent.exe` 실행. .NET 별도 설치 불필요.
+- **처음 설치:** `YummiAgent-Setup-x.x.x.exe` (Inno Setup) 실행  
+- **자동 업데이트:** 서버 zip → 기존 설치 폴더에 덮어쓰기 (`.NET` 불필요)
 
 | 빌드 | 용도 |
 |------|------|
@@ -130,7 +131,7 @@ chmod +x deploy/agent-publish.sh
 **3. GitHub Actions** (선택 자동화)
 
 - `main`에 `agent/**` push → Windows에서 포터블 zip 빌드 + `deploy/agent-version.json` 생성
-- Artifacts: `YummiAgent-win-x64-portable.zip`
+- Artifacts: `YummiAgent-Setup` (설치 프로그램), `YummiAgent-win-x64-portable` (자동 업데이트 zip)
 - VM 자동 배포: **Secrets** `VM_HOST`, `VM_USER`, `VM_SSH_KEY` + **Variable** `VM_DEPLOY_ENABLED` = `true`  
   (job 조건에서 secrets는 쓸 수 없어 Variable로 deploy job on/off)
 

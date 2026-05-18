@@ -4,14 +4,20 @@ WinForms 포터블 에이전트 — Relay WSS + 로컬 LCU.
 
 ## 빌드 (Windows)
 
-```bat
-build.bat
-```
+| 스크립트 | 결과 |
+|----------|------|
+| `build.bat` | 포터블 publish 폴더 |
+| `build-installer.bat` | **Inno Setup 설치 프로그램** + zip (자동 업데이트용) |
+| `build-slim.bat` | 작은 zip (.NET 8 Runtime 필요) |
 
-또는 `build-portable.bat` — **포터블** (~80–150MB, .NET 런타임 설치 불필요).  
-작은 zip이 필요하면 `build-slim.bat` (~5–15MB, PC에 .NET 8 Desktop Runtime 필요).
+`build-installer.bat` 필요: [Inno Setup 6](https://jrsoftware.org/isdl.php)
 
-출력: `YummiLcu.Agent\bin\Release\net8.0-windows\win-x64\publish\YummiLcu.Agent.exe`
+출력:
+
+- `installer\output\YummiAgent-Setup-<버전>.exe` — **처음 설치용**
+- `installer\output\YummiAgent-win-x64-portable.zip` — 자동 업데이트용
+
+다운로드 URL (manifest): `installerUrl` → `…/agent/YummiAgent-Setup-0.3.1.exe`
 
 ## 설정
 
