@@ -54,5 +54,11 @@ with open(path, "w", encoding="utf-8") as f:
 print(json.dumps(data, ensure_ascii=False))
 PY
 
-echo "manifest → $MANIFEST (Relay가 이 파일을 서빙)"
+# nginx가 읽을 수 있도록 /var/www 에도 복사 (home/ubuntu 는 www-data 접근 불가)
+PUBLIC_MANIFEST="${AGENT_MANIFEST_PATH:-/var/www/yummi-agent/agent-version.json}"
+sudo mkdir -p "$(dirname "$PUBLIC_MANIFEST")"
+sudo cp "$MANIFEST" "$PUBLIC_MANIFEST"
+sudo chmod 644 "$PUBLIC_MANIFEST"
+echo "manifest → $MANIFEST"
+echo "manifest → $PUBLIC_MANIFEST (nginx /agent/version.json)"
 echo "완료. PC 에이전트는 다음 실행 시 v$VERSION 자동 적용."

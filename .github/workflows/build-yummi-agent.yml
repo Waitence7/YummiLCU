@@ -110,5 +110,7 @@ jobs:
             sudo chmod 644 /var/www/yummi-agent/YummiAgent.zip
             LCU="${{ secrets.VM_LCU_PATH != '' && secrets.VM_LCU_PATH || '/home/ubuntu/Yummi/YummiLcu' }}"
             cp /tmp/yummi-agent-deploy/deploy/agent-version.json "$LCU/deploy/agent-version.json"
+            sudo cp "$LCU/deploy/agent-version.json" /var/www/yummi-agent/agent-version.json
+            sudo chmod 644 /var/www/yummi-agent/agent-version.json
             rm -rf /tmp/yummi-agent-deploy
             echo "Deployed portable zip → /var/www/yummi-agent/YummiAgent.zip"
