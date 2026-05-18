@@ -131,7 +131,8 @@ chmod +x deploy/agent-publish.sh
 
 - `main`에 `agent/**` push → Windows에서 포터블 zip 빌드 + `deploy/agent-version.json` 생성
 - Artifacts: `YummiAgent-win-x64-portable.zip`
-- Secrets (`VM_HOST`, `VM_USER`, `VM_SSH_KEY`, …) 설정 시 VM에 zip·manifest 자동 복사
+- VM 자동 배포: **Secrets** `VM_HOST`, `VM_USER`, `VM_SSH_KEY` + **Variable** `VM_DEPLOY_ENABLED` = `true`  
+  (job 조건에서 secrets는 쓸 수 없어 Variable로 deploy job on/off)
 
 ---
 

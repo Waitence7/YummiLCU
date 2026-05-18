@@ -67,13 +67,14 @@ jobs:
           path: deploy/agent-version.json
           retention-days: 30
 
+  # job if 에서는 secrets 사용 불가 → Variables VM_DEPLOY_ENABLED=true 일 때만 실행
   deploy-vm:
     needs: build
     runs-on: ubuntu-latest
     if: >
       github.event_name == 'push' &&
       (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
-      secrets.VM_HOST != ''
+      vars.VM_DEPLOY_ENABLED == 'true'
     steps:
       - uses: actions/download-artifact@v4
         with:
