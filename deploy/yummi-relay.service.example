@@ -1,0 +1,15 @@
+[Unit]
+Description=YummiLcu Relay (FastAPI)
+After=network.target redis.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/Yummi/YummiLcu
+EnvironmentFile=/home/ubuntu/Yummi/YummiLcu/.env
+ExecStart=/home/ubuntu/Yummi/YummiLcu/.venv/bin/uvicorn relay.app:app --host 127.0.0.1 --port 8790
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

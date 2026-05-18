@@ -1,0 +1,9 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.agent.json
+agent/**/bin/
+agent/**/obj/
+*.user
+*.suo

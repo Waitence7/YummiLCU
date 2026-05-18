@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Version>0.2.0</Version>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon />
+    <RootNamespace>YummiLcu.Agent</RootNamespace>
+    <AssemblyName>YummiLcu.Agent</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="..\agent.json" Link="agent.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
