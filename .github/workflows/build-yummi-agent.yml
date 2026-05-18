@@ -44,9 +44,15 @@ jobs:
 
       - name: Sync deploy/agent-version.json from csproj
         shell: pwsh
+        env:
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
+          GITHUB_SHA: ${{ github.sha }}
         run: |
-          $notes = '${{ github.event.inputs.release_notes }}'
-          if (-not $notes) { $notes = "Build ${{ github.sha.Substring(0, 7) }}" }
+          $notes = $env:RELEASE_NOTES
+          if (-not $notes) {
+            $short = $env:GITHUB_SHA.Substring(0, 7)
+            $notes = "Build $short"
+          }
           & ./deploy/sync-agent-version.ps1 -Notes $notes
 
       - uses: actions/upload-artifact@v4
@@ -84,7 +90,7 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT || 22 }}
+          port: ${{ secrets.VM_PORT != '' && secrets.VM_PORT || '22' }}
           source: "YummiAgent-win-x64-portable.zip,deploy/agent-version.json"
           target: "/tmp/yummi-agent-deploy"
           strip_components: 0
@@ -95,13 +101,13 @@ jobs:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT || 22 }}
+          port: ${{ secrets.VM_PORT != '' && secrets.VM_PORT || '22' }}
           script: |
             set -e
             sudo mkdir -p /var/www/yummi-agent
             sudo cp /tmp/yummi-agent-deploy/YummiAgent-win-x64-portable.zip /var/www/yummi-agent/YummiAgent.zip
             sudo chmod 644 /var/www/yummi-agent/YummiAgent.zip
-            LCU="${{ secrets.VM_LCU_PATH || '/home/ubuntu/Yummi/YummiLcu' }}"
+            LCU="${{ secrets.VM_LCU_PATH != '' && secrets.VM_LCU_PATH || '/home/ubuntu/Yummi/YummiLcu' }}"
             cp /tmp/yummi-agent-deploy/deploy/agent-version.json "$LCU/deploy/agent-version.json"
             rm -rf /tmp/yummi-agent-deploy
             echo "Deployed portable zip → /var/www/yummi-agent/YummiAgent.zip"
