@@ -115,6 +115,9 @@ internal sealed class LcuClient : IDisposable
     public async Task<bool> PostAsync(string path) =>
         (await _http.PostAsync(path, JsonBody())).IsSuccessStatusCode;
 
+    public async Task<bool> PostJsonAsync(string path, string json) =>
+        (await _http.PostAsync(path, JsonBody(json))).IsSuccessStatusCode;
+
     public async Task<bool> DeleteAsync(string path) =>
         (await _http.DeleteAsync(path)).IsSuccessStatusCode;
 
@@ -145,6 +148,72 @@ internal sealed class LcuClient : IDisposable
         var phase = doc.RootElement.GetString();
         doc.Dispose();
         return phase;
+    }
+
+    public async Task<MatchmakingStatus> GetMatchmakingStatusAsync()
+    {
+        using var doc = await GetJsonAsync("/lol-matchmaking/v1/search");
+        if (doc is not null)
+        {
+            var root = doc.RootElement;
+            if (TryParseMatchmaking(root, out var status))
+                return status;
+            if (root.TryGetProperty("isCurrentlyInQueue", out var inQ) && !inQ.GetBoolean())
+                return MatchmakingStatus.Idle;
+        }
+
+        using var stateDoc = await GetJsonAsync("/lol-lobby/v2/lobby/matchmaking/search-state");
+        if (stateDoc is not null && TryParseLobbySearchState(stateDoc.RootElement, out var lobbyStatus))
+            return lobbyStatus;
+
+        return MatchmakingStatus.Idle;
+    }
+
+    private static bool TryParseMatchmaking(JsonElement root, out MatchmakingStatus status)
+    {
+        status = MatchmakingStatus.Idle;
+        var searching = root.TryGetProperty("isCurrentlyInQueue", out var inQ) && inQ.GetBoolean();
+        if (root.TryGetProperty("searchState", out var stateEl))
+        {
+            var state = stateEl.GetString();
+            if (state is "Searching" or "Found")
+                searching = true;
+            else if (state is "Idle" or "Invalid" or "Stopped")
+                searching = false;
+        }
+
+        if (!searching)
+            return false;
+
+        var elapsed = root.TryGetProperty("timeInQueue", out var tq)
+            ? MatchmakingStatus.NormalizeSeconds(tq.GetDouble())
+            : 0;
+        var estimated = root.TryGetProperty("estimatedQueueTime", out var eq)
+            ? MatchmakingStatus.NormalizeSeconds(eq.GetDouble())
+            : 0;
+
+        status = new MatchmakingStatus(true, elapsed, estimated);
+        return true;
+    }
+
+    private static bool TryParseLobbySearchState(JsonElement root, out MatchmakingStatus status)
+    {
+        status = MatchmakingStatus.Idle;
+        if (!root.TryGetProperty("searchState", out var stateEl))
+            return false;
+        var state = stateEl.GetString();
+        if (state is not "Searching" and not "Found")
+            return false;
+
+        var elapsed = root.TryGetProperty("timeInQueue", out var tq)
+            ? MatchmakingStatus.NormalizeSeconds(tq.GetDouble())
+            : 0;
+        var estimated = root.TryGetProperty("estimatedQueueTime", out var eq)
+            ? MatchmakingStatus.NormalizeSeconds(eq.GetDouble())
+            : 0;
+
+        status = new MatchmakingStatus(true, elapsed, estimated);
+        return true;
     }
 
     public async Task<bool> SetStatusMessageAsync(string statusMessage)

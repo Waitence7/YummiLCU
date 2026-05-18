@@ -3,6 +3,7 @@
 __pycache__/
 *.pyc
 .agent.json
+agent/agent.json
 agent/**/bin/
 agent/**/obj/
 *.user

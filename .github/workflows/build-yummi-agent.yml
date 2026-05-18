@@ -1,0 +1,107 @@
+# Windows 에이전트 포터블 빌드 + version.json + (선택) VM 배포
+name: Build Yummi Agent (Windows)
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - "agent/**"
+      - "deploy/agent-version.json"
+      - ".github/workflows/build-yummi-agent.yml"
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "배포 노트 (manifest notes)"
+        required: false
+        default: ""
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish (portable, self-contained)
+        working-directory: agent/YummiLcu.Agent
+        run: |
+          dotnet publish -c Release -r win-x64 --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true
+
+      - name: Copy agent.json (example → publish)
+        run: |
+          Copy-Item agent/agent.json.example `
+            agent/YummiLcu.Agent/bin/Release/net8.0-windows/win-x64/publish/agent.json
+
+      - name: Zip artifact
+        run: |
+          Compress-Archive -Path agent/YummiLcu.Agent/bin/Release/net8.0-windows/win-x64/publish/* `
+            -DestinationPath YummiAgent-win-x64-portable.zip -Force
+
+      - name: Sync deploy/agent-version.json from csproj
+        shell: pwsh
+        run: |
+          $notes = '${{ github.event.inputs.release_notes }}'
+          if (-not $notes) { $notes = "Build ${{ github.sha.Substring(0, 7) }}" }
+          & ./deploy/sync-agent-version.ps1 -Notes $notes
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YummiAgent-win-x64-portable
+          path: YummiAgent-win-x64-portable.zip
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-version-json
+          path: deploy/agent-version.json
+          retention-days: 30
+
+  deploy-vm:
+    needs: build
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'push' &&
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
+      secrets.VM_HOST != ''
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: YummiAgent-win-x64-portable
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-version-json
+          path: deploy
+
+      - name: Deploy zip + manifest to VM (SSH)
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_PORT || 22 }}
+          source: "YummiAgent-win-x64-portable.zip,deploy/agent-version.json"
+          target: "/tmp/yummi-agent-deploy"
+          strip_components: 0
+
+      - name: Install on VM paths
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_PORT || 22 }}
+          script: |
+            set -e
+            sudo mkdir -p /var/www/yummi-agent
+            sudo cp /tmp/yummi-agent-deploy/YummiAgent-win-x64-portable.zip /var/www/yummi-agent/YummiAgent.zip
+            sudo chmod 644 /var/www/yummi-agent/YummiAgent.zip
+            LCU="${{ secrets.VM_LCU_PATH || '/home/ubuntu/Yummi/YummiLcu' }}"
+            cp /tmp/yummi-agent-deploy/deploy/agent-version.json "$LCU/deploy/agent-version.json"
+            rm -rf /tmp/yummi-agent-deploy
+            echo "Deployed portable zip → /var/www/yummi-agent/YummiAgent.zip"

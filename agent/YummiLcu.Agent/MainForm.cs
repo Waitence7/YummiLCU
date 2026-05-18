@@ -6,6 +6,14 @@ internal sealed class MainForm : Form
 {
     private readonly AgentConfig _config;
     private readonly Label _status = new() { AutoSize = true, MaximumSize = new Size(520, 0) };
+    private readonly Label _matchmaking = new()
+    {
+        AutoSize = true,
+        MaximumSize = new Size(520, 0),
+        ForeColor = Color.DarkOrange,
+        Font = new Font(SystemFonts.MessageBoxFont.FontFamily, 10f, FontStyle.Bold),
+        Visible = false,
+    };
     private readonly TextBox _lockfilePath = new() { Width = 340, PlaceholderText = "lockfile 경로" };
     private readonly TextBox _statusMsg = new() { Width = 340, Multiline = true, Height = 48, ScrollBars = ScrollBars.Vertical };
     private readonly CheckBox _preventDodge = new() { Text = "닷지 후 매칭 자동 재시작 방지", AutoSize = true, Checked = true };
@@ -24,6 +32,9 @@ internal sealed class MainForm : Form
 
     private static readonly (string Label, string Action)[] ActionButtons =
     {
+        ("롤 시작", "launch_client"),
+        ("솔랭 돌리기", "play_ranked_solo"),
+        ("일겜 돌리기", "play_normal_draft"),
         ("매치 수락", "accept_match"),
         ("매치 거절", "decline_match"),
         ("큐 시작", "queue_start"),
@@ -51,19 +62,23 @@ internal sealed class MainForm : Form
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 5,
+            RowCount = 6,
             Padding = new Padding(8),
         };
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-        var rowConn = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        var rowConn = new FlowLayoutPanel { AutoSize = true, WrapContents = true, MaximumSize = new Size(560, 0) };
         rowConn.Controls.Add(_start);
         rowConn.Controls.Add(_stop);
         rowConn.Controls.Add(_status);
+
+        var rowMatchmaking = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        rowMatchmaking.Controls.Add(_matchmaking);
 
         var rowLock = new FlowLayoutPanel { AutoSize = true, WrapContents = true };
         rowLock.Controls.Add(new Label { Text = "lockfile:", AutoSize = true, Padding = new Padding(0, 6, 0, 0) });
@@ -100,10 +115,11 @@ internal sealed class MainForm : Form
         grpActions.Controls.Add(actionsFlow);
 
         root.Controls.Add(rowConn, 0, 0);
-        root.Controls.Add(rowLock, 0, 1);
-        root.Controls.Add(grpSettings, 0, 2);
-        root.Controls.Add(grpActions, 0, 3);
-        root.Controls.Add(_log, 0, 4);
+        root.Controls.Add(rowMatchmaking, 0, 1);
+        root.Controls.Add(rowLock, 0, 2);
+        root.Controls.Add(grpSettings, 0, 3);
+        root.Controls.Add(grpActions, 0, 4);
+        root.Controls.Add(_log, 0, 5);
         Controls.Add(root);
 
         _lockfilePath.Text = _config.LockfilePath ?? "";
@@ -113,30 +129,6 @@ internal sealed class MainForm : Form
         _stop.Click += (_, _) => Stop();
         _preventDodge.CheckedChanged += (_, _) => SaveFeatureFlags();
         _defaultStatus.CheckedChanged += (_, _) => SaveFeatureFlags();
-        Shown += async (_, _) => await CheckUpdatesAsync();
-    }
-
-    private async Task CheckUpdatesAsync()
-    {
-        var url = _config.UpdateManifestUrl;
-        if (string.IsNullOrWhiteSpace(url) || !_config.CheckUpdatesOnStartup)
-            return;
-        var info = await UpdateChecker.CheckAsync(url.Trim());
-        if (info is null)
-            return;
-        var msg = $"새 버전 {info.Version} (현재 {UpdateChecker.CurrentVersion})\n{info.Notes}\n\n다운로드 페이지를 열까요?";
-        var r = MessageBox.Show(msg, "Yummi Agent 업데이트", MessageBoxButtons.YesNo, MessageBoxIcon.Information);
-        if (r == DialogResult.Yes && !string.IsNullOrWhiteSpace(info.Url))
-        {
-            try
-            {
-                Process.Start(new ProcessStartInfo(info.Url) { UseShellExecute = true });
-            }
-            catch (Exception ex)
-            {
-                AppendLog($"업데이트 URL 열기 실패: {ex.Message}");
-            }
-        }
     }
 
     private void SaveFeatureFlags()
@@ -148,12 +140,13 @@ internal sealed class MainForm : Form
 
     private async Task RunUiActionAsync(string action)
     {
-        if (_session is null || !_session.IsLcuReady)
+        if (_session is null)
         {
-            AppendLog("LCU 미연결 — 먼저 연결 시작");
+            AppendLog("먼저 「연결 시작」을 눌러 주세요");
             return;
         }
-        var (ok, msg) = await _session.RunLocalCommandAsync(action);
+        var ct = _runCts?.Token ?? CancellationToken.None;
+        var (ok, msg) = await _session.RunLocalCommandAsync(action, ct: ct);
         AppendLog($"{(ok ? "OK" : "FAIL")} {action}: {msg}");
     }
 
@@ -211,6 +204,7 @@ internal sealed class MainForm : Form
         var sessionId = Guid.NewGuid().ToString();
         _session = new RelaySession(_config, sessionId);
         _session.StatusChanged += s => BeginInvoke(() => _status.Text = s);
+        _session.MatchmakingStatusChanged += OnMatchmakingStatusChanged;
         _session.Log += s => BeginInvoke(() => AppendLog(s));
         _runCts = new CancellationTokenSource();
         _ = Task.Run(async () =>
@@ -227,8 +221,30 @@ internal sealed class MainForm : Form
         _runCts?.Cancel();
         _session?.DisposeAsync().AsTask().GetAwaiter().GetResult();
         _status.Text = "중지됨";
+        _matchmaking.Visible = false;
+        _matchmaking.Text = "";
         _start.Enabled = true;
         _stop.Enabled = false;
+    }
+
+    private void OnMatchmakingStatusChanged(MatchmakingStatus status)
+    {
+        if (InvokeRequired)
+        {
+            BeginInvoke(() => OnMatchmakingStatusChanged(status));
+            return;
+        }
+
+        if (status.IsSearching)
+        {
+            _matchmaking.Text = status.DisplayLine;
+            _matchmaking.Visible = true;
+        }
+        else
+        {
+            _matchmaking.Text = "";
+            _matchmaking.Visible = false;
+        }
     }
 
     private void AppendLog(string line) =>

@@ -16,7 +16,11 @@ internal sealed class RelaySession : IAsyncDisposable
     private string? _lastGameflowPhase;
 
     public event Action<string>? StatusChanged;
+    public event Action<MatchmakingStatus>? MatchmakingStatusChanged;
     public event Action<string>? Log;
+
+    private bool _wasSearching;
+    private string _idleStatus = "대기 중 (명령 수신)";
 
     public RelaySession(AgentConfig config, string sessionId)
     {
@@ -66,7 +70,9 @@ internal sealed class RelaySession : IAsyncDisposable
         }
 
         _ = Task.Run(() => GameflowWatchLoopAsync(ct), ct);
-        SetStatus("대기 중 (명령 수신)");
+        _ = Task.Run(() => MatchmakingWatchLoopAsync(ct), ct);
+        _idleStatus = "대기 중 (명령 수신)";
+        SetStatus(_idleStatus);
 
         try
         {
@@ -78,10 +84,40 @@ internal sealed class RelaySession : IAsyncDisposable
         }
     }
 
-    public async Task<(bool Ok, string Message)> RunLocalCommandAsync(string action, string? payloadText = null)
+    private static bool CanLaunchLeague(string action) =>
+        action is "launch_client" or "play_ranked_solo" or "play_normal_draft";
+
+    private static bool NeedsLcu(string action) =>
+        action is not "launch_client" and action is not "ping";
+
+    public async Task<(bool Ok, string Message)> RunLocalCommandAsync(
+        string action,
+        string? payloadText = null,
+        CancellationToken ct = default)
     {
+        if (!AllowedActions.IsAllowed(action))
+            return (false, "unknown action");
+
+        if (action == "launch_client")
+            return LeagueLauncher.TryLaunch();
+
+        if (NeedsLcu(action) && _lcu is null)
+        {
+            if (CanLaunchLeague(action))
+            {
+                var (launched, launchMsg) = LeagueLauncher.TryLaunch();
+                Log?.Invoke(launchMsg);
+                if (!launched)
+                    return (false, launchMsg);
+            }
+
+            if (!await TryWaitForLcuAsync(TimeSpan.FromMinutes(4), ct))
+                return (false, "LCU 연결 대기 시간 초과 (클라이언트 로그인 후 다시 시도)");
+        }
+
         if (_lcu is null)
             return (false, "LCU 미연결");
+
         JsonDocument? payloadDoc = null;
         JsonElement? payload = null;
         if (!string.IsNullOrWhiteSpace(payloadText))
@@ -98,6 +134,75 @@ internal sealed class RelaySession : IAsyncDisposable
             payloadDoc?.Dispose();
         }
     }
+
+    private async Task<bool> TryWaitForLcuAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        if (_lcu is not null)
+            return true;
+
+        var deadline = DateTime.UtcNow + timeout;
+        Log?.Invoke("LCU 연결 대기 중… (클라이언트 로딩·로그인)");
+        while (DateTime.UtcNow < deadline && !ct.IsCancellationRequested)
+        {
+            var path = _config.ResolveLockfilePath();
+            if (path != null && !File.Exists(path))
+                path = null;
+            path ??= LcuClient.FindLockfilePath();
+            if (path is not null)
+            {
+                var (client, error) = LcuClient.TryFromLockfile(path);
+                if (client is not null)
+                {
+                    _lcu = client;
+                    Log?.Invoke($"LCU 연결: {path}");
+                    return true;
+                }
+                Log?.Invoke($"lockfile: {error}");
+            }
+
+            await Task.Delay(2500, ct);
+        }
+
+        return _lcu is not null;
+    }
+
+    private async Task MatchmakingWatchLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            if (_lcu is null)
+            {
+                if (_wasSearching)
+                {
+                    _wasSearching = false;
+                    PublishMatchmaking(MatchmakingStatus.Idle);
+                    SetStatus(_idleStatus);
+                }
+                await Task.Delay(2000, ct);
+                continue;
+            }
+
+            var status = await _lcu.GetMatchmakingStatusAsync();
+            PublishMatchmaking(status);
+
+            if (status.IsSearching)
+            {
+                SetStatus(status.DisplayLine);
+                _wasSearching = true;
+                await Task.Delay(1000, ct);
+            }
+            else
+            {
+                if (_wasSearching)
+                    SetStatus(_idleStatus);
+                _wasSearching = false;
+                await Task.Delay(2500, ct);
+            }
+        }
+    }
+
+    private void PublishMatchmaking(MatchmakingStatus status) =>
+        MatchmakingStatusChanged?.Invoke(status);
 
     private async Task GameflowWatchLoopAsync(CancellationToken ct)
     {
@@ -197,13 +302,14 @@ internal sealed class RelaySession : IAsyncDisposable
                 Log?.Invoke($"거부된 action: {action}");
                 return;
             }
-            if (_lcu is null)
-            {
-                Log?.Invoke("LCU 미연결 — 명령 무시");
-                return;
-            }
-            JsonElement? payload = root.TryGetProperty("payload", out var p) ? p.Clone() : null;
-            var (ok, msg) = await AllowedActions.ExecuteAsync(action, new ActionContext(_lcu, _config, payload));
+            string? payloadText = null;
+            if (root.TryGetProperty("payload", out var p) &&
+                p.ValueKind == JsonValueKind.Object &&
+                p.TryGetProperty("text", out var textEl))
+                payloadText = textEl.GetString();
+
+            var ct = _cts?.Token ?? CancellationToken.None;
+            var (ok, msg) = await RunLocalCommandAsync(action, payloadText, ct);
             Log?.Invoke($"{(ok ? "OK" : "FAIL")} {action}: {msg}");
         }
         catch (Exception ex)

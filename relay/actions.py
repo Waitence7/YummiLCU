@@ -20,6 +20,9 @@ ACTION_HELP: dict[str, str] = {
     "set_status": "상메 설정 (payload.text, 유니코드·줄바꿈)",
     "reset_status": "기본 상메(𝗬𝘂𝗺𝗺𝗶 𝗖𝗹𝗶𝗲𝗻𝘁)",
     "claim_all_rewards": "보상 일괄 수령 시도",
+    "launch_client": "롤 클라이언트 실행",
+    "play_ranked_solo": "롤 실행 + 솔랭 매칭",
+    "play_normal_draft": "롤 실행 + 일반(비공개 선택) 매칭",
 }
 
 ALLOWED_ACTIONS: frozenset[str] = frozenset(ACTION_HELP.keys())

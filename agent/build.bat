@@ -1,3 +1,3 @@
 @echo off
-REM Default: slim build (small). For offline/no-runtime PC use build-portable.bat
-call "%~dp0build-slim.bat"
+REM Default: portable (런타임 설치 불필요). 작은 zip은 build-slim.bat
+call "%~dp0build-portable.bat"

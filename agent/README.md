@@ -4,12 +4,14 @@ WinForms 포터블 에이전트 — Relay WSS + 로컬 LCU.
 
 ## 빌드 (Windows)
 
-```powershell
-cd agent/YummiLcu.Agent
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+```bat
+build.bat
 ```
 
-출력: `bin/Release/net8.0-windows/win-x64/publish/YummiLcu.Agent.exe`
+또는 `build-portable.bat` — **포터블** (~80–150MB, .NET 런타임 설치 불필요).  
+작은 zip이 필요하면 `build-slim.bat` (~5–15MB, PC에 .NET 8 Desktop Runtime 필요).
+
+출력: `YummiLcu.Agent\bin\Release\net8.0-windows\win-x64\publish\YummiLcu.Agent.exe`
 
 ## 설정
 

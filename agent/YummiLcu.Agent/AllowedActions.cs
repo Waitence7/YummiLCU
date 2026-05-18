@@ -24,6 +24,9 @@ internal static class AllowedActions
           ["set_status"] = SetStatusAsync,
           ["reset_status"] = async ctx => await SetStatusTextAsync(ctx, StatusMessageHelper.DefaultYummiClient),
           ["claim_all_rewards"] = async ctx => (true, await LcuRewards.ClaimAllAsync(ctx.Lcu)),
+          ["launch_client"] = _ => Task.FromResult(LeagueLauncher.TryLaunch()),
+          ["play_ranked_solo"] = async ctx => await LcuQueue.CreateAndQueueAsync(ctx.Lcu, LcuQueue.RankedSolo),
+          ["play_normal_draft"] = async ctx => await LcuQueue.CreateAndQueueAsync(ctx.Lcu, LcuQueue.NormalDraft),
       };
 
   public static IReadOnlyCollection<string> Names => Handlers.Keys;

@@ -3,5 +3,8 @@
   "LockfilePath": "C:\\Riot Games\\League of Legends\\lockfile",
   "AuthPollIntervalMs": 1500,
   "PreventQueueAfterDodge": true,
-  "ApplyDefaultStatusOnConnect": true
+  "ApplyDefaultStatusOnConnect": true,
+  "UpdateManifestUrl": "https://yummi.duckdns.org/agent/version.json",
+  "CheckUpdatesOnStartup": true,
+  "AutoUpdateEnabled": true
 }
