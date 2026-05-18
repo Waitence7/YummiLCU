@@ -111,23 +111,27 @@ jobs:
           name: agent-version-json
           path: deploy
 
-      - name: Prepare deploy bundle
+      - name: Pack deploy bundle (tar)
         run: |
+          set -e
           mkdir -p deploy-bundle
           cp YummiAgent-win-x64-portable.zip deploy-bundle/
-          cp YummiAgent-Setup-*.exe deploy-bundle/ 2>/dev/null || cp *.exe deploy-bundle/
+          shopt -s nullglob
+          for exe in YummiAgent-Setup-*.exe; do cp "$exe" deploy-bundle/; done
+          test -f deploy/agent-version.json
           cp deploy/agent-version.json deploy-bundle/
           ls -la deploy-bundle/
+          tar czf deploy-bundle.tar.gz -C deploy-bundle .
 
-      - name: Deploy to VM (SSH)
+      - name: Upload bundle to VM
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.VM_HOST }}
           username: ${{ secrets.VM_USER }}
           key: ${{ secrets.VM_SSH_KEY }}
           port: ${{ secrets.VM_PORT != '' && secrets.VM_PORT || '22' }}
-          source: "deploy-bundle/*"
-          target: "/tmp/yummi-agent-deploy"
+          source: deploy-bundle.tar.gz
+          target: /tmp
           strip_components: 0
 
       - name: Install on VM paths
@@ -138,19 +142,28 @@ jobs:
           key: ${{ secrets.VM_SSH_KEY }}
           port: ${{ secrets.VM_PORT != '' && secrets.VM_PORT || '22' }}
           script: |
-            set -e
-            VER=$(python3 -c "import json; print(json.load(open('/tmp/yummi-agent-deploy/agent-version.json'))['version'])")
+            set -euo pipefail
+            DEPLOY=/tmp/yummi-agent-deploy
+            rm -rf "$DEPLOY"
+            mkdir -p "$DEPLOY"
+            tar xzf /tmp/deploy-bundle.tar.gz -C "$DEPLOY"
+            ls -la "$DEPLOY"
+            MANIFEST="$DEPLOY/agent-version.json"
+            test -f "$MANIFEST"
+            VER=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['version'])")
             sudo mkdir -p /var/www/yummi-agent
-            sudo cp /tmp/yummi-agent-deploy/YummiAgent-win-x64-portable.zip /var/www/yummi-agent/YummiAgent.zip
+            sudo cp "$DEPLOY/YummiAgent-win-x64-portable.zip" /var/www/yummi-agent/YummiAgent.zip
             sudo chmod 644 /var/www/yummi-agent/YummiAgent.zip
-            SETUP=$(ls /tmp/yummi-agent-deploy/YummiAgent-Setup-*.exe 2>/dev/null | head -1)
+            SETUP=$(ls "$DEPLOY"/YummiAgent-Setup-*.exe 2>/dev/null | head -1 || true)
             if [ -n "$SETUP" ]; then
               sudo cp "$SETUP" "/var/www/yummi-agent/YummiAgent-Setup-${VER}.exe"
               sudo chmod 644 "/var/www/yummi-agent/YummiAgent-Setup-${VER}.exe"
+            else
+              echo "WARN: no installer exe in bundle (Inno build skipped?)"
             fi
             LCU="${{ secrets.VM_LCU_PATH != '' && secrets.VM_LCU_PATH || '/home/ubuntu/Yummi/YummiLcu' }}"
-            cp /tmp/yummi-agent-deploy/agent-version.json "$LCU/deploy/agent-version.json"
-            sudo cp "$LCU/deploy/agent-version.json" /var/www/yummi-agent/agent-version.json
+            cp "$MANIFEST" "$LCU/deploy/agent-version.json"
+            sudo cp "$MANIFEST" /var/www/yummi-agent/agent-version.json
             sudo chmod 644 /var/www/yummi-agent/agent-version.json
-            rm -rf /tmp/yummi-agent-deploy
-            echo "Deployed zip + installer + manifest (v${VER})"
+            rm -f /tmp/deploy-bundle.tar.gz
+            echo "Deployed zip + manifest (v${VER})"
