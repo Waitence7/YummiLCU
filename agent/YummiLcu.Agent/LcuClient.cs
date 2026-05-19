@@ -150,6 +150,40 @@ internal sealed class LcuClient : IDisposable
         return phase;
     }
 
+    public async Task<LobbyInfo> GetLobbyAsync()
+    {
+        using var doc = await GetJsonAsync("/lol-lobby/v2/lobby");
+        if (doc is null)
+            return LobbyInfo.None;
+
+        var root = doc.RootElement;
+        if (root.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return LobbyInfo.None;
+
+        var queueId = 0;
+        if (root.TryGetProperty("gameConfig", out var cfg) &&
+            cfg.TryGetProperty("queueId", out var qid))
+            queueId = qid.GetInt32();
+
+        var memberCount = 0;
+        if (root.TryGetProperty("members", out var members) && members.ValueKind == JsonValueKind.Array)
+            memberCount = members.GetArrayLength();
+
+        var maxMembers = 5;
+        if (root.TryGetProperty("gameConfig", out var cfg2))
+        {
+            if (cfg2.TryGetProperty("maxTeamSize", out var mts))
+                maxMembers = Math.Max(1, mts.GetInt32());
+            else if (cfg2.TryGetProperty("maxLobbySize", out var mls))
+                maxMembers = Math.Max(1, mls.GetInt32());
+        }
+
+        if (queueId <= 0 && memberCount <= 0)
+            return LobbyInfo.None;
+
+        return new LobbyInfo(true, queueId, LobbyInfo.LabelForQueue(queueId), memberCount, maxMembers);
+    }
+
     public async Task<MatchmakingStatus> GetMatchmakingStatusAsync()
     {
         using var doc = await GetJsonAsync("/lol-matchmaking/v1/search");

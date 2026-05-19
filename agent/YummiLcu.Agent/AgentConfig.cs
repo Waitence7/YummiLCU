@@ -19,6 +19,8 @@ internal sealed class AgentConfig
     public bool CheckUpdatesOnStartup { get; set; } = true;
     /// <summary>true면 새 버전 시 zip 받아 자동 교체·재시작.</summary>
     public bool AutoUpdateEnabled { get; set; } = true;
+    /// <summary>LCU/Relay 없이 로비·매칭 UI만 로컬 시뮬레이션.</summary>
+    public bool UiTestMode { get; set; }
 
     public string ConfigFilePath => Path.Combine(AppContext.BaseDirectory, "agent.json");
 

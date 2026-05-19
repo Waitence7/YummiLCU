@@ -9,6 +9,17 @@ internal static class LcuQueue
     /// <summary>일반 게임 — 비공개 선택 (드래프트).</summary>
     public const int NormalDraft = 400;
 
+    public static async Task<(bool Ok, string Message)> CreateLobbyAsync(LcuClient lcu, int queueId)
+    {
+        await lcu.DeleteAsync("/lol-lobby/v2/lobby/matchmaking/search");
+        await lcu.DeleteAsync("/lol-lobby/v2/lobby");
+        var ok = await lcu.PostJsonAsync("/lol-lobby/v2/lobby", $"{{\"queueId\":{queueId}}}");
+        if (!ok)
+            return (false, $"로비 생성 실패 (queue {queueId})");
+        var label = LobbyInfo.LabelForQueue(queueId);
+        return (true, $"{label} 로비 생성");
+    }
+
     public static async Task<(bool Ok, string Message)> CreateAndQueueAsync(LcuClient lcu, int queueId, int maxAttempts = 6)
     {
         for (var attempt = 1; attempt <= maxAttempts; attempt++)

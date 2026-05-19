@@ -17,9 +17,11 @@ internal sealed class RelaySession : IAsyncDisposable
 
     public event Action<string>? StatusChanged;
     public event Action<MatchmakingStatus>? MatchmakingStatusChanged;
+    public event Action<LobbyInfo>? LobbyChanged;
     public event Action<string>? Log;
 
     private bool _wasSearching;
+    private LobbyInfo _lastLobby;
     private string _idleStatus = "대기 중 (명령 수신)";
 
     public RelaySession(AgentConfig config, string sessionId)
@@ -91,6 +93,7 @@ internal sealed class RelaySession : IAsyncDisposable
 
         _ = Task.Run(() => GameflowWatchLoopAsync(ct), ct);
         _ = Task.Run(() => MatchmakingWatchLoopAsync(ct), ct);
+        _ = Task.Run(() => LobbyWatchLoopAsync(ct), ct);
         _idleStatus = "대기 중 (명령 수신)";
         SetStatus(_idleStatus);
 
@@ -223,6 +226,32 @@ internal sealed class RelaySession : IAsyncDisposable
 
     private void PublishMatchmaking(MatchmakingStatus status) =>
         MatchmakingStatusChanged?.Invoke(status);
+
+    private async Task LobbyWatchLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            if (_lcu is null)
+            {
+                if (_lastLobby.IsInLobby)
+                {
+                    _lastLobby = LobbyInfo.None;
+                    LobbyChanged?.Invoke(_lastLobby);
+                }
+                await Task.Delay(2000, ct);
+                continue;
+            }
+
+            var lobby = await _lcu.GetLobbyAsync();
+            if (lobby != _lastLobby)
+            {
+                _lastLobby = lobby;
+                LobbyChanged?.Invoke(lobby);
+            }
+
+            await Task.Delay(1500, ct);
+        }
+    }
 
     private async Task GameflowWatchLoopAsync(CancellationToken ct)
     {

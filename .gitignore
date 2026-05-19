@@ -6,5 +6,6 @@ __pycache__/
 agent/agent.json
 agent/**/bin/
 agent/**/obj/
+.vs/
 *.user
 *.suo
