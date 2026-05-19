@@ -7,10 +7,13 @@ LCU Relay FastAPI — OAuth, 에이전트 WebSocket, 봇 internal HTTP.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import secrets
+import time
 import uuid
+from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -30,6 +33,13 @@ logger = logging.getLogger("yummi_lcu.relay")
 
 SESSION_KEY = "relay:session:{session_id}"
 SESSION_STATUS_KEY = "relay:session_status:{session_id}"
+OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
+OAUTH_STATE_TTL_SEC = 600
+
+# internal API 인증 실패 rate limit (IP → 타임스탬프 목록)
+_failed_internal_auth: dict[str, list[float]] = defaultdict(list)
+_INTERNAL_AUTH_MAX_FAILS = 20
+_INTERNAL_AUTH_WINDOW_SEC = 60.0
 
 
 def _session_redis_key(session_id: str) -> str:
@@ -40,8 +50,42 @@ def _status_redis_key(session_id: str) -> str:
     return SESSION_STATUS_KEY.format(session_id=session_id)
 
 
+def _oauth_state_redis_key(oauth_state: str) -> str:
+    return OAUTH_STATE_KEY.format(oauth_state=oauth_state)
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _record_internal_auth_failure(ip: str) -> None:
+    now = time.monotonic()
+    window = _INTERNAL_AUTH_WINDOW_SEC
+    attempts = _failed_internal_auth[ip]
+    attempts[:] = [t for t in attempts if now - t < window]
+    attempts.append(now)
+
+
+def _is_internal_auth_rate_limited(ip: str) -> bool:
+    now = time.monotonic()
+    window = _INTERNAL_AUTH_WINDOW_SEC
+    attempts = _failed_internal_auth.get(ip, [])
+    attempts[:] = [t for t in attempts if now - t < window]
+    return len(attempts) >= _INTERNAL_AUTH_MAX_FAILS
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
+    try:
+        config.relay_public_base_url_must_be_https()
+    except RuntimeError as e:
+        logger.error("%s", e)
+        raise
     if not config.oauth_configured():
         logger.warning("Discord OAuth 미설정 — /login 동작하지 않습니다 (.env 확인)")
     if not config.relay_internal_secret():
@@ -69,12 +113,9 @@ app = FastAPI(title="YummiLcu Relay", lifespan=_lifespan)
 
 
 @app.get("/health")
-async def health(request: Request) -> dict[str, Any]:
-    return {
-        "status": "ok",
-        "oauth_configured": config.oauth_configured(),
-        "internal_secret_configured": bool(config.relay_internal_secret()),
-    }
+async def health() -> dict[str, str]:
+    """공개 헬스체크 — 설정 노출 최소화."""
+    return {"status": "ok"}
 
 
 _AGENT_VERSION_FILE = Path(__file__).resolve().parents[1] / "deploy" / "agent-version.json"
@@ -90,7 +131,10 @@ async def agent_version_manifest() -> JSONResponse:
 
 
 @app.get("/login")
-async def login(session_id: str = Query(..., min_length=8, max_length=64)) -> RedirectResponse:
+async def login(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+) -> RedirectResponse:
     """에이전트가 연 브라우저용 Discord OAuth 시작."""
     if not config.oauth_configured():
         raise HTTPException(503, "OAuth not configured")
@@ -98,7 +142,10 @@ async def login(session_id: str = Query(..., min_length=8, max_length=64)) -> Re
         uuid.UUID(session_id)
     except ValueError as e:
         raise HTTPException(400, "invalid session_id") from e
-    return RedirectResponse(auth.build_login_url(session_id), status_code=302)
+    oauth_state = secrets.token_urlsafe(32)
+    r: redis.Redis = request.app.state.redis
+    await r.set(_oauth_state_redis_key(oauth_state), session_id, ex=OAUTH_STATE_TTL_SEC)
+    return RedirectResponse(auth.build_login_url(oauth_state), status_code=302)
 
 
 @app.get("/auth/callback")
@@ -111,11 +158,14 @@ async def auth_callback(
 ) -> HTMLResponse:
     """Discord redirect — session_id(state)에 discord_id 저장. `/auth/discord/callback` 별칭 포함."""
     if error:
-        return HTMLResponse(f"<h1>로그인 취소됨</h1><p>{error}</p>", status_code=400)
+        safe = html.escape(error, quote=True)
+        return HTMLResponse(f"<h1>로그인 취소됨</h1><p>{safe}</p>", status_code=400)
     if not code or not state:
         raise HTTPException(400, "missing code or state")
-    session_id = state
     r: redis.Redis = request.app.state.redis
+    session_id = await r.getdel(_oauth_state_redis_key(state))
+    if not session_id:
+        return HTMLResponse("<h1>로그인 세션 만료</h1><p>에이전트에서 다시 연결해 주세요.</p>", status_code=400)
     conn: ConnectionManager = request.app.state.connections
     http: aiohttp.ClientSession = request.app.state.http
 
@@ -159,7 +209,7 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
         return JSONResponse({"status": "pending"})
     # WS가 아직 없을 수 있음 — bind 시도
     await conn.bind_discord(session_id, discord_id)
-    return JSONResponse({"status": "ok", "discord_id": str(discord_id)})
+    return JSONResponse({"status": "ok"})
 
 
 # * ========================================================
@@ -206,11 +256,18 @@ class InternalCommandBody(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-def _verify_internal_secret(x_relay_internal_secret: str | None = Header(None)) -> None:
+def _verify_internal_secret(
+    request: Request,
+    x_relay_internal_secret: str | None = Header(None),
+) -> None:
+    ip = _client_ip(request)
+    if _is_internal_auth_rate_limited(ip):
+        raise HTTPException(429, "too many requests")
     expected = config.relay_internal_secret()
     if not expected:
         raise HTTPException(503, "internal API not configured")
     if not x_relay_internal_secret or not secrets.compare_digest(x_relay_internal_secret, expected):
+        _record_internal_auth_failure(ip)
         raise HTTPException(401, "unauthorized")
 
 
@@ -221,7 +278,7 @@ async def internal_command(
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     """누른 유저 discord_id의 에이전트로만 action 전달."""
-    _verify_internal_secret(x_relay_internal_secret)
+    _verify_internal_secret(request, x_relay_internal_secret)
     if not is_allowed_action(body.action):
         raise HTTPException(400, f"action not allowed: {body.action}")
     conn: ConnectionManager = request.app.state.connections
@@ -249,6 +306,6 @@ async def internal_online(
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     """에이전트 연결 여부 (봇 UI용)."""
-    _verify_internal_secret(x_relay_internal_secret)
+    _verify_internal_secret(request, x_relay_internal_secret)
     conn: ConnectionManager = request.app.state.connections
     return JSONResponse({"online": conn.is_online(discord_id), "allowed_actions": sorted(ALLOWED_ACTIONS)})

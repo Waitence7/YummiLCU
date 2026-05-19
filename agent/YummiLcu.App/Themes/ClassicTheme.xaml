@@ -1,0 +1,9 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Color x:Key="LcuBgColor">#0A0A0C</Color>
+  <SolidColorBrush x:Key="LcuBg" Color="{StaticResource LcuBgColor}" />
+  <SolidColorBrush x:Key="LcuPanel" Color="#12141A" />
+  <SolidColorBrush x:Key="LcuAccent" Color="#C8AA6E" />
+  <SolidColorBrush x:Key="LcuSubAccent" Color="#785A28" />
+  <SolidColorBrush x:Key="LcuText" Color="#F0E6D2" />
+</ResourceDictionary>

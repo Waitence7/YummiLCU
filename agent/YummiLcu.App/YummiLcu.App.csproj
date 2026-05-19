@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Version>0.4.0</Version>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <ApplicationIcon />
+    <RootNamespace>YummiLcu.App</RootNamespace>
+    <AssemblyName>YummiLcu.App</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\YummiLcu.Core\YummiLcu.Core.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\agent.json" Link="agent.json" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\agent.json')" />
+    <None Include="..\agent.json.example" Link="agent.json" CopyToOutputDirectory="PreserveNewest" Condition="!Exists('..\agent.json')" />
+  </ItemGroup>
+</Project>

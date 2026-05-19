@@ -32,12 +32,12 @@ jobs:
         id: ver
         shell: pwsh
         run: |
-          [xml]$x = Get-Content agent/YummiLcu.Agent/YummiLcu.Agent.csproj
+          [xml]$x = Get-Content agent/YummiLcu.App/YummiLcu.App.csproj
           $v = $x.Project.PropertyGroup.Version
           "version=$v" >> $env:GITHUB_OUTPUT
 
       - name: Publish (portable, self-contained)
-        working-directory: agent/YummiLcu.Agent
+        working-directory: agent/YummiLcu.App
         run: |
           dotnet publish -c Release -r win-x64 --self-contained true `
             -p:PublishSingleFile=true `
@@ -46,7 +46,7 @@ jobs:
       - name: Copy agent.json (example → publish)
         run: |
           Copy-Item agent/agent.json.example `
-            agent/YummiLcu.Agent/bin/Release/net8.0-windows/win-x64/publish/agent.json
+            agent/YummiLcu.App/bin/Release/net8.0-windows/win-x64/publish/agent.json
 
       - name: Build Inno Setup installer
         run: |
@@ -56,7 +56,7 @@ jobs:
 
       - name: Zip artifact (auto-update)
         run: |
-          Compress-Archive -Path agent/YummiLcu.Agent/bin/Release/net8.0-windows/win-x64/publish/* `
+          Compress-Archive -Path agent/YummiLcu.App/bin/Release/net8.0-windows/win-x64/publish/* `
             -DestinationPath YummiAgent-win-x64-portable.zip -Force
 
       - name: Sync deploy/agent-version.json from csproj

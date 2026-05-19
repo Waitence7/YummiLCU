@@ -1,0 +1,27 @@
+<Application x:Class="YummiLcu.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:YummiLcu.App.ViewModels"
+             xmlns:views="clr-namespace:YummiLcu.App.Views"
+             >
+  <Application.Resources>
+    <ResourceDictionary>
+      <ResourceDictionary.MergedDictionaries>
+        <ResourceDictionary Source="Themes/CatTheme.xaml" />
+        <ResourceDictionary Source="Themes/SharedStyles.xaml" />
+      </ResourceDictionary.MergedDictionaries>
+
+      <BooleanToVisibilityConverter x:Key="BoolToVis" />
+
+      <DataTemplate DataType="{x:Type vm:HomeViewModel}">
+        <views:HomePage />
+      </DataTemplate>
+      <DataTemplate DataType="{x:Type vm:LobbyViewModel}">
+        <views:LobbyPage />
+      </DataTemplate>
+      <DataTemplate DataType="{x:Type vm:ChampSelectViewModel}">
+        <views:ChampSelectPage />
+      </DataTemplate>
+    </ResourceDictionary>
+  </Application.Resources>
+</Application>

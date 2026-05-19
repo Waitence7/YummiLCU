@@ -45,6 +45,17 @@ def relay_public_base_url() -> str:
     return base.rstrip("/")
 
 
+def relay_public_base_url_must_be_https() -> None:
+    """공개 Relay URL 이 localhost 가 아니면 HTTPS 만 허용."""
+    base = relay_public_base_url().lower()
+    if "localhost" in base or "127.0.0.1" in base:
+        return
+    if not base.startswith("https://"):
+        raise RuntimeError(
+            "RELAY_PUBLIC_BASE_URL must use https:// for non-localhost deployments"
+        )
+
+
 def relay_internal_secret() -> str:
     return _env("RELAY_INTERNAL_SECRET")
 

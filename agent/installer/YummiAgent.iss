@@ -6,8 +6,8 @@
 #endif
 
 #define AppName "Yummi Agent"
-#define AppExe "YummiLcu.Agent.exe"
-#define PublishDir "..\YummiLcu.Agent\bin\Release\net8.0-windows\win-x64\publish"
+#define AppExe "YummiLcu.App.exe"
+#define PublishDir "..\YummiLcu.App\bin\Release\net8.0-windows\win-x64\publish"
 #define OutputDir "output"
 
 [Setup]

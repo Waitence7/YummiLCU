@@ -23,6 +23,8 @@ ACTION_HELP: dict[str, str] = {
     "launch_client": "롤 클라이언트 실행",
     "play_ranked_solo": "롤 실행 + 솔랭 매칭",
     "play_normal_draft": "롤 실행 + 일반(비공개 선택) 매칭",
+    "create_ranked_lobby": "솔랭 로비만 생성",
+    "create_normal_lobby": "일반(비공개 선택) 로비만 생성",
 }
 
 ALLOWED_ACTIONS: frozenset[str] = frozenset(ACTION_HELP.keys())

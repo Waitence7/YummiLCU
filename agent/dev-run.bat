@@ -1,6 +1,6 @@
 @echo off
-REM 개발용: 빌드 없이 소스에서 바로 실행 (코드 수정 후 창 닫고 다시 실행)
-cd /d "%~dp0YummiLcu.Agent"
+REM 개발용: WPF 앱 소스에서 바로 실행
+cd /d "%~dp0YummiLcu.App"
 echo dotnet run (dev)...
 dotnet run -c Debug
 pause

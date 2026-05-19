@@ -9,7 +9,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-CSPROJ="$ROOT/agent/YummiLcu.Agent/YummiLcu.Agent.csproj"
+CSPROJ="$ROOT/agent/YummiLcu.App/YummiLcu.App.csproj"
 MANIFEST="$ROOT/deploy/agent-version.json"
 ZIP_SRC="${1:-}"
 INSTALLER_SRC="${2:-}"

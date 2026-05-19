@@ -18,14 +18,14 @@ DISCORD_API = "https://discord.com/api"
 DISCORD_AUTHORIZE = "https://discord.com/api/oauth2/authorize"
 
 
-def build_login_url(session_id: str) -> str:
-    """Discord authorize URL을 만듭니다. state=session_id."""
+def build_login_url(oauth_state: str) -> str:
+    """Discord authorize URL. state 는 Redis 에 매핑된 일회용 토큰 (session_id 아님)."""
     params = {
         "client_id": config.discord_client_id(),
         "redirect_uri": config.discord_oauth_redirect_uri(),
         "response_type": "code",
         "scope": "identify",
-        "state": session_id,
+        "state": oauth_state,
     }
     return f"{DISCORD_AUTHORIZE}?{urllib.parse.urlencode(params)}"
 

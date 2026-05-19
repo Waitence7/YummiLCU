@@ -1,0 +1,52 @@
+<UserControl x:Class="YummiLcu.App.Views.ChampSelectPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent">
+  <Grid>
+    <Grid.ColumnDefinitions>
+      <ColumnDefinition Width="*" />
+      <ColumnDefinition Width="280" />
+    </Grid.ColumnDefinitions>
+
+    <Border Style="{StaticResource GamePanelBorder}" Margin="0,0,8,0">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,12">
+          <TextBlock Text="챔피언 선택" FontSize="20" FontWeight="Bold" Foreground="{DynamicResource LcuAccent}" />
+          <TextBlock Text="{Binding Phase}" Foreground="{DynamicResource LcuSubAccent}" Margin="16,4,0,0" />
+        </StackPanel>
+        <ListView ItemsSource="{Binding Actions}" Background="Transparent" BorderThickness="0">
+          <ListView.View>
+            <GridView>
+              <GridViewColumn Header="ID" DisplayMemberBinding="{Binding Id}" Width="40" />
+              <GridViewColumn Header="타입" DisplayMemberBinding="{Binding Type}" Width="80" />
+              <GridViewColumn Header="챔프" DisplayMemberBinding="{Binding ChampionId}" Width="60" />
+            </GridView>
+          </ListView.View>
+        </ListView>
+        <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Margin="0,12,0,0">
+          <TextBox Text="{Binding PickChampionIdText, UpdateSourceTrigger=PropertyChanged}" Width="80" Style="{StaticResource LcuTextBoxStyle}" />
+          <Button Content="픽/밴 실행" Style="{StaticResource AccentButtonStyle}" Command="{Binding PickCommand}" Margin="8,0,0,0" />
+          <Button Content="새로고침" Style="{StaticResource NavButtonStyle}" Command="{Binding RefreshCommand}" Margin="8,0,0,0" />
+        </StackPanel>
+      </DockPanel>
+    </Border>
+
+    <Border Grid.Column="1" Style="{StaticResource GamePanelBorder}">
+      <DockPanel>
+        <TextBlock DockPanel.Dock="Top" Text="룬 페이지" FontWeight="SemiBold" Foreground="{DynamicResource LcuAccent}" Margin="0,0,0,8" />
+        <ListView ItemsSource="{Binding PerkPages}" Background="Transparent" BorderThickness="0">
+          <ListView.ItemTemplate>
+            <DataTemplate>
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Text="{Binding Name}" Foreground="{DynamicResource LcuText}" Width="160" />
+                <Button Content="적용" Style="{StaticResource NavButtonStyle}"
+                        Command="{Binding DataContext.ApplyPerkCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                        CommandParameter="{Binding}" />
+              </StackPanel>
+            </DataTemplate>
+          </ListView.ItemTemplate>
+        </ListView>
+      </DockPanel>
+    </Border>
+  </Grid>
+</UserControl>

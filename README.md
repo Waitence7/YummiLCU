@@ -92,7 +92,7 @@ manifest 예시:
 }
 ```
 
-- `version`은 **반드시** 배포하는 exe의 `YummiLcu.Agent.csproj` `<Version>` 과 맞추고, 유저 PC보다 **커야** 업데이트가 실행됩니다.
+- `version`은 **반드시** 배포하는 exe의 `YummiLcu.App.csproj` `<Version>` 과 맞추고, 유저 PC보다 **커야** 업데이트가 실행됩니다.
 - Relay는 manifest 파일만 읽습니다. **Relay 재시작 없이** manifest·zip만 바꿔도 됩니다.
 
 ### PC 설정 (`agent.json`)
@@ -113,7 +113,7 @@ manifest 예시:
 
 ### 운영자: 새 버전 배포
 
-**1. 버전 올리기** — `agent/YummiLcu.Agent/YummiLcu.Agent.csproj` 의 `<Version>` 증가 (예: `0.3.1` → `0.3.2`).
+**1. 버전 올리기** — `agent/YummiLcu.App/YummiLcu.App.csproj` 의 `<Version>` 증가 (예: `0.4.0` → `0.4.1`).
 
 **2. VM 한 줄** (zip + manifest 동시):
 

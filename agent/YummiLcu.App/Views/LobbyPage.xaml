@@ -1,0 +1,55 @@
+<UserControl x:Class="YummiLcu.App.Views.LobbyPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent">
+  <Grid>
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition Height="*" />
+    </Grid.RowDefinitions>
+
+    <Border Style="{StaticResource GamePanelBorder}" Margin="0,0,0,12">
+      <StackPanel>
+        <TextBlock Text="{Binding QueueLabel}" FontSize="20" FontWeight="Bold" Foreground="{DynamicResource LcuAccent}" HorizontalAlignment="Center" />
+        <TextBlock Text="{Binding MemberText}" Foreground="{DynamicResource LcuSubAccent}" HorizontalAlignment="Center" Margin="0,4,0,12" />
+        <UniformGrid Columns="5" HorizontalAlignment="Center" Margin="0,0,0,16">
+          <Border Width="64" Height="80" Margin="4" Background="{DynamicResource LcuBg}" BorderBrush="{DynamicResource LcuAccent}" BorderThickness="1" />
+          <Border Width="64" Height="80" Margin="4" Background="{DynamicResource LcuBg}" BorderBrush="{DynamicResource LcuAccent}" BorderThickness="1" />
+          <Border Width="64" Height="80" Margin="4" Background="{DynamicResource LcuBg}" BorderBrush="{DynamicResource LcuAccent}" BorderThickness="1" />
+          <Border Width="64" Height="80" Margin="4" Background="{DynamicResource LcuBg}" BorderBrush="{DynamicResource LcuAccent}" BorderThickness="1" />
+          <Border Width="64" Height="80" Margin="4" Background="{DynamicResource LcuBg}" BorderBrush="{DynamicResource LcuAccent}" BorderThickness="1" />
+        </UniformGrid>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,0,0,12">
+          <Button Content="솔랭 로비" Style="{StaticResource AccentButtonStyle}" Command="{Binding CreateRankedLobbyCommand}" Margin="4" />
+          <Button Content="일반 로비" Style="{StaticResource AccentButtonStyle}" Command="{Binding CreateNormalLobbyCommand}" Margin="4" />
+          <Button Content="나가기" Style="{StaticResource NavButtonStyle}" Command="{Binding LeaveLobbyCommand}" Margin="4" />
+        </StackPanel>
+        <Button Content="{Binding PlayButtonText}" Style="{StaticResource AccentButtonStyle}" FontSize="16" Padding="24,12"
+                HorizontalAlignment="Center" Command="{Binding PlayOrCancelCommand}" MinWidth="200" />
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" Margin="0,8,0,0">
+          <TextBlock Text="{Binding EtaText}" Foreground="{DynamicResource LcuAccent}" Margin="8,0" />
+          <TextBlock Text="{Binding ElapsedText}" Foreground="{DynamicResource LcuSubAccent}" Margin="8,0" />
+        </StackPanel>
+      </StackPanel>
+    </Border>
+
+    <Border Grid.Row="1" Style="{StaticResource GamePanelBorder}">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="0,0,0,8">
+          <TextBlock Text="친구" FontSize="16" FontWeight="SemiBold" Foreground="{DynamicResource LcuAccent}" VerticalAlignment="Center" />
+          <Button Content="새로고침" Style="{StaticResource NavButtonStyle}" Command="{Binding RefreshFriendsCommand}" Margin="12,0,0,0" />
+        </StackPanel>
+        <ListView ItemsSource="{Binding Friends}" Background="Transparent" BorderThickness="0">
+          <ListView.ItemTemplate>
+            <DataTemplate>
+              <StackPanel Orientation="Horizontal" Margin="4">
+                <TextBlock Text="{Binding Display}" Foreground="{DynamicResource LcuText}" Width="180" />
+                <TextBlock Text="{Binding Availability}" Foreground="{DynamicResource LcuSubAccent}" />
+              </StackPanel>
+            </DataTemplate>
+          </ListView.ItemTemplate>
+        </ListView>
+      </DockPanel>
+    </Border>
+  </Grid>
+</UserControl>

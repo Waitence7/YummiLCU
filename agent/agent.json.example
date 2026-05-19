@@ -1,4 +1,5 @@
 {
+  "UiTestMode": false,
   "RelayPublicBaseUrl": "https://yummi.duckdns.org",
   "LockfilePath": "C:\\Riot Games\\League of Legends\\lockfile",
   "AuthPollIntervalMs": 1500,
