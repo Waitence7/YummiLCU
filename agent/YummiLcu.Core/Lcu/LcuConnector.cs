@@ -195,6 +195,10 @@ public sealed class LcuConnector : ILcuConnector, IDisposable
         _testMode ? Task.FromResult(_testHarness.CurrentMatchmaking) :
         _lcu is null ? Task.FromResult(MatchmakingStatus.Idle) : _lcu.GetMatchmakingStatusAsync();
 
+    public Task<string?> GetGameflowPhaseAsync() =>
+        _testMode ? Task.FromResult<string?>(null) :
+        _lcu is null ? Task.FromResult<string?>(null) : _lcu.GetGameflowPhaseAsync();
+
     public Task<IReadOnlyList<FriendInfo>> GetFriendsAsync() =>
         _testMode ? Task.FromResult<IReadOnlyList<FriendInfo>>(new[]
         {

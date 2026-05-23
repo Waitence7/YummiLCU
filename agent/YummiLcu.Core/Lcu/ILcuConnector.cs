@@ -23,6 +23,7 @@ public interface ILcuConnector
     Task<bool> SetStatusMessageAsync(string text);
     Task<LobbyInfo> GetLobbyAsync();
     Task<MatchmakingStatus> GetMatchmakingAsync();
+    Task<string?> GetGameflowPhaseAsync();
     Task<IReadOnlyList<FriendInfo>> GetFriendsAsync();
     Task<ChampSelectSessionInfo?> GetChampSelectSessionAsync();
     Task<IReadOnlyList<PerkPageInfo>> GetPerkPagesAsync();

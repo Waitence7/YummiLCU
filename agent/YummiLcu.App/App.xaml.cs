@@ -1,4 +1,5 @@
 using System.Windows;
+using YummiLcu.App.Composition;
 using YummiLcu.App.Services;
 using YummiLcu.App.ViewModels;
 using YummiLcu.Core;
@@ -8,12 +9,14 @@ namespace YummiLcu.App;
 
 public partial class App : Application
 {
+    private AppServices? _services;
     private ShellViewModel? _shell;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        ThemeService.Apply(AppTheme.Cat);
+        _services = new AppServices();
+        _services.Themes.Apply(AppTheme.Cat);
 
         var config = AgentConfig.Load();
         if (IsTestModeArg(e.Args))
@@ -35,7 +38,7 @@ public partial class App : Application
         if (config.UiTestMode)
             lcu.SetTestMode(true);
 
-        _shell = new ShellViewModel(config, lcu);
+        _shell = new ShellViewModel(config, lcu, _services);
         var main = new MainWindow { DataContext = _shell };
         MainWindow = main;
         ModalOverlayService.Initialize(main);

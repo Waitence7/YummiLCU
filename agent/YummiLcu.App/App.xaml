@@ -22,6 +22,9 @@
       <DataTemplate DataType="{x:Type vm:ChampSelectViewModel}">
         <views:ChampSelectPage />
       </DataTemplate>
+      <DataTemplate DataType="{x:Type vm:SettingsViewModel}">
+        <views:SettingsPage />
+      </DataTemplate>
     </ResourceDictionary>
   </Application.Resources>
 </Application>

@@ -1,0 +1,50 @@
+<UserControl x:Class="YummiLcu.App.Views.SettingsPage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:lcu="clr-namespace:YummiLcu.App.Infrastructure.Lcu"
+             Background="Transparent">
+  <Grid MaxWidth="620" HorizontalAlignment="Center" VerticalAlignment="Center">
+    <Border Style="{StaticResource GamePanelBorder}">
+      <StackPanel>
+        <TextBlock Text="설정" FontSize="22" FontWeight="Bold" Foreground="{DynamicResource LcuAccent}" Margin="0,0,0,16" />
+
+        <CheckBox Content="펫 플레이스홀더 표시" IsChecked="{Binding EnablePetPlaceholder}"
+                  Foreground="{DynamicResource LcuText}" Margin="0,6" />
+        <CheckBox Content="UI 애니메이션 사용" IsChecked="{Binding EnableUiAnimations}"
+                  Foreground="{DynamicResource LcuText}" Margin="0,6" />
+        <CheckBox Content="상태 분위기 반응 사용" IsChecked="{Binding EnableAtmosphereReactions}"
+                  Foreground="{DynamicResource LcuText}" Margin="0,6" />
+        <CheckBox Content="토스트 알림 사용" IsChecked="{Binding EnableToastNotifications}"
+                  Foreground="{DynamicResource LcuText}" Margin="0,6" />
+        <CheckBox Content="사운드 사용" IsChecked="{Binding EnableSounds}"
+                  Foreground="{DynamicResource LcuText}" Margin="0,6" />
+
+        <TextBlock Text="사운드 볼륨" Foreground="{DynamicResource LcuText}" Margin="0,18,0,6" />
+        <Slider Minimum="0" Maximum="1" Value="{Binding SoundVolume, UpdateSourceTrigger=PropertyChanged}" />
+        <TextBlock Text="실제 사운드 파일은 아직 포함되지 않았습니다." Foreground="{DynamicResource LcuSubAccent}" FontSize="11" Margin="0,8,0,0" />
+
+        <Separator Margin="0,20,0,14" Background="{DynamicResource LcuSubAccent}" Opacity="0.28" />
+        <TextBlock Text="개발자 디버그" FontSize="15" FontWeight="SemiBold" Foreground="{DynamicResource LcuAccent}" />
+        <TextBlock Text="League Client 없이 상태 반응을 확인합니다." Foreground="{DynamicResource LcuSubAccent}" FontSize="11" Margin="0,4,0,10" />
+        <WrapPanel>
+          <Button Content="Disconnected" Style="{StaticResource NavButtonStyle}" Margin="0,0,6,6"
+                  Command="{Binding SimulateGameStateCommand}" CommandParameter="{x:Static lcu:AppGameState.Disconnected}" />
+          <Button Content="Lobby" Style="{StaticResource NavButtonStyle}" Margin="0,0,6,6"
+                  Command="{Binding SimulateGameStateCommand}" CommandParameter="{x:Static lcu:AppGameState.Lobby}" />
+          <Button Content="Queue" Style="{StaticResource NavButtonStyle}" Margin="0,0,6,6"
+                  Command="{Binding SimulateGameStateCommand}" CommandParameter="{x:Static lcu:AppGameState.Queue}" />
+          <Button Content="MatchFound" Style="{StaticResource NavButtonStyle}" Margin="0,0,6,6"
+                  Command="{Binding SimulateGameStateCommand}" CommandParameter="{x:Static lcu:AppGameState.MatchFound}" />
+          <Button Content="ChampionSelect" Style="{StaticResource NavButtonStyle}" Margin="0,0,6,6"
+                  Command="{Binding SimulateGameStateCommand}" CommandParameter="{x:Static lcu:AppGameState.ChampionSelect}" />
+          <Button Content="InGame" Style="{StaticResource NavButtonStyle}" Margin="0,0,6,6"
+                  Command="{Binding SimulateGameStateCommand}" CommandParameter="{x:Static lcu:AppGameState.InGame}" />
+          <Button Content="EndOfGame" Style="{StaticResource NavButtonStyle}" Margin="0,0,6,6"
+                  Command="{Binding SimulateGameStateCommand}" CommandParameter="{x:Static lcu:AppGameState.EndOfGame}" />
+          <Button Content="Unknown" Style="{StaticResource NavButtonStyle}" Margin="0,0,6,6"
+                  Command="{Binding SimulateGameStateCommand}" CommandParameter="{x:Static lcu:AppGameState.Unknown}" />
+        </WrapPanel>
+      </StackPanel>
+    </Border>
+  </Grid>
+</UserControl>
