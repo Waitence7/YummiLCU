@@ -7,6 +7,8 @@ public readonly record struct ActionContext(LcuClient Lcu, AgentConfig Config, J
 
 public static class AllowedActions
 {
+    private const int MaxPartyInviteRiotIds = 20;
+
     private static readonly Dictionary<string, Func<ActionContext, Task<(bool Ok, string Message)>>> Handlers =
         new(StringComparer.Ordinal)
         {
@@ -108,6 +110,8 @@ public static class AllowedActions
         var riotIds = PayloadStringArray(ctx.Payload, "riot_ids");
         if (riotIds.Count == 0)
             return (false, "초대할 Riot ID가 없습니다.");
+        if (riotIds.Count > MaxPartyInviteRiotIds)
+            return (false, $"초대는 최대 {MaxPartyInviteRiotIds}명까지 가능합니다.");
 
         var inParty = await ctx.Lcu.GetLobbyMemberRiotKeysAsync();
         var invited = 0;

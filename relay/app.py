@@ -34,6 +34,7 @@ logger = logging.getLogger("yummi_lcu.relay")
 
 SESSION_KEY = "relay:session:{session_id}"
 SESSION_STATUS_KEY = "relay:session_status:{session_id}"
+WS_TOKEN_KEY = "relay:ws_token:{session_id}"
 OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
 
@@ -45,6 +46,7 @@ _INTERNAL_AUTH_WINDOW_SEC = 60.0
 _LONG_COMMAND_ACTIONS = frozenset({"launch_client", "play_ranked_solo", "play_normal_draft"})
 _COMMAND_TIMEOUT_DEFAULT_SEC = 30.0
 _COMMAND_TIMEOUT_LONG_SEC = 300.0
+_MAX_PARTY_INVITE_RIOT_IDS = 20
 
 
 def _session_redis_key(session_id: str) -> str:
@@ -59,7 +61,41 @@ def _oauth_state_redis_key(oauth_state: str) -> str:
     return OAUTH_STATE_KEY.format(oauth_state=oauth_state)
 
 
+def _ws_token_redis_key(session_id: str) -> str:
+    return WS_TOKEN_KEY.format(session_id=session_id)
+
+
+async def _claim_or_verify_ws_token(r: redis.Redis, session_id: str, ws_token: str) -> bool:
+    """첫 WS 연결이 ws_token 을 선점. 이후 동일 session_id 는 같은 토큰만 허용."""
+    key = _ws_token_redis_key(session_id)
+    stored = await r.get(key)
+    ttl = config.relay_session_ttl_sec()
+    if stored is None:
+        return bool(await r.set(key, ws_token, ex=ttl, nx=True))
+    return secrets.compare_digest(stored, ws_token)
+
+
+async def _try_bind_discord(
+    conn: ConnectionManager,
+    r: redis.Redis,
+    session_id: str,
+    discord_id: int,
+) -> bool:
+    """OAuth 완료 후 ws_token 이 일치하는 에이전트 WS 만 discord_id 에 바인딩."""
+    ws_token = conn.session_ws_token(session_id)
+    if not ws_token:
+        return False
+    stored = await r.get(_ws_token_redis_key(session_id))
+    if not stored or not secrets.compare_digest(stored, ws_token):
+        return False
+    return await conn.bind_discord(session_id, discord_id)
+
+
 def _client_ip(request: Request) -> str:
+    # nginx 가 설정한 X-Real-IP 우선 (클라이언트 X-Forwarded-For 스푸핑 완화)
+    real_ip = request.headers.get("x-real-ip")
+    if real_ip:
+        return real_ip.strip()
     forwarded = request.headers.get("x-forwarded-for")
     if forwarded:
         return forwarded.split(",")[0].strip()
@@ -189,7 +225,7 @@ async def auth_callback(
     ttl = config.relay_session_ttl_sec()
     await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
     await r.set(_status_redis_key(session_id), "ok", ex=ttl)
-    bound = await conn.bind_discord(session_id, discord_id)
+    bound = await _try_bind_discord(conn, r, session_id, discord_id)
     logger.info("OAuth 완료 discord_id=%s session=%s bound_ws=%s", discord_id, session_id[:8], bound)
     return HTMLResponse(
         "<h1>로그인 완료</h1><p>이 창을 닫고 에이전트로 돌아가세요.</p>",
@@ -212,8 +248,8 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
         discord_id = int(raw)
     except ValueError:
         return JSONResponse({"status": "pending"})
-    # WS가 아직 없을 수 있음 — bind 시도
-    await conn.bind_discord(session_id, discord_id)
+    # WS가 아직 없을 수 있음 — ws_token 검증 후 bind 시도
+    await _try_bind_discord(conn, r, session_id, discord_id)
     return JSONResponse({"status": "ok"})
 
 
@@ -295,17 +331,29 @@ async def _handle_agent_message(
 
 
 @app.websocket("/ws/agent")
-async def ws_agent(websocket: WebSocket, session_id: str = Query(..., min_length=8, max_length=64)) -> None:
-    """C# 에이전트 연결. OAuth 후 discord_id에 바인딩."""
+async def ws_agent(
+    websocket: WebSocket,
+    session_id: str = Query(..., min_length=8, max_length=64),
+    ws_token: str = Query(..., min_length=16, max_length=128),
+) -> None:
+    """C# 에이전트 연결. session_id(URL) + ws_token(WS 전용) 으로 OAuth 바인딩 보호."""
+    try:
+        uuid.UUID(session_id)
+    except ValueError:
+        await websocket.close(code=1008)
+        return
+    r: redis.Redis = websocket.app.state.redis
+    if not await _claim_or_verify_ws_token(r, session_id, ws_token):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     conn: ConnectionManager = websocket.app.state.connections
-    r: redis.Redis = websocket.app.state.redis
-    await conn.attach_session(session_id, websocket)
+    await conn.attach_session(session_id, websocket, ws_token)
 
     raw = await r.get(_session_redis_key(session_id))
     if raw is not None:
         try:
-            await conn.bind_discord(session_id, int(raw))
+            await _try_bind_discord(conn, r, session_id, int(raw))
         except ValueError:
             pass
 
@@ -360,6 +408,10 @@ async def internal_command(
     _verify_internal_secret(request, x_relay_internal_secret)
     if not is_allowed_action(body.action):
         raise HTTPException(400, f"action not allowed: {body.action}")
+    if body.action == "invite_party_members":
+        riot_ids = body.payload.get("riot_ids")
+        if isinstance(riot_ids, list) and len(riot_ids) > _MAX_PARTY_INVITE_RIOT_IDS:
+            raise HTTPException(400, f"riot_ids max {_MAX_PARTY_INVITE_RIOT_IDS}")
     conn: ConnectionManager = request.app.state.connections
     if not conn.is_online(body.discord_id):
         raise HTTPException(404, "agent not connected")

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -63,7 +64,8 @@ public partial class AgentViewModel : ObservableObject, IDisposable
         SaveConfig();
         IsConnected = true;
         var sessionId = Guid.NewGuid().ToString();
-        _relay = new RelaySession(_config, sessionId);
+        var wsToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
+        _relay = new RelaySession(_config, sessionId, wsToken);
         _relay.StatusChanged += s => StatusText = s;
         _relay.Log += AppendLog;
         _relayCts = new CancellationTokenSource();

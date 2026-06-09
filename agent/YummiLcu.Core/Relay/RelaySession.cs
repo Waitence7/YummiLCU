@@ -11,6 +11,7 @@ public sealed class RelaySession : IAsyncDisposable
 {
     private readonly AgentConfig _config;
     private readonly string _sessionId;
+    private readonly string _wsToken;
     private readonly HttpClient _http = new();
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
@@ -28,10 +29,11 @@ public sealed class RelaySession : IAsyncDisposable
     private LobbyInfo _lastLobby;
     private string _idleStatus = "대기 중 (명령 수신)";
 
-    public RelaySession(AgentConfig config, string sessionId)
+    public RelaySession(AgentConfig config, string sessionId, string wsToken)
     {
         _config = config;
         _sessionId = sessionId;
+        _wsToken = wsToken;
     }
 
     public AgentConfig Config => _config;
@@ -42,21 +44,11 @@ public sealed class RelaySession : IAsyncDisposable
         _cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
         var ct = _cts.Token;
 
-        SetStatus("브라우저 로그인 중...");
-        try
-        {
-            Process.Start(new ProcessStartInfo(_config.LoginUrl(_sessionId)) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            Log?.Invoke($"브라우저 열기 실패: {ex.Message}");
-        }
-
         Log?.Invoke($"Relay 연결 시도: {_config.RelayPublicBaseUrl}");
         try
         {
             _ws = new ClientWebSocket();
-            await _ws.ConnectAsync(new Uri(_config.WsUrl(_sessionId)), ct);
+            await _ws.ConnectAsync(new Uri(_config.WsUrl(_sessionId, _wsToken)), ct);
         }
         catch (Exception ex)
         {
@@ -67,6 +59,16 @@ public sealed class RelaySession : IAsyncDisposable
         Log?.Invoke("WebSocket 연결됨");
 
         _ = Task.Run(() => ReceiveLoopAsync(ct), ct);
+
+        SetStatus("브라우저 로그인 중...");
+        try
+        {
+            Process.Start(new ProcessStartInfo(_config.LoginUrl(_sessionId)) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Log?.Invoke($"브라우저 열기 실패: {ex.Message}");
+        }
 
         while (!ct.IsCancellationRequested)
         {

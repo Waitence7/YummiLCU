@@ -6,6 +6,8 @@
 |------|------|
 | `/internal/*` | nginx 에서 **127.0.0.1 만** 허용 (`deploy/nginx-waitence.conf`) |
 | Internal secret | `RELAY_INTERNAL_SECRET` 32바이트+ 랜덤, `.env` 만 (git 제외) |
+| `/lcu/internal/` | dashboard nginx 예시에도 **127.0.0.1 만** (`nginx-yummi-dashboard.conf.example`) |
+| HTTP 배포 중 | `nginx-waitence-http.conf` 에서도 `/internal/` 차단 |
 | OAuth | `state` = 일회용 토큰 → Redis → `session_id` (피싱/세션 고정 완화) |
 | `/auth/status` | `discord_id` 미반환 (상태만) |
 | 공개 URL | `RELAY_PUBLIC_BASE_URL` 비로컬은 **HTTPS 필수** (relay 기동 시 검증) |
@@ -30,6 +32,6 @@
 
 - **LCU lockfile** = 해당 PC 계정 전체 제어 (로컬 신뢰 전제)
 - **코드 서명** 없는 zip 업데이트 — `sha256` 으로 무결성만 검증 (서버·manifest 보호 필요)
-- **WebSocket** — `session_id` UUID + OAuth 바인딩에 의존
+- **WebSocket** — `session_id`(브라우저) + `ws_token`(WS 전용, Redis 선점) + OAuth 바인딩
 
 자세한 흐름: [`AGENT_MECHANISM.md`](AGENT_MECHANISM.md)

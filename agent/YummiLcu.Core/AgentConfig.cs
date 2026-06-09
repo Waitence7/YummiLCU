@@ -74,14 +74,15 @@ public sealed class AgentConfig
         File.WriteAllText(ConfigFilePath, json);
     }
 
-    public string WsUrl(string sessionId)
+    public string WsUrl(string sessionId, string wsToken)
     {
         var baseUrl = EnforceHttpsIfPublic(RelayPublicBaseUrl.TrimEnd('/'));
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
             throw new InvalidOperationException("RelayPublicBaseUrl invalid");
         var wsScheme = uri.Scheme == Uri.UriSchemeHttps ? "wss" : "ws";
         var wsBase = $"{wsScheme}://{uri.Host}{(uri.IsDefaultPort ? "" : $":{uri.Port}")}";
-        return $"{wsBase}/ws/agent?session_id={Uri.EscapeDataString(sessionId)}";
+        return
+            $"{wsBase}/ws/agent?session_id={Uri.EscapeDataString(sessionId)}&ws_token={Uri.EscapeDataString(wsToken)}";
     }
 
     public string LoginUrl(string sessionId) =>

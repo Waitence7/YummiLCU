@@ -19,25 +19,28 @@ class ConnectionManager:
     def __init__(self) -> None:
         self._by_discord: dict[int, WebSocket] = {}
         self._session_ws: dict[str, WebSocket] = {}
+        self._session_ws_token: dict[str, str] = {}  # session_id -> ws_token (에이전트만 보유)
         self._ws_discord: dict[int, int] = {}  # id(ws) -> discord_id
         self._ws_session: dict[int, str] = {}  # id(ws) -> session_id (인증 전)
         self._pending_results: dict[tuple[int, str], asyncio.Future[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
 
-    async def attach_session(self, session_id: str, ws: WebSocket) -> None:
-        """OAuth 완료 전 session_id로 WS를 임시 보관합니다."""
+    async def attach_session(self, session_id: str, ws: WebSocket, ws_token: str) -> None:
+        """OAuth 완료 전 session_id + ws_token 으로 WS를 임시 보관합니다."""
         async with self._lock:
             old = self._session_ws.get(session_id)
             if old is not None and old is not ws:
                 self._drop_ws_locked(old)
             self._session_ws[session_id] = ws
+            self._session_ws_token[session_id] = ws_token
             self._ws_session[id(ws)] = session_id
 
     async def bind_discord(self, session_id: str, discord_id: int) -> bool:
-        """session WS를 discord_id에 등록합니다. 성공 시 True."""
+        """ws_token 이 등록된 session WS만 discord_id에 바인딩합니다."""
         async with self._lock:
             ws = self._session_ws.pop(session_id, None)
-            if ws is None:
+            ws_token = self._session_ws_token.pop(session_id, None)
+            if ws is None or not ws_token:
                 return False
             self._ws_session.pop(id(ws), None)
             prev = self._by_discord.get(discord_id)
@@ -63,6 +66,10 @@ class ConnectionManager:
         sid = self._ws_session.pop(wid, None)
         if sid is not None and self._session_ws.get(sid) is ws:
             del self._session_ws[sid]
+            self._session_ws_token.pop(sid, None)
+
+    def session_ws_token(self, session_id: str) -> str | None:
+        return self._session_ws_token.get(session_id)
 
     def _cancel_pending_for_discord_locked(self, discord_id: int) -> None:
         for key in [k for k in self._pending_results if k[0] == discord_id]:
