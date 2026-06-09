@@ -76,11 +76,11 @@ public partial class AgentViewModel : ObservableObject, IDisposable
             }
             catch (Exception ex)
             {
-                Application.Current.Dispatcher.Invoke(() => AppendLog($"오류: {ex.Message}"));
+                System.Windows.Application.Current.Dispatcher.Invoke(() => AppendLog($"오류: {ex.Message}"));
             }
             finally
             {
-                Application.Current.Dispatcher.Invoke(() =>
+                System.Windows.Application.Current.Dispatcher.Invoke(() =>
                 {
                     IsConnected = false;
                     StatusText = "중지됨";
@@ -176,7 +176,7 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     private void AppendLog(string line)
     {
         var entry = $"[{DateTime.Now:HH:mm:ss}] {line}";
-        Application.Current.Dispatcher.Invoke(() =>
+        System.Windows.Application.Current.Dispatcher.Invoke(() =>
         {
             LogLines.Add(entry);
             while (LogLines.Count > 500)

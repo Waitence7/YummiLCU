@@ -4,7 +4,7 @@ using YummiLcu.Core;
 
 namespace YummiLcu.App;
 
-public partial class App : Application
+public partial class App : System.Windows.Application
 {
     private AgentViewModel? _vm;
 
