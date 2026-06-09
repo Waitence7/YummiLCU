@@ -4,7 +4,6 @@ using System.IO;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
-using Microsoft.Win32;
 using YummiLcu.Core;
 using YummiLcu.Core.Relay;
 
@@ -44,7 +43,7 @@ public partial class AgentViewModel : ObservableObject, IDisposable
             return;
 
         var msg = $"새 버전 {info.Version} (현재 {UpdateChecker.CurrentVersion})\n{info.Notes}\n\n다운로드 페이지를 열까요?";
-        var r = MessageBox.Show(msg, "Yummi Agent 업데이트", MessageBoxButton.YesNo, MessageBoxImage.Information);
+        var r = System.Windows.MessageBox.Show(msg, "Yummi Agent 업데이트", MessageBoxButton.YesNo, MessageBoxImage.Information);
         if (r == MessageBoxResult.Yes && !string.IsNullOrWhiteSpace(info.Url))
         {
             try
@@ -114,7 +113,7 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     [RelayCommand]
     private void PickLockfileFile()
     {
-        var dlg = new OpenFileDialog
+        var dlg = new Microsoft.Win32.OpenFileDialog
         {
             Title = "lockfile",
             FileName = "lockfile",
