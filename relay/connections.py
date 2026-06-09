@@ -21,6 +21,7 @@ class ConnectionManager:
         self._session_ws: dict[str, WebSocket] = {}
         self._ws_discord: dict[int, int] = {}  # id(ws) -> discord_id
         self._ws_session: dict[int, str] = {}  # id(ws) -> session_id (인증 전)
+        self._pending_results: dict[tuple[int, str], asyncio.Future[dict[str, Any]]] = {}
         self._lock = asyncio.Lock()
 
     async def attach_session(self, session_id: str, ws: WebSocket) -> None:
@@ -57,13 +58,40 @@ class ConnectionManager:
         if did is not None:
             if self._by_discord.get(did) is ws:
                 del self._by_discord[did]
+            self._cancel_pending_for_discord_locked(did)
             logger.info("에이전트 해제: discord_id=%s", did)
         sid = self._ws_session.pop(wid, None)
         if sid is not None and self._session_ws.get(sid) is ws:
             del self._session_ws[sid]
 
+    def _cancel_pending_for_discord_locked(self, discord_id: int) -> None:
+        for key in [k for k in self._pending_results if k[0] == discord_id]:
+            fut = self._pending_results.pop(key, None)
+            if fut is not None and not fut.done():
+                fut.cancel()
+
     def is_online(self, discord_id: int) -> bool:
         return discord_id in self._by_discord
+
+    def discord_id_for_ws(self, ws: WebSocket) -> int | None:
+        return self._ws_discord.get(id(ws))
+
+    def register_pending_result(self, discord_id: int, request_id: str) -> asyncio.Future[dict[str, Any]]:
+        fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        self._pending_results[(discord_id, request_id)] = fut
+        return fut
+
+    def complete_pending_result(self, discord_id: int, request_id: str, result: dict[str, Any]) -> bool:
+        fut = self._pending_results.pop((discord_id, request_id), None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(result)
+        return True
+
+    def cancel_pending_result(self, discord_id: int, request_id: str) -> None:
+        fut = self._pending_results.pop((discord_id, request_id), None)
+        if fut is not None and not fut.done():
+            fut.cancel()
 
     async def send_command(self, discord_id: int, payload: dict[str, Any]) -> bool:
         async with self._lock:

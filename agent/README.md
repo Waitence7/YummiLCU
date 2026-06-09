@@ -1,30 +1,27 @@
 # YummiLcu Agent (WPF)
 
-WPF + MVVM 에이전트 — Relay WSS + 로컬 LCU.
+단순 연결형 에이전트 — Relay WSS + 로컬 LCU (Discord 봇 명령 수신).
 
 ## 프로젝트 구조
 
 ```
 agent/
 ├── YummiLcu.Core/          # LCU HTTP, Relay, 설정 (UI 없음)
-│   ├── Lcu/                # LcuClient, LcuConnector, LcuQueue
-│   ├── Lcu/Models/         # DTO (Summoner, Lobby, ChampSelect…)
+│   ├── Lcu/                # LcuClient, AllowedActions, LcuQueue
 │   └── Relay/              # RelaySession
-├── YummiLcu.App/           # WPF UI
-│   ├── Themes/             # CatTheme, CyberTheme, ClassicTheme
-│   ├── Views/              # HomePage, LobbyPage, ChampSelectPage
-│   ├── ViewModels/         # MVVM (CommunityToolkit.Mvvm)
-│   └── Services/           # ThemeService, NavigationService
+├── YummiLcu.App/           # WPF 단순 UI
+│   ├── MainWindow.xaml
+│   └── ViewModels/AgentViewModel.cs
 ├── agent.json.example
 └── build-installer.bat
 ```
 
-## 빠른 시작 (개발)
+## 빠른 시작
 
-1. **롤 없이 UI만 테스트:** `dev-run-test.bat` 또는 `dotnet run --project YummiLcu.App -- --test`
-2. 일반 실행: `dev-run.bat` — 좌측 **테스트 모드 (롤 불필요)** 체크해도 동일
-3. `agent.json`에 `"UiTestMode": true` 저장 시 다음 실행부터 자동 테스트 모드
-4. 실제 LCU: 테스트 모드 **끄고** lockfile 경로 설정 → **홈**에서 LCU 연결
+1. `dev-run.bat` — 에이전트 실행
+2. `agent.json`에 `RelayPublicBaseUrl`, `LockfilePath` 설정
+3. **연결 시작** → 브라우저 Discord 로그인 → Relay 유지
+4. Discord `/lcu` 등 봇 명령으로 LCU 제어 (에이전트 UI에는 API 버튼 없음)
 
 ## 빌드
 
@@ -33,23 +30,17 @@ agent/
 | `build.bat` / `build-portable.bat` | 포터블 publish |
 | `build-installer.bat` | Inno Setup + zip |
 | `dev-run.bat` | 디버그 실행 |
-| `dev-run-test.bat` | 테스트 모드 (`--test`, 롤 불필요) |
 
-실행 파일: `YummiLcu.App.exe`
+실행 파일: `YummiLcu.App.exe` (v0.5.0+)
 
 ## 화면
 
-| 메뉴 | 기능 |
+| 요소 | 기능 |
 |------|------|
-| 홈 | 소환사 정보, 상메, lockfile |
-| 로비 | 로비 생성, 게임 찾기, 친구 목록 |
-| 챔프 선택 | 세션 폴링, 픽/밴, 룬 페이지 |
-
-## 테마
-
-`Themes/CatTheme.xaml`, `CyberTheme.xaml`, `ClassicTheme.xaml` — 동일 Key (`LcuBg`, `LcuPanel`, `LcuAccent`, `LcuSubAccent`, `LcuText`).
-
-UI는 `{DynamicResource LcuBg}` 등으로 바인딩. 좌측 하단에서 테마 전환.
+| 연결 시작 / 중지 | Relay 세션 (Discord OAuth + WebSocket) |
+| lockfile | 롤 클라이언트 lockfile 경로 |
+| 설정 | 닷지 후 큐 방지, 연결 시 기본 상메 |
+| 로그 | Relay·LCU·봇 명령 실행 결과 |
 
 ## 설정 (`agent.json`)
 
@@ -57,32 +48,21 @@ UI는 `{DynamicResource LcuBg}` 등으로 바인딩. 좌측 하단에서 테마 
 {
   "RelayPublicBaseUrl": "https://yummi.duckdns.org",
   "LockfilePath": "%LocalAppData%\\Riot Games\\Riot Client\\Config\\lockfile",
-  "UiTestMode": false,
   "PreventQueueAfterDodge": true,
   "ApplyDefaultStatusOnConnect": true
 }
 ```
 
-## LCU API (주요)
+## Relay + 봇 응답
 
-| 기능 | 엔드포인트 |
-|------|------------|
-| 소환사 | `GET /lol-summoner/v1/current-summoner` |
-| 상메 | `GET/PUT /lol-chat/v1/me` |
-| 로비 | `GET/POST/DELETE /lol-lobby/v2/lobby` |
-| 매칭 | `POST/DELETE .../matchmaking/search` |
-| 친구 | `GET /lol-chat/v1/friends` |
-| 챔프선 | `GET /lol-champ-select/v1/session` |
-| 픽/밴 | `PATCH .../session/actions/{id}` |
-| 룬 | `GET /lol-perks/v1/pages` |
+1. Discord 봇 → Relay `POST /internal/command`
+2. Relay → 에이전트 WebSocket `command`
+3. 에이전트 → LCU 실행 후 `command_result` 회신
+4. Relay → 봇 HTTP `result` 포함 응답 → Discord에 실행 결과 표시
 
-클라이언트 버전에 따라 응답 필드가 다를 수 있습니다.
-
-## Relay
-
-좌측 **Relay 시작** → Discord 로그인 → WS 명령으로 LCU 제어 (기존과 동일).
+모집 **게임 초대하기**는 `invite_party_members` action으로 동일 경로를 사용합니다 (v0.5.1+).
 
 ## 작동 원리 (상세)
 
-전체 아키텍처·LCU·Relay·MVVM·테스트 모드·자동 업데이트 설명: [`docs/AGENT_MECHANISM.md`](../docs/AGENT_MECHANISM.md)  
-보안·통신: [`docs/SECURITY.md`](../docs/SECURITY.md)
+[`docs/AGENT_MECHANISM.md`](../docs/AGENT_MECHANISM.md)  
+보안: [`docs/SECURITY.md`](../docs/SECURITY.md)

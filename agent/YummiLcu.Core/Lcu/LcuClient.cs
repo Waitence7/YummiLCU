@@ -295,6 +295,68 @@ public sealed class LcuClient : IDisposable
         return new LobbyInfo(true, queueId, LobbyInfo.LabelForQueue(queueId), memberCount, maxMembers);
     }
 
+    public async Task<HashSet<string>> GetLobbyMemberRiotKeysAsync()
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        using var doc = await GetJsonAsync("/lol-lobby/v2/lobby");
+        if (doc is null) return keys;
+
+        var root = doc.RootElement;
+        if (root.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return keys;
+        if (!root.TryGetProperty("members", out var members) || members.ValueKind != JsonValueKind.Array)
+            return keys;
+
+        foreach (var member in members.EnumerateArray())
+        {
+            var gameName = ReadPlayerString(member, "riotIdGameName", "gameName", "summonerName");
+            var tagLine = ReadPlayerString(member, "riotIdTagline", "riotIdTagLine", "gameTag", "tagLine");
+            if (!string.IsNullOrWhiteSpace(gameName) && !string.IsNullOrWhiteSpace(tagLine))
+                keys.Add(LcuPartyInvite.RiotKey(gameName, tagLine));
+        }
+        return keys;
+    }
+
+    public async Task<long?> ResolveSummonerIdByRiotIdAsync(string gameName, string tagLine)
+    {
+        var friends = await GetFriendsAsync();
+        foreach (var friend in friends)
+        {
+            if (!string.Equals(friend.GameName, gameName, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(friend.TagLine, tagLine, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (!string.IsNullOrWhiteSpace(friend.Puuid))
+            {
+                var fromPuuid = await GetSummonerIdByPuuidAsync(friend.Puuid);
+                if (fromPuuid is not null)
+                    return fromPuuid;
+            }
+        }
+
+        var riotId = Uri.EscapeDataString($"{gameName}#{tagLine}");
+        using var doc = await GetJsonAsync($"/lol-summoner/v1/summoners?name={riotId}");
+        if (doc is null) return null;
+        return TryReadSummonerId(doc.RootElement);
+    }
+
+    public async Task<long?> GetSummonerIdByPuuidAsync(string puuid)
+    {
+        if (string.IsNullOrWhiteSpace(puuid)) return null;
+        using var doc = await GetJsonAsync($"/lol-summoner/v1/summoners-by-puuid-cached/{Uri.EscapeDataString(puuid)}");
+        if (doc is null) return null;
+        return TryReadSummonerId(doc.RootElement);
+    }
+
+    public async Task<bool> InviteToLobbyAsync(long summonerId) =>
+        await PostJsonAsync("/lol-lobby/v2/lobby/invitations", $"[{{\"toSummonerId\":{summonerId}}}]");
+
+    private static long? TryReadSummonerId(JsonElement root)
+    {
+        if (root.TryGetProperty("summonerId", out var sid) && sid.TryGetInt64(out var id))
+            return id;
+        return null;
+    }
+
     public async Task<MatchmakingStatus> GetMatchmakingStatusAsync()
     {
         using var doc = await GetJsonAsync("/lol-matchmaking/v1/search");
@@ -369,6 +431,166 @@ public sealed class LcuClient : IDisposable
         {
             me.Dispose();
         }
+    }
+
+    public async Task<GuildMatchLcuPayload?> BuildGuildMatchEogPayloadAsync(string phase)
+    {
+        if (string.IsNullOrWhiteSpace(phase)) return null;
+
+        using var eogDoc = await GetJsonAsync("/lol-end-of-game/v1/eog-stats-block");
+        using var sessionDoc = await GetJsonAsync("/lol-gameflow/v1/session");
+
+        var participants = new List<GuildMatchLcuParticipant>();
+        string? reporterGameName = null;
+        string? reporterTagLine = null;
+        bool? reporterWon = null;
+
+        if (eogDoc is not null)
+        {
+            ParseEogParticipants(eogDoc.RootElement, participants, ref reporterGameName, ref reporterTagLine, ref reporterWon);
+        }
+
+        if (participants.Count < 2 && sessionDoc is not null &&
+            sessionDoc.RootElement.TryGetProperty("gameData", out var gameData))
+        {
+            ParseSessionParticipants(gameData, participants);
+        }
+
+        if (participants.Count < 2) return null;
+
+        var gameResult = BuildGameResult(participants, reporterGameName, reporterTagLine, reporterWon);
+
+        return new GuildMatchLcuPayload
+        {
+            GameflowPhase = phase,
+            CapturedAt = DateTime.UtcNow.ToString("o"),
+            Participants = participants,
+            GameResult = gameResult,
+            EogStats = eogDoc is null ? null : JsonSerializer.Deserialize<object>(eogDoc.RootElement.GetRawText())
+        };
+    }
+
+    private static void ParseEogParticipants(
+        JsonElement root,
+        List<GuildMatchLcuParticipant> participants,
+        ref string? reporterGameName,
+        ref string? reporterTagLine,
+        ref bool? reporterWon)
+    {
+        if (!root.TryGetProperty("teams", out var teams) || teams.ValueKind != JsonValueKind.Array)
+            return;
+
+        foreach (var team in teams.EnumerateArray())
+        {
+            var isWinningTeam = team.TryGetProperty("isWinningTeam", out var winEl) && winEl.GetBoolean();
+            if (!team.TryGetProperty("players", out var players) || players.ValueKind != JsonValueKind.Array)
+                continue;
+
+            foreach (var player in players.EnumerateArray())
+            {
+                var gameName = ReadPlayerString(player, "riotIdGameName", "summonerName", "gameName");
+                var tagLine = ReadPlayerString(player, "riotIdTagline", "riotIdTagLine", "tagLine");
+                if (string.IsNullOrWhiteSpace(gameName) || string.IsNullOrWhiteSpace(tagLine))
+                    continue;
+
+                var teamId = player.TryGetProperty("teamId", out var teamEl) && teamEl.TryGetInt32(out var tid)
+                    ? tid
+                    : (int?)null;
+                var isLocal = player.TryGetProperty("isLocalPlayer", out var localEl) && localEl.GetBoolean();
+                var won = player.TryGetProperty("win", out var wonEl) && wonEl.ValueKind == JsonValueKind.True
+                    ? true
+                    : player.TryGetProperty("win", out var lostEl) && lostEl.ValueKind == JsonValueKind.False
+                        ? false
+                        : isWinningTeam;
+
+                participants.Add(new GuildMatchLcuParticipant
+                {
+                    GameName = gameName,
+                    TagLine = tagLine,
+                    TeamId = teamId,
+                    Won = won
+                });
+
+                if (isLocal)
+                {
+                    reporterGameName = gameName;
+                    reporterTagLine = tagLine;
+                    reporterWon = won;
+                }
+            }
+        }
+    }
+
+    private static void ParseSessionParticipants(JsonElement gameData, List<GuildMatchLcuParticipant> participants)
+    {
+        foreach (var key in new[] { "teamOne", "teamTwo", "playerChampionSelections" })
+        {
+            if (!gameData.TryGetProperty(key, out var arr) || arr.ValueKind != JsonValueKind.Array)
+                continue;
+
+            foreach (var row in arr.EnumerateArray())
+            {
+                var gameName = ReadPlayerString(row, "riotIdGameName", "summonerName", "gameName");
+                var tagLine = ReadPlayerString(row, "riotIdTagline", "riotIdTagLine", "tagLine");
+                if (string.IsNullOrWhiteSpace(gameName) || string.IsNullOrWhiteSpace(tagLine))
+                    continue;
+
+                var teamId = row.TryGetProperty("teamId", out var teamEl) && teamEl.TryGetInt32(out var tid)
+                    ? tid
+                    : (int?)null;
+
+                participants.Add(new GuildMatchLcuParticipant
+                {
+                    GameName = gameName,
+                    TagLine = tagLine,
+                    TeamId = teamId
+                });
+            }
+        }
+    }
+
+    private static string ReadPlayerString(JsonElement row, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            if (row.TryGetProperty(key, out var value) && value.ValueKind == JsonValueKind.String)
+            {
+                var text = value.GetString();
+                if (!string.IsNullOrWhiteSpace(text))
+                    return text.Trim();
+            }
+        }
+        return "";
+    }
+
+    private static GuildMatchLcuGameResult? BuildGameResult(
+        IReadOnlyList<GuildMatchLcuParticipant> participants,
+        string? reporterGameName,
+        string? reporterTagLine,
+        bool? reporterWon)
+    {
+        if (reporterWon is not null)
+        {
+            return new GuildMatchLcuGameResult { DidWin = reporterWon };
+        }
+
+        var winners = participants.Where(p => p.Won == true).ToList();
+        if (winners.Count == 0) return null;
+
+        var winnerTeamId = winners[0].TeamId;
+        if (winnerTeamId is 100) return new GuildMatchLcuGameResult { WinnerTeamSide = "blue" };
+        if (winnerTeamId is 200) return new GuildMatchLcuGameResult { WinnerTeamSide = "red" };
+
+        if (!string.IsNullOrWhiteSpace(reporterGameName) && !string.IsNullOrWhiteSpace(reporterTagLine))
+        {
+            var reporter = participants.FirstOrDefault(p =>
+                string.Equals(p.GameName, reporterGameName, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(p.TagLine, reporterTagLine, StringComparison.OrdinalIgnoreCase));
+            if (reporter?.Won is not null)
+                return new GuildMatchLcuGameResult { DidWin = reporter.Won };
+        }
+
+        return null;
     }
 
     public void Dispose() => _http.Dispose();

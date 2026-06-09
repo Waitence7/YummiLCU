@@ -1,22 +1,16 @@
 using System.Windows;
-using YummiLcu.App.Composition;
-using YummiLcu.App.Services;
 using YummiLcu.App.ViewModels;
 using YummiLcu.Core;
-using YummiLcu.Core.Lcu;
 
 namespace YummiLcu.App;
 
 public partial class App : Application
 {
-    private AppServices? _services;
-    private ShellViewModel? _shell;
+    private AgentViewModel? _vm;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
-        _services = new AppServices();
-        _services.Themes.Apply(AppTheme.Cat);
 
         var config = AgentConfig.Load();
         if (IsTestModeArg(e.Args))
@@ -34,20 +28,16 @@ public partial class App : Application
             }
         }
 
-        var lcu = new LcuConnector();
-        if (config.UiTestMode)
-            lcu.SetTestMode(true);
-
-        _shell = new ShellViewModel(config, lcu, _services);
-        var main = new MainWindow { DataContext = _shell };
+        _vm = new AgentViewModel(config);
+        var main = new MainWindow { DataContext = _vm };
         MainWindow = main;
-        ModalOverlayService.Initialize(main);
         main.Show();
+        _ = _vm.CheckUpdatesOnStartupAsync();
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
-        _shell?.Dispose();
+        _vm?.Dispose();
         base.OnExit(e);
     }
 

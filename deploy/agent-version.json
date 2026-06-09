@@ -1,6 +1,6 @@
 {
-  "version": "0.4.1",
+  "version": "0.5.1",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
-  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.4.1.exe",
-  "notes": "Build 82afe88"
+  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.5.1.exe",
+  "notes": "모집 게임 초대하기 (invite_party_members)"
 }

@@ -70,3 +70,11 @@ def redis_url() -> str:
 
 def oauth_configured() -> bool:
     return bool(discord_client_id() and discord_client_secret() and discord_oauth_redirect_uri())
+
+
+def tournament_api_base_url() -> str:
+    return _env("TOURNAMENT_API_BASE_URL", "http://127.0.0.1:4000").rstrip("/")
+
+
+def tournament_bot_internal_token() -> str:
+    return _env("TOURNAMENT_BOT_INTERNAL_TOKEN")

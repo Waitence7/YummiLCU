@@ -7,6 +7,7 @@ LCU Relay FastAPI — OAuth, 에이전트 WebSocket, 봇 internal HTTP.
 
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -40,6 +41,10 @@ OAUTH_STATE_TTL_SEC = 600
 _failed_internal_auth: dict[str, list[float]] = defaultdict(list)
 _INTERNAL_AUTH_MAX_FAILS = 20
 _INTERNAL_AUTH_WINDOW_SEC = 60.0
+
+_LONG_COMMAND_ACTIONS = frozenset({"launch_client", "play_ranked_solo", "play_normal_draft"})
+_COMMAND_TIMEOUT_DEFAULT_SEC = 30.0
+_COMMAND_TIMEOUT_LONG_SEC = 300.0
 
 
 def _session_redis_key(session_id: str) -> str:
@@ -217,6 +222,78 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
 # * ========================================================
 
 
+async def _forward_guild_match_eog(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+    payload: dict[str, Any],
+) -> None:
+    api_base = config.tournament_api_base_url()
+    token = config.tournament_bot_internal_token()
+    if not token:
+        logger.warning("TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — 내전 LCU 전송 생략")
+        return
+
+    url = f"{api_base}/api/bot/guild-match/lcu-ingest"
+    headers = {
+        "content-type": "application/json",
+        "x-internal-bot-token": token,
+        "x-actor-discord-user-id": str(discord_id),
+    }
+    body = {"rawData": payload}
+    try:
+        async with http.post(url, headers=headers, json=body) as res:
+            text = await res.text()
+            if res.status >= 400:
+                logger.warning(
+                    "내전 LCU ingest 실패 discord_id=%s status=%s body=%s",
+                    discord_id,
+                    res.status,
+                    text[:500],
+                )
+                return
+            logger.info("내전 LCU ingest OK discord_id=%s body=%s", discord_id, text[:300])
+    except Exception:
+        logger.exception("내전 LCU ingest 요청 실패 discord_id=%s", discord_id)
+
+
+async def _handle_agent_message(
+    websocket: WebSocket,
+    conn: ConnectionManager,
+    msg: str,
+) -> None:
+    try:
+        data = json.loads(msg)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, dict):
+        return
+
+    msg_type = data.get("type")
+    if msg_type == "guild_match_eog":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("payload")
+        if discord_id is None or not isinstance(payload, dict):
+            logger.warning("guild_match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
+            return
+        http: aiohttp.ClientSession = websocket.app.state.http
+        await _forward_guild_match_eog(http, discord_id, payload)
+        return
+
+    if msg_type == "command_result":
+        discord_id = conn.discord_id_for_ws(websocket)
+        request_id = data.get("request_id")
+        if discord_id is None or not isinstance(request_id, str) or not request_id:
+            return
+        conn.complete_pending_result(
+            discord_id,
+            request_id,
+            {
+                "ok": bool(data.get("ok")),
+                "message": str(data.get("message") or ""),
+            },
+        )
+
+
 @app.websocket("/ws/agent")
 async def ws_agent(websocket: WebSocket, session_id: str = Query(..., min_length=8, max_length=64)) -> None:
     """C# 에이전트 연결. OAuth 후 discord_id에 바인딩."""
@@ -237,6 +314,8 @@ async def ws_agent(websocket: WebSocket, session_id: str = Query(..., min_length
             msg = await websocket.receive_text()
             if msg == "ping":
                 await websocket.send_json({"type": "pong"})
+                continue
+            await _handle_agent_message(websocket, conn, msg)
     except WebSocketDisconnect:
         pass
     finally:
@@ -285,6 +364,7 @@ async def internal_command(
     if not conn.is_online(body.discord_id):
         raise HTTPException(404, "agent not connected")
     req_id = secrets.token_hex(8)
+    pending = conn.register_pending_result(body.discord_id, req_id)
     ok = await conn.send_command(
         body.discord_id,
         {
@@ -295,8 +375,23 @@ async def internal_command(
         },
     )
     if not ok:
+        conn.cancel_pending_result(body.discord_id, req_id)
         raise HTTPException(502, "failed to send to agent")
-    return JSONResponse({"ok": True, "request_id": req_id})
+
+    timeout_sec = (
+        _COMMAND_TIMEOUT_LONG_SEC
+        if body.action in _LONG_COMMAND_ACTIONS
+        else _COMMAND_TIMEOUT_DEFAULT_SEC
+    )
+    try:
+        result = await asyncio.wait_for(pending, timeout=timeout_sec)
+    except asyncio.TimeoutError:
+        conn.cancel_pending_result(body.discord_id, req_id)
+        raise HTTPException(504, "agent response timeout") from None
+    except asyncio.CancelledError:
+        raise HTTPException(502, "agent disconnected") from None
+
+    return JSONResponse({"ok": True, "request_id": req_id, "result": result})
 
 
 @app.get("/internal/online/{discord_id}")

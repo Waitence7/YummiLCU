@@ -13,7 +13,7 @@
 | **Relay (인터넷)** | Discord 봇·웹이 “이 유저 PC에 명령 보내기” |
 | **LCU (로컬 HTTPS)** | 실제 롤 클라이언트에 로비·매칭·상메 등 적용 |
 
-UI(WPF)는 사람이 버튼을 누를 때 **같은 LCU API**를 쓰고, Discord 경로는 **Relay → WebSocket → 에이전트 → LCU** 순으로 갑니다.
+UI(WPF)는 **연결·설정·로그**만 제공합니다. LCU 조작은 Discord 봇 명령이 **Relay → WebSocket → 에이전트 → LCU** 경로로만 수행됩니다.
 
 ---
 
@@ -22,11 +22,10 @@ UI(WPF)는 사람이 버튼을 누를 때 **같은 LCU API**를 쓰고, Discord 
 ```mermaid
 flowchart TB
   subgraph user_pc [사용자 PC]
-    WPF[YummiLcu.App WPF UI]
+    WPF[YummiLcu.App 단순 UI]
     Core[YummiLcu.Core]
-  LCUConnector[LcuConnector]
-  RelaySession[RelaySession]
-  LcuClient[LcuClient HTTPS]
+    RelaySession[RelaySession]
+    LcuClient[LcuClient HTTPS]
     LoL[League Client LCU]
   end
 
@@ -36,14 +35,11 @@ flowchart TB
     Bot[Discord Bot / Internal API]
   end
 
-  WPF --> Core
-  Core --> LCUConnector
-  Core --> RelaySession
-  LCUConnector --> LcuClient
+  WPF --> RelaySession
   RelaySession --> LcuClient
   LcuClient --> LoL
 
-  RelaySession <-->|WSS| FastAPI
+  RelaySession <-->|WSS command + command_result| FastAPI
   Bot -->|POST /internal/command| FastAPI
   FastAPI --> Redis
 ```
@@ -52,7 +48,7 @@ flowchart TB
 
 | 경로 | 설명 |
 |------|------|
-| `agent/YummiLcu.App/` | WPF 화면, MVVM, 테마, 페이지 전환 |
+| `agent/YummiLcu.App/` | WPF 단순 UI (연결, lockfile, 설정, 로그) |
 | `agent/YummiLcu.Core/` | LCU HTTP, Relay WebSocket, 설정, 테스트 시뮬레이터 |
 | `relay/` | OAuth, 에이전트 WS, 봇용 internal HTTP |
 | `deploy/` | 버전 manifest, VM 배포 스크립트 |
@@ -77,43 +73,18 @@ flowchart TB
 
 클라이언트가 lockfile을 **잠그고 있어도** `FileShare.ReadWrite`로 읽기를 재시도합니다.
 
-### 3.3 LcuClient vs LcuConnector
+### 3.3 LcuClient와 RelaySession
 
 | 클래스 | 용도 |
 |--------|------|
 | **`LcuClient`** | HTTP GET/POST/PATCH/DELETE, JSON 파싱, API 한 메서드 = 한 엔드포인트 |
-| **`LcuConnector`** | UI·ViewModel용 **진입점**. 연결/해제, 폴링 루프, 테스트 모드 분기, `RunActionAsync` |
+| **`RelaySession`** | Relay WebSocket, Discord 명령 수신, **자체 `LcuClient`** 로 LCU 제어 |
 
-UI는 보통 `ILcuConnector`만 사용합니다.  
-Relay 쪽 `RelaySession`은 **자체 `LcuClient` 인스턴스**를 따로 들고 있어, UI 연결과 독립적으로 Discord 명령을 처리할 수 있습니다.
+에이전트 UI는 LCU HTTP를 직접 호출하지 않습니다. 모든 LCU 조작은 `RelaySession` 경로입니다.
 
 ### 3.4 상태 폴링 (Watch Loop)
 
-LCU는 WebSocket 푸시를 에이전트가 쓰지 않고, **주기적 HTTP 폴링**으로 UI를 갱신합니다.
-
-```mermaid
-sequenceDiagram
-  participant UI as LobbyViewModel
-  participant Conn as LcuConnector
-  participant LCU as LcuClient
-  participant API as LCU HTTPS
-
-  loop every 1.5s lobby / 1s matchmaking
-    Conn->>LCU: GetLobbyAsync / GetMatchmakingStatusAsync
-    LCU->>API: GET /lol-lobby/v2/lobby 등
-    API-->>LCU: JSON
-    LCU-->>Conn: LobbyInfo / MatchmakingStatus
-    Conn-->>UI: LobbyChanged / MatchmakingChanged 이벤트
-  end
-```
-
-| 폴링 | 간격(대략) | 담당 |
-|------|-----------|------|
-| 로비 | 1.5초 | `LobbyWatchAsync` |
-| 매칭 | 검색 중 1초 / 대기 2.5초 | `MatchmakingWatchAsync` |
-| 챔프 선택 페이지 | 1.5초 | `ChampSelectViewModel` 타이머 |
-
-`RelaySession`에도 동일한 로비·매칭 워치 루프가 있어, Relay만 켜도 Discord 명령에 필요한 LCU 상태를 유지합니다.
+`RelaySession`이 로비·매칭·게임플로를 **주기적 HTTP 폴링**으로 감시합니다 (닷지 후 큐 방지, 상태 표시 등).
 
 ---
 
@@ -172,7 +143,17 @@ Relay는 `discord_id`에 연결된 **에이전트 WebSocket**으로 JSON을 push
 }
 ```
 
-에이전트 [`RelaySession.HandleMessageAsync`](../agent/YummiLcu.Core/Relay/RelaySession.cs)가 수신 → **화이트리스트** 검사 → `AllowedActions.ExecuteAsync` → `LcuClient` HTTP 호출.
+에이전트 [`RelaySession.HandleMessageAsync`](../agent/YummiLcu.Core/Relay/RelaySession.cs)가 수신 → **화이트리스트** 검사 → `AllowedActions.ExecuteAsync` → `LcuClient` HTTP 호출 → 실행 결과를 WebSocket으로 회신:
+
+```json
+{ "type": "command_result", "request_id": "a1b2c3d4", "ok": true, "message": "pong" }
+```
+
+Relay는 `command_result`를 받을 때까지 `/internal/command` HTTP 응답을 보류한 뒤, 봇에 `result`를 포함해 반환합니다.
+
+```json
+{ "ok": true, "request_id": "a1b2c3d4", "result": { "ok": true, "message": "pong" } }
+```
 
 화이트리스트는 C# [`AllowedActions`](../agent/YummiLcu.Core/Lcu/AllowedActions.cs)와 Python [`relay/actions.py`](../relay/actions.py)에서 **동일한 action 이름**을 유지해야 합니다.
 
@@ -184,9 +165,13 @@ Relay는 `discord_id`에 연결된 **에이전트 WebSocket**으로 JSON을 push
 
 ```mermaid
 flowchart LR
-  A[UI 버튼 / Discord] --> B{AllowedActions}
-  B --> C[LcuQueue / LcuClient API]
-  C --> D[롤 클라이언트]
+  A[Discord 봇] --> B{Relay}
+  B --> C[RelaySession]
+  C --> D{AllowedActions}
+  D --> E[LcuClient API]
+  E --> F[롤 클라이언트]
+  C --> B
+  B --> A
 ```
 
 ### 대표 action과 LCU 동작
@@ -201,59 +186,39 @@ flowchart LR
 | `accept_match` | POST ready-check accept |
 | `play_ranked_solo` | 로비 생성 + 매칭 시작 (재시도 포함) |
 | `launch_client` | Riot Client 실행 (LCU 불필요) |
+| `invite_party_members` | `payload.riot_ids` → 로비 멤버 스킵 후 `POST /lol-lobby/v2/lobby/invitations` |
 
 로비·매칭 일괄 처리: [`LcuQueue`](../agent/YummiLcu.Core/Lcu/LcuQueue.cs)
 
----
+### 모집 「게임 초대하기」
 
-## 6. WPF UI (MVVM) 메커니즘
+Discord 모집 패널(증바람·자랭·내전)에서 작성자가 **게임 초대하기**를 누르면:
 
-### 6.1 시작 흐름
+1. YummiBot이 확정 멤버의 Riot ID 수집 (예비·미등록·작성자 제외)
+2. `POST /internal/command` — `invite_party_members`, `payload.riot_ids`
+3. 에이전트가 로비 확인 → 이미 파티인 닉 스킵 → LCU 초대
+4. `command_result` 메시지가 Discord에 표시 (예: `초대 2명, 스킵 1명(파티 중), 실패 0명`)
 
-[`App.xaml.cs`](../agent/YummiLcu.App/App.xaml.cs):
-
-1. (선택) `UpdateChecker` — manifest 버전 비교 후 zip 자동 교체  
-2. `AgentConfig.Load()` — 실행 폴더 옆 `agent.json`  
-3. `LcuConnector` 생성, `UiTestMode`면 테스트 하네스 활성  
-4. `ShellViewModel` + `MainWindow` 표시  
-
-### 6.2 Shell + 페이지
-
-| 구성요소 | 역할 |
-|----------|------|
-| `ShellViewModel` | 현재 페이지, Relay 시작/중지, 테마, 로그, 테스트 모드 |
-| `HomeViewModel` | 소환사, 상메, lockfile, LCU 연결 |
-| `LobbyViewModel` | 로비/매칭 UI, 친구 목록, `RunActionAsync` |
-| `ChampSelectViewModel` | 챔프선 세션 폴링, 픽/밴, 룬 페이지 |
-
-페이지 전환: `ContentControl` + `DataTemplate`(ViewModel 타입별 View) + [`NavigationService`](../agent/YummiLcu.App/Services/NavigationService.cs) Fade 애니메이션.
-
-### 6.3 테마 (DynamicResource)
-
-`Themes/CatTheme.xaml` 등에 `LcuBg`, `LcuPanel`, `LcuAccent`, `LcuSubAccent`, `LcuText` 브러시를 정의합니다.
-
-[`ThemeService`](../agent/YummiLcu.App/Services/ThemeService.cs)가 `Application.Current.Resources.MergedDictionaries`에서 **테마 딕셔너리만 교체**합니다. XAML은 `{DynamicResource LcuBg}`로 바인딩하므로 **런타임에 색이 즉시 바뀝니다**.
+구현: [`recruitment_base.game_invite_logic`](../../YummiBot/modules/tournament/recruitment/recruitment_base.py), [`AllowedActions.InvitePartyMembersAsync`](../agent/YummiLcu.Core/Lcu/AllowedActions.cs)
 
 ---
 
-## 7. 테스트 모드 메커니즘
+## 6. WPF UI (단순 에이전트)
 
-`agent.json` → `UiTestMode: true` 또는 UI 체크박스.
+[`App.xaml.cs`](../agent/YummiLcu.App/App.xaml.cs) → [`AgentViewModel`](../agent/YummiLcu.App/ViewModels/AgentViewModel.cs) + [`MainWindow`](../agent/YummiLcu.App/MainWindow.xaml).
 
-| 항목 | 실제 모드 | 테스트 모드 |
-|------|-----------|-------------|
-| LCU HTTP | `LcuClient` | 사용 안 함 |
-| Relay | 선택 | 사용 안 함 (UI만) |
-| 로비/매칭 | LCU API | [`UiTestHarness`](../agent/YummiLcu.Core/UiTestHarness.cs) 메모리 시뮬 |
-| 타이머 | LCU 응답 | 1초마다 경과 시간 증가 |
+| UI 요소 | 역할 |
+|---------|------|
+| 연결 시작 / 중지 | `RelaySession.RunAsync` 시작·취소 |
+| lockfile 경로 | `agent.json` 저장 |
+| 설정 체크박스 | 닷지 후 큐 방지, 연결 시 기본 상메 |
+| 로그 | Relay·LCU·명령 실행 로그 |
 
-`LcuConnector.SetTestMode(true)` → `UiTestHarness.Start()` → `RunActionAsync`가 하네스로 분기.
-
-UI 개발·레이아웃 확인용이며, **실제 게임 상태와는 무관**합니다.
+로컬 LCU API 호출 버튼은 없습니다. Discord `/lcu` 등 봇 명령만 LCU를 조작합니다.
 
 ---
 
-## 8. 자동 업데이트 메커니즘
+## 7. 자동 업데이트 메커니즘
 
 1. 시작 시 `UpdateManifestUrl`(예: `.../agent-version.json`) GET  
 2. manifest `version` > 현재 어셈블리 버전이면 zip URL 다운로드  
@@ -265,7 +230,7 @@ UI 개발·레이아웃 확인용이며, **실제 게임 상태와는 무관**�
 
 ---
 
-## 9. 닷지 후 매칭 방지 (게임플로 감시)
+## 8. 닷지 후 매칭 방지 (게임플로 감시)
 
 `PreventQueueAfterDodge: true`일 때 [`RelaySession.GameflowWatchLoopAsync`](../agent/YummiLcu.Core/Relay/RelaySession.cs):
 
@@ -275,26 +240,7 @@ UI 개발·레이아웃 확인용이며, **실제 게임 상태와는 무관**�
 
 ---
 
-## 10. 데이터가 UI까지 오는 경로 (예: 매칭 중)
-
-```mermaid
-sequenceDiagram
-  participant LoL as 롤 클라이언트
-  participant LCU as LcuClient
-  participant Conn as LcuConnector
-  participant VM as LobbyViewModel
-  participant View as LobbyPage
-
-  LoL->>LCU: search-state JSON
-  LCU->>Conn: GetMatchmakingStatusAsync
-  Conn->>VM: MatchmakingChanged(status)
-  VM->>VM: IsSearching, EtaText, PlayButtonText
-  VM->>View: WPF 바인딩 갱신
-```
-
----
-
-## 11. 보안·신뢰 경계
+## 9. 보안·신뢰 경계
 
 | 경계 | 내용 |
 |------|------|
@@ -307,35 +253,31 @@ sequenceDiagram
 
 ---
 
-## 12. 자주 헷갈리는 점
-
-**Q. UI에서 LCU 연결과 Relay 시작은 따로인가요?**  
-A. 네. UI용 `LcuConnector`와 Relay용 `RelaySession`이 **각각** lockfile로 LCU에 붙을 수 있습니다. 보통 둘 다 켜도 되고, 테스트 모드에서는 둘 다 LCU 없이 UI만 동작합니다.
+## 10. 자주 헷갈리는 점
 
 **Q. Discord 명령이 안 먹혀요.**  
-A. Relay WS 연결 + OAuth `ok` + 해당 `discord_id`로 봇이 `/internal/command`를 쐈는지 + LCU lockfile 연결 순으로 확인하세요.
+A. 에이전트 **연결 시작** + OAuth `ok` + 해당 `discord_id`로 봇이 `/internal/command`를 쐈는지 + LCU lockfile 연결 순으로 확인하세요.
 
 **Q. API 경로가 문서와 다릅니다.**  
 A. 롤 패치마다 LCU 스키마가 바뀝니다. 에이전트는 일부 엔드포인트만 구현하며, 실패 시 로그와 LCU 응답을 확인해야 합니다.
 
 **Q. 빌드 산출물 이름이 바뀌었나요?**  
-A. WinForms `YummiLcu.Agent.exe` → WPF **`YummiLcu.App.exe`** (v0.4.0+).
+A. WinForms `YummiLcu.Agent.exe` → WPF **`YummiLcu.App.exe`** (v0.5.0+ 단순 UI).
 
 ---
 
-## 13. 관련 파일 빠른 찾기
+## 11. 관련 파일 빠른 찾기
 
 | 궁금한 것 | 파일 |
 |-----------|------|
 | lockfile → HTTP | `YummiLcu.Core/Lcu/LcuClient.cs` |
-| UI LCU 진입점 | `YummiLcu.Core/Lcu/LcuConnector.cs` |
-| Discord WS + 명령 | `YummiLcu.Core/Relay/RelaySession.cs` |
+| Discord WS + 명령 + 결과 회신 | `YummiLcu.Core/Relay/RelaySession.cs` |
 | action 목록 | `YummiLcu.Core/Lcu/AllowedActions.cs`, `relay/actions.py` |
-| Relay OAuth/WS | `relay/app.py` |
-| 메인 UI | `YummiLcu.App/ViewModels/ShellViewModel.cs` |
+| Relay OAuth/WS + 결과 대기 | `relay/app.py`, `relay/connections.py` |
+| 메인 UI | `YummiLcu.App/ViewModels/AgentViewModel.cs` |
 | 설정 | `agent.json`, `AgentConfig.cs` |
 | 사용 가이드 | [`agent/README.md`](../agent/README.md) |
 
 ---
 
-*문서 버전: WPF 에이전트 0.4.x 기준*
+*문서 버전: WPF 에이전트 0.5.x 기준*

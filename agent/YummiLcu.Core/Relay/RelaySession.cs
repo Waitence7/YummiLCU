@@ -16,6 +16,8 @@ public sealed class RelaySession : IAsyncDisposable
     private CancellationTokenSource? _cts;
     private LcuClient? _lcu;
     private string? _lastGameflowPhase;
+    private bool _eogSnapshotSent;
+    private readonly SemaphoreSlim _wsSendLock = new(1, 1);
 
     public event Action<string>? StatusChanged;
     public event Action<MatchmakingStatus>? MatchmakingStatusChanged;
@@ -100,7 +102,7 @@ public sealed class RelaySession : IAsyncDisposable
     }
 
     public async Task<(bool Ok, string Message)> RunLocalCommandAsync(
-        string action, string? payloadText = null, CancellationToken ct = default)
+        string action, JsonElement? payload = null, CancellationToken ct = default)
     {
         if (!AllowedActions.IsAllowed(action))
             return (false, "unknown action");
@@ -122,21 +124,7 @@ public sealed class RelaySession : IAsyncDisposable
         if (_lcu is null)
             return (false, "LCU 미연결");
 
-        JsonDocument? payloadDoc = null;
-        JsonElement? payload = null;
-        if (!string.IsNullOrWhiteSpace(payloadText))
-        {
-            payloadDoc = JsonDocument.Parse(JsonSerializer.Serialize(new { text = payloadText }));
-            payload = payloadDoc.RootElement.Clone();
-        }
-        try
-        {
-            return await AllowedActions.ExecuteAsync(action, new ActionContext(_lcu, _config, payload));
-        }
-        finally
-        {
-            payloadDoc?.Dispose();
-        }
+        return await AllowedActions.ExecuteAsync(action, new ActionContext(_lcu, _config, payload));
     }
 
     private async Task<bool> TryWaitForLcuAsync(TimeSpan timeout, CancellationToken ct)
@@ -222,22 +210,73 @@ public sealed class RelaySession : IAsyncDisposable
 
     private async Task GameflowWatchLoopAsync(CancellationToken ct)
     {
-        while (!ct.IsCancellationRequested && _lcu is not null)
+        while (!ct.IsCancellationRequested)
         {
-            if (_config.PreventQueueAfterDodge)
+            if (_lcu is not null)
             {
                 var phase = await _lcu.GetGameflowPhaseAsync();
                 if (phase is not null)
                 {
-                    if (_lastGameflowPhase is "ChampSelect" && phase is "Lobby" or "None")
+                    if (_config.PreventQueueAfterDodge &&
+                        _lastGameflowPhase is "ChampSelect" && phase is "Lobby" or "None")
                     {
                         await _lcu.DeleteAsync("/lol-lobby/v2/lobby/matchmaking/search");
                         Log?.Invoke("챔프선택 종료 → 매칭 중지");
                     }
+
+                    if (phase is "PreEndOfGame" or "EndOfGame" or "WaitingForStats")
+                    {
+                        if (!_eogSnapshotSent && _lastGameflowPhase is "InProgress" or "PreEndOfGame")
+                            await TrySendGuildMatchEogSnapshotAsync(phase, ct);
+                    }
+                    else if (phase is "Lobby" or "None" or "ChampSelect" or "Matchmaking")
+                    {
+                        _eogSnapshotSent = false;
+                    }
+
                     _lastGameflowPhase = phase;
                 }
             }
             await Task.Delay(2000, ct);
+        }
+    }
+
+    private async Task TrySendGuildMatchEogSnapshotAsync(string phase, CancellationToken ct)
+    {
+        if (_lcu is null) return;
+
+        GuildMatchLcuPayload? payload = null;
+        for (var attempt = 0; attempt < 5 && payload is null; attempt++)
+        {
+            payload = await _lcu.BuildGuildMatchEogPayloadAsync(phase);
+            if (payload is null)
+                await Task.Delay(1500, ct);
+        }
+
+        if (payload is null || payload.Participants.Count < 2)
+        {
+            Log?.Invoke("내전 LCU 스냅샷: 참가자 정보를 아직 읽지 못했습니다.");
+            return;
+        }
+
+        await SendAgentMessageAsync(new { type = "guild_match_eog", payload }, ct);
+        _eogSnapshotSent = true;
+        Log?.Invoke($"내전 LCU 스냅샷 전송 ({payload.Participants.Count}명)");
+    }
+
+    private async Task SendAgentMessageAsync(object message, CancellationToken ct)
+    {
+        if (_ws?.State != WebSocketState.Open) return;
+        var json = JsonSerializer.Serialize(message);
+        var bytes = Encoding.UTF8.GetBytes(json);
+        await _wsSendLock.WaitAsync(ct);
+        try
+        {
+            await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
+        }
+        finally
+        {
+            _wsSendLock.Release();
         }
     }
 
@@ -288,30 +327,49 @@ public sealed class RelaySession : IAsyncDisposable
 
     private async Task HandleMessageAsync(string text)
     {
+        string? requestId = null;
         try
         {
             using var doc = JsonDocument.Parse(text);
             var root = doc.RootElement;
             if (root.GetProperty("type").GetString() != "command") return;
             var action = root.GetProperty("action").GetString() ?? "";
+            if (root.TryGetProperty("request_id", out var reqEl))
+                requestId = reqEl.GetString();
+
             if (!AllowedActions.IsAllowed(action))
             {
                 Log?.Invoke($"거부된 action: {action}");
+                await SendCommandResultAsync(requestId, false, $"unknown action: {action}");
                 return;
             }
-            string? payloadText = null;
-            if (root.TryGetProperty("payload", out var p) && p.ValueKind == JsonValueKind.Object &&
-                p.TryGetProperty("text", out var textEl))
-                payloadText = textEl.GetString();
+
+            JsonElement? payload = null;
+            if (root.TryGetProperty("payload", out var p) && p.ValueKind == JsonValueKind.Object)
+                payload = p.Clone();
 
             var ct = _cts?.Token ?? CancellationToken.None;
-            var (ok, msg) = await RunLocalCommandAsync(action, payloadText, ct);
+            var (ok, msg) = await RunLocalCommandAsync(action, payload, ct);
             Log?.Invoke($"{(ok ? "OK" : "FAIL")} {action}: {msg}");
+            await SendCommandResultAsync(requestId, ok, msg, ct);
         }
         catch (Exception ex)
         {
             Log?.Invoke($"메시지 처리 오류: {ex.Message}");
+            await SendCommandResultAsync(requestId, false, ex.Message);
         }
+    }
+
+    private async Task SendCommandResultAsync(
+        string? requestId,
+        bool ok,
+        string message,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(requestId)) return;
+        await SendAgentMessageAsync(
+            new { type = "command_result", request_id = requestId, ok, message },
+            ct);
     }
 
     private void SetStatus(string s) => StatusChanged?.Invoke(s);
@@ -325,5 +383,6 @@ public sealed class RelaySession : IAsyncDisposable
         _lcu?.Dispose();
         _http.Dispose();
         _cts?.Dispose();
+        _wsSendLock.Dispose();
     }
 }
