@@ -1,10 +1,10 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
-using System.Security.Cryptography;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using YummiLcu.App;
 using YummiLcu.Core;
 using YummiLcu.Core.Relay;
 
@@ -20,7 +20,11 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     [ObservableProperty] private string _lockfilePath = "";
     [ObservableProperty] private bool _preventQueueAfterDodge = true;
     [ObservableProperty] private bool _applyDefaultStatusOnConnect = true;
+    [ObservableProperty] private bool _runAtWindowsStartup;
     [ObservableProperty] private bool _isConnected;
+    [ObservableProperty] private bool _relayConnected;
+    [ObservableProperty] private bool _lcuConnected;
+    [ObservableProperty] private string _discordIdText = "—";
     [ObservableProperty] private string _logText = "";
 
     public ObservableCollection<string> LogLines { get; } = new();
@@ -31,6 +35,7 @@ public partial class AgentViewModel : ObservableObject, IDisposable
         _lockfilePath = config.LockfilePath ?? "";
         _preventQueueAfterDodge = config.PreventQueueAfterDodge;
         _applyDefaultStatusOnConnect = config.ApplyDefaultStatusOnConnect;
+        _runAtWindowsStartup = config.RunAtWindowsStartup || WindowsStartupHelper.IsEnabled();
     }
 
     public async Task CheckUpdatesOnStartupAsync()
@@ -43,13 +48,14 @@ public partial class AgentViewModel : ObservableObject, IDisposable
         if (info is null)
             return;
 
+        var download = info.PreferredDownloadUrl;
         var msg = $"새 버전 {info.Version} (현재 {UpdateChecker.CurrentVersion})\n{info.Notes}\n\n다운로드 페이지를 열까요?";
         var r = System.Windows.MessageBox.Show(msg, "Yummi Agent 업데이트", MessageBoxButton.YesNo, MessageBoxImage.Information);
-        if (r == MessageBoxResult.Yes && !string.IsNullOrWhiteSpace(info.Url))
+        if (r == MessageBoxResult.Yes && !string.IsNullOrWhiteSpace(download))
         {
             try
             {
-                Process.Start(new ProcessStartInfo(info.Url) { UseShellExecute = true });
+                Process.Start(new ProcessStartInfo(download) { UseShellExecute = true });
             }
             catch (Exception ex)
             {
@@ -63,11 +69,16 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     {
         SaveConfig();
         IsConnected = true;
-        var sessionId = Guid.NewGuid().ToString();
-        var wsToken = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
-        _relay = new RelaySession(_config, sessionId, wsToken);
+        var saved = AgentSessionStore.Load();
+        var session = saved ?? AgentSessionStore.CreateNew();
+        if (saved is not null)
+            AppendLog("저장된 Discord 로그인 세션 사용");
+        _relay = new RelaySession(_config, session.SessionId, session.WsToken);
         _relay.StatusChanged += s => StatusText = s;
         _relay.Log += AppendLog;
+        _relay.RelayConnectionChanged += connected => RelayConnected = connected;
+        _relay.LcuConnectionChanged += connected => LcuConnected = connected;
+        _relay.DiscordIdChanged += id => DiscordIdText = id?.ToString() ?? "—";
         _relayCts = new CancellationTokenSource();
         _ = Task.Run(async () =>
         {
@@ -84,6 +95,7 @@ public partial class AgentViewModel : ObservableObject, IDisposable
                 System.Windows.Application.Current.Dispatcher.Invoke(() =>
                 {
                     IsConnected = false;
+                    RelayConnected = false;
                     StatusText = "중지됨";
                 });
             }
@@ -101,10 +113,23 @@ public partial class AgentViewModel : ObservableObject, IDisposable
             await _relay.DisposeAsync();
         _relay = null;
         IsConnected = false;
+        RelayConnected = false;
+        LcuConnected = false;
         StatusText = "중지됨";
     }
 
     private bool CanStop() => IsConnected;
+
+    [RelayCommand]
+    private async Task ReLoginAsync()
+    {
+        AgentSessionStore.Clear();
+        DiscordIdText = "—";
+        AppendLog("Discord 세션 삭제 — 재로그인합니다.");
+        if (IsConnected)
+            await StopAsync();
+        await StartAsync();
+    }
 
     partial void OnIsConnectedChanged(bool value)
     {
@@ -153,6 +178,14 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     partial void OnPreventQueueAfterDodgeChanged(bool value) => SaveFeatureFlags();
     partial void OnApplyDefaultStatusOnConnectChanged(bool value) => SaveFeatureFlags();
 
+    partial void OnRunAtWindowsStartupChanged(bool value)
+    {
+        _config.RunAtWindowsStartup = value;
+        WindowsStartupHelper.SetEnabled(value);
+        try { _config.Save(); }
+        catch { /* ignore */ }
+    }
+
     private void SaveFeatureFlags()
     {
         _config.PreventQueueAfterDodge = PreventQueueAfterDodge;
@@ -172,6 +205,10 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     {
         SaveLockfilePath();
         SaveFeatureFlags();
+        WindowsStartupHelper.SetEnabled(RunAtWindowsStartup);
+        _config.RunAtWindowsStartup = RunAtWindowsStartup;
+        try { _config.Save(); }
+        catch { /* ignore */ }
     }
 
     private void AppendLog(string line)

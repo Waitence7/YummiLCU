@@ -36,12 +36,11 @@ jobs:
           $v = $x.Project.PropertyGroup.Version
           "version=$v" >> $env:GITHUB_OUTPUT
 
-      - name: Publish (portable, self-contained)
+      - name: Publish (slim, framework-dependent — auto-update ~8MB)
         working-directory: agent/YummiLcu.App
         run: |
-          dotnet publish -c Release -r win-x64 --self-contained true `
-            -p:PublishSingleFile=true `
-            -p:EnableCompressionInSingleFile=true
+          dotnet publish -c Release -r win-x64 --self-contained false `
+            -p:PublishSingleFile=false
 
       - name: Copy agent.json (example → publish)
         run: |
@@ -54,10 +53,17 @@ jobs:
           if (-not (Test-Path $iscc)) { $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" }
           & $iscc /DAppVersion=${{ steps.ver.outputs.version }} agent/installer/YummiAgent.iss
 
-      - name: Zip artifact (auto-update)
+      - name: Zip artifact (slim full + patch)
+        shell: pwsh
         run: |
-          Compress-Archive -Path agent/YummiLcu.App/bin/Release/net8.0-windows/win-x64/publish/* `
-            -DestinationPath YummiAgent-win-x64-portable.zip -Force
+          $pub = "agent/YummiLcu.App/bin/Release/net8.0-windows/win-x64/publish"
+          Compress-Archive -Path "$pub/*" -DestinationPath YummiAgent-win-x64-portable.zip -Force
+          $patchDir = "patch-staging"
+          New-Item -ItemType Directory -Force -Path $patchDir | Out-Null
+          Copy-Item "$pub/YummiLcu.App.exe", "$pub/YummiLcu.Core.dll" -Destination $patchDir
+          Compress-Archive -Path "$patchDir/*" -DestinationPath YummiAgent-patch.zip -Force
+          Write-Host "Full zip: $((Get-Item YummiAgent-win-x64-portable.zip).Length / 1MB) MB"
+          Write-Host "Patch zip: $((Get-Item YummiAgent-patch.zip).Length / 1MB) MB"
 
       - name: Sync deploy/agent-version.json from csproj
         shell: pwsh
@@ -70,12 +76,17 @@ jobs:
             $short = $env:GITHUB_SHA.Substring(0, 7)
             $notes = "Build $short"
           }
-          & ./deploy/sync-agent-version.ps1 -Notes $notes
+          & ./deploy/sync-agent-version.ps1 -Notes $notes `
+            -ZipPath "YummiAgent-win-x64-portable.zip" `
+            -PatchZipPath "YummiAgent-patch.zip" `
+            -PatchFrom "0.5.2"
 
       - uses: actions/upload-artifact@v4
         with:
           name: YummiAgent-win-x64-portable
-          path: YummiAgent-win-x64-portable.zip
+          path: |
+            YummiAgent-win-x64-portable.zip
+            YummiAgent-patch.zip
           retention-days: 30
 
       - uses: actions/upload-artifact@v4
@@ -90,6 +101,9 @@ jobs:
           path: deploy/agent-version.json
           retention-days: 30
 
+  # SCP 배포: VM 방화벽(ufw)이 22/tcp를 GitHub Actions IP에 열어줘야 함.
+  # 특정 IP만 허용이면 dial tcp :22 i/o timeout → VM_DEPLOY_ENABLED=false 후
+  # VM에서 ./deploy/vm-deploy-agent.sh --download-only 사용.
   deploy-vm:
     needs: build
     runs-on: ubuntu-latest
@@ -154,6 +168,10 @@ jobs:
             sudo mkdir -p /var/www/yummi-agent
             sudo cp "$DEPLOY/YummiAgent-win-x64-portable.zip" /var/www/yummi-agent/YummiAgent.zip
             sudo chmod 644 /var/www/yummi-agent/YummiAgent.zip
+            if [ -f "$DEPLOY/YummiAgent-patch.zip" ]; then
+              sudo cp "$DEPLOY/YummiAgent-patch.zip" /var/www/yummi-agent/YummiAgent-patch.zip
+              sudo chmod 644 /var/www/yummi-agent/YummiAgent-patch.zip
+            fi
             SETUP=$(ls "$DEPLOY"/YummiAgent-Setup-*.exe 2>/dev/null | head -1 || true)
             if [ -n "$SETUP" ]; then
               sudo cp "$SETUP" "/var/www/yummi-agent/YummiAgent-Setup-${VER}.exe"

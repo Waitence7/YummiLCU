@@ -8,12 +8,48 @@ namespace YummiLcu.Core;
 public static class AgentUpdater
 {
     private const string ExeName = "YummiLcu.App.exe";
+    private const string CoreDllName = "YummiLcu.Core.dll";
+
+    /// <summary>슬림(프레임워크 의존) 배포 — Core.dll 이 함께 있음.</summary>
+    public static bool IsFrameworkDependentLayout(string? baseDir = null)
+    {
+        var dir = baseDir ?? AppContext.BaseDirectory;
+        return File.Exists(Path.Combine(dir, CoreDllName));
+    }
 
     public static async Task<(bool Started, string Message)> DownloadAndApplyAsync(
-        string zipUrl, string version, string? expectedSha256Hex = null, CancellationToken ct = default)
+        UpdateChecker.UpdateInfo info, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(zipUrl))
-            return (false, "zip URL 없음");
+        var targetDir = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar);
+
+        if (!IsFrameworkDependentLayout(targetDir))
+        {
+            var installer = info.PreferredDownloadUrl;
+            if (!string.IsNullOrWhiteSpace(installer))
+                return (false, "구버전(단일 exe) 설치입니다. 설치 프로그램으로 v" + info.Version + " 을 받아 주세요.");
+            return (false, "자동 zip 업데이트는 슬림 설치(0.5.3+)에서만 지원됩니다.");
+        }
+
+        var usePatch = !string.IsNullOrWhiteSpace(info.PatchUrl)
+            && !string.IsNullOrWhiteSpace(info.PatchFrom)
+            && Version.TryParse(UpdateChecker.CurrentVersion, out var cur)
+            && Version.TryParse(info.PatchFrom, out var from)
+            && cur == from;
+
+        var url = usePatch ? info.PatchUrl!.Trim() : (info.Url ?? "").Trim();
+        var sha = usePatch ? info.PatchSha256 : info.Sha256;
+        var label = usePatch ? $"패치 {info.PatchFrom}→{info.Version}" : $"전체 v{info.Version}";
+
+        if (string.IsNullOrWhiteSpace(url))
+            return (false, "업데이트 URL 없음");
+
+        return await DownloadZipAndApplyAsync(url, info.Version, sha, label, ct);
+    }
+
+    public static async Task<(bool Started, string Message)> DownloadZipAndApplyAsync(
+        string zipUrl, string version, string? expectedSha256Hex = null, string? label = null,
+        CancellationToken ct = default)
+    {
         if (!Uri.TryCreate(zipUrl.Trim(), UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
             return (false, "zip URL은 https 만 허용됩니다");
 
@@ -39,7 +75,7 @@ public static class AgentUpdater
         if (!string.IsNullOrWhiteSpace(expectedSha256Hex))
         {
             if (!VerifySha256File(zipPath, expectedSha256Hex))
-                return (false, "업데이트 zip SHA-256 검증 실패 (manifest sha256 확인)");
+                return (false, "업데이트 zip SHA-256 검증 실패");
         }
 
         try
@@ -68,24 +104,18 @@ public static class AgentUpdater
             CreateNoWindow = true,
         });
 
-        return (true, $"업데이트 {version} 적용 중…");
+        var msg = string.IsNullOrWhiteSpace(label) ? $"업데이트 {version} 적용 중…" : $"{label} 적용 중…";
+        return (true, msg);
     }
 
     private static bool VerifySha256File(string filePath, string expectedHex)
     {
         var expected = expectedHex.Trim().Replace("-", "").ToLowerInvariant();
-        if (expected.Length != 64)
-            return false;
+        if (expected.Length != 64) return false;
         var hash = SHA256.HashData(File.ReadAllBytes(filePath));
         byte[] expectedBytes;
-        try
-        {
-            expectedBytes = Convert.FromHexString(expected);
-        }
-        catch (FormatException)
-        {
-            return false;
-        }
+        try { expectedBytes = Convert.FromHexString(expected); }
+        catch (FormatException) { return false; }
         return CryptographicOperations.FixedTimeEquals(hash, expectedBytes);
     }
 

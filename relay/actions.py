@@ -26,6 +26,7 @@ ACTION_HELP: dict[str, str] = {
     "create_ranked_lobby": "솔랭 로비만 생성",
     "create_normal_lobby": "일반(비공개 선택) 로비만 생성",
     "invite_party_members": "모집 확정 멤버 파티 초대 (payload.riot_ids)",
+    "check_party_members": "LCU 로비 참가 여부 확인 (payload.check_riot_ids)",
 }
 
 ALLOWED_ACTIONS: frozenset[str] = frozenset(ACTION_HELP.keys())

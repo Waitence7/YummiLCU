@@ -41,10 +41,10 @@ public static class UpdateChecker
         if (string.IsNullOrWhiteSpace(config.UpdateManifestUrl)) return (false, "");
 
         var info = await CheckAsync(config.UpdateManifestUrl.Trim(), ct);
-        if (info is null || string.IsNullOrWhiteSpace(info.Url)) return (false, "");
+        if (info is null || (string.IsNullOrWhiteSpace(info.Url) && string.IsNullOrWhiteSpace(info.PatchUrl)))
+            return (false, "");
 
-        var (started, msg) = await AgentUpdater.DownloadAndApplyAsync(
-            info.Url, info.Version, info.Sha256, ct);
+        var (started, msg) = await AgentUpdater.DownloadAndApplyAsync(info, ct);
         if (!started) return (false, msg);
 
         await Task.Delay(500, ct);
@@ -59,8 +59,16 @@ public static class UpdateChecker
     {
         public string Version { get; set; } = "";
         public string? Url { get; set; }
+        public string? InstallerUrl { get; set; }
         public string? Notes { get; set; }
         /// <summary>zip SHA-256 hex (소문자). manifest 에 있으면 다운로드 후 검증.</summary>
         public string? Sha256 { get; set; }
+        /// <summary>이전 버전→현재 버전 패치 zip (App.exe+Core.dll, ~2MB).</summary>
+        public string? PatchUrl { get; set; }
+        public string? PatchFrom { get; set; }
+        public string? PatchSha256 { get; set; }
+
+        public string? PreferredDownloadUrl =>
+            !string.IsNullOrWhiteSpace(InstallerUrl) ? InstallerUrl : Url;
     }
 }

@@ -4,7 +4,7 @@ cd /d "%~dp0"
 
 echo [1/3] Portable publish...
 cd YummiLcu.App
-dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+dotnet publish -c Release -r win-x64 --self-contained false -p:PublishSingleFile=false
 if errorlevel 1 goto fail
 cd ..
 

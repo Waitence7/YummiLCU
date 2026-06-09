@@ -75,6 +75,16 @@ async def _claim_or_verify_ws_token(r: redis.Redis, session_id: str, ws_token: s
     return secrets.compare_digest(stored, ws_token)
 
 
+async def _refresh_session_ttl(r: redis.Redis, session_id: str) -> None:
+    """연결 중인 에이전트 세션 Redis TTL 연장."""
+    ttl = config.relay_session_ttl_sec()
+    pipe = r.pipeline()
+    pipe.expire(_session_redis_key(session_id), ttl)
+    pipe.expire(_status_redis_key(session_id), ttl)
+    pipe.expire(_ws_token_redis_key(session_id), ttl)
+    await pipe.execute()
+
+
 async def _try_bind_discord(
     conn: ConnectionManager,
     r: redis.Redis,
@@ -250,6 +260,7 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
         return JSONResponse({"status": "pending"})
     # WS가 아직 없을 수 있음 — ws_token 검증 후 bind 시도
     await _try_bind_discord(conn, r, session_id, discord_id)
+    await _refresh_session_ttl(r, session_id)
     return JSONResponse({"status": "ok"})
 
 
@@ -315,19 +326,53 @@ async def _handle_agent_message(
         await _forward_guild_match_eog(http, discord_id, payload)
         return
 
+    if msg_type == "agent_hello":
+        discord_id = conn.discord_id_for_ws(websocket)
+        if discord_id is None:
+            return
+        info = {
+            "version": str(data.get("version") or ""),
+            "lcu_ready": bool(data.get("lcu_ready")),
+            "os": str(data.get("os") or ""),
+        }
+        conn.set_agent_info(discord_id, info)
+        logger.info(
+            "agent_hello discord_id=%s version=%s lcu_ready=%s",
+            discord_id,
+            info["version"],
+            info["lcu_ready"],
+        )
+        return
+
+    if msg_type == "party_lobby_update":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("data")
+        if discord_id is None or not isinstance(payload, dict):
+            return
+        await conn.forward_party_lobby_update(discord_id, payload)
+        return
+
+    if msg_type == "gameflow_update":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("data")
+        if discord_id is None or not isinstance(payload, dict):
+            return
+        await conn.forward_gameflow_update(discord_id, payload)
+        return
+
     if msg_type == "command_result":
         discord_id = conn.discord_id_for_ws(websocket)
         request_id = data.get("request_id")
         if discord_id is None or not isinstance(request_id, str) or not request_id:
             return
-        conn.complete_pending_result(
-            discord_id,
-            request_id,
-            {
-                "ok": bool(data.get("ok")),
-                "message": str(data.get("message") or ""),
-            },
-        )
+        result: dict[str, Any] = {
+            "ok": bool(data.get("ok")),
+            "message": str(data.get("message") or ""),
+        }
+        extra = data.get("data")
+        if isinstance(extra, dict):
+            result["data"] = extra
+        conn.complete_pending_result(discord_id, request_id, result)
 
 
 @app.websocket("/ws/agent")
@@ -361,6 +406,9 @@ async def ws_agent(
         while True:
             msg = await websocket.receive_text()
             if msg == "ping":
+                sid = conn.ws_session_id(websocket)
+                if sid:
+                    await _refresh_session_ttl(r, sid)
                 await websocket.send_json({"type": "pong"})
                 continue
             await _handle_agent_message(websocket, conn, msg)
@@ -368,6 +416,73 @@ async def ws_agent(
         pass
     finally:
         await conn.unregister_ws(websocket)
+
+
+# * ========================================================
+# * # WebSocket (YummiBot) 파트 #
+# * ========================================================
+
+
+async def _handle_bot_message(conn: ConnectionManager, msg: str) -> None:
+    if msg == "ping":
+        return
+    try:
+        data = json.loads(msg)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(data, dict):
+        return
+
+    msg_type = data.get("type")
+    if msg_type == "subscribe_party":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.subscribe_party_lobby(raw_id)
+            if conn.is_online(raw_id):
+                await conn.send_command(raw_id, {"type": "request_party_snapshot"})
+        return
+    if msg_type == "unsubscribe_party":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.unsubscribe_party_lobby(raw_id)
+        return
+    if msg_type == "subscribe_gameflow":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.subscribe_gameflow(raw_id)
+        return
+    if msg_type == "unsubscribe_gameflow":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.unsubscribe_gameflow(raw_id)
+
+
+@app.websocket("/ws/bot")
+async def ws_bot(
+    websocket: WebSocket,
+    secret: str = Query(..., min_length=8, max_length=256),
+) -> None:
+    """YummiBot 실시간 이벤트 수신. RELAY_INTERNAL_SECRET 으로 인증."""
+    expected = config.relay_internal_secret()
+    if not expected or not secrets.compare_digest(secret, expected):
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    conn: ConnectionManager = websocket.app.state.connections
+    await conn.register_bot_ws(websocket)
+
+    try:
+        while True:
+            msg = await websocket.receive_text()
+            if msg == "ping":
+                await websocket.send_json({"type": "pong"})
+                continue
+            await _handle_bot_message(conn, msg)
+    except WebSocketDisconnect:
+        pass
+    finally:
+        await conn.unregister_bot_ws(websocket)
 
 
 # * ========================================================
@@ -408,10 +523,11 @@ async def internal_command(
     _verify_internal_secret(request, x_relay_internal_secret)
     if not is_allowed_action(body.action):
         raise HTTPException(400, f"action not allowed: {body.action}")
-    if body.action == "invite_party_members":
-        riot_ids = body.payload.get("riot_ids")
-        if isinstance(riot_ids, list) and len(riot_ids) > _MAX_PARTY_INVITE_RIOT_IDS:
-            raise HTTPException(400, f"riot_ids max {_MAX_PARTY_INVITE_RIOT_IDS}")
+    if body.action in ("invite_party_members", "check_party_members"):
+        for key in ("riot_ids", "check_riot_ids"):
+            ids = body.payload.get(key)
+            if isinstance(ids, list) and len(ids) > _MAX_PARTY_INVITE_RIOT_IDS:
+                raise HTTPException(400, f"{key} max {_MAX_PARTY_INVITE_RIOT_IDS}")
     conn: ConnectionManager = request.app.state.connections
     if not conn.is_online(body.discord_id):
         raise HTTPException(404, "agent not connected")
@@ -455,4 +571,13 @@ async def internal_online(
     """에이전트 연결 여부 (봇 UI용)."""
     _verify_internal_secret(request, x_relay_internal_secret)
     conn: ConnectionManager = request.app.state.connections
-    return JSONResponse({"online": conn.is_online(discord_id), "allowed_actions": sorted(ALLOWED_ACTIONS)})
+    online = conn.is_online(discord_id)
+    body: dict[str, Any] = {
+        "online": online,
+        "allowed_actions": sorted(ALLOWED_ACTIONS),
+    }
+    if online:
+        agent = conn.agent_info(discord_id)
+        if agent:
+            body["agent"] = agent
+    return JSONResponse(body)

@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using YummiLcu.Core.Lcu;
@@ -13,21 +14,39 @@ public sealed class RelaySession : IAsyncDisposable
     private readonly string _sessionId;
     private readonly string _wsToken;
     private readonly HttpClient _http = new();
+    private readonly SemaphoreSlim _wsSendLock = new(1, 1);
+    private readonly SemaphoreSlim _commandLock = new(1, 1);
+
     private ClientWebSocket? _ws;
     private CancellationTokenSource? _cts;
+    private CancellationTokenSource? _sessionCts;
     private LcuClient? _lcu;
+    private CancellationTokenSource? _lcuEventCts;
     private string? _lastGameflowPhase;
     private bool _eogSnapshotSent;
-    private readonly SemaphoreSlim _wsSendLock = new(1, 1);
+    private bool _wasSearching;
+    private LobbyInfo _lastLobby;
+    private string _idleStatus = "대기 중 (명령 수신)";
+    private DateTime _lastPartyPushUtc = DateTime.MinValue;
+    private DateTime _lastGameflowPushUtc = DateTime.MinValue;
+    private string? _lockfileSignature;
+    private volatile bool _lcuEventWsOpen;
+    private volatile bool _relayWsOpen;
+    private bool _lcuConnected;
+    private long? _discordId;
+
+    private static readonly TimeSpan PushDebounce = TimeSpan.FromMilliseconds(300);
+    private static readonly TimeSpan FallbackPollInterval = TimeSpan.FromSeconds(30);
+    private static readonly string AgentVersion =
+        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
 
     public event Action<string>? StatusChanged;
     public event Action<MatchmakingStatus>? MatchmakingStatusChanged;
     public event Action<LobbyInfo>? LobbyChanged;
     public event Action<string>? Log;
-
-    private bool _wasSearching;
-    private LobbyInfo _lastLobby;
-    private string _idleStatus = "대기 중 (명령 수신)";
+    public event Action<bool>? RelayConnectionChanged;
+    public event Action<bool>? LcuConnectionChanged;
+    public event Action<long?>? DiscordIdChanged;
 
     public RelaySession(AgentConfig config, string sessionId, string wsToken)
     {
@@ -38,93 +57,185 @@ public sealed class RelaySession : IAsyncDisposable
 
     public AgentConfig Config => _config;
     public bool IsLcuReady => _lcu is not null;
+    public bool IsRelayConnected => _relayWsOpen;
+    public long? DiscordId => _discordId;
 
     public async Task RunAsync(CancellationToken outerCt)
     {
         _cts = CancellationTokenSource.CreateLinkedTokenSource(outerCt);
         var ct = _cts.Token;
-
-        Log?.Invoke($"Relay 연결 시도: {_config.RelayPublicBaseUrl}");
-        try
-        {
-            _ws = new ClientWebSocket();
-            await _ws.ConnectAsync(new Uri(_config.WsUrl(_sessionId, _wsToken)), ct);
-        }
-        catch (Exception ex)
-        {
-            Log?.Invoke($"Relay WebSocket 실패: {ex.Message}");
-            SetStatus("Relay 연결 실패");
-            return;
-        }
-        Log?.Invoke("WebSocket 연결됨");
-
-        _ = Task.Run(() => ReceiveLoopAsync(ct), ct);
-
-        SetStatus("브라우저 로그인 중...");
-        try
-        {
-            Process.Start(new ProcessStartInfo(_config.LoginUrl(_sessionId)) { UseShellExecute = true });
-        }
-        catch (Exception ex)
-        {
-            Log?.Invoke($"브라우저 열기 실패: {ex.Message}");
-        }
+        var backoff = TimeSpan.FromSeconds(3);
 
         while (!ct.IsCancellationRequested)
         {
             try
             {
-                if (await PollAuthAsync(ct)) break;
+                var reason = await RunConnectedSessionAsync(ct);
+                if (ct.IsCancellationRequested || reason == SessionEndReason.AuthExpired)
+                    break;
+                if (reason == SessionEndReason.UserStopped)
+                    break;
+
+                LogLine($"Relay 세션 종료 ({reason}) — {backoff.TotalSeconds:0}s 후 재연결");
+                SetRelayConnected(false);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                break;
             }
             catch (Exception ex)
             {
-                Log?.Invoke($"인증 확인 실패: {ex.Message}");
+                LogLine($"Relay 오류: {ex.Message}");
+                SetRelayConnected(false);
             }
-            await Task.Delay(_config.AuthPollIntervalMs, ct);
+
+            try
+            {
+                await Task.Delay(backoff, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            backoff = TimeSpan.FromMilliseconds(Math.Min(backoff.TotalMilliseconds * 1.5, 30_000));
+        }
+    }
+
+    private enum SessionEndReason
+    {
+        UserStopped,
+        AuthExpired,
+        RelayDisconnected,
+    }
+
+    private async Task<SessionEndReason> RunConnectedSessionAsync(CancellationToken ct)
+    {
+        _sessionCts?.Cancel();
+        _sessionCts?.Dispose();
+        _sessionCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var sessionCt = _sessionCts.Token;
+
+        LogLine($"Relay 연결 시도: {_config.RelayPublicBaseUrl}");
+        _ws?.Dispose();
+        _ws = new ClientWebSocket();
+
+        try
+        {
+            await _ws.ConnectAsync(new Uri(_config.WsUrl(_sessionId, _wsToken)), sessionCt);
+        }
+        catch (Exception ex)
+        {
+            LogLine($"Relay WebSocket 실패: {ex.Message}");
+            SetStatus("Relay 연결 실패");
+            return SessionEndReason.RelayDisconnected;
         }
 
+        SetRelayConnected(true);
+        LogLine("Relay WebSocket 연결됨");
+
+        var receiveEnded = new TaskCompletionSource<SessionEndReason>();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await ReceiveLoopAsync(sessionCt);
+                receiveEnded.TrySetResult(SessionEndReason.RelayDisconnected);
+            }
+            catch (OperationCanceledException)
+            {
+                receiveEnded.TrySetResult(SessionEndReason.UserStopped);
+            }
+        }, sessionCt);
+
+        if (await PollAuthAsync(sessionCt) == AuthPollStatus.Ok)
+        {
+            LogLine("저장된 Discord 로그인 세션 유효 — 브라우저 생략");
+        }
+        else
+        {
+            SetStatus("브라우저 로그인 중...");
+            try
+            {
+                Process.Start(new ProcessStartInfo(_config.LoginUrl(_sessionId)) { UseShellExecute = true });
+            }
+            catch (Exception ex)
+            {
+                LogLine($"브라우저 열기 실패: {ex.Message}");
+            }
+
+            while (!sessionCt.IsCancellationRequested)
+            {
+                try
+                {
+                    var status = await PollAuthAsync(sessionCt);
+                    if (status == AuthPollStatus.Ok) break;
+                    if (status == AuthPollStatus.Expired)
+                    {
+                        AgentSessionStore.Clear();
+                        LogLine("로그인 세션 만료 — 다시 Discord 로그인이 필요합니다.");
+                        SetStatus("로그인 만료");
+                        return SessionEndReason.AuthExpired;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogLine($"인증 확인 실패: {ex.Message}");
+                }
+                await Task.Delay(_config.AuthPollIntervalMs, sessionCt);
+            }
+        }
+
+        AgentSessionStore.Save(_sessionId, _wsToken);
+        _ = Task.Run(() => SessionKeepAliveLoopAsync(sessionCt), sessionCt);
+
         SetStatus("로그인 완료 — LCU 확인 중...");
-        await EnsureLcuAsync(ct);
+        await EnsureLcuAsync(sessionCt);
 
         if (_config.ApplyDefaultStatusOnConnect && _lcu is not null)
         {
-            var (ok, msg) = await AllowedActions.ExecuteAsync(
+            var resetResult = await AllowedActions.ExecuteAsync(
                 "reset_status", new ActionContext(_lcu, _config, null));
-            Log?.Invoke(ok ? msg : $"기본 상메 실패: {msg}");
+            LogLine(resetResult.Ok ? resetResult.Message : $"기본 상메 실패: {resetResult.Message}");
         }
 
-        _ = Task.Run(() => GameflowWatchLoopAsync(ct), ct);
-        _ = Task.Run(() => MatchmakingWatchLoopAsync(ct), ct);
-        _ = Task.Run(() => LobbyWatchLoopAsync(ct), ct);
+        _ = Task.Run(() => LcuLockfileWatchLoopAsync(sessionCt), sessionCt);
+        _ = Task.Run(() => LcuWatchFallbackLoopAsync(sessionCt), sessionCt);
+
         _idleStatus = "대기 중 (명령 수신)";
         SetStatus(_idleStatus);
+        await SendAgentHelloAsync(sessionCt);
 
-        try { await Task.Delay(Timeout.Infinite, ct); }
-        catch (OperationCanceledException) { }
+        return await receiveEnded.Task;
     }
 
-    public async Task<(bool Ok, string Message)> RunLocalCommandAsync(
+    public async Task<ActionResult> RunLocalCommandAsync(
         string action, JsonElement? payload = null, CancellationToken ct = default)
     {
         if (!AllowedActions.IsAllowed(action))
-            return (false, "unknown action");
+            return new ActionResult(false, "unknown action");
         if (action == "launch_client")
-            return LeagueLauncher.TryLaunch();
+        {
+            var launch = LeagueLauncher.TryLaunch();
+            return new ActionResult(launch.Ok, launch.Message);
+        }
+        if (action == "ping")
+            return await AllowedActions.ExecuteAsync(action, new ActionContext(_lcu!, _config, payload));
 
-        if (action != "ping" && action != "launch_client" && _lcu is null)
+        if (_lcu is null)
         {
             if (action is "play_ranked_solo" or "play_normal_draft")
             {
                 var (launched, launchMsg) = LeagueLauncher.TryLaunch();
-                Log?.Invoke(launchMsg);
-                if (!launched) return (false, launchMsg);
+                LogLine(launchMsg);
+                if (!launched) return new ActionResult(false, launchMsg);
             }
             if (!await TryWaitForLcuAsync(TimeSpan.FromMinutes(4), ct))
-                return (false, "LCU 연결 대기 시간 초과");
+                return new ActionResult(false, "LCU 연결 대기 시간 초과");
         }
 
         if (_lcu is null)
-            return (false, "LCU 미연결");
+            return new ActionResult(false, "LCU 미연결");
 
         return await AllowedActions.ExecuteAsync(action, new ActionContext(_lcu, _config, payload));
     }
@@ -138,109 +249,274 @@ public sealed class RelaySession : IAsyncDisposable
             var path = _config.ResolveLockfilePath() ?? LcuClient.FindLockfilePath();
             if (path is not null)
             {
-                var (client, error) = LcuClient.TryFromLockfile(path);
-                if (client is not null)
-                {
-                    _lcu = client;
-                    Log?.Invoke($"LCU 연결: {path}");
-                    return true;
-                }
-                Log?.Invoke($"lockfile: {error}");
+                await TryConnectLcuAsync(path, ct);
+                if (_lcu is not null) return true;
             }
             await Task.Delay(2500, ct);
         }
         return _lcu is not null;
     }
 
-    private async Task MatchmakingWatchLoopAsync(CancellationToken ct)
+    private async Task EnsureLcuAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            if (_lcu is null)
+            var path = _config.ResolveLockfilePath() ?? LcuClient.FindLockfilePath();
+            if (path is not null)
             {
-                if (_wasSearching)
-                {
-                    _wasSearching = false;
-                    MatchmakingStatusChanged?.Invoke(MatchmakingStatus.Idle);
-                    SetStatus(_idleStatus);
-                }
-                await Task.Delay(2000, ct);
-                continue;
-            }
-
-            var status = await _lcu.GetMatchmakingStatusAsync();
-            MatchmakingStatusChanged?.Invoke(status);
-            if (status.IsSearching)
-            {
-                SetStatus(status.DisplayLine);
-                _wasSearching = true;
-                await Task.Delay(1000, ct);
+                await TryConnectLcuAsync(path, ct);
+                if (_lcu is not null) return;
             }
             else
             {
-                if (_wasSearching) SetStatus(_idleStatus);
-                _wasSearching = false;
-                await Task.Delay(2500, ct);
+                LogLine("lockfile 대기 중...");
             }
+            await Task.Delay(3000, ct);
         }
     }
 
-    private async Task LobbyWatchLoopAsync(CancellationToken ct)
+    private async Task LcuLockfileWatchLoopAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            if (_lcu is null)
+            var path = _config.ResolveLockfilePath() ?? LcuClient.FindLockfilePath();
+            var sig = LcuClient.ReadLockfileSignature(path);
+            if (sig != _lockfileSignature)
             {
-                if (_lastLobby.IsInLobby)
+                _lockfileSignature = sig;
+                if (sig is null)
                 {
-                    _lastLobby = LobbyInfo.None;
-                    LobbyChanged?.Invoke(_lastLobby);
+                    await DisconnectLcuAsync();
                 }
-                await Task.Delay(2000, ct);
-                continue;
-            }
-
-            var lobby = await _lcu.GetLobbyAsync();
-            if (lobby != _lastLobby)
-            {
-                _lastLobby = lobby;
-                LobbyChanged?.Invoke(lobby);
-            }
-            await Task.Delay(1500, ct);
-        }
-    }
-
-    private async Task GameflowWatchLoopAsync(CancellationToken ct)
-    {
-        while (!ct.IsCancellationRequested)
-        {
-            if (_lcu is not null)
-            {
-                var phase = await _lcu.GetGameflowPhaseAsync();
-                if (phase is not null)
+                else if (path is not null)
                 {
-                    if (_config.PreventQueueAfterDodge &&
-                        _lastGameflowPhase is "ChampSelect" && phase is "Lobby" or "None")
-                    {
-                        await _lcu.DeleteAsync("/lol-lobby/v2/lobby/matchmaking/search");
-                        Log?.Invoke("챔프선택 종료 → 매칭 중지");
-                    }
-
-                    if (phase is "PreEndOfGame" or "EndOfGame" or "WaitingForStats")
-                    {
-                        if (!_eogSnapshotSent && _lastGameflowPhase is "InProgress" or "PreEndOfGame")
-                            await TrySendGuildMatchEogSnapshotAsync(phase, ct);
-                    }
-                    else if (phase is "Lobby" or "None" or "ChampSelect" or "Matchmaking")
-                    {
-                        _eogSnapshotSent = false;
-                    }
-
-                    _lastGameflowPhase = phase;
+                    await TryConnectLcuAsync(path, ct, force: true);
                 }
             }
             await Task.Delay(2000, ct);
         }
+    }
+
+    private async Task TryConnectLcuAsync(string lockfilePath, CancellationToken ct, bool force = false)
+    {
+        var sig = LcuClient.ReadLockfileSignature(lockfilePath);
+        if (!force && sig is not null && sig == _lockfileSignature && _lcu is not null)
+            return;
+
+        var (client, error) = LcuClient.TryFromLockfile(lockfilePath);
+        if (client is null)
+        {
+            LogLine($"lockfile: {error}");
+            return;
+        }
+
+        if (_lcu is not null && sig == _lockfileSignature)
+            return;
+
+        await DisconnectLcuAsync();
+        _lcu = client;
+        _lockfileSignature = sig;
+        SetLcuConnected(true);
+        LogLine($"LCU 연결: {lockfilePath}");
+
+        _lcuEventCts?.Cancel();
+        _lcuEventCts?.Dispose();
+        _lcuEventCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _ = Task.Run(() => LcuEventLoopAsync(_lcuEventCts.Token), ct);
+
+        await RefreshLobbyFromLcuAsync(ct);
+        await RefreshMatchmakingFromLcuAsync(ct);
+        var phase = await _lcu.GetGameflowPhaseAsync();
+        if (phase is not null)
+            await HandleGameflowPhaseAsync(phase, ct);
+        await SendAgentHelloAsync(ct);
+    }
+
+    private Task DisconnectLcuAsync()
+    {
+        _lcuEventCts?.Cancel();
+        _lcuEventCts?.Dispose();
+        _lcuEventCts = null;
+        _lcuEventWsOpen = false;
+        _lcu?.Dispose();
+        _lcu = null;
+        if (_lastLobby.IsInLobby)
+        {
+            _lastLobby = LobbyInfo.None;
+            LobbyChanged?.Invoke(_lastLobby);
+        }
+        SetLcuConnected(false);
+        return Task.CompletedTask;
+    }
+
+    private async Task LcuEventLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested && _lcu is not null)
+        {
+            try
+            {
+                await using var ev = new LcuEventSocket(_lcu.Port, _lcu.Password);
+                ev.ApiEvent += OnLcuApiEventAsync;
+                _lcuEventWsOpen = true;
+                await ev.RunAsync(ct);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                LogLine($"LCU 이벤트 WS 끊김: {ex.Message}");
+            }
+            finally
+            {
+                _lcuEventWsOpen = false;
+            }
+
+            if (!ct.IsCancellationRequested)
+                await Task.Delay(3000, ct);
+        }
+    }
+
+    private async Task LcuWatchFallbackLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await Task.Delay(FallbackPollInterval, ct);
+            if (_lcu is null) continue;
+
+            if (!_lcuEventWsOpen)
+            {
+                await RefreshLobbyFromLcuAsync(ct);
+                await RefreshMatchmakingFromLcuAsync(ct);
+            }
+
+            var phase = await _lcu.GetGameflowPhaseAsync();
+            if (phase is not null)
+                await HandleGameflowPhaseAsync(phase, ct);
+        }
+    }
+
+    private async Task OnLcuApiEventAsync(LcuApiEvent ev, CancellationToken ct)
+    {
+        switch (ev.Kind)
+        {
+            case LcuApiEventKind.Lobby:
+                await RefreshLobbyFromLcuAsync(ct);
+                await PushPartyLobbyUpdateAsync(ct);
+                break;
+            case LcuApiEventKind.Matchmaking:
+                await RefreshMatchmakingFromLcuAsync(ct);
+                break;
+            case LcuApiEventKind.Gameflow:
+            {
+                var phase = ev.Data?.Trim('"');
+                if (string.IsNullOrWhiteSpace(phase))
+                    phase = await _lcu!.GetGameflowPhaseAsync();
+                if (phase is not null)
+                    await HandleGameflowPhaseAsync(phase, ct);
+                break;
+            }
+        }
+    }
+
+    private async Task RefreshLobbyFromLcuAsync(CancellationToken ct)
+    {
+        if (_lcu is null) return;
+        var lobby = await _lcu.GetLobbyAsync();
+        if (lobby == _lastLobby) return;
+        _lastLobby = lobby;
+        LobbyChanged?.Invoke(lobby);
+    }
+
+    private async Task RefreshMatchmakingFromLcuAsync(CancellationToken ct)
+    {
+        if (_lcu is null) return;
+        var status = await _lcu.GetMatchmakingStatusAsync();
+        MatchmakingStatusChanged?.Invoke(status);
+        if (status.IsSearching)
+        {
+            SetStatus(status.DisplayLine);
+            _wasSearching = true;
+        }
+        else if (_wasSearching)
+        {
+            SetStatus(_idleStatus);
+            _wasSearching = false;
+        }
+    }
+
+    private async Task HandleGameflowPhaseAsync(string phase, CancellationToken ct)
+    {
+        if (_lcu is null) return;
+
+        if (_config.PreventQueueAfterDodge &&
+            _lastGameflowPhase is "ChampSelect" && phase is "Lobby" or "None")
+        {
+            await _lcu.DeleteAsync("/lol-lobby/v2/lobby/matchmaking/search");
+            LogLine("챔프선택 종료 → 매칭 중지");
+        }
+
+        if (phase is "PreEndOfGame" or "EndOfGame" or "WaitingForStats")
+        {
+            if (!_eogSnapshotSent && _lastGameflowPhase is "InProgress" or "PreEndOfGame")
+                await TrySendGuildMatchEogSnapshotAsync(phase, ct);
+        }
+        else if (phase is "Lobby" or "None" or "ChampSelect" or "Matchmaking")
+        {
+            _eogSnapshotSent = false;
+        }
+
+        if (_lastGameflowPhase != phase)
+        {
+            _lastGameflowPhase = phase;
+            await PushGameflowUpdateAsync(phase, ct);
+        }
+    }
+
+    private async Task PushPartyLobbyUpdateAsync(CancellationToken ct)
+    {
+        if (_lcu is null) return;
+        var now = DateTime.UtcNow;
+        if (now - _lastPartyPushUtc < PushDebounce) return;
+        _lastPartyPushUtc = now;
+
+        var lobby = await _lcu.GetLobbyAsync();
+        var riotIds = lobby.IsInLobby
+            ? await _lcu.GetLobbyMemberDisplayRiotIdsAsync()
+            : Array.Empty<string>();
+
+        await SendAgentMessageAsync(
+            new
+            {
+                type = "party_lobby_update",
+                data = new { in_lobby = lobby.IsInLobby, riot_ids_in_party = riotIds },
+            },
+            ct);
+    }
+
+    private async Task PushGameflowUpdateAsync(string phase, CancellationToken ct)
+    {
+        var now = DateTime.UtcNow;
+        if (now - _lastGameflowPushUtc < PushDebounce) return;
+        _lastGameflowPushUtc = now;
+
+        await SendAgentMessageAsync(
+            new { type = "gameflow_update", data = new { phase, lcu_ready = _lcu is not null } },
+            ct);
+    }
+
+    private async Task SendAgentHelloAsync(CancellationToken ct)
+    {
+        await SendAgentMessageAsync(
+            new
+            {
+                type = "agent_hello",
+                version = AgentVersion,
+                lcu_ready = _lcu is not null,
+                os = Environment.OSVersion.VersionString,
+            },
+            ct);
     }
 
     private async Task TrySendGuildMatchEogSnapshotAsync(string phase, CancellationToken ct)
@@ -257,13 +533,13 @@ public sealed class RelaySession : IAsyncDisposable
 
         if (payload is null || payload.Participants.Count < 2)
         {
-            Log?.Invoke("내전 LCU 스냅샷: 참가자 정보를 아직 읽지 못했습니다.");
+            LogLine("내전 LCU 스냅샷: 참가자 정보를 아직 읽지 못했습니다.");
             return;
         }
 
         await SendAgentMessageAsync(new { type = "guild_match_eog", payload }, ct);
         _eogSnapshotSent = true;
-        Log?.Invoke($"내전 LCU 스냅샷 전송 ({payload.Participants.Count}명)");
+        LogLine($"내전 LCU 스냅샷 전송 ({payload.Participants.Count}명)");
     }
 
     private async Task SendAgentMessageAsync(object message, CancellationToken ct)
@@ -282,36 +558,43 @@ public sealed class RelaySession : IAsyncDisposable
         }
     }
 
-    private async Task<bool> PollAuthAsync(CancellationToken ct)
+    private enum AuthPollStatus { Pending, Ok, Expired }
+
+    private async Task<AuthPollStatus> PollAuthAsync(CancellationToken ct)
     {
         using var res = await _http.GetAsync(_config.AuthStatusUrl(_sessionId), ct);
-        if (!res.IsSuccessStatusCode) return false;
+        if (!res.IsSuccessStatusCode) return AuthPollStatus.Pending;
         var json = await res.Content.ReadAsStringAsync(ct);
         using var doc = JsonDocument.Parse(json);
-        return doc.RootElement.GetProperty("status").GetString() == "ok";
+        return doc.RootElement.GetProperty("status").GetString() switch
+        {
+            "ok" => AuthPollStatus.Ok,
+            "expired" => AuthPollStatus.Expired,
+            _ => AuthPollStatus.Pending,
+        };
     }
 
-    private async Task EnsureLcuAsync(CancellationToken ct)
+    private async Task SessionKeepAliveLoopAsync(CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            var path = _config.ResolveLockfilePath() ?? LcuClient.FindLockfilePath();
-            if (path is not null)
+            await Task.Delay(TimeSpan.FromMinutes(3), ct);
+            if (_ws?.State != WebSocketState.Open) continue;
+            try
             {
-                var (client, error) = LcuClient.TryFromLockfile(path);
-                if (client is not null)
+                await _wsSendLock.WaitAsync(ct);
+                try
                 {
-                    _lcu = client;
-                    Log?.Invoke($"LCU 연결: {path}");
-                    return;
+                    var bytes = Encoding.UTF8.GetBytes("ping");
+                    await _ws.SendAsync(bytes, WebSocketMessageType.Text, true, ct);
                 }
-                Log?.Invoke($"lockfile: {error}");
+                finally
+                {
+                    _wsSendLock.Release();
+                }
             }
-            else
-            {
-                Log?.Invoke("lockfile 대기 중...");
-            }
-            await Task.Delay(3000, ct);
+            catch (OperationCanceledException) { break; }
+            catch { /* ignore */ }
         }
     }
 
@@ -319,11 +602,19 @@ public sealed class RelaySession : IAsyncDisposable
     {
         if (_ws is null) return;
         var buf = new byte[8192];
+        var pending = new StringBuilder();
         while (_ws.State == WebSocketState.Open && !ct.IsCancellationRequested)
         {
             var result = await _ws.ReceiveAsync(buf, ct);
             if (result.MessageType == WebSocketMessageType.Close) break;
-            await HandleMessageAsync(Encoding.UTF8.GetString(buf, 0, result.Count));
+
+            pending.Append(Encoding.UTF8.GetString(buf, 0, result.Count));
+            if (!result.EndOfMessage) continue;
+
+            var text = pending.ToString();
+            pending.Clear();
+            if (text == "ping") continue;
+            await HandleMessageAsync(text);
         }
     }
 
@@ -332,16 +623,40 @@ public sealed class RelaySession : IAsyncDisposable
         string? requestId = null;
         try
         {
+            var ct = _sessionCts?.Token ?? _cts?.Token ?? CancellationToken.None;
             using var doc = JsonDocument.Parse(text);
             var root = doc.RootElement;
-            if (root.GetProperty("type").GetString() != "command") return;
+            if (root.TryGetProperty("type", out var typeEl))
+            {
+                var msgType = typeEl.GetString();
+                if (msgType == "pong") return;
+                if (msgType == "session_bound")
+                {
+                    if (root.TryGetProperty("discord_id", out var didEl) && didEl.TryGetInt64(out var did))
+                    {
+                        _discordId = did;
+                        DiscordIdChanged?.Invoke(did);
+                        LogLine($"Discord 바인딩: {did}");
+                        await SendAgentHelloAsync(ct);
+                    }
+                    return;
+                }
+                if (msgType == "request_party_snapshot")
+                {
+                    await PushPartyLobbyUpdateAsync(ct);
+                    return;
+                }
+                if (msgType != "command") return;
+            }
+            else return;
+
             var action = root.GetProperty("action").GetString() ?? "";
             if (root.TryGetProperty("request_id", out var reqEl))
                 requestId = reqEl.GetString();
 
             if (!AllowedActions.IsAllowed(action))
             {
-                Log?.Invoke($"거부된 action: {action}");
+                LogLine($"거부된 action: {action}");
                 await SendCommandResultAsync(requestId, false, $"unknown action: {action}");
                 return;
             }
@@ -350,41 +665,77 @@ public sealed class RelaySession : IAsyncDisposable
             if (root.TryGetProperty("payload", out var p) && p.ValueKind == JsonValueKind.Object)
                 payload = p.Clone();
 
-            var ct = _cts?.Token ?? CancellationToken.None;
-            var (ok, msg) = await RunLocalCommandAsync(action, payload, ct);
-            Log?.Invoke($"{(ok ? "OK" : "FAIL")} {action}: {msg}");
-            await SendCommandResultAsync(requestId, ok, msg, ct);
+            await _commandLock.WaitAsync(ct);
+            ActionResult commandResult;
+            try
+            {
+                commandResult = await RunLocalCommandAsync(action, payload, ct);
+            }
+            finally
+            {
+                _commandLock.Release();
+            }
+
+            LogLine($"{(commandResult.Ok ? "OK" : "FAIL")} {action}: {commandResult.Message}");
+            await SendCommandResultAsync(requestId, commandResult.Ok, commandResult.Message, commandResult.Data, ct);
         }
         catch (Exception ex)
         {
-            Log?.Invoke($"메시지 처리 오류: {ex.Message}");
+            LogLine($"메시지 처리 오류: {ex.Message}");
             await SendCommandResultAsync(requestId, false, ex.Message);
         }
     }
 
     private async Task SendCommandResultAsync(
-        string? requestId,
-        bool ok,
-        string message,
-        CancellationToken ct = default)
+        string? requestId, bool ok, string message, JsonElement? data = null, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(requestId)) return;
+        if (data is null)
+        {
+            await SendAgentMessageAsync(
+                new { type = "command_result", request_id = requestId, ok, message }, ct);
+            return;
+        }
         await SendAgentMessageAsync(
-            new { type = "command_result", request_id = requestId, ok, message },
-            ct);
+            new { type = "command_result", request_id = requestId, ok, message, data = data.Value }, ct);
     }
 
     private void SetStatus(string s) => StatusChanged?.Invoke(s);
 
+    private void SetRelayConnected(bool connected)
+    {
+        if (_relayWsOpen == connected) return;
+        _relayWsOpen = connected;
+        RelayConnectionChanged?.Invoke(connected);
+    }
+
+    private void SetLcuConnected(bool connected)
+    {
+        if (_lcuConnected == connected) return;
+        _lcuConnected = connected;
+        LcuConnectionChanged?.Invoke(connected);
+    }
+
+    private void LogLine(string line)
+    {
+        AgentFileLogger.Write(line);
+        Log?.Invoke(line);
+    }
+
     public async ValueTask DisposeAsync()
     {
+        _sessionCts?.Cancel();
         _cts?.Cancel();
+        _lcuEventCts?.Cancel();
         if (_ws?.State == WebSocketState.Open)
             await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
         _ws?.Dispose();
         _lcu?.Dispose();
         _http.Dispose();
+        _sessionCts?.Dispose();
         _cts?.Dispose();
+        _lcuEventCts?.Dispose();
         _wsSendLock.Dispose();
+        _commandLock.Dispose();
     }
 }

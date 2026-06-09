@@ -49,3 +49,43 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopico
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function IsDotNetDesktop8Installed: Boolean;
+var
+  TempFile: String;
+  Lines: TArrayOfString;
+  i: Integer;
+  ResultCode: Integer;
+begin
+  TempFile := ExpandConstant('{tmp}\yummi-dotnet-runtimes.txt');
+  if Exec(ExpandConstant('{cmd}'), '/c dotnet --list-runtimes > "' + TempFile + '" 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if LoadStringsFromFile(TempFile, Lines) then
+    begin
+      for i := 0 to GetArrayLength(Lines) - 1 do
+        if Pos('Microsoft.WindowsDesktop.App 8.', Lines[i]) > 0 then
+        begin
+          Result := True;
+          exit;
+        end;
+    end;
+  end;
+  Result := False;
+end;
+
+function InitializeSetup: Boolean;
+var
+  ResultCode: Integer;
+begin
+  if not IsDotNetDesktop8Installed then
+  begin
+    if MsgBox('.NET 8 Desktop Runtime 이 필요합니다.' + #13#10 +
+      'https://dotnet.microsoft.com/download/dotnet/8.0 에서 설치 후 다시 실행해 주세요.' + #13#10#13#10 +
+      '설치 페이지를 열까요?', mbConfirmation, MB_YESNO) = IDYES then
+      ShellExec('open', 'https://dotnet.microsoft.com/download/dotnet/8.0', '', '', SW_SHOWNORMAL, ewNoWait, ResultCode);
+    Result := False;
+    exit;
+  end;
+  Result := True;
+end;

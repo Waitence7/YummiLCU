@@ -82,9 +82,30 @@ flowchart TB
 
 에이전트 UI는 LCU HTTP를 직접 호출하지 않습니다. 모든 LCU 조작은 `RelaySession` 경로입니다.
 
-### 3.4 상태 폴링 (Watch Loop)
+### 3.4 LCU 이벤트 WebSocket + 폴백
 
-`RelaySession`이 로비·매칭·게임플로를 **주기적 HTTP 폴링**으로 감시합니다 (닷지 후 큐 방지, 상태 표시 등).
+`RelaySession`은 **LCU lockfile WebSocket** (`OnJsonApiEvent`)으로 로비·게임플로·매칭 변경을 감지합니다.
+
+| 이벤트 URI | 용도 |
+|------------|------|
+| `/lol-lobby/v2/lobby` | 파티 로비 → `party_lobby_update` Relay push |
+| `/lol-gameflow/v1/gameflow-phase` | 닷지 방지, 내전 EOG, `gameflow_update` push |
+| `/lol-matchmaking/v1/search` 등 | 매칭 상태 UI |
+
+- LCU WS가 끊기면 **30초 HTTP 폴백**으로 게임플로·로비·매칭을 보완합니다.
+- lockfile 포트/비밀번호 변경(클라 재시작) 시 `LcuClient`·이벤트 WS를 **자동 재연결**합니다.
+- Relay WebSocket도 끊기면 **백오프 재연결**합니다.
+
+구현: [`LcuEventSocket`](../agent/YummiLcu.Core/Lcu/LcuEventSocket.cs), [`RelaySession`](../agent/YummiLcu.Core/Relay/RelaySession.cs)
+
+### 3.5 에이전트 → Relay 실시간 push
+
+| type | 설명 |
+|------|------|
+| `agent_hello` | 연결 시 버전·LCU 준비 상태 |
+| `party_lobby_update` | 로비 멤버 변경 → Relay → 봇 WS |
+| `gameflow_update` | 게임 단계 변경 (Lobby, ChampSelect 등) |
+| `guild_match_eog` | 내전 종료 스냅샷 → Tournament API |
 
 ---
 
@@ -118,9 +139,11 @@ sequenceDiagram
 3. 동시에 **WebSocket** `wss://.../ws/agent?session_id=...` 연결  
 4. Relay가 Redis에 `discord_id` 저장  
 5. 에이전트가 `/auth/status`를 **폴링**하다 `ok` 수신  
-6. 이후 해당 WS는 `discord_id`에 **바인딩** (`ConnectionManager`)
+6. 이후 해당 WS는 `discord_id`에 **바인딩** (`ConnectionManager`) → 에이전트에 `session_bound` push
 
 설정: [`AgentConfig`](../agent/YummiLcu.Core/AgentConfig.cs) — `RelayPublicBaseUrl`, `AuthPollIntervalMs`
+
+**안정성 (v0.5.3+):** Relay·LCU 끊김 자동 재연결, LCU 명령 **직렬화** (`SemaphoreSlim`), 로그 파일 `%LocalAppData%\YummiAgent\agent.log`
 
 ### 4.2 Discord 봇 → PC 명령
 

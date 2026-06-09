@@ -1,6 +1,8 @@
 {
-  "version": "0.5.1",
+  "version": "0.5.3",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
-  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.5.1.exe",
-  "notes": "모집 게임 초대하기 (invite_party_members)"
+  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.5.3.exe",
+  "patchUrl": "https://yummi.duckdns.org/agent/YummiAgent-patch.zip",
+  "patchFrom": "0.5.2",
+  "notes": "슬림 업데이트(~8MB 전체 / ~2MB 패치), Relay·LCU 재연결, LCU WS (v0.5.3)"
 }

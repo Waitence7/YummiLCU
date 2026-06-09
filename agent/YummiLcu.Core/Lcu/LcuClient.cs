@@ -9,8 +9,13 @@ public sealed class LcuClient : IDisposable
 {
     private readonly HttpClient _http;
 
+    public int Port { get; }
+    public string Password { get; }
+
     public LcuClient(int port, string password)
     {
+        Port = port;
+        Password = password;
         // Riot LCU uses self-signed certs on loopback only — reject non-local targets.
         var handler = new HttpClientHandler
         {
@@ -298,26 +303,52 @@ public sealed class LcuClient : IDisposable
     public async Task<HashSet<string>> GetLobbyMemberRiotKeysAsync()
     {
         var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var displayId in await GetLobbyMemberDisplayRiotIdsAsync())
+            keys.Add(LcuPartyInvite.RiotKeyFromDisplay(displayId));
+        return keys;
+    }
+
+    public async Task<IReadOnlyList<string>> GetLobbyMemberDisplayRiotIdsAsync()
+    {
+        var list = new List<string>();
         using var doc = await GetJsonAsync("/lol-lobby/v2/lobby");
-        if (doc is null) return keys;
+        if (doc is null) return list;
 
         var root = doc.RootElement;
         if (root.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
-            return keys;
+            return list;
         if (!root.TryGetProperty("members", out var members) || members.ValueKind != JsonValueKind.Array)
-            return keys;
+            return list;
 
         foreach (var member in members.EnumerateArray())
         {
             var gameName = ReadPlayerString(member, "riotIdGameName", "gameName", "summonerName");
             var tagLine = ReadPlayerString(member, "riotIdTagline", "riotIdTagLine", "gameTag", "tagLine");
             if (!string.IsNullOrWhiteSpace(gameName) && !string.IsNullOrWhiteSpace(tagLine))
-                keys.Add(LcuPartyInvite.RiotKey(gameName, tagLine));
+                list.Add($"{gameName.Trim()}#{tagLine.Trim()}");
         }
-        return keys;
+        return list;
     }
 
-    public async Task<long?> ResolveSummonerIdByRiotIdAsync(string gameName, string tagLine)
+    public static string? ReadLockfileSignature(string? lockfilePath)
+    {
+        if (string.IsNullOrWhiteSpace(lockfilePath) || !File.Exists(lockfilePath))
+            return null;
+        try
+        {
+            var raw = File.ReadAllText(lockfilePath).Trim();
+            var parts = raw.Split(':');
+            if (parts.Length < 4) return null;
+            return $"{parts[2]}:{parts[3]}";
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task<(long? SummonerId, string? FailureReason)> ResolveSummonerIdForInviteAsync(
+        string gameName, string tagLine)
     {
         var friends = await GetFriendsAsync();
         foreach (var friend in friends)
@@ -329,14 +360,48 @@ public sealed class LcuClient : IDisposable
             {
                 var fromPuuid = await GetSummonerIdByPuuidAsync(friend.Puuid);
                 if (fromPuuid is not null)
-                    return fromPuuid;
+                    return (fromPuuid, null);
             }
         }
 
+        var fromName = await ResolveSummonerIdByRiotIdAsync(gameName, tagLine);
+        if (fromName is not null)
+            return (fromName, null);
+
+        var fromAccount = await ResolveSummonerIdFromAccountApiAsync(gameName, tagLine);
+        if (fromAccount is not null)
+            return (fromAccount, null);
+
+        return (null, "닉 조회 실패 (Riot ID 확인 또는 친구 추가)");
+    }
+
+    public async Task<long?> ResolveSummonerIdByRiotIdAsync(string gameName, string tagLine)
+    {
         var riotId = Uri.EscapeDataString($"{gameName}#{tagLine}");
         using var doc = await GetJsonAsync($"/lol-summoner/v1/summoners?name={riotId}");
         if (doc is null) return null;
         return TryReadSummonerId(doc.RootElement);
+    }
+
+    private async Task<long?> ResolveSummonerIdFromAccountApiAsync(string gameName, string tagLine)
+    {
+        var riotId = Uri.EscapeDataString($"{gameName}#{tagLine}");
+        using var doc = await GetJsonAsync($"/lol-account/v1/accounts/aliases?riotId={riotId}");
+        if (doc is null || doc.RootElement.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var alias in doc.RootElement.EnumerateArray())
+        {
+            if (!alias.TryGetProperty("puuid", out var puuidEl))
+                continue;
+            var puuid = puuidEl.GetString();
+            if (string.IsNullOrWhiteSpace(puuid))
+                continue;
+            var sid = await GetSummonerIdByPuuidAsync(puuid);
+            if (sid is not null)
+                return sid;
+        }
+        return null;
     }
 
     public async Task<long?> GetSummonerIdByPuuidAsync(string puuid)

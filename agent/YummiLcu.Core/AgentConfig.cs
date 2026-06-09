@@ -14,6 +14,7 @@ public sealed class AgentConfig
     public string? UpdateManifestUrl { get; set; } = "https://yummi.duckdns.org/agent/version.json";
     public bool CheckUpdatesOnStartup { get; set; } = true;
     public bool AutoUpdateEnabled { get; set; } = true;
+    public bool RunAtWindowsStartup { get; set; }
     public bool UiTestMode { get; set; }
 
     public string ConfigFilePath => Path.Combine(AppContext.BaseDirectory, "agent.json");

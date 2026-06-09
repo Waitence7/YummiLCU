@@ -1,8 +1,72 @@
+using System.Drawing;
 using System.Windows;
+using System.Windows.Forms;
+using YummiLcu.App.ViewModels;
 
 namespace YummiLcu.App;
 
 public partial class MainWindow : Window
 {
-    public MainWindow() => InitializeComponent();
+    private NotifyIcon? _tray;
+    private bool _reallyClose;
+
+    public MainWindow()
+    {
+        InitializeComponent();
+        Loaded += OnLoaded;
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        _tray = new NotifyIcon
+        {
+            Text = "Yummi LCU Agent",
+            Icon = SystemIcons.Application,
+            Visible = true,
+        };
+        _tray.DoubleClick += (_, _) => RestoreFromTray();
+
+        var menu = new ContextMenuStrip();
+        menu.Items.Add("열기", null, (_, _) => RestoreFromTray());
+        menu.Items.Add("종료", null, (_, _) =>
+        {
+            _reallyClose = true;
+            Close();
+        });
+        _tray.ContextMenuStrip = menu;
+    }
+
+    private void RestoreFromTray()
+    {
+        Show();
+        WindowState = WindowState.Normal;
+        Activate();
+    }
+
+    private void Window_StateChanged(object? sender, EventArgs e)
+    {
+        if (WindowState == WindowState.Minimized)
+        {
+            Hide();
+            if (_tray is not null)
+                _tray.Visible = true;
+        }
+    }
+
+    private void Window_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
+    {
+        if (!_reallyClose)
+        {
+            e.Cancel = true;
+            Hide();
+            return;
+        }
+
+        if (_tray is not null)
+        {
+            _tray.Visible = false;
+            _tray.Dispose();
+            _tray = null;
+        }
+    }
 }

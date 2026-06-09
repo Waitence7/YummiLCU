@@ -2,11 +2,14 @@
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Yummi LCU Agent"
-        Width="600" Height="560"
-        MinWidth="520" MinHeight="480"
-        WindowStartupLocation="CenterScreen">
+        Width="640" Height="620"
+        MinWidth="560" MinHeight="520"
+        WindowStartupLocation="CenterScreen"
+        StateChanged="Window_StateChanged"
+        Closing="Window_Closing">
   <Grid Margin="12">
     <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
@@ -16,13 +19,59 @@
     <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
       <Button Content="연결 시작" Width="90" Margin="0,0,8,0"
               Command="{Binding StartCommand}" />
-      <Button Content="중지" Width="70" Margin="0,0,12,0"
+      <Button Content="중지" Width="70" Margin="0,0,8,0"
               Command="{Binding StopCommand}" />
+      <Button Content="Discord 재로그인" Width="110" Margin="0,0,12,0"
+              Command="{Binding ReLoginCommand}" />
       <TextBlock Text="{Binding StatusText}" VerticalAlignment="Center"
-                 TextWrapping="Wrap" MaxWidth="380" Foreground="#666" />
+                 TextWrapping="Wrap" MaxWidth="280" Foreground="#666" />
     </StackPanel>
 
     <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8">
+      <TextBlock Text="Discord:" VerticalAlignment="Center" Margin="0,0,4,0" />
+      <Ellipse Width="10" Height="10" Margin="0,0,12,0" VerticalAlignment="Center">
+        <Ellipse.Style>
+          <Style TargetType="Ellipse">
+            <Setter Property="Fill" Value="#ccc" />
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding IsConnected}" Value="True">
+                <Setter Property="Fill" Value="#43b581" />
+              </DataTrigger>
+            </Style.Triggers>
+          </Style>
+        </Ellipse.Style>
+      </Ellipse>
+      <TextBlock Text="Relay:" VerticalAlignment="Center" Margin="0,0,4,0" />
+      <Ellipse Width="10" Height="10" Margin="0,0,12,0" VerticalAlignment="Center">
+        <Ellipse.Style>
+          <Style TargetType="Ellipse">
+            <Setter Property="Fill" Value="#ccc" />
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding RelayConnected}" Value="True">
+                <Setter Property="Fill" Value="#43b581" />
+              </DataTrigger>
+            </Style.Triggers>
+          </Style>
+        </Ellipse.Style>
+      </Ellipse>
+      <TextBlock Text="LCU:" VerticalAlignment="Center" Margin="0,0,4,0" />
+      <Ellipse Width="10" Height="10" Margin="0,0,12,0" VerticalAlignment="Center">
+        <Ellipse.Style>
+          <Style TargetType="Ellipse">
+            <Setter Property="Fill" Value="#ccc" />
+            <Style.Triggers>
+              <DataTrigger Binding="{Binding LcuConnected}" Value="True">
+                <Setter Property="Fill" Value="#43b581" />
+              </DataTrigger>
+            </Style.Triggers>
+          </Style>
+        </Ellipse.Style>
+      </Ellipse>
+      <TextBlock Text="ID:" VerticalAlignment="Center" Margin="0,0,4,0" />
+      <TextBlock Text="{Binding DiscordIdText}" VerticalAlignment="Center" FontFamily="Consolas" />
+    </StackPanel>
+
+    <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,8">
       <TextBlock Text="lockfile:" VerticalAlignment="Center" Margin="0,0,6,0" />
       <TextBox Text="{Binding LockfilePath, UpdateSourceTrigger=PropertyChanged}"
                Width="300" Margin="0,0,6,0" />
@@ -32,16 +81,18 @@
               Command="{Binding PickLeagueFolderCommand}" />
     </StackPanel>
 
-    <GroupBox Grid.Row="2" Header="설정" Padding="8" Margin="0,0,0,8">
+    <GroupBox Grid.Row="3" Header="설정" Padding="8" Margin="0,0,0,8">
       <StackPanel>
         <CheckBox Content="닷지 후 매칭 자동 재시작 방지"
                   IsChecked="{Binding PreventQueueAfterDodge}" Margin="0,0,0,4" />
         <CheckBox Content="연결 시 기본 상메 적용"
-                  IsChecked="{Binding ApplyDefaultStatusOnConnect}" />
+                  IsChecked="{Binding ApplyDefaultStatusOnConnect}" Margin="0,0,0,4" />
+        <CheckBox Content="Windows 시작 시 자동 실행"
+                  IsChecked="{Binding RunAtWindowsStartup}" />
       </StackPanel>
     </GroupBox>
 
-    <GroupBox Grid.Row="3" Header="로그" Padding="4">
+    <GroupBox Grid.Row="4" Header="로그" Padding="4">
       <ScrollViewer VerticalScrollBarVisibility="Auto">
         <TextBlock Text="{Binding LogText}" FontFamily="Consolas" FontSize="11"
                    TextWrapping="Wrap" />

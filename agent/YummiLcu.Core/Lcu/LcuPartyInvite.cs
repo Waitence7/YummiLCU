@@ -17,4 +17,7 @@ public static class LcuPartyInvite
 
     public static string RiotKey(string gameName, string tagLine) =>
         $"{gameName.Trim()}#{tagLine.Trim()}".ToLowerInvariant();
+
+    public static string RiotKeyFromDisplay(string displayRiotId) =>
+        (displayRiotId ?? "").Trim().ToLowerInvariant();
 }

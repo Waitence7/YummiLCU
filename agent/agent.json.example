@@ -7,5 +7,6 @@
   "ApplyDefaultStatusOnConnect": true,
   "UpdateManifestUrl": "https://yummi.duckdns.org/agent/version.json",
   "CheckUpdatesOnStartup": true,
-  "AutoUpdateEnabled": true
+  "AutoUpdateEnabled": true,
+  "RunAtWindowsStartup": false
 }

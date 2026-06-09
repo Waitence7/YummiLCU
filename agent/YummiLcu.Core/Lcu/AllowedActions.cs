@@ -9,10 +9,10 @@ public static class AllowedActions
 {
     private const int MaxPartyInviteRiotIds = 20;
 
-    private static readonly Dictionary<string, Func<ActionContext, Task<(bool Ok, string Message)>>> Handlers =
+    private static readonly Dictionary<string, Func<ActionContext, Task<ActionResult>>> Handlers =
         new(StringComparer.Ordinal)
         {
-            ["ping"] = _ => Task.FromResult((true, "pong")),
+            ["ping"] = _ => Task.FromResult(new ActionResult(true, "pong")),
             ["accept_match"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/lol-matchmaking/v1/ready-check/accept")),
             ["decline_match"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/lol-matchmaking/v1/ready-check/decline")),
             ["reconnect"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/lol-gameflow/v1/reconnect")),
@@ -25,53 +25,59 @@ public static class AllowedActions
             ["quit_client"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/process-control/v1/process/quit")),
             ["set_status"] = SetStatusAsync,
             ["reset_status"] = async ctx => await SetStatusTextAsync(ctx, StatusMessageHelper.DefaultYummiClient),
-            ["claim_all_rewards"] = async ctx => (true, await LcuRewards.ClaimAllAsync(ctx.Lcu)),
-            ["launch_client"] = _ => Task.FromResult(LeagueLauncher.TryLaunch()),
-            ["create_ranked_lobby"] = async ctx => await LcuQueue.CreateLobbyAsync(ctx.Lcu, LcuQueue.RankedSolo),
-            ["create_normal_lobby"] = async ctx => await LcuQueue.CreateLobbyAsync(ctx.Lcu, LcuQueue.NormalDraft),
-            ["play_ranked_solo"] = async ctx => await LcuQueue.CreateAndQueueAsync(ctx.Lcu, LcuQueue.RankedSolo),
-            ["play_normal_draft"] = async ctx => await LcuQueue.CreateAndQueueAsync(ctx.Lcu, LcuQueue.NormalDraft),
+            ["claim_all_rewards"] = async ctx => new ActionResult(true, await LcuRewards.ClaimAllAsync(ctx.Lcu)),
+            ["launch_client"] = _ => Task.FromResult(ToActionResult(LeagueLauncher.TryLaunch())),
+            ["create_ranked_lobby"] = async ctx => ToActionResult(await LcuQueue.CreateLobbyAsync(ctx.Lcu, LcuQueue.RankedSolo)),
+            ["create_normal_lobby"] = async ctx => ToActionResult(await LcuQueue.CreateLobbyAsync(ctx.Lcu, LcuQueue.NormalDraft)),
+            ["play_ranked_solo"] = async ctx => ToActionResult(await LcuQueue.CreateAndQueueAsync(ctx.Lcu, LcuQueue.RankedSolo)),
+            ["play_normal_draft"] = async ctx => ToActionResult(await LcuQueue.CreateAndQueueAsync(ctx.Lcu, LcuQueue.NormalDraft)),
             ["invite_party_members"] = InvitePartyMembersAsync,
+            ["check_party_members"] = CheckPartyMembersAsync,
         };
 
     public static IReadOnlyCollection<string> Names => Handlers.Keys;
     public static bool IsAllowed(string action) => Handlers.ContainsKey(action);
 
-    public static async Task<(bool Ok, string Message)> ExecuteAsync(string action, ActionContext ctx)
+    public static async Task<ActionResult> ExecuteAsync(string action, ActionContext ctx)
     {
         if (!Handlers.TryGetValue(action, out var fn))
-            return (false, "unknown action");
+            return new ActionResult(false, "unknown action");
         return await fn(ctx);
     }
 
-    private static Task<(bool Ok, string Message)> Bool(bool ok) =>
-        Task.FromResult((ok, ok ? "ok" : "LCU 요청 실패"));
+    private static Task<ActionResult> Bool(bool ok) =>
+        Task.FromResult(ActionResult.FromBool(ok));
 
-    private static async Task<(bool Ok, string Message)> DodgeAsync(ActionContext ctx)
+    private static ActionResult ToActionResult((bool Ok, string Message) result) =>
+        new(result.Ok, result.Message);
+
+    private static async Task<ActionResult> DodgeAsync(ActionContext ctx)
     {
         var ok = await ctx.Lcu.PostAsync("/lol-gameflow/v1/session/dodge");
-        if (!ok) return (false, "닷지 실패");
+        if (!ok) return new ActionResult(false, "닷지 실패");
         if (ctx.Config.PreventQueueAfterDodge)
         {
             await ctx.Lcu.DeleteAsync("/lol-lobby/v2/lobby/matchmaking/search");
-            return (true, "닷지 + 매칭 중지");
+            return new ActionResult(true, "닷지 + 매칭 중지");
         }
-        return (true, "닷지 완료");
+        return new ActionResult(true, "닷지 완료");
     }
 
-    private static async Task<(bool Ok, string Message)> SetStatusAsync(ActionContext ctx)
+    private static async Task<ActionResult> SetStatusAsync(ActionContext ctx)
     {
         var text = PayloadString(ctx.Payload, "text");
         return await SetStatusTextAsync(ctx, text);
     }
 
-    private static async Task<(bool Ok, string Message)> SetStatusTextAsync(ActionContext ctx, string? raw)
+    private static async Task<ActionResult> SetStatusTextAsync(ActionContext ctx, string? raw)
     {
         var text = StatusMessageHelper.Normalize(raw);
         if (!StatusMessageHelper.TryValidate(text, out var err))
-            return (false, err);
+            return new ActionResult(false, err);
         var ok = await ctx.Lcu.SetStatusMessageAsync(text);
-        return ok ? (true, $"상메 설정: {text[..Math.Min(text.Length, 40)]}") : (false, "상메 설정 실패");
+        return ok
+            ? new ActionResult(true, $"상메 설정: {text[..Math.Min(text.Length, 40)]}")
+            : new ActionResult(false, "상메 설정 실패");
     }
 
     private static string? PayloadString(JsonElement? payload, string key)
@@ -101,69 +107,141 @@ public static class AllowedActions
         return list;
     }
 
-    private static async Task<(bool Ok, string Message)> InvitePartyMembersAsync(ActionContext ctx)
+    private static async Task<ActionResult> InvitePartyMembersAsync(ActionContext ctx)
     {
         var lobby = await ctx.Lcu.GetLobbyAsync();
         if (!lobby.IsInLobby)
-            return (false, "로비(파티)가 열려 있지 않습니다.");
+            return new ActionResult(false, "로비(파티)가 열려 있지 않습니다.");
 
         var riotIds = PayloadStringArray(ctx.Payload, "riot_ids");
-        if (riotIds.Count == 0)
-            return (false, "초대할 Riot ID가 없습니다.");
+        var checkIds = PayloadStringArray(ctx.Payload, "check_riot_ids");
+        if (checkIds.Count == 0)
+            checkIds = riotIds;
+        if (riotIds.Count == 0 && checkIds.Count == 0)
+            return new ActionResult(false, "초대할 Riot ID가 없습니다.");
         if (riotIds.Count > MaxPartyInviteRiotIds)
-            return (false, $"초대는 최대 {MaxPartyInviteRiotIds}명까지 가능합니다.");
+            return new ActionResult(false, $"초대는 최대 {MaxPartyInviteRiotIds}명까지 가능합니다.");
 
         var inParty = await ctx.Lcu.GetLobbyMemberRiotKeysAsync();
         var invited = 0;
-        var skipped = 0;
         var failed = 0;
         var details = new List<string>();
+        var memberStatuses = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         foreach (var raw in riotIds)
         {
             if (!LcuPartyInvite.TryParseRiotId(raw, out var gameName, out var tagLine))
             {
                 failed++;
+                memberStatuses[raw] = "invite_failed";
                 details.Add($"{raw}: Riot ID 형식 오류");
                 continue;
             }
 
             var key = LcuPartyInvite.RiotKey(gameName, tagLine);
+            var displayId = $"{gameName}#{tagLine}";
             if (inParty.Contains(key))
             {
-                skipped++;
+                memberStatuses[displayId] = "in_party";
                 continue;
             }
 
-            var summonerId = await ctx.Lcu.ResolveSummonerIdByRiotIdAsync(gameName, tagLine);
+            var (summonerId, lookupError) = await ctx.Lcu.ResolveSummonerIdForInviteAsync(gameName, tagLine);
             if (summonerId is null)
             {
                 failed++;
-                details.Add($"{gameName}#{tagLine}: 닉 조회 실패");
+                memberStatuses[displayId] = "invite_failed";
+                details.Add($"{displayId}: {lookupError ?? "닉 조회 실패"}");
                 continue;
             }
 
             if (await ctx.Lcu.InviteToLobbyAsync(summonerId.Value))
             {
                 invited++;
-                inParty.Add(key);
+                memberStatuses[displayId] = "invited";
             }
             else
             {
                 failed++;
-                details.Add($"{gameName}#{tagLine}: 초대 실패");
+                memberStatuses[displayId] = "invite_failed";
+                details.Add($"{displayId}: 초대 실패");
             }
 
             await Task.Delay(250);
         }
 
-        var summary = $"초대 {invited}명, 스킵 {skipped}명(파티 중), 실패 {failed}명";
+        inParty = await ctx.Lcu.GetLobbyMemberRiotKeysAsync();
+        foreach (var raw in checkIds)
+        {
+            if (!LcuPartyInvite.TryParseRiotId(raw, out var gameName, out var tagLine))
+                continue;
+            var displayId = $"{gameName}#{tagLine}";
+            var key = LcuPartyInvite.RiotKey(gameName, tagLine);
+            if (inParty.Contains(key))
+                memberStatuses[displayId] = "in_party";
+        }
+
+        var members = memberStatuses
+            .Select(kv => new { riot_id = kv.Key, status = kv.Value })
+            .ToList();
+        var allInParty = checkIds.Count > 0 && checkIds.All(raw =>
+        {
+            if (!LcuPartyInvite.TryParseRiotId(raw, out var gn, out var tl))
+                return false;
+            return inParty.Contains(LcuPartyInvite.RiotKey(gn, tl));
+        });
+
+        var summary = $"파티 참가 {members.Count(m => m.status == "in_party")}명, 초대됨 {members.Count(m => m.status == "invited")}명, 실패 {members.Count(m => m.status == "invite_failed")}명";
         if (details.Count > 0 && details.Count <= 6)
             summary += "\n" + string.Join("\n", details);
 
-        var ok = invited > 0 || (skipped > 0 && failed == 0);
-        if (!ok && failed > 0 && invited == 0 && skipped == 0)
-            return (false, summary);
-        return (true, summary);
+        var data = JsonSerializer.SerializeToElement(new { members, all_in_party = allInParty });
+        var ok = allInParty || invited > 0 || members.Any(m => m.status is "in_party" or "invited");
+        if (!ok && failed > 0)
+            return new ActionResult(false, summary, data);
+        return new ActionResult(true, summary, data);
+    }
+
+    private static async Task<ActionResult> CheckPartyMembersAsync(ActionContext ctx)
+    {
+        var lobby = await ctx.Lcu.GetLobbyAsync();
+        if (!lobby.IsInLobby)
+            return new ActionResult(false, "로비(파티)가 열려 있지 않습니다.");
+
+        var checkIds = PayloadStringArray(ctx.Payload, "check_riot_ids");
+        if (checkIds.Count == 0)
+            return new ActionResult(false, "확인할 Riot ID가 없습니다.");
+        if (checkIds.Count > MaxPartyInviteRiotIds)
+            return new ActionResult(false, $"확인은 최대 {MaxPartyInviteRiotIds}명까지 가능합니다.");
+
+        var inParty = await ctx.Lcu.GetLobbyMemberRiotKeysAsync();
+        var (members, allInParty, summary) = BuildPartyCheckResult(checkIds, inParty);
+        var data = JsonSerializer.SerializeToElement(new { members, all_in_party = allInParty });
+        return new ActionResult(true, summary, data);
+    }
+
+    private static (List<object> Members, bool AllInParty, string Summary) BuildPartyCheckResult(
+        IReadOnlyList<string> checkIds,
+        HashSet<string> inParty)
+    {
+        var members = new List<object>();
+        foreach (var raw in checkIds)
+        {
+            if (!LcuPartyInvite.TryParseRiotId(raw, out var gameName, out var tagLine))
+                continue;
+            var displayId = $"{gameName}#{tagLine}";
+            var key = LcuPartyInvite.RiotKey(gameName, tagLine);
+            if (inParty.Contains(key))
+                members.Add(new { riot_id = displayId, status = "in_party" });
+        }
+
+        var allInParty = checkIds.All(raw =>
+        {
+            if (!LcuPartyInvite.TryParseRiotId(raw, out var gn, out var tl))
+                return false;
+            return inParty.Contains(LcuPartyInvite.RiotKey(gn, tl));
+        });
+        var summary = $"파티 참가 {members.Count}/{checkIds.Count}명";
+        return (members, allInParty, summary);
     }
 }
