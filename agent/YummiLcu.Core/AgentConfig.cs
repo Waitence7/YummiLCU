@@ -11,6 +11,9 @@ public sealed class AgentConfig
     public string? LockfilePath { get; set; }
     public bool PreventQueueAfterDodge { get; set; } = true;
     public bool ApplyDefaultStatusOnConnect { get; set; } = true;
+    public bool AutoAcceptMatch { get; set; }
+    /// <summary>롤 클라이언트 실행 시 Relay 자동 연결, 종료 시 연결·앱 종료.</summary>
+    public bool FollowLeagueClient { get; set; } = true;
     public string? UpdateManifestUrl { get; set; } = "https://yummi.duckdns.org/agent/version.json";
     public bool CheckUpdatesOnStartup { get; set; } = true;
     public bool AutoUpdateEnabled { get; set; } = true;
@@ -37,7 +40,11 @@ public sealed class AgentConfig
             try
             {
                 var json = File.ReadAllText(path);
+                using var doc = JsonDocument.Parse(json);
+                var hasFollowLeague = doc.RootElement.TryGetProperty("FollowLeagueClient", out _);
                 cfg = JsonSerializer.Deserialize<AgentConfig>(json) ?? new AgentConfig();
+                if (!hasFollowLeague)
+                    cfg.FollowLeagueClient = true;
             }
             catch
             {
@@ -75,15 +82,14 @@ public sealed class AgentConfig
         File.WriteAllText(ConfigFilePath, json);
     }
 
-    public string WsUrl(string sessionId, string wsToken)
+    public string WsUrl(string sessionId)
     {
         var baseUrl = EnforceHttpsIfPublic(RelayPublicBaseUrl.TrimEnd('/'));
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
             throw new InvalidOperationException("RelayPublicBaseUrl invalid");
         var wsScheme = uri.Scheme == Uri.UriSchemeHttps ? "wss" : "ws";
         var wsBase = $"{wsScheme}://{uri.Host}{(uri.IsDefaultPort ? "" : $":{uri.Port}")}";
-        return
-            $"{wsBase}/ws/agent?session_id={Uri.EscapeDataString(sessionId)}&ws_token={Uri.EscapeDataString(wsToken)}";
+        return $"{wsBase}/ws/agent?session_id={Uri.EscapeDataString(sessionId)}";
     }
 
     public string LoginUrl(string sessionId) =>

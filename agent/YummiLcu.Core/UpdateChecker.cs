@@ -26,6 +26,8 @@ public static class UpdateChecker
             if (Version.Parse(info.Version) <= Version.Parse(CurrentVersion)) return null;
             if (!string.IsNullOrWhiteSpace(info.Url) && !IsHttpsUrl(info.Url))
                 return null;
+            if (!HasRequiredSha256(info))
+                return null;
             return info;
         }
         catch
@@ -54,6 +56,16 @@ public static class UpdateChecker
 
     private static bool IsHttpsUrl(string url) =>
         Uri.TryCreate(url.Trim(), UriKind.Absolute, out var u) && u.Scheme == Uri.UriSchemeHttps;
+
+    private static bool HasRequiredSha256(UpdateInfo info)
+    {
+        if (Version.TryParse(CurrentVersion, out var cur) &&
+            Version.TryParse(info.PatchFrom ?? "", out var from) &&
+            cur == from &&
+            !string.IsNullOrWhiteSpace(info.PatchUrl))
+            return !string.IsNullOrWhiteSpace(info.PatchSha256);
+        return !string.IsNullOrWhiteSpace(info.Sha256);
+    }
 
     public sealed class UpdateInfo
     {

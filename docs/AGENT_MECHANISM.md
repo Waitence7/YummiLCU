@@ -140,24 +140,26 @@ sequenceDiagram
   participant Relay as Relay FastAPI
   participant Redis as Redis
 
-  Agent->>Agent: session_id = GUID
-  Agent->>Browser: /login?session_id=...
-  Agent->>Relay: WSS /ws/agent?session_id=...
+  Agent->>Agent: session_id + ws_token 생성
+  Agent->>Relay: WSS /ws/agent?session_id=... → 첫 메시지 auth(ws_token)
+  Agent->>Browser: /login?session_id=... (WS 선연결 필수)
   Browser->>Relay: Discord OAuth
+  Relay->>Browser: 6자리 링크 코드 표시
+  Agent->>Relay: WS complete_oauth_link(code)
   Relay->>Redis: session → discord_id, status=ok
   loop AuthPollIntervalMs
     Agent->>Relay: GET /auth/status?session_id=
-    Relay-->>Agent: pending | ok
+    Relay-->>Agent: pending | link_pending | ok
   end
   Agent->>Agent: EnsureLcuAsync lockfile 대기
 ```
 
-1. 에이전트가 **랜덤 `session_id`** 생성  
-2. 브라우저로 `RelayPublicBaseUrl/login?session_id=...` 열기 → Discord 로그인  
-3. 동시에 **WebSocket** `wss://.../ws/agent?session_id=...` 연결  
-4. Relay가 Redis에 `discord_id` 저장  
-5. 에이전트가 `/auth/status`를 **폴링**하다 `ok` 수신  
-6. 이후 해당 WS는 `discord_id`에 **바인딩** (`ConnectionManager`) → 에이전트에 `session_bound` push
+1. 에이전트가 **`session_id` + `ws_token`** 생성  
+2. **WebSocket** `wss://.../ws/agent?session_id=...` 연결 후 첫 메시지로 `ws_token` 인증  
+3. 브라우저로 `RelayPublicBaseUrl/login?session_id=...` 열기 → Discord 로그인  
+4. 브라우저에 **6자리 링크 코드** 표시 → 에이전트 UI에 입력 (`complete_oauth_link`)  
+5. Relay가 Redis에 `discord_id` 저장 후 해당 WS에 **바인딩** → `session_bound` push  
+6. 에이전트가 `/auth/status` **폴링**으로 `ok` 확인 (재접속 시 저장 세션은 코드 생략)
 
 설정: [`AgentConfig`](../agent/YummiLcu.Core/AgentConfig.cs) — `RelayPublicBaseUrl`, `AuthPollIntervalMs`
 

@@ -1,4 +1,3 @@
-using System.Threading;
 using System.Windows;
 using YummiLcu.App.ViewModels;
 using YummiLcu.Core;
@@ -9,19 +8,15 @@ public partial class App : System.Windows.Application
 {
     private static Mutex? _singleInstanceMutex;
     private AgentViewModel? _vm;
+    private CancellationTokenSource? _activateListenCts;
 
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
 
-        _singleInstanceMutex = new Mutex(true, "YummiLcu.Agent.SingleInstance", out var created);
-        if (!created)
+        if (!SingleInstanceHelper.TryAcquireMutex(out _singleInstanceMutex))
         {
-            System.Windows.MessageBox.Show(
-                "Yummi Agent가 이미 실행 중입니다.",
-                "Yummi Agent",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            SingleInstanceHelper.SignalActivate();
             Shutdown();
             return;
         }
@@ -43,16 +38,50 @@ public partial class App : System.Windows.Application
         }
 
         _vm = new AgentViewModel(config);
+        _vm.RequestApplicationShutdown += () =>
+        {
+            Current.Dispatcher.Invoke(() =>
+            {
+                if (MainWindow is MainWindow mw)
+                    mw.ShutdownApplication();
+            });
+        };
+
         var main = new MainWindow { DataContext = _vm };
         MainWindow = main;
         main.Show();
+
+        if (config.FollowLeagueClient)
+        {
+            _vm.StartLeagueWatcherIfEnabled();
+            if (!LeagueClientWatcher.IsClientPresent(config))
+                main.HideToTray();
+        }
+
+        _activateListenCts = new CancellationTokenSource();
+        var listenCt = _activateListenCts.Token;
+        _ = Task.Run(() =>
+        {
+            SingleInstanceHelper.ListenForActivate(() =>
+            {
+                Current.Dispatcher.Invoke(() =>
+                {
+                    if (MainWindow is MainWindow mw)
+                        mw.RestoreFromTray();
+                });
+            }, listenCt);
+        }, listenCt);
+
         _ = _vm.CheckUpdatesOnStartupAsync();
     }
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _activateListenCts?.Cancel();
+        _activateListenCts?.Dispose();
         _vm?.Dispose();
-        _singleInstanceMutex?.ReleaseMutex();
+        try { _singleInstanceMutex?.ReleaseMutex(); }
+        catch (ApplicationException) { /* abandoned */ }
         _singleInstanceMutex?.Dispose();
         base.OnExit(e);
     }

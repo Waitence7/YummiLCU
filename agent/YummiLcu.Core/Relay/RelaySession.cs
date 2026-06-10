@@ -50,6 +50,9 @@ public sealed class RelaySession : IAsyncDisposable
     public event Action<bool>? RelayConnectionChanged;
     public event Action<bool>? LcuConnectionChanged;
     public event Action<long?>? DiscordIdChanged;
+    public event Action? OAuthLinkCodeRequired;
+
+    private TaskCompletionSource<bool>? _linkCodeTcs;
 
     public RelaySession(AgentConfig config, string sessionId, string wsToken)
     {
@@ -125,7 +128,10 @@ public sealed class RelaySession : IAsyncDisposable
 
         try
         {
-            await _ws.ConnectAsync(new Uri(_config.WsUrl(_sessionId, _wsToken)), sessionCt);
+            await _ws.ConnectAsync(new Uri(_config.WsUrl(_sessionId)), sessionCt);
+            var authJson = JsonSerializer.Serialize(new { type = "auth", ws_token = _wsToken });
+            var authBytes = Encoding.UTF8.GetBytes(authJson);
+            await _ws.SendAsync(authBytes, WebSocketMessageType.Text, true, sessionCt);
         }
         catch (Exception ex)
         {
@@ -173,6 +179,13 @@ public sealed class RelaySession : IAsyncDisposable
                 {
                     var status = await PollAuthAsync(sessionCt);
                     if (status == AuthPollStatus.Ok) break;
+                    if (status == AuthPollStatus.LinkPending)
+                    {
+                        SetStatus("브라우저 6자리 코드 입력…");
+                        LogLine("Discord 로그인 완료 — 브라우저에 표시된 6자리 코드를 입력하세요.");
+                        OAuthLinkCodeRequired?.Invoke();
+                        break;
+                    }
                     if (status == AuthPollStatus.Expired)
                     {
                         AgentSessionStore.Clear();
@@ -184,6 +197,20 @@ public sealed class RelaySession : IAsyncDisposable
                 catch (Exception ex)
                 {
                     LogLine($"인증 확인 실패: {ex.Message}");
+                }
+                await Task.Delay(_config.AuthPollIntervalMs, sessionCt);
+            }
+
+            while (!sessionCt.IsCancellationRequested)
+            {
+                var status = await PollAuthAsync(sessionCt);
+                if (status == AuthPollStatus.Ok) break;
+                if (status == AuthPollStatus.Expired)
+                {
+                    AgentSessionStore.Clear();
+                    LogLine("로그인 세션 만료 — 다시 Discord 로그인이 필요합니다.");
+                    SetStatus("로그인 만료");
+                    return SessionEndReason.AuthExpired;
                 }
                 await Task.Delay(_config.AuthPollIntervalMs, sessionCt);
             }
@@ -497,6 +524,7 @@ public sealed class RelaySession : IAsyncDisposable
         if (rc.IsActive == _lastReadyCheckActive)
             return;
 
+        var becameActive = rc.IsActive;
         _lastReadyCheckActive = rc.IsActive;
         await SendAgentMessageAsync(
             new
@@ -510,6 +538,40 @@ public sealed class RelaySession : IAsyncDisposable
                 },
             },
             ct);
+
+        if (becameActive && _config.AutoAcceptMatch)
+            _ = TryAutoAcceptMatchAsync(ct);
+    }
+
+    private async Task TryAutoAcceptMatchAsync(CancellationToken ct)
+    {
+        var delayMs = Random.Shared.Next(300, 501);
+        try
+        {
+            await Task.Delay(delayMs, ct);
+            if (_lcu is null || !_config.AutoAcceptMatch)
+                return;
+
+            var rc = await _lcu.GetReadyCheckAsync();
+            if (!rc.IsActive)
+                return;
+
+            var result = await AllowedActions.ExecuteAsync(
+                "accept_match",
+                new ActionContext(_lcu, _config, null));
+            if (result.Ok)
+                LogLine($"매치 자동 수락 ({delayMs}ms 후)");
+            else
+                LogLine($"매치 자동 수락 실패: {result.Message}");
+        }
+        catch (OperationCanceledException)
+        {
+            // session stopped
+        }
+        catch (Exception ex)
+        {
+            LogLine($"매치 자동 수락 오류: {ex.Message}");
+        }
     }
 
     private async Task PushPartyLobbyUpdateAsync(CancellationToken ct)
@@ -629,7 +691,25 @@ public sealed class RelaySession : IAsyncDisposable
         }
     }
 
-    private enum AuthPollStatus { Pending, Ok, Expired }
+    public async Task<bool> SubmitOAuthLinkCodeAsync(string code, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(code)) return false;
+        _linkCodeTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await SendAgentMessageAsync(new { type = "complete_oauth_link", code = code.Trim() }, ct);
+        try
+        {
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            await using var reg = timeout.Token.Register(() => _linkCodeTcs.TrySetResult(false));
+            return await _linkCodeTcs.Task;
+        }
+        finally
+        {
+            _linkCodeTcs = null;
+        }
+    }
+
+    private enum AuthPollStatus { Pending, LinkPending, Ok, Expired }
 
     private async Task<AuthPollStatus> PollAuthAsync(CancellationToken ct)
     {
@@ -640,6 +720,7 @@ public sealed class RelaySession : IAsyncDisposable
         return doc.RootElement.GetProperty("status").GetString() switch
         {
             "ok" => AuthPollStatus.Ok,
+            "link_pending" => AuthPollStatus.LinkPending,
             "expired" => AuthPollStatus.Expired,
             _ => AuthPollStatus.Pending,
         };
@@ -701,6 +782,18 @@ public sealed class RelaySession : IAsyncDisposable
             {
                 var msgType = typeEl.GetString();
                 if (msgType == "pong") return;
+                if (msgType == "oauth_linked")
+                {
+                    _linkCodeTcs?.TrySetResult(true);
+                    return;
+                }
+                if (msgType == "oauth_link_failed")
+                {
+                    _linkCodeTcs?.TrySetResult(false);
+                    var failMsg = root.TryGetProperty("message", out var fm) ? fm.GetString() : null;
+                    LogLine(string.IsNullOrWhiteSpace(failMsg) ? "링크 코드 확인 실패" : $"링크 코드 실패: {failMsg}");
+                    return;
+                }
                 if (msgType == "session_bound")
                 {
                     if (root.TryGetProperty("discord_id", out var didEl) && didEl.TryGetInt64(out var did))
@@ -804,7 +897,20 @@ public sealed class RelaySession : IAsyncDisposable
         _cts?.Cancel();
         _lcuEventCts?.Cancel();
         if (_ws?.State == WebSocketState.Open)
-            await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "bye", CancellationToken.None);
+        {
+            try
+            {
+                using var closeCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                await _ws.CloseAsync(
+                    WebSocketCloseStatus.NormalClosure,
+                    "bye",
+                    closeCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                // 네트워크 지연 시 강제 종료
+            }
+        }
         _ws?.Dispose();
         _lcu?.Dispose();
         _http.Dispose();

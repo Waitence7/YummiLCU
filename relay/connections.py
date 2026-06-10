@@ -97,6 +97,10 @@ class ConnectionManager:
     def session_ws_token(self, session_id: str) -> str | None:
         return self._session_ws_token.get(session_id)
 
+    def has_active_session_ws(self, session_id: str) -> bool:
+        """OAuth 시작 전 에이전트 WS 가 붙어 있는지."""
+        return session_id in self._session_ws
+
     def ws_session_id(self, ws: WebSocket) -> str | None:
         return self._ws_session_id.get(id(ws))
 

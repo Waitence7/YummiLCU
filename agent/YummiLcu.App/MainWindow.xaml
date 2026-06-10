@@ -13,6 +13,7 @@
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
     </Grid.RowDefinitions>
 
@@ -81,18 +82,42 @@
               Command="{Binding PickLeagueFolderCommand}" />
     </StackPanel>
 
-    <GroupBox Grid.Row="3" Header="설정" Padding="8" Margin="0,0,0,8">
+    <StackPanel Grid.Row="3" Margin="0,0,0,8">
+      <StackPanel.Style>
+        <Style TargetType="StackPanel">
+          <Setter Property="Visibility" Value="Collapsed" />
+          <Style.Triggers>
+            <DataTrigger Binding="{Binding IsOAuthLinkPending}" Value="True">
+              <Setter Property="Visibility" Value="Visible" />
+            </DataTrigger>
+          </Style.Triggers>
+        </Style>
+      </StackPanel.Style>
+      <TextBlock Text="브라우저에 표시된 6자리 코드를 입력하세요." Margin="0,0,0,4" Foreground="#c45c26" />
+      <StackPanel Orientation="Horizontal">
+        <TextBox Text="{Binding OauthLinkCode, UpdateSourceTrigger=PropertyChanged}"
+                 Width="120" MaxLength="6" FontFamily="Consolas" FontSize="16"
+                 Margin="0,0,8,0" />
+        <Button Content="코드 확인" Width="80" Command="{Binding SubmitOAuthLinkCodeCommand}" />
+      </StackPanel>
+    </StackPanel>
+
+    <GroupBox Grid.Row="4" Header="설정" Padding="8" Margin="0,0,0,8">
       <StackPanel>
         <CheckBox Content="닷지 후 매칭 자동 재시작 방지"
                   IsChecked="{Binding PreventQueueAfterDodge}" Margin="0,0,0,4" />
         <CheckBox Content="연결 시 기본 상메 적용"
                   IsChecked="{Binding ApplyDefaultStatusOnConnect}" Margin="0,0,0,4" />
+        <CheckBox Content="매치 자동 수락 (0.3~0.5초 후)"
+                  IsChecked="{Binding AutoAcceptMatch}" Margin="0,0,0,4" />
+        <CheckBox Content="롤 클라이언트와 함께 자동 시작/종료"
+                  IsChecked="{Binding FollowLeagueClient}" Margin="0,0,0,4" />
         <CheckBox Content="Windows 시작 시 자동 실행"
                   IsChecked="{Binding RunAtWindowsStartup}" />
       </StackPanel>
     </GroupBox>
 
-    <GroupBox Grid.Row="4" Header="로그" Padding="4">
+    <GroupBox Grid.Row="5" Header="로그" Padding="4">
       <ScrollViewer VerticalScrollBarVisibility="Auto">
         <TextBlock Text="{Binding LogText}" FontFamily="Consolas" FontSize="11"
                    TextWrapping="Wrap" />

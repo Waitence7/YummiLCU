@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 
 namespace YummiLcu.Core;
@@ -9,6 +11,8 @@ public static class AgentSessionStore
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 
     public sealed record SavedSession(string SessionId, string WsToken);
+
+    private sealed record EncryptedStoreFile(int V, string Payload);
 
     private static string StorePath =>
         Path.Combine(
@@ -25,13 +29,14 @@ public static class AgentSessionStore
         {
             if (!File.Exists(StorePath)) return null;
             var json = File.ReadAllText(StorePath);
-            var row = JsonSerializer.Deserialize<SavedSession>(json);
-            if (row is null ||
-                string.IsNullOrWhiteSpace(row.SessionId) ||
-                string.IsNullOrWhiteSpace(row.WsToken) ||
-                row.WsToken.Length < 16)
-                return null;
-            return row;
+            var encrypted = JsonSerializer.Deserialize<EncryptedStoreFile>(json);
+            if (encrypted?.V == 2 && !string.IsNullOrWhiteSpace(encrypted.Payload))
+            {
+                var plain = UnprotectPayload(encrypted.Payload);
+                if (plain is null) return null;
+                return DeserializeSession(plain);
+            }
+            return DeserializeSession(json);
         }
         catch
         {
@@ -46,8 +51,12 @@ public static class AgentSessionStore
             var dir = Path.GetDirectoryName(StorePath);
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
-            var json = JsonSerializer.Serialize(new SavedSession(sessionId, wsToken), JsonOpts);
-            File.WriteAllText(StorePath, json);
+            var inner = JsonSerializer.Serialize(new SavedSession(sessionId, wsToken), JsonOpts);
+            var payload = ProtectPayload(inner);
+            var outer = payload is not null
+                ? JsonSerializer.Serialize(new EncryptedStoreFile(2, payload), JsonOpts)
+                : inner;
+            File.WriteAllText(StorePath, outer);
         }
         catch
         {
@@ -65,6 +74,49 @@ public static class AgentSessionStore
         catch
         {
             // ignore
+        }
+    }
+
+    private static SavedSession? DeserializeSession(string json)
+    {
+        var row = JsonSerializer.Deserialize<SavedSession>(json);
+        if (row is null ||
+            string.IsNullOrWhiteSpace(row.SessionId) ||
+            string.IsNullOrWhiteSpace(row.WsToken) ||
+            row.WsToken.Length < 16)
+            return null;
+        return row;
+    }
+
+    private static string? ProtectPayload(string plain)
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return null;
+        try
+        {
+            var bytes = Encoding.UTF8.GetBytes(plain);
+            var protectedBytes = ProtectedData.Protect(bytes, null, DataProtectionScope.CurrentUser);
+            return Convert.ToBase64String(protectedBytes);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? UnprotectPayload(string payloadB64)
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return null;
+        try
+        {
+            var protectedBytes = Convert.FromBase64String(payloadB64);
+            var bytes = ProtectedData.Unprotect(protectedBytes, null, DataProtectionScope.CurrentUser);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        catch
+        {
+            return null;
         }
     }
 }

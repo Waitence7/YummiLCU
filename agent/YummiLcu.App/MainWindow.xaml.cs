@@ -36,11 +36,27 @@ public partial class MainWindow : Window
         _tray.ContextMenuStrip = menu;
     }
 
-    private void RestoreFromTray()
+    public void RestoreFromTray()
     {
         Show();
         WindowState = WindowState.Normal;
         Activate();
+        Topmost = true;
+        Topmost = false;
+        Focus();
+    }
+
+    public void HideToTray()
+    {
+        Hide();
+        if (_tray is not null)
+            _tray.Visible = true;
+    }
+
+    public void ShutdownApplication()
+    {
+        _reallyClose = true;
+        System.Windows.Application.Current.Shutdown();
     }
 
     private void Window_StateChanged(object? sender, EventArgs e)
@@ -57,9 +73,17 @@ public partial class MainWindow : Window
     {
         if (!_reallyClose)
         {
-            e.Cancel = true;
-            Hide();
-            return;
+            var connected = DataContext is AgentViewModel vm && vm.IsConnected;
+            if (!connected)
+            {
+                _reallyClose = true;
+            }
+            else
+            {
+                e.Cancel = true;
+                Hide();
+                return;
+            }
         }
 
         if (_tray is not null)

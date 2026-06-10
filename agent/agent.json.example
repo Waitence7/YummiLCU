@@ -5,6 +5,8 @@
   "AuthPollIntervalMs": 1500,
   "PreventQueueAfterDodge": true,
   "ApplyDefaultStatusOnConnect": true,
+  "AutoAcceptMatch": false,
+  "FollowLeagueClient": true,
   "UpdateManifestUrl": "https://yummi.duckdns.org/agent/version.json",
   "CheckUpdatesOnStartup": true,
   "AutoUpdateEnabled": true,

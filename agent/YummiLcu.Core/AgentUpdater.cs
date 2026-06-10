@@ -72,11 +72,11 @@ public static class AgentUpdater
             return (false, $"다운로드 실패: {ex.Message}");
         }
 
-        if (!string.IsNullOrWhiteSpace(expectedSha256Hex))
-        {
-            if (!VerifySha256File(zipPath, expectedSha256Hex))
-                return (false, "업데이트 zip SHA-256 검증 실패");
-        }
+        if (string.IsNullOrWhiteSpace(expectedSha256Hex))
+            return (false, "manifest에 sha256 이 없어 업데이트를 거부했습니다");
+
+        if (!VerifySha256File(zipPath, expectedSha256Hex))
+            return (false, "업데이트 zip SHA-256 검증 실패");
 
         try
         {

@@ -14,7 +14,6 @@ import logging
 import secrets
 import time
 import uuid
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -35,13 +34,15 @@ logger = logging.getLogger("yummi_lcu.relay")
 SESSION_KEY = "relay:session:{session_id}"
 SESSION_STATUS_KEY = "relay:session_status:{session_id}"
 WS_TOKEN_KEY = "relay:ws_token:{session_id}"
+OAUTH_LINK_PENDING_KEY = "relay:oauth_link_pending:{session_id}"
 OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
+OAUTH_LINK_CODE_TTL_SEC = 600
+WS_AUTH_TIMEOUT_SEC = 15.0
 
-# internal API 인증 실패 rate limit (IP → 타임스탬프 목록)
-_failed_internal_auth: dict[str, list[float]] = defaultdict(list)
 _INTERNAL_AUTH_MAX_FAILS = 20
 _INTERNAL_AUTH_WINDOW_SEC = 60.0
+_INTERNAL_AUTH_REDIS_KEY = "relay:internal_auth_fail:{ip}"
 
 _LONG_COMMAND_ACTIONS = frozenset({"launch_client", "play_ranked_solo", "play_normal_draft"})
 _COMMAND_TIMEOUT_DEFAULT_SEC = 30.0
@@ -65,6 +66,18 @@ def _ws_token_redis_key(session_id: str) -> str:
     return WS_TOKEN_KEY.format(session_id=session_id)
 
 
+def _oauth_link_pending_redis_key(session_id: str) -> str:
+    return OAUTH_LINK_PENDING_KEY.format(session_id=session_id)
+
+
+def _internal_auth_redis_key(ip: str) -> str:
+    return _INTERNAL_AUTH_REDIS_KEY.format(ip=ip)
+
+
+def _generate_link_code() -> str:
+    return "".join(secrets.choice("0123456789") for _ in range(6))
+
+
 async def _claim_or_verify_ws_token(r: redis.Redis, session_id: str, ws_token: str) -> bool:
     """첫 WS 연결이 ws_token 을 선점. 이후 동일 session_id 는 같은 토큰만 허용."""
     key = _ws_token_redis_key(session_id)
@@ -83,6 +96,45 @@ async def _refresh_session_ttl(r: redis.Redis, session_id: str) -> None:
     pipe.expire(_status_redis_key(session_id), ttl)
     pipe.expire(_ws_token_redis_key(session_id), ttl)
     await pipe.execute()
+
+
+async def _complete_oauth_link(
+    conn: ConnectionManager,
+    r: redis.Redis,
+    websocket: WebSocket,
+    code: str,
+) -> bool:
+    """브라우저 OAuth 후 에이전트에 입력한 6자리 코드로 discord_id 바인딩."""
+    session_id = conn.ws_session_id(websocket)
+    if not session_id:
+        return False
+    raw_pending = await r.get(_oauth_link_pending_redis_key(session_id))
+    if not raw_pending:
+        return False
+    try:
+        pending = json.loads(raw_pending)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(pending, dict):
+        return False
+    expected = str(pending.get("code") or "").strip()
+    submitted = code.strip().replace(" ", "")
+    if not expected or not secrets.compare_digest(expected, submitted):
+        return False
+    try:
+        discord_id = int(pending["discord_id"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    if discord_id <= 0:
+        return False
+
+    ttl = config.relay_session_ttl_sec()
+    await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
+    await r.set(_status_redis_key(session_id), "ok", ex=ttl)
+    await r.delete(_oauth_link_pending_redis_key(session_id))
+    bound = await _try_bind_discord(conn, r, session_id, discord_id)
+    logger.info("OAuth 링크 코드 확인 discord_id=%s session=%s bound_ws=%s", discord_id, session_id[:8], bound)
+    return bound
 
 
 async def _try_bind_discord(
@@ -114,20 +166,40 @@ def _client_ip(request: Request) -> str:
     return "unknown"
 
 
-def _record_internal_auth_failure(ip: str) -> None:
-    now = time.monotonic()
-    window = _INTERNAL_AUTH_WINDOW_SEC
-    attempts = _failed_internal_auth[ip]
-    attempts[:] = [t for t in attempts if now - t < window]
-    attempts.append(now)
+async def _record_internal_auth_failure(r: redis.Redis, ip: str) -> None:
+    key = _internal_auth_redis_key(ip)
+    count = await r.incr(key)
+    if count == 1:
+        await r.expire(key, int(_INTERNAL_AUTH_WINDOW_SEC))
 
 
-def _is_internal_auth_rate_limited(ip: str) -> bool:
-    now = time.monotonic()
-    window = _INTERNAL_AUTH_WINDOW_SEC
-    attempts = _failed_internal_auth.get(ip, [])
-    attempts[:] = [t for t in attempts if now - t < window]
-    return len(attempts) >= _INTERNAL_AUTH_MAX_FAILS
+async def _is_internal_auth_rate_limited(r: redis.Redis, ip: str) -> bool:
+    raw = await r.get(_internal_auth_redis_key(ip))
+    if raw is None:
+        return False
+    try:
+        return int(raw) >= _INTERNAL_AUTH_MAX_FAILS
+    except ValueError:
+        return False
+
+
+async def _read_ws_auth_payload(websocket: WebSocket) -> dict[str, Any] | None:
+    """첫 WebSocket 메시지에서 auth JSON 파싱 (쿼리 시크릿 미사용)."""
+    try:
+        msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_SEC)
+    except (asyncio.TimeoutError, WebSocketDisconnect):
+        return None
+    if msg == "ping":
+        await websocket.send_json({"type": "pong"})
+        try:
+            msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_SEC)
+        except (asyncio.TimeoutError, WebSocketDisconnect):
+            return None
+    try:
+        data = json.loads(msg)
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 @asynccontextmanager
@@ -186,13 +258,16 @@ async def login(
     request: Request,
     session_id: str = Query(..., min_length=8, max_length=64),
 ) -> RedirectResponse:
-    """에이전트가 연 브라우저용 Discord OAuth 시작."""
+    """에이전트가 연 브라우저용 Discord OAuth 시작 (에이전트 WS 선연결 필수)."""
     if not config.oauth_configured():
         raise HTTPException(503, "OAuth not configured")
     try:
         uuid.UUID(session_id)
     except ValueError as e:
         raise HTTPException(400, "invalid session_id") from e
+    conn: ConnectionManager = request.app.state.connections
+    if not conn.has_active_session_ws(session_id):
+        raise HTTPException(400, "에이전트를 먼저 연결해 주세요.")
     oauth_state = secrets.token_urlsafe(32)
     r: redis.Redis = request.app.state.redis
     await r.set(_oauth_state_redis_key(oauth_state), session_id, ex=OAUTH_STATE_TTL_SEC)
@@ -233,26 +308,33 @@ async def auth_callback(
         return HTMLResponse("<h1>Discord 사용자 ID 조회 실패</h1>", status_code=502)
 
     ttl = config.relay_session_ttl_sec()
-    await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
-    await r.set(_status_redis_key(session_id), "ok", ex=ttl)
-    bound = await _try_bind_discord(conn, r, session_id, discord_id)
-    logger.info("OAuth 완료 discord_id=%s session=%s bound_ws=%s", discord_id, session_id[:8], bound)
+    link_code = _generate_link_code()
+    pending = json.dumps({"discord_id": discord_id, "code": link_code})
+    await r.set(_oauth_link_pending_redis_key(session_id), pending, ex=OAUTH_LINK_CODE_TTL_SEC)
+    await r.set(_status_redis_key(session_id), "link_pending", ex=ttl)
+    logger.info("OAuth 대기(링크 코드) discord_id=%s session=%s", discord_id, session_id[:8])
+    safe_code = html.escape(link_code, quote=True)
     return HTMLResponse(
-        "<h1>로그인 완료</h1><p>이 창을 닫고 에이전트로 돌아가세요.</p>",
+        "<h1>Discord 로그인 완료</h1>"
+        f"<p>에이전트에 아래 <strong>6자리 코드</strong>를 입력하세요.</p>"
+        f"<p style='font-size:2rem;letter-spacing:0.3em;font-family:monospace'>{safe_code}</p>"
+        "<p>코드는 10분간 유효합니다. 이 창은 닫아도 됩니다.</p>",
         status_code=200,
     )
 
 
 @app.get("/auth/status")
 async def auth_status(request: Request, session_id: str = Query(..., min_length=8, max_length=64)) -> JSONResponse:
-    """에이전트 폴링 — pending | ok | expired."""
+    """에이전트 폴링 — pending | link_pending | ok | expired."""
     r: redis.Redis = request.app.state.redis
     conn: ConnectionManager = request.app.state.connections
+    st = await r.get(_status_redis_key(session_id))
+    if st == "expired":
+        return JSONResponse({"status": "expired"})
+    if st == "link_pending":
+        return JSONResponse({"status": "link_pending"})
     raw = await r.get(_session_redis_key(session_id))
     if raw is None:
-        st = await r.get(_status_redis_key(session_id))
-        if st == "expired":
-            return JSONResponse({"status": "expired"})
         return JSONResponse({"status": "pending"})
     try:
         discord_id = int(raw)
@@ -316,6 +398,18 @@ async def _handle_agent_message(
         return
 
     msg_type = data.get("type")
+    if msg_type == "complete_oauth_link":
+        code = data.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return
+        r: redis.Redis = websocket.app.state.redis
+        ok = await _complete_oauth_link(conn, r, websocket, code)
+        if ok:
+            await websocket.send_json({"type": "oauth_linked"})
+        else:
+            await websocket.send_json({"type": "oauth_link_failed", "message": "invalid or expired code"})
+        return
+
     if msg_type == "guild_match_eog":
         discord_id = conn.discord_id_for_ws(websocket)
         payload = data.get("payload")
@@ -400,19 +494,29 @@ async def _handle_agent_message(
 async def ws_agent(
     websocket: WebSocket,
     session_id: str = Query(..., min_length=8, max_length=64),
-    ws_token: str = Query(..., min_length=16, max_length=128),
 ) -> None:
-    """C# 에이전트 연결. session_id(URL) + ws_token(WS 전용) 으로 OAuth 바인딩 보호."""
+    """C# 에이전트 연결. session_id(URL) + 첫 메시지 ws_token 으로 OAuth 바인딩 보호."""
     try:
         uuid.UUID(session_id)
     except ValueError:
         await websocket.close(code=1008)
         return
+
+    await websocket.accept()
+    auth_payload = await _read_ws_auth_payload(websocket)
+    if auth_payload is None or auth_payload.get("type") != "auth":
+        await websocket.close(code=1008)
+        return
+    ws_token = auth_payload.get("ws_token")
+    if not isinstance(ws_token, str) or len(ws_token) < 16 or len(ws_token) > 128:
+        await websocket.close(code=1008)
+        return
+
     r: redis.Redis = websocket.app.state.redis
     if not await _claim_or_verify_ws_token(r, session_id, ws_token):
         await websocket.close(code=1008)
         return
-    await websocket.accept()
+
     conn: ConnectionManager = websocket.app.state.connections
     await conn.attach_session(session_id, websocket, ws_token)
 
@@ -506,17 +610,19 @@ async def _handle_bot_message(conn: ConnectionManager, msg: str) -> None:
 
 
 @app.websocket("/ws/bot")
-async def ws_bot(
-    websocket: WebSocket,
-    secret: str = Query(..., min_length=8, max_length=256),
-) -> None:
-    """YummiBot 실시간 이벤트 수신. RELAY_INTERNAL_SECRET 으로 인증."""
+async def ws_bot(websocket: WebSocket) -> None:
+    """YummiBot 실시간 이벤트 수신. 첫 메시지로 RELAY_INTERNAL_SECRET 인증."""
+    await websocket.accept()
+    auth_payload = await _read_ws_auth_payload(websocket)
     expected = config.relay_internal_secret()
-    if not expected or not secrets.compare_digest(secret, expected):
+    if not expected or auth_payload is None or auth_payload.get("type") != "auth":
+        await websocket.close(code=1008)
+        return
+    secret = auth_payload.get("secret")
+    if not isinstance(secret, str) or not secrets.compare_digest(secret, expected):
         await websocket.close(code=1008)
         return
 
-    await websocket.accept()
     conn: ConnectionManager = websocket.app.state.connections
     await conn.register_bot_ws(websocket)
 
@@ -546,18 +652,19 @@ class InternalCommandBody(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-def _verify_internal_secret(
+async def _verify_internal_secret(
     request: Request,
     x_relay_internal_secret: str | None = Header(None),
 ) -> None:
     ip = _client_ip(request)
-    if _is_internal_auth_rate_limited(ip):
+    r: redis.Redis = request.app.state.redis
+    if await _is_internal_auth_rate_limited(r, ip):
         raise HTTPException(429, "too many requests")
     expected = config.relay_internal_secret()
     if not expected:
         raise HTTPException(503, "internal API not configured")
     if not x_relay_internal_secret or not secrets.compare_digest(x_relay_internal_secret, expected):
-        _record_internal_auth_failure(ip)
+        await _record_internal_auth_failure(r, ip)
         raise HTTPException(401, "unauthorized")
 
 
@@ -568,7 +675,7 @@ async def internal_command(
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     """누른 유저 discord_id의 에이전트로만 action 전달."""
-    _verify_internal_secret(request, x_relay_internal_secret)
+    await _verify_internal_secret(request, x_relay_internal_secret)
     if not is_allowed_action(body.action):
         raise HTTPException(400, f"action not allowed: {body.action}")
     if body.action in ("invite_party_members", "check_party_members"):
@@ -617,7 +724,7 @@ async def internal_participant_status(
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     """참가자별 최신 LCU 상태 (에이전트 push 캐시)."""
-    _verify_internal_secret(request, x_relay_internal_secret)
+    await _verify_internal_secret(request, x_relay_internal_secret)
     conn: ConnectionManager = request.app.state.connections
     discord_ids: list[int] = []
     for part in ids.split(","):
@@ -639,7 +746,7 @@ async def internal_online(
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     """에이전트 연결 여부 (봇 UI용)."""
-    _verify_internal_secret(request, x_relay_internal_secret)
+    await _verify_internal_secret(request, x_relay_internal_secret)
     conn: ConnectionManager = request.app.state.connections
     online = conn.is_online(discord_id)
     body: dict[str, Any] = {

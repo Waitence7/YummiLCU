@@ -15,17 +15,23 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     private readonly AgentConfig _config;
     private RelaySession? _relay;
     private CancellationTokenSource? _relayCts;
+    private LeagueClientWatcher? _leagueWatcher;
+    private CancellationTokenSource? _leagueWatcherCts;
 
     [ObservableProperty] private string _statusText = "연결 시작 → Discord 로그인";
     [ObservableProperty] private string _lockfilePath = "";
     [ObservableProperty] private bool _preventQueueAfterDodge = true;
     [ObservableProperty] private bool _applyDefaultStatusOnConnect = true;
+    [ObservableProperty] private bool _autoAcceptMatch;
+    [ObservableProperty] private bool _followLeagueClient = true;
     [ObservableProperty] private bool _runAtWindowsStartup;
     [ObservableProperty] private bool _isConnected;
     [ObservableProperty] private bool _relayConnected;
     [ObservableProperty] private bool _lcuConnected;
     [ObservableProperty] private string _discordIdText = "—";
     [ObservableProperty] private string _logText = "";
+    [ObservableProperty] private string _oauthLinkCode = "";
+    [ObservableProperty] private bool _isOAuthLinkPending;
 
     public ObservableCollection<string> LogLines { get; } = new();
 
@@ -35,7 +41,52 @@ public partial class AgentViewModel : ObservableObject, IDisposable
         _lockfilePath = config.LockfilePath ?? "";
         _preventQueueAfterDodge = config.PreventQueueAfterDodge;
         _applyDefaultStatusOnConnect = config.ApplyDefaultStatusOnConnect;
+        _autoAcceptMatch = config.AutoAcceptMatch;
+        _followLeagueClient = config.FollowLeagueClient;
         _runAtWindowsStartup = config.RunAtWindowsStartup || WindowsStartupHelper.IsEnabled();
+    }
+
+    public event Action? RequestApplicationShutdown;
+
+    public void StartLeagueWatcherIfEnabled()
+    {
+        if (!_config.FollowLeagueClient || _leagueWatcherCts is not null)
+            return;
+
+        if (!RunAtWindowsStartup)
+            AppendLog("팁: 롤 켜기 전 에이전트가 꺼져 있으면 자동 연결되지 않습니다. Windows 시작 시 자동 실행을 켜 두세요.");
+
+        _leagueWatcher = new LeagueClientWatcher();
+        _leagueWatcher.LeagueClientStarted += OnLeagueClientStarted;
+        _leagueWatcher.LeagueClientStopped += OnLeagueClientStopped;
+        _leagueWatcherCts = new CancellationTokenSource();
+        _ = Task.Run(() => _leagueWatcher.RunAsync(_config, _leagueWatcherCts.Token));
+
+        if (LeagueClientWatcher.IsClientPresent(_config) && !IsConnected)
+            _ = StartAsync();
+
+        if (!LeagueClientWatcher.IsClientPresent(_config))
+            StatusText = "롤 클라이언트 대기 중…";
+    }
+
+    private void OnLeagueClientStarted()
+    {
+        System.Windows.Application.Current.Dispatcher.Invoke(() =>
+        {
+            if (!IsConnected)
+                _ = StartAsync();
+        });
+    }
+
+    private void OnLeagueClientStopped()
+    {
+        System.Windows.Application.Current.Dispatcher.Invoke(async () =>
+        {
+            if (IsConnected)
+                await StopAsync();
+            AppendLog("롤 클라이언트 종료 — 에이전트를 닫습니다.");
+            RequestApplicationShutdown?.Invoke();
+        });
     }
 
     public async Task CheckUpdatesOnStartupAsync()
@@ -79,6 +130,10 @@ public partial class AgentViewModel : ObservableObject, IDisposable
         _relay.RelayConnectionChanged += connected => RelayConnected = connected;
         _relay.LcuConnectionChanged += connected => LcuConnected = connected;
         _relay.DiscordIdChanged += id => DiscordIdText = id?.ToString() ?? "—";
+        _relay.OAuthLinkCodeRequired += () =>
+        {
+            System.Windows.Application.Current.Dispatcher.Invoke(() => IsOAuthLinkPending = true);
+        };
         _relayCts = new CancellationTokenSource();
         _ = Task.Run(async () =>
         {
@@ -110,15 +165,56 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     {
         _relayCts?.Cancel();
         if (_relay is not null)
-            await _relay.DisposeAsync();
+        {
+            try
+            {
+                await _relay.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8));
+            }
+            catch (TimeoutException)
+            {
+                AppendLog("연결 종료 타임아웃 — 백그라운드 정리 중");
+            }
+        }
+        if (_config.FollowLeagueClient
+            && _leagueWatcher is not null
+            && LeagueClientWatcher.IsClientPresent(_config))
+        {
+            _leagueWatcher.NotifyManualDisconnectWhileClientRunning();
+        }
+
+        _relayCts?.Dispose();
+        _relayCts = null;
         _relay = null;
         IsConnected = false;
         RelayConnected = false;
         LcuConnected = false;
+        IsOAuthLinkPending = false;
+        OauthLinkCode = "";
         StatusText = "중지됨";
     }
 
     private bool CanStop() => IsConnected;
+
+    [RelayCommand]
+    private async Task SubmitOAuthLinkCodeAsync()
+    {
+        if (_relay is null || string.IsNullOrWhiteSpace(OauthLinkCode))
+        {
+            AppendLog("6자리 코드를 입력하세요.");
+            return;
+        }
+        var ok = await _relay.SubmitOAuthLinkCodeAsync(OauthLinkCode.Trim(), _relayCts?.Token ?? CancellationToken.None);
+        if (ok)
+        {
+            OauthLinkCode = "";
+            IsOAuthLinkPending = false;
+            AppendLog("Discord 연결 코드 확인됨");
+        }
+        else
+        {
+            AppendLog("코드가 올바르지 않거나 만료되었습니다.");
+        }
+    }
 
     [RelayCommand]
     private async Task ReLoginAsync()
@@ -177,6 +273,19 @@ public partial class AgentViewModel : ObservableObject, IDisposable
 
     partial void OnPreventQueueAfterDodgeChanged(bool value) => SaveFeatureFlags();
     partial void OnApplyDefaultStatusOnConnectChanged(bool value) => SaveFeatureFlags();
+    partial void OnAutoAcceptMatchChanged(bool value) => SaveFeatureFlags();
+
+    partial void OnFollowLeagueClientChanged(bool value)
+    {
+        _config.FollowLeagueClient = value;
+        try { _config.Save(); }
+        catch { /* ignore */ }
+
+        if (value)
+            StartLeagueWatcherIfEnabled();
+        else
+            StopLeagueWatcher();
+    }
 
     partial void OnRunAtWindowsStartupChanged(bool value)
     {
@@ -190,8 +299,23 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     {
         _config.PreventQueueAfterDodge = PreventQueueAfterDodge;
         _config.ApplyDefaultStatusOnConnect = ApplyDefaultStatusOnConnect;
+        _config.AutoAcceptMatch = AutoAcceptMatch;
+        _config.FollowLeagueClient = FollowLeagueClient;
         try { _config.Save(); }
         catch { /* ignore */ }
+    }
+
+    private void StopLeagueWatcher()
+    {
+        _leagueWatcherCts?.Cancel();
+        _leagueWatcherCts?.Dispose();
+        _leagueWatcherCts = null;
+        if (_leagueWatcher is not null)
+        {
+            _leagueWatcher.LeagueClientStarted -= OnLeagueClientStarted;
+            _leagueWatcher.LeagueClientStopped -= OnLeagueClientStopped;
+            _leagueWatcher = null;
+        }
     }
 
     private void SaveLockfilePath()
@@ -225,6 +349,7 @@ public partial class AgentViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        StopLeagueWatcher();
         _relayCts?.Cancel();
         _relay?.DisposeAsync().AsTask().GetAwaiter().GetResult();
     }
