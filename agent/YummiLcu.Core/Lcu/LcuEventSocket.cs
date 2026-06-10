@@ -10,6 +10,7 @@ public enum LcuApiEventKind
     Lobby,
     Gameflow,
     Matchmaking,
+    ReadyCheck,
 }
 
 public readonly record struct LcuApiEvent(LcuApiEventKind Kind, string Uri, string EventType, string? Data);
@@ -32,6 +33,11 @@ public sealed class LcuEventSocket : IAsyncDisposable
     {
         "/lol-matchmaking/v1/search",
         "/lol-lobby/v2/lobby/matchmaking/search-state",
+    };
+
+    private static readonly HashSet<string> ReadyCheckUris = new(StringComparer.Ordinal)
+    {
+        "/lol-matchmaking/v1/ready-check",
     };
 
     private readonly int _port;
@@ -133,6 +139,7 @@ public sealed class LcuEventSocket : IAsyncDisposable
         if (LobbyUris.Contains(uri)) return LcuApiEventKind.Lobby;
         if (GameflowUris.Contains(uri)) return LcuApiEventKind.Gameflow;
         if (MatchmakingUris.Contains(uri)) return LcuApiEventKind.Matchmaking;
+        if (ReadyCheckUris.Contains(uri)) return LcuApiEventKind.ReadyCheck;
         return LcuApiEventKind.Unknown;
     }
 

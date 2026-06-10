@@ -270,6 +270,53 @@ public sealed class LcuClient : IDisposable
         return phase;
     }
 
+    public async Task<ParticipantStatusSnapshot> BuildParticipantStatusAsync()
+    {
+        var phase = await GetGameflowPhaseAsync() ?? "None";
+        var lobby = await GetLobbyAsync();
+
+        long? gameStartedAtMs = null;
+        if (phase is "InProgress" or "PreEndOfGame")
+            gameStartedAtMs = await GetGameStartedAtMsAsync();
+
+        var status = MapParticipantStatus(phase, lobby);
+        return new ParticipantStatusSnapshot(status, phase, gameStartedAtMs, true);
+    }
+
+    private static string MapParticipantStatus(string phase, LobbyInfo lobby) =>
+        phase switch
+        {
+            "InProgress" or "PreEndOfGame" => "in_game",
+            "ChampSelect" => "champ_select",
+            "Lobby" when lobby.IsInLobby => "lobby",
+            _ => "waiting",
+        };
+
+    private async Task<long?> GetGameStartedAtMsAsync()
+    {
+        using var doc = await GetJsonAsync("/lol-gameflow/v1/session");
+        if (doc is null) return null;
+        if (!doc.RootElement.TryGetProperty("gameData", out var gameData))
+            return null;
+
+        if (gameData.TryGetProperty("gameCreation", out var creationEl) &&
+            creationEl.TryGetInt64(out var creationMs) && creationMs > 0)
+            return creationMs;
+
+        if (gameData.TryGetProperty("gameTime", out var gameTimeEl))
+        {
+            var seconds = gameTimeEl.GetDouble();
+            if (seconds > 10_000)
+                seconds /= 1000.0;
+            if (seconds <= 0)
+                return null;
+            var startedMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - (long)(seconds * 1000.0);
+            return startedMs > 0 ? startedMs : null;
+        }
+
+        return null;
+    }
+
     public async Task<LobbyInfo> GetLobbyAsync()
     {
         using var doc = await GetJsonAsync("/lol-lobby/v2/lobby");
@@ -420,6 +467,24 @@ public sealed class LcuClient : IDisposable
         if (root.TryGetProperty("summonerId", out var sid) && sid.TryGetInt64(out var id))
             return id;
         return null;
+    }
+
+    public async Task<ReadyCheckInfo> GetReadyCheckAsync()
+    {
+        using var doc = await GetJsonAsync("/lol-matchmaking/v1/ready-check");
+        if (doc is null) return ReadyCheckInfo.Inactive;
+
+        var root = doc.RootElement;
+        if (root.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return ReadyCheckInfo.Inactive;
+
+        var state = root.TryGetProperty("state", out var st) ? st.GetString() ?? "" : "";
+        var playerResponse = root.TryGetProperty("playerResponse", out var pr)
+            ? pr.GetString() ?? ""
+            : "";
+        var isActive = state is "InProgress" or "Waiting"
+            && playerResponse is "" or "None" or "Pending";
+        return new ReadyCheckInfo(isActive, state, playerResponse);
     }
 
     public async Task<MatchmakingStatus> GetMatchmakingStatusAsync()

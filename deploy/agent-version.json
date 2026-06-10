@@ -2,7 +2,9 @@
   "version": "0.5.3",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
   "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.5.3.exe",
+  "notes": "Build d2f8e04",
+  "sha256": "6b50af0ef3d321af80dfe4a8410d56e4d7a6da65759b1dd1d439697e643f9bb8",
   "patchUrl": "https://yummi.duckdns.org/agent/YummiAgent-patch.zip",
   "patchFrom": "0.5.2",
-  "notes": "슬림 업데이트(~8MB 전체 / ~2MB 패치), Relay·LCU 재연결, LCU WS (v0.5.3)"
+  "patchSha256": "9356646174b992376fa919f0592e52fdcfe76a877ecba0334420445d2344b199"
 }

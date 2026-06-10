@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from fastapi import WebSocket
@@ -27,6 +28,9 @@ class ConnectionManager:
         self._bot_ws: WebSocket | None = None
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._gameflow_subscribers: set[int] = set()
+        self._match_dm_subscribers: set[int] = set()
+        self._participant_status_subscribers: set[int] = set()
+        self._participant_status: dict[int, dict[str, Any]] = {}
         self._agent_info: dict[int, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
@@ -63,8 +67,17 @@ class ConnectionManager:
         return True
 
     async def unregister_ws(self, ws: WebSocket) -> None:
+        offline_id: int | None = None
+        offline_payload: dict[str, Any] | None = None
         async with self._lock:
+            wid = id(ws)
+            did = self._ws_discord.get(wid)
+            if did is not None:
+                offline_id = int(did)
+                offline_payload = self._offline_participant_status_locked(offline_id)
             self._drop_ws_locked(ws)
+        if offline_id is not None and offline_payload is not None:
+            await self.forward_participant_status_update(offline_id, offline_payload)
 
     def _drop_ws_locked(self, ws: WebSocket) -> None:
         wid = id(ws)
@@ -171,6 +184,131 @@ class ConnectionManager:
 
     def unsubscribe_gameflow(self, discord_id: int) -> None:
         self._gameflow_subscribers.discard(int(discord_id))
+
+    def subscribe_match_dm(self, discord_id: int) -> None:
+        self._match_dm_subscribers.add(int(discord_id))
+
+    def unsubscribe_match_dm(self, discord_id: int) -> None:
+        self._match_dm_subscribers.discard(int(discord_id))
+
+    def subscribe_participant_status(self, discord_id: int) -> None:
+        self._participant_status_subscribers.add(int(discord_id))
+        logger.debug(
+            "participant_status 구독 + discord_id=%s (총 %s)",
+            discord_id,
+            len(self._participant_status_subscribers),
+        )
+
+    def unsubscribe_participant_status(self, discord_id: int) -> None:
+        self._participant_status_subscribers.discard(int(discord_id))
+        logger.debug(
+            "participant_status 구독 - discord_id=%s (총 %s)",
+            discord_id,
+            len(self._participant_status_subscribers),
+        )
+
+    def participant_status_subscribers_snapshot(self) -> set[int]:
+        return set(self._participant_status_subscribers)
+
+    def _offline_participant_status_locked(self, discord_id: int) -> dict[str, Any]:
+        payload = {
+            "status": "offline",
+            "phase": "None",
+            "game_started_at_ms": None,
+            "lcu_ready": False,
+            "agent_online": False,
+            "updated_at": time.time(),
+        }
+        self._participant_status[int(discord_id)] = dict(payload)
+        return payload
+
+    def set_participant_status(self, discord_id: int, data: dict[str, Any]) -> dict[str, Any]:
+        started_raw = data.get("game_started_at_ms")
+        if started_raw is None:
+            started_raw = data.get("game_started_at")
+        payload = {
+            "status": str(data.get("status") or "waiting"),
+            "phase": data.get("phase"),
+            "game_started_at_ms": None,
+            "lcu_ready": bool(data.get("lcu_ready")),
+            "agent_online": bool(data.get("agent_online", True)),
+            "updated_at": time.time(),
+        }
+        if started_raw is not None:
+            try:
+                payload["game_started_at_ms"] = int(started_raw)
+            except (TypeError, ValueError):
+                payload["game_started_at_ms"] = None
+        self._participant_status[int(discord_id)] = payload
+        return payload
+
+    def get_participant_status(self, discord_id: int) -> dict[str, Any] | None:
+        row = self._participant_status.get(int(discord_id))
+        return dict(row) if row else None
+
+    def get_participant_statuses(self, discord_ids: list[int]) -> dict[int, dict[str, Any]]:
+        out: dict[int, dict[str, Any]] = {}
+        for raw_id in discord_ids:
+            did = int(raw_id)
+            cached = self._participant_status.get(did)
+            if cached is not None:
+                out[did] = dict(cached)
+            elif not self.is_online(did):
+                out[did] = {
+                    "status": "offline",
+                    "phase": "None",
+                    "game_started_at_ms": None,
+                    "lcu_ready": False,
+                    "agent_online": False,
+                    "updated_at": 0.0,
+                }
+        return out
+
+    async def forward_participant_status_update(
+        self, discord_id: int, data: dict[str, Any]
+    ) -> bool:
+        async with self._lock:
+            if int(discord_id) not in self._participant_status_subscribers:
+                return False
+            ws = self._bot_ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(
+                {
+                    "type": "participant_status_update",
+                    "discord_id": int(discord_id),
+                    "data": data,
+                }
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "봇 WS participant_status_update 전달 실패 discord_id=%s", discord_id
+            )
+            await self.unregister_bot_ws(ws)
+            return False
+
+    async def forward_ready_check_update(self, discord_id: int, data: dict[str, Any]) -> bool:
+        async with self._lock:
+            if int(discord_id) not in self._match_dm_subscribers:
+                return False
+            ws = self._bot_ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(
+                {
+                    "type": "ready_check_update",
+                    "discord_id": int(discord_id),
+                    "data": data,
+                }
+            )
+            return True
+        except Exception:
+            logger.exception("봇 WS ready_check_update 전달 실패 discord_id=%s", discord_id)
+            await self.unregister_bot_ws(ws)
+            return False
 
     async def forward_gameflow_update(self, discord_id: int, data: dict[str, Any]) -> bool:
         async with self._lock:

@@ -29,10 +29,13 @@ public sealed class RelaySession : IAsyncDisposable
     private string _idleStatus = "대기 중 (명령 수신)";
     private DateTime _lastPartyPushUtc = DateTime.MinValue;
     private DateTime _lastGameflowPushUtc = DateTime.MinValue;
+    private DateTime _lastParticipantStatusPushUtc = DateTime.MinValue;
+    private string? _lastParticipantStatusKey;
     private string? _lockfileSignature;
     private volatile bool _lcuEventWsOpen;
     private volatile bool _relayWsOpen;
     private bool _lcuConnected;
+    private bool _lastReadyCheckActive;
     private long? _discordId;
 
     private static readonly TimeSpan PushDebounce = TimeSpan.FromMilliseconds(300);
@@ -332,7 +335,7 @@ public sealed class RelaySession : IAsyncDisposable
         await SendAgentHelloAsync(ct);
     }
 
-    private Task DisconnectLcuAsync()
+    private async Task DisconnectLcuAsync()
     {
         _lcuEventCts?.Cancel();
         _lcuEventCts?.Dispose();
@@ -346,7 +349,9 @@ public sealed class RelaySession : IAsyncDisposable
             LobbyChanged?.Invoke(_lastLobby);
         }
         SetLcuConnected(false);
-        return Task.CompletedTask;
+        _lastParticipantStatusKey = null;
+        var ct = _sessionCts?.Token ?? _cts?.Token ?? CancellationToken.None;
+        await PushParticipantStatusAsync(ct, force: true);
     }
 
     private async Task LcuEventLoopAsync(CancellationToken ct)
@@ -407,6 +412,10 @@ public sealed class RelaySession : IAsyncDisposable
                 break;
             case LcuApiEventKind.Matchmaking:
                 await RefreshMatchmakingFromLcuAsync(ct);
+                await TryPushReadyCheckUpdateAsync(ct);
+                break;
+            case LcuApiEventKind.ReadyCheck:
+                await TryPushReadyCheckUpdateAsync(ct);
                 break;
             case LcuApiEventKind.Gameflow:
             {
@@ -427,6 +436,7 @@ public sealed class RelaySession : IAsyncDisposable
         if (lobby == _lastLobby) return;
         _lastLobby = lobby;
         LobbyChanged?.Invoke(lobby);
+        await PushParticipantStatusAsync(ct);
     }
 
     private async Task RefreshMatchmakingFromLcuAsync(CancellationToken ct)
@@ -444,6 +454,7 @@ public sealed class RelaySession : IAsyncDisposable
             SetStatus(_idleStatus);
             _wasSearching = false;
         }
+
     }
 
     private async Task HandleGameflowPhaseAsync(string phase, CancellationToken ct)
@@ -471,7 +482,34 @@ public sealed class RelaySession : IAsyncDisposable
         {
             _lastGameflowPhase = phase;
             await PushGameflowUpdateAsync(phase, ct);
+            await PushParticipantStatusAsync(ct);
         }
+
+        if (phase is "ReadyCheck" or "ChampSelect" or "Lobby" or "None" or "Matchmaking")
+            await TryPushReadyCheckUpdateAsync(ct);
+    }
+
+    private async Task TryPushReadyCheckUpdateAsync(CancellationToken ct)
+    {
+        if (_lcu is null) return;
+
+        var rc = await _lcu.GetReadyCheckAsync();
+        if (rc.IsActive == _lastReadyCheckActive)
+            return;
+
+        _lastReadyCheckActive = rc.IsActive;
+        await SendAgentMessageAsync(
+            new
+            {
+                type = "ready_check_update",
+                data = new
+                {
+                    active = rc.IsActive,
+                    state = rc.State,
+                    player_response = rc.PlayerResponse,
+                },
+            },
+            ct);
     }
 
     private async Task PushPartyLobbyUpdateAsync(CancellationToken ct)
@@ -506,6 +544,38 @@ public sealed class RelaySession : IAsyncDisposable
             ct);
     }
 
+    private async Task PushParticipantStatusAsync(CancellationToken ct, bool force = false)
+    {
+        if (_ws?.State != WebSocketState.Open || _discordId is null)
+            return;
+
+        var snapshot = _lcu is not null
+            ? await _lcu.BuildParticipantStatusAsync()
+            : ParticipantStatusSnapshot.WaitingWithoutLcu();
+
+        var key = $"{snapshot.Status}:{snapshot.Phase}:{snapshot.GameStartedAtMs}";
+        if (!force && key == _lastParticipantStatusKey)
+            return;
+
+        _lastParticipantStatusKey = key;
+        _lastParticipantStatusPushUtc = DateTime.UtcNow;
+
+        await SendAgentMessageAsync(
+            new
+            {
+                type = "participant_status_update",
+                data = new
+                {
+                    status = snapshot.Status,
+                    phase = snapshot.Phase,
+                    game_started_at_ms = snapshot.GameStartedAtMs,
+                    lcu_ready = snapshot.LcuReady,
+                    agent_online = true,
+                },
+            },
+            ct);
+    }
+
     private async Task SendAgentHelloAsync(CancellationToken ct)
     {
         await SendAgentMessageAsync(
@@ -517,6 +587,7 @@ public sealed class RelaySession : IAsyncDisposable
                 os = Environment.OSVersion.VersionString,
             },
             ct);
+        await PushParticipantStatusAsync(ct, force: true);
     }
 
     private async Task TrySendGuildMatchEogSnapshotAsync(string phase, CancellationToken ct)
@@ -644,6 +715,11 @@ public sealed class RelaySession : IAsyncDisposable
                 if (msgType == "request_party_snapshot")
                 {
                     await PushPartyLobbyUpdateAsync(ct);
+                    return;
+                }
+                if (msgType == "request_participant_status")
+                {
+                    await PushParticipantStatusAsync(ct, force: true);
                     return;
                 }
                 if (msgType != "command") return;

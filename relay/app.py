@@ -352,12 +352,33 @@ async def _handle_agent_message(
         await conn.forward_party_lobby_update(discord_id, payload)
         return
 
+    if msg_type == "ready_check_update":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("data")
+        if discord_id is None or not isinstance(payload, dict):
+            return
+        await conn.forward_ready_check_update(discord_id, payload)
+        return
+
     if msg_type == "gameflow_update":
         discord_id = conn.discord_id_for_ws(websocket)
         payload = data.get("data")
         if discord_id is None or not isinstance(payload, dict):
             return
         await conn.forward_gameflow_update(discord_id, payload)
+        if isinstance(payload, dict) and payload.get("phase") == "ReadyCheck":
+            await conn.forward_ready_check_update(
+                discord_id, {"active": True, "source": "gameflow"}
+            )
+        return
+
+    if msg_type == "participant_status_update":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("data")
+        if discord_id is None or not isinstance(payload, dict):
+            return
+        stored = conn.set_participant_status(discord_id, payload)
+        await conn.forward_participant_status_update(discord_id, stored)
         return
 
     if msg_type == "command_result":
@@ -455,6 +476,33 @@ async def _handle_bot_message(conn: ConnectionManager, msg: str) -> None:
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:
             conn.unsubscribe_gameflow(raw_id)
+        return
+    if msg_type == "subscribe_match_dm":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.subscribe_match_dm(raw_id)
+        return
+    if msg_type == "unsubscribe_match_dm":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.unsubscribe_match_dm(raw_id)
+        return
+    if msg_type == "subscribe_participant_status":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.subscribe_participant_status(raw_id)
+            if conn.is_online(raw_id):
+                await conn.send_command(
+                    raw_id, {"type": "request_participant_status"}
+                )
+            cached = conn.get_participant_status(raw_id)
+            if cached is not None:
+                await conn.forward_participant_status_update(raw_id, cached)
+        return
+    if msg_type == "unsubscribe_participant_status":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.unsubscribe_participant_status(raw_id)
 
 
 @app.websocket("/ws/bot")
@@ -560,6 +608,28 @@ async def internal_command(
         raise HTTPException(502, "agent disconnected") from None
 
     return JSONResponse({"ok": True, "request_id": req_id, "result": result})
+
+
+@app.get("/internal/participant-status")
+async def internal_participant_status(
+    request: Request,
+    ids: str = Query(..., min_length=1, max_length=4096),
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    """참가자별 최신 LCU 상태 (에이전트 push 캐시)."""
+    _verify_internal_secret(request, x_relay_internal_secret)
+    conn: ConnectionManager = request.app.state.connections
+    discord_ids: list[int] = []
+    for part in ids.split(","):
+        part = part.strip()
+        if part.isdigit():
+            discord_ids.append(int(part))
+    if not discord_ids:
+        raise HTTPException(400, "ids required")
+    if len(discord_ids) > 50:
+        raise HTTPException(400, "ids max 50")
+    statuses = conn.get_participant_statuses(discord_ids)
+    return JSONResponse({"statuses": {str(k): v for k, v in statuses.items()}})
 
 
 @app.get("/internal/online/{discord_id}")

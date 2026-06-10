@@ -90,6 +90,7 @@ flowchart TB
 |------------|------|
 | `/lol-lobby/v2/lobby` | 파티 로비 → `party_lobby_update` Relay push |
 | `/lol-gameflow/v1/gameflow-phase` | 닷지 방지, 내전 EOG, `gameflow_update` push |
+| `/lol-matchmaking/v1/ready-check` | 레디체크 → `ready_check_update` push (Discord `/dm`) |
 | `/lol-matchmaking/v1/search` 등 | 매칭 상태 UI |
 
 - LCU WS가 끊기면 **30초 HTTP 폴백**으로 게임플로·로비·매칭을 보완합니다.
@@ -105,7 +106,24 @@ flowchart TB
 | `agent_hello` | 연결 시 버전·LCU 준비 상태 |
 | `party_lobby_update` | 로비 멤버 변경 → Relay → 봇 WS |
 | `gameflow_update` | 게임 단계 변경 (Lobby, ChampSelect 등) |
+| `ready_check_update` | 레디체크 활성/타이머 → Relay → 봇 `/dm` DM 알림 |
 | `guild_match_eog` | 내전 종료 스냅샷 → Tournament API |
+
+### 3.6 Relay → 봇 WebSocket (`/ws/bot`)
+
+봇은 Relay에 **내부 secret**으로 WebSocket을 연결합니다 (`relay_ws.py`). 에이전트 push를 구독·전달합니다.
+
+| 봇 → Relay | 용도 |
+|------------|------|
+| `subscribe_party` / `unsubscribe_party` | 모집 작성자 로비 실시간 감시 |
+| `subscribe_match_dm` / `unsubscribe_match_dm` | `/dm` 활성 사용자 레디체크 알림 |
+
+| Relay → 봇 | 용도 |
+|------------|------|
+| `party_lobby_update` | 모집 패널 로비 상태 갱신 |
+| `ready_check_update` | 매치 DM (수락/거절 버튼) |
+
+구버전 에이전트는 `gameflow_update`의 `phase: ReadyCheck`로 `/dm`이 동작합니다 (Relay 폴백).
 
 ---
 
@@ -243,11 +261,14 @@ Discord 모집 패널(증바람·자랭·내전)에서 작성자가 **게임 초
 
 ## 7. 자동 업데이트 메커니즘
 
-1. 시작 시 `UpdateManifestUrl`(예: `.../agent-version.json`) GET  
-2. manifest `version` > 현재 어셈블리 버전이면 zip URL 다운로드  
-3. [`AgentUpdater`](../agent/YummiLcu.Core/AgentUpdater.cs)가 임시 폴더에 풀고 **cmd 스크립트**로  
-   - 프로세스 종료 대기 → `robocopy`로 publish 폴더 덮어쓰기 → `YummiLcu.App.exe` 재실행  
-4. `agent.json`은 가능하면 유지 (`robocopy /XF agent.json`)
+1. 시작 시 `UpdateManifestUrl`(예: `.../agent/version.json`) GET  
+2. manifest `version` > 현재 어셈블리 버전이면 다운로드  
+   - `patchFrom`이 현재 버전과 일치하면 `patchUrl` (~130KB) 우선  
+   - 아니면 전체 `url` 슬림 zip (~240KB)  
+3. [`AgentUpdater`](../agent/YummiLcu.Core/AgentUpdater.cs)가 슬림/레거시(self-contained) 레이아웃을 구분해 적용  
+   - 레거시(60MB+ 단일 exe)는 자동 슬림 갱신 불가 → 설치 프로그램 마이그레이션 필요  
+4. 임시 폴더에 풀고 **cmd 스크립트**로 프로세스 종료 대기 → `robocopy` → `YummiLcu.App.exe` 재실행  
+5. `agent.json`은 가능하면 유지 (`robocopy /XF agent.json`)
 
 배포 manifest: [`deploy/agent-version.json`](../deploy/agent-version.json) — CI 빌드 시 csproj `<Version>`과 동기화.
 

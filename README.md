@@ -1,16 +1,16 @@
 # YummiLcu
 
-Discord 봇([Yummibot](../Yummibot))과 유저 PC의 League Client (LCU)를 중계합니다.
+Discord 봇([YummiBot](../YummiBot))과 유저 PC의 League Client (LCU)를 중계합니다.
 
 ## 구성
 
 | 경로 | 설명 |
 |------|------|
 | `relay/` | FastAPI — OAuth, WebSocket, 봇용 internal HTTP |
-| `agent/` | C# WinForms **포터블** 에이전트 (유저 PC) |
+| `agent/` | C# WPF 에이전트 (유저 PC, v0.5.3) |
 | `deploy/` | nginx, systemd, `agent-version.json`, `agent-publish.sh` |
 
-배포 **B**: Yummibot `main.py`와 Relay는 **별 프로세스**. 봇은 `http://127.0.0.1:8790` 으로만 명령 전달.
+배포 **B**: YummiBot `main.py`와 Relay는 **별 프로세스**. 봇은 `http://127.0.0.1:8790` (HTTP + `/ws/bot`)으로 Relay와 통신.
 
 ---
 
@@ -26,9 +26,9 @@ uv run yummi-lcu-relay
 
 공개 HTTPS/WSS는 Nginx로 `RELAY_PUBLIC_BASE_URL` → `127.0.0.1:8790` 프록시 (`deploy/nginx-waitence.conf` 참고).
 
-## Yummibot 연동
+## YummiBot 연동
 
-`Yummibot/.env`:
+`YummiBot/.env`:
 
 ```env
 RELAY_INTERNAL_URL=http://127.0.0.1:8790
@@ -43,16 +43,25 @@ Discord Developer Portal → OAuth2 Redirect: `https://<도메인>/auth/discord/
 
 ## 에이전트 (유저 PC)
 
-- **처음 설치:** `YummiAgent-Setup-x.x.x.exe` (Inno Setup) 실행  
-- **자동 업데이트:** 서버 zip → 기존 설치 폴더에 덮어쓰기 (`.NET` 불필요)
+- **처음 설치:** `YummiAgent-Setup-x.x.x.exe` (Inno Setup, .NET 8 Desktop Runtime 필요)  
+- **자동 업데이트:** 서버 zip → 기존 설치 폴더에 덮어쓰기 (슬림 빌드 기준 ~240KB)
 
 | 빌드 | 용도 |
 |------|------|
-| `agent/build.bat` | 기본 — 포터블 (~80–150MB) |
-| `agent/build-slim.bat` | 작은 zip (~5–15MB), PC에 .NET 8 Desktop Runtime 필요 |
+| `agent/build.bat` / `build-installer.bat` | 슬림 publish + Inno Setup (~2MB 설치 파일) |
+| `agent/build-slim.bat` | 슬림 zip만 (~240KB), PC에 .NET 8 Desktop Runtime 필요 |
 
 설정은 exe **옆** `agent.json` (`agent/agent.json.example` 참고).  
-자세한 UI·lockfile: `agent/README.md`.
+UI·lockfile·실시간 push: [`agent/README.md`](agent/README.md).
+
+### 봇 연동 기능 (요약)
+
+| 기능 | 경로 |
+|------|------|
+| `/lcu` 패널 | 봇 HTTP → Relay → 에이전트 WS → LCU |
+| 모집 **게임 초대하기** | `invite_party_members` |
+| 모집 로비 실시간 갱신 | 에이전트 `party_lobby_update` → Relay `/ws/bot` → 봇 |
+| `/dm` 매치 알림 | `ready_check_update` (또는 `gameflow_update` ReadyCheck) → DM 수락/거절 버튼 |
 
 ---
 
@@ -75,20 +84,27 @@ Discord Developer Portal → OAuth2 Redirect: `https://<도메인>/auth/discord/
 - **`agent.json`은 덮어쓰지 않음** — URL, lockfile, 옵션은 업데이트 후에도 유지.
 - 업데이트 중 에이전트가 **잠깐 꺼졌다 켜짐** (롤·Relay 연결도 끊김).
 
-### 서버 쪽 두 파일
+### 서버 쪽 파일
 
 | 파일 | 역할 | 제공 방법 |
 |------|------|-----------|
-| `deploy/agent-version.json` | 버전·다운로드 URL·릴리스 노트 | Relay `GET /agent/version.json` |
-| `/var/www/yummi-agent/YummiAgent.zip` | 실제 포터블 zip | nginx 정적 (`/agent/YummiAgent.zip`) |
+| `deploy/agent-version.json` | 버전·다운로드 URL·패치·SHA256 | Relay `GET /agent/version.json` |
+| `/var/www/yummi-agent/YummiAgent.zip` | 슬림 전체 zip | nginx 정적 |
+| `/var/www/yummi-agent/YummiAgent-patch.zip` | 슬림→슬림 패치 (선택) | nginx 정적 |
+| `/var/www/yummi-agent/YummiAgent-Setup-*.exe` | 최초 설치 | nginx 정적 |
 
-manifest 예시:
+manifest 예시 (v0.5.3+):
 
 ```json
 {
-  "version": "0.3.1",
+  "version": "0.5.3",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
-  "notes": "변경 내용 한 줄"
+  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.5.3.exe",
+  "patchUrl": "https://yummi.duckdns.org/agent/YummiAgent-patch.zip",
+  "patchFrom": "0.5.2",
+  "notes": "변경 내용 한 줄",
+  "sha256": "...",
+  "patchSha256": "..."
 }
 ```
 
@@ -130,10 +146,17 @@ chmod +x deploy/agent-publish.sh
 
 **3. GitHub Actions** (선택 자동화)
 
-- `main`에 `agent/**` push → Windows에서 포터블 zip 빌드 + `deploy/agent-version.json` 생성
-- Artifacts: `YummiAgent-Setup` (설치 프로그램), `YummiAgent-win-x64-portable` (자동 업데이트 zip)
+- `main`에 `agent/**` push → Windows에서 슬림 zip·패치·설치 파일 빌드 + `deploy/agent-version.json` 생성
+- Artifacts: `YummiAgent-Setup`, `YummiAgent-win-x64-portable`, `YummiAgent-patch` (해당 시)
 - VM 자동 배포: **Secrets** `VM_HOST`, `VM_USER`, `VM_SSH_KEY` + **Variable** `VM_DEPLOY_ENABLED` = `true`  
-  (job 조건에서 secrets는 쓸 수 없어 Variable로 deploy job on/off)
+  (UFW 등으로 SCP가 막히면 job이 skip될 수 있음)
+
+**4. VM에서 수동 배포** (`gh auth login` 필요):
+
+```bash
+cd ~/Yummi/YummiLcu
+./deploy/vm-deploy-agent.sh --download-only   # 마지막 성공 빌드 artifact → /var/www/yummi-agent/
+```
 
 ---
 
@@ -142,7 +165,7 @@ chmod +x deploy/agent-publish.sh
 ### 보안·설정
 
 - **`agent.json`은 Git에 올리지 마세요** — Relay URL, lockfile 경로 등. 예시만 `agent.json.example` 커밋.
-- **`RELAY_INTERNAL_SECRET`** 은 Relay·Yummibot만 공유. 유저 PC 에이전트에는 없음.
+- **`RELAY_INTERNAL_SECRET`** 은 Relay·YummiBot만 공유. 유저 PC 에이전트에는 없음.
 - Discord OAuth는 **Relay 공개 URL** 기준. 도메인 바꾸면 Developer Portal Redirect도 수정.
 
 ### lockfile
@@ -155,8 +178,9 @@ chmod +x deploy/agent-publish.sh
 ### LCU 명령 (whitelist)
 
 - 허용 명령은 **`relay/actions.py`** 와 **`agent/.../AllowedActions.cs`** 에 동일하게 있어야 함.
-- 새 action 추가 시 Relay·에이전트·Yummibot `lcu_relay.py` 를 함께 맞출 것.
+- 새 action 추가 시 Relay·에이전트·YummiBot `lcu_relay.py` 를 함께 맞출 것.
 - 디스코드 `/lcu` — 롤 시작, 솔랭/일겜 돌리기, 매칭 수락 등. 실행·매칭은 수 분 걸릴 수 있음.
+- 디스코드 `/dm` — 매치 잡힘 시 DM 알림 (수락/거절 버튼). Redis + Relay `subscribe_match_dm` 구독.
 
 ### 매칭·클라이언트
 
@@ -175,14 +199,15 @@ chmod +x deploy/agent-publish.sh
 | 증상 | 확인 |
 |------|------|
 | 업데이트 안 됨 | VM `agent-version.json` version > PC exe 버전? zip URL 브라우저에서 다운로드 되는지? |
+| 구버전 self-contained | 60MB+ 단일 exe는 슬림 zip 자동 갱신 불가 → **Setup 설치**로 마이그레이션 |
 | exe만 있고 설정 날아감 | 같은 폴더에 `agent.json` 있는지 (업데이트는 json 보존) |
 | 개발 중 계속 재시작 | `AutoUpdateEnabled: false` 또는 manifest version 내리지 않기 |
-| Actions만 쓰는 경우 | Artifacts zip을 VM에 올린 뒤 `agent-publish.sh` 실행 (Artifacts URL은 로그인 필요라 manifest에 쓰기 부적합) |
+| Actions deploy skip | `vm-deploy-agent.sh --download-only` 또는 `agent-publish.sh`로 수동 배포 |
 
 ### 저장소
 
 - GitHub에는 **이 레포(YummiLCU)만** — `agent/`, `relay/`, `deploy/`.
-- Yummibot은 별도 경로/저장소.
+- YummiBot은 별도 경로/저장소.
 
 ---
 

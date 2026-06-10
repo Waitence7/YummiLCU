@@ -31,7 +31,7 @@ agent/
 | `build-installer.bat` | Inno Setup + zip |
 | `dev-run.bat` | 디버그 실행 |
 
-실행 파일: `YummiLcu.App.exe` (v0.5.0+)
+실행 파일: `YummiLcu.App.exe` (현재 **v0.5.3**)
 
 ## 화면
 
@@ -65,15 +65,30 @@ agent/
 
 모집 **게임 초대하기**는 `invite_party_members` action으로 동일 경로를 사용합니다 (v0.5.1+).
 
-## 자동 업데이트 용량 (v0.5.3+)
+## Relay 실시간 push (v0.5.2+)
+
+에이전트가 LCU WebSocket 이벤트를 감지해 Relay로 push합니다. Relay는 봇 WebSocket(`/ws/bot`)으로 전달합니다.
+
+| type | 용도 |
+|------|------|
+| `agent_hello` | 연결 시 버전·LCU 준비 상태 |
+| `party_lobby_update` | 파티 로비 변경 → 모집 패널 실시간 갱신 |
+| `gameflow_update` | 게임 단계 (Lobby, ReadyCheck, ChampSelect 등) |
+| `ready_check_update` | 레디체크 상세 → Discord `/dm` 수락·거절 알림 |
+
+`ready_check_update`가 없는 구버전 에이전트는 `gameflow_update`의 `ReadyCheck` 단계로 `/dm`이 동작합니다.
+
+## 자동 업데이트 (v0.5.3+ 슬림)
 
 | 패키지 | 용량(대략) | 용도 |
 |--------|-----------|------|
-| `YummiAgent.zip` | ~8MB | 슬림 전체 (.NET 8 런타임 별도) |
-| `YummiAgent-patch.zip` | ~2MB | App.exe+Core.dll만 (이전 슬림→슬림) |
-| `YummiAgent-Setup-*.exe` | ~10MB | 최초 설치 (.NET 8 Desktop Runtime 필요) |
+| `YummiAgent.zip` | ~240KB | 슬림 전체 (framework-dependent, .NET 8 Desktop Runtime 별도) |
+| `YummiAgent-patch.zip` | ~130KB | App.exe + Core.dll만 (슬림→슬림 패치) |
+| `YummiAgent-Setup-*.exe` | ~2MB | 최초 설치 (Inno Setup, .NET 8 Desktop Runtime 확인) |
 
-구버전(단일 exe 60MB+ self-contained)은 **설치 프로그램**으로 한 번 마이그레이션해야 합니다.
+구버전(**self-contained** 단일 exe 60MB+)은 슬림 zip으로 자동 갱신되지 않습니다. **설치 프로그램**으로 한 번 마이그레이션하세요.
+
+manifest (`agent-version.json`)에 `patchUrl`·`patchFrom`이 있으면 해당 버전에서 패치 zip을 우선 사용합니다.
 
 ## 작동 원리 (상세)
 
