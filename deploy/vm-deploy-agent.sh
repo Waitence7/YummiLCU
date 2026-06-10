@@ -35,7 +35,7 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 if ! gh auth status >/dev/null 2>&1; then
-  echo "gh 미로그인 — manual-deploy-from-ci.py 로 artifact 배포 (SSH deploy-vm 실패 시 동일)"
+  echo "gh 미로그인 — manual-deploy-from-ci.py 로 artifact 배포"
   exec python3 "$ROOT/deploy/manual-deploy-from-ci.py"
 fi
 
