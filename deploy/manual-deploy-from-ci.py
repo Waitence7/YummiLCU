@@ -64,8 +64,13 @@ def _latest_build_run_id(token: str) -> int:
         f"https://api.github.com/repos/{REPO}/actions/workflows/{WORKFLOW}/runs?per_page=15",
     ).get("workflow_runs", [])
     for run in runs:
-        if run.get("conclusion") == "success":
-            return int(run["id"])
+        rid = int(run["id"])
+        jobs = _api(
+            token, f"https://api.github.com/repos/{REPO}/actions/runs/{rid}/jobs"
+        ).get("jobs", [])
+        for job in jobs:
+            if job.get("name") == "build" and job.get("conclusion") == "success":
+                return rid
     raise SystemExit("build 성공 run 없음")
 
 
