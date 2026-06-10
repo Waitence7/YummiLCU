@@ -86,7 +86,7 @@ def main() -> int:
         )["artifacts"]
     }
     if not arts:
-        print(f"artifact 없음 run={RUN_ID}", file=sys.stderr)
+        print(f"artifact 없음 run={run_id}", file=sys.stderr)
         return 1
 
     tmpdir = tempfile.mkdtemp(prefix="yummi-agent-dl.")

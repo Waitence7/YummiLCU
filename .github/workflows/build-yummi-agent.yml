@@ -1,4 +1,4 @@
-# Windows 에이전트: 포터블 zip + Inno Setup 설치 프로그램 + VM 배포
+# Windows 에이전트: 포터블 zip + Inno Setup 설치 프로그램 (VM 배포는 vm-deploy-agent.sh)
 name: Build Yummi Agent (Windows)
 
 on:
@@ -101,87 +101,6 @@ jobs:
           path: deploy/agent-version.json
           retention-days: 30
 
-  # SCP 배포: VM 방화벽(ufw)이 22/tcp를 GitHub Actions IP에 열어줘야 함.
-  # 특정 IP만 허용이면 dial tcp :22 i/o timeout → VM_DEPLOY_ENABLED=false 후
-  # VM에서 ./deploy/vm-deploy-agent.sh --download-only 사용.
-  deploy-vm:
-    needs: build
-    runs-on: ubuntu-latest
-    if: >
-      github.event_name == 'push' &&
-      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') &&
-      vars.VM_DEPLOY_ENABLED == 'true'
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: YummiAgent-win-x64-portable
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: YummiAgent-Setup
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: agent-version-json
-          path: deploy
-
-      - name: Pack deploy bundle (tar)
-        run: |
-          set -e
-          mkdir -p deploy-bundle
-          cp YummiAgent-win-x64-portable.zip deploy-bundle/
-          shopt -s nullglob
-          for exe in YummiAgent-Setup-*.exe; do cp "$exe" deploy-bundle/; done
-          test -f deploy/agent-version.json
-          cp deploy/agent-version.json deploy-bundle/
-          ls -la deploy-bundle/
-          tar czf deploy-bundle.tar.gz -C deploy-bundle .
-
-      - name: Upload bundle to VM
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT != '' && secrets.VM_PORT || '22' }}
-          source: deploy-bundle.tar.gz
-          target: /tmp
-          strip_components: 0
-
-      - name: Install on VM paths
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VM_HOST }}
-          username: ${{ secrets.VM_USER }}
-          key: ${{ secrets.VM_SSH_KEY }}
-          port: ${{ secrets.VM_PORT != '' && secrets.VM_PORT || '22' }}
-          script: |
-            set -euo pipefail
-            DEPLOY=/tmp/yummi-agent-deploy
-            rm -rf "$DEPLOY"
-            mkdir -p "$DEPLOY"
-            tar xzf /tmp/deploy-bundle.tar.gz -C "$DEPLOY"
-            ls -la "$DEPLOY"
-            MANIFEST="$DEPLOY/agent-version.json"
-            test -f "$MANIFEST"
-            VER=$(python3 -c "import json; print(json.load(open('$MANIFEST'))['version'])")
-            sudo mkdir -p /var/www/yummi-agent
-            sudo cp "$DEPLOY/YummiAgent-win-x64-portable.zip" /var/www/yummi-agent/YummiAgent.zip
-            sudo chmod 644 /var/www/yummi-agent/YummiAgent.zip
-            if [ -f "$DEPLOY/YummiAgent-patch.zip" ]; then
-              sudo cp "$DEPLOY/YummiAgent-patch.zip" /var/www/yummi-agent/YummiAgent-patch.zip
-              sudo chmod 644 /var/www/yummi-agent/YummiAgent-patch.zip
-            fi
-            SETUP=$(ls "$DEPLOY"/YummiAgent-Setup-*.exe 2>/dev/null | head -1 || true)
-            if [ -n "$SETUP" ]; then
-              sudo cp "$SETUP" "/var/www/yummi-agent/YummiAgent-Setup-${VER}.exe"
-              sudo chmod 644 "/var/www/yummi-agent/YummiAgent-Setup-${VER}.exe"
-            else
-              echo "WARN: no installer exe in bundle (Inno build skipped?)"
-            fi
-            LCU="${{ secrets.VM_LCU_PATH != '' && secrets.VM_LCU_PATH || '/home/ubuntu/Yummi/YummiLcu' }}"
-            cp "$MANIFEST" "$LCU/deploy/agent-version.json"
-            sudo cp "$MANIFEST" /var/www/yummi-agent/agent-version.json
-            sudo chmod 644 /var/www/yummi-agent/agent-version.json
-            rm -f /tmp/deploy-bundle.tar.gz
-            echo "Deployed zip + manifest (v${VER})"
+  # VM 배포: GitHub Actions SCP/SSH 대신 Ubuntu VM에서 직접 실행
+  #   ./deploy/vm-deploy-agent.sh              # 빌드 트리거 + 대기 + 배포
+  #   ./deploy/vm-deploy-agent.sh --download-only   # 최근 성공 빌드만 배포

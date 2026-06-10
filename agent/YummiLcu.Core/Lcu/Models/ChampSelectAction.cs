@@ -8,4 +8,5 @@ public sealed class ChampSelectAction
     public bool Completed { get; init; }
     public bool IsAllyAction { get; init; }
     public bool IsInProgress { get; init; }
+    public int ActorCellId { get; init; }
 }

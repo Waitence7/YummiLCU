@@ -454,6 +454,14 @@ async def _handle_agent_message(
         await conn.forward_ready_check_update(discord_id, payload)
         return
 
+    if msg_type == "champ_select_update":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("data")
+        if discord_id is None or not isinstance(payload, dict):
+            return
+        await conn.forward_champ_select_update(discord_id, payload)
+        return
+
     if msg_type == "gameflow_update":
         discord_id = conn.discord_id_for_ws(websocket)
         payload = data.get("data")

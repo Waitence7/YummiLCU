@@ -36,6 +36,7 @@ public sealed class RelaySession : IAsyncDisposable
     private volatile bool _relayWsOpen;
     private bool _lcuConnected;
     private bool _lastReadyCheckActive;
+    private string? _lastChampSelectFingerprint;
     private long? _discordId;
 
     private static readonly TimeSpan PushDebounce = TimeSpan.FromMilliseconds(300);
@@ -444,6 +445,9 @@ public sealed class RelaySession : IAsyncDisposable
             case LcuApiEventKind.ReadyCheck:
                 await TryPushReadyCheckUpdateAsync(ct);
                 break;
+            case LcuApiEventKind.ChampSelect:
+                await TryPushChampSelectUpdateAsync(ct);
+                break;
             case LcuApiEventKind.Gameflow:
             {
                 var phase = ev.Data?.Trim('"');
@@ -507,13 +511,117 @@ public sealed class RelaySession : IAsyncDisposable
 
         if (_lastGameflowPhase != phase)
         {
+            var prev = _lastGameflowPhase;
             _lastGameflowPhase = phase;
             await PushGameflowUpdateAsync(phase, ct);
             await PushParticipantStatusAsync(ct);
+            if (prev is "ChampSelect" && phase is not "ChampSelect")
+                await PushChampSelectInactiveAsync(ct);
+            if (phase is "ChampSelect")
+                await TryPushChampSelectUpdateAsync(ct, force: true);
         }
 
         if (phase is "ReadyCheck" or "ChampSelect" or "Lobby" or "None" or "Matchmaking")
             await TryPushReadyCheckUpdateAsync(ct);
+
+        if (phase is "ChampSelect")
+            await TryPushChampSelectUpdateAsync(ct);
+    }
+
+    private async Task PushChampSelectInactiveAsync(CancellationToken ct)
+    {
+        _lastChampSelectFingerprint = null;
+        await SendAgentMessageAsync(
+            new { type = "champ_select_update", data = new { active = false } },
+            ct);
+    }
+
+    private static string BuildChampSelectFingerprint(ChampSelectSessionInfo session)
+    {
+        if (!session.IsActive)
+            return "inactive";
+        var sb = new StringBuilder();
+        sb.Append(session.Phase).Append('|').Append(session.TimerMs).Append('|');
+        foreach (var a in session.Actions)
+        {
+            sb.Append(a.Id).Append(':')
+                .Append(a.ChampionId).Append(':')
+                .Append(a.Completed).Append(':')
+                .Append(a.IsInProgress).Append(';');
+        }
+        return sb.ToString();
+    }
+
+    private static object BuildChampSelectPayload(ChampSelectSessionInfo session)
+    {
+        object? current = null;
+        if (session.CurrentAction is { } cur)
+        {
+            current = new
+            {
+                id = cur.Id,
+                type = cur.Type,
+                champion_id = cur.ChampionId,
+                is_mine = cur.ActorCellId < 0 || cur.ActorCellId == session.LocalPlayerCellId,
+            };
+        }
+
+        return new
+        {
+            active = session.IsActive,
+            phase = session.Phase,
+            timer_ms = session.TimerMs,
+            local_cell_id = session.LocalPlayerCellId,
+            my_team = session.MyTeam.Select(m => new
+            {
+                cell_id = m.CellId,
+                summoner_name = m.SummonerName,
+                assigned_position = m.AssignedPosition,
+                champion_id = m.ChampionId,
+                champion_pick_intent = m.ChampionPickIntent,
+            }),
+            their_team = session.TheirTeam.Select(m => new
+            {
+                cell_id = m.CellId,
+                summoner_name = m.SummonerName,
+                assigned_position = m.AssignedPosition,
+                champion_id = m.ChampionId,
+                champion_pick_intent = m.ChampionPickIntent,
+            }),
+            actions = session.Actions.Select(a => new
+            {
+                id = a.Id,
+                type = a.Type,
+                champion_id = a.ChampionId,
+                completed = a.Completed,
+                is_ally_action = a.IsAllyAction,
+                is_in_progress = a.IsInProgress,
+                actor_cell_id = a.ActorCellId,
+            }),
+            current_action = current,
+        };
+    }
+
+    private async Task TryPushChampSelectUpdateAsync(CancellationToken ct, bool force = false)
+    {
+        if (_lcu is null) return;
+
+        var session = await _lcu.GetChampSelectSessionAsync();
+        if (session is null || !session.IsActive)
+        {
+            if (_lastChampSelectFingerprint is not null)
+                await PushChampSelectInactiveAsync(ct);
+            return;
+        }
+
+        var fingerprint = BuildChampSelectFingerprint(session);
+        if (!force && fingerprint == _lastChampSelectFingerprint)
+            return;
+        _lastChampSelectFingerprint = fingerprint;
+
+        await SendAgentMessageAsync(
+            new { type = "champ_select_update", data = BuildChampSelectPayload(session) },
+            ct);
     }
 
     private async Task TryPushReadyCheckUpdateAsync(CancellationToken ct)
@@ -545,7 +653,7 @@ public sealed class RelaySession : IAsyncDisposable
 
     private async Task TryAutoAcceptMatchAsync(CancellationToken ct)
     {
-        var delayMs = Random.Shared.Next(300, 501);
+        var delayMs = Random.Shared.Next(2000, 3001);
         try
         {
             await Task.Delay(delayMs, ct);

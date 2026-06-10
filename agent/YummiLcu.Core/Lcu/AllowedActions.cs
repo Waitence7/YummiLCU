@@ -22,6 +22,7 @@ public static class AllowedActions
             ["leave_lobby"] = async ctx => await Bool(await ctx.Lcu.DeleteAsync("/lol-lobby/v2/lobby")),
             ["party_ready"] = async ctx => await Bool(await ctx.Lcu.PutJsonAsync("/lol-lobby/v1/parties/ready", """{"ready":true}""")),
             ["champ_reroll"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/lol-champ-select/v1/session/my-selection/reroll")),
+            ["champ_select_action"] = ChampSelectActionAsync,
             ["quit_client"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/process-control/v1/process/quit")),
             ["set_status"] = SetStatusAsync,
             ["reset_status"] = async ctx => await SetStatusTextAsync(ctx, StatusMessageHelper.DefaultYummiClient),
@@ -78,6 +79,30 @@ public static class AllowedActions
         return ok
             ? new ActionResult(true, $"상메 설정: {text[..Math.Min(text.Length, 40)]}")
             : new ActionResult(false, "상메 설정 실패");
+    }
+
+    private static async Task<ActionResult> ChampSelectActionAsync(ActionContext ctx)
+    {
+        var actionId = PayloadInt(ctx.Payload, "action_id");
+        var championId = PayloadInt(ctx.Payload, "champion_id");
+        if (actionId is null or <= 0)
+            return new ActionResult(false, "action_id가 필요합니다.");
+        if (championId is null or <= 0)
+            return new ActionResult(false, "champion_id가 필요합니다.");
+        var ok = await ctx.Lcu.PatchChampSelectActionAsync(actionId.Value, championId.Value);
+        return ActionResult.FromBool(ok);
+    }
+
+    private static int? PayloadInt(JsonElement? payload, string key)
+    {
+        if (payload is null || payload.Value.ValueKind != JsonValueKind.Object) return null;
+        if (!payload.Value.TryGetProperty(key, out var el)) return null;
+        return el.ValueKind switch
+        {
+            JsonValueKind.Number when el.TryGetInt32(out var n) => n,
+            JsonValueKind.String when int.TryParse(el.GetString(), out var parsed) => parsed,
+            _ => null,
+        };
     }
 
     private static string? PayloadString(JsonElement? payload, string key)

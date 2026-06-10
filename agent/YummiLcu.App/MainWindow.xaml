@@ -108,7 +108,7 @@
                   IsChecked="{Binding PreventQueueAfterDodge}" Margin="0,0,0,4" />
         <CheckBox Content="연결 시 기본 상메 적용"
                   IsChecked="{Binding ApplyDefaultStatusOnConnect}" Margin="0,0,0,4" />
-        <CheckBox Content="매치 자동 수락 (0.3~0.5초 후)"
+        <CheckBox Content="매치 자동 수락 (2~3초 후)"
                   IsChecked="{Binding AutoAcceptMatch}" Margin="0,0,0,4" />
         <CheckBox Content="롤 클라이언트와 함께 자동 시작/종료"
                   IsChecked="{Binding FollowLeagueClient}" Margin="0,0,0,4" />

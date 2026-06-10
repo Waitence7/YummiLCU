@@ -293,6 +293,29 @@ class ConnectionManager:
             await self.unregister_bot_ws(ws)
             return False
 
+    async def forward_champ_select_update(self, discord_id: int, data: dict[str, Any]) -> bool:
+        async with self._lock:
+            if int(discord_id) not in self._match_dm_subscribers:
+                return False
+            ws = self._bot_ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(
+                {
+                    "type": "champ_select_update",
+                    "discord_id": int(discord_id),
+                    "data": data,
+                }
+            )
+            return True
+        except Exception:
+            logger.exception(
+                "봇 WS champ_select_update 전달 실패 discord_id=%s", discord_id
+            )
+            await self.unregister_bot_ws(ws)
+            return False
+
     async def forward_ready_check_update(self, discord_id: int, data: dict[str, Any]) -> bool:
         async with self._lock:
             if int(discord_id) not in self._match_dm_subscribers:

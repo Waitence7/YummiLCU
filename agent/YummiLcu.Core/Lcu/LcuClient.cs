@@ -218,19 +218,63 @@ public sealed class LcuClient : IDisposable
                         Completed = a.TryGetProperty("completed", out var c) && c.GetBoolean(),
                         IsAllyAction = a.TryGetProperty("isAllyAction", out var ally) && ally.GetBoolean(),
                         IsInProgress = a.TryGetProperty("isInProgress", out var ip) && ip.GetBoolean(),
+                        ActorCellId = a.TryGetProperty("actorCellId", out var ac) ? ac.GetInt32() : -1,
                     });
                 }
             }
         }
 
+        var localCellId = root.TryGetProperty("localPlayerCellId", out var cell) ? cell.GetInt32() : 0;
+        var timerMs = 0;
+        var phase = "";
+        if (root.TryGetProperty("timer", out var timer))
+        {
+            if (timer.TryGetProperty("phase", out var ph))
+                phase = ph.GetString() ?? "";
+            if (timer.TryGetProperty("adjustedTimeLeftInPhase", out var left))
+                timerMs = left.GetInt32();
+        }
+
+        ChampSelectAction? currentAction = null;
+        foreach (var action in actions)
+        {
+            if (!action.IsInProgress || !action.IsAllyAction) continue;
+            if (action.ActorCellId >= 0 && action.ActorCellId != localCellId) continue;
+            currentAction = action;
+            break;
+        }
+
         return new ChampSelectSessionInfo
         {
             IsActive = true,
-            Phase = root.TryGetProperty("timer", out var timer) && timer.TryGetProperty("phase", out var ph)
-                ? ph.GetString() ?? "" : "",
+            Phase = phase,
+            TimerMs = timerMs,
             Actions = actions,
-            LocalPlayerCellId = root.TryGetProperty("localPlayerCellId", out var cell) ? cell.GetInt32() : 0,
+            LocalPlayerCellId = localCellId,
+            MyTeam = ParseChampSelectTeam(root, "myTeam"),
+            TheirTeam = ParseChampSelectTeam(root, "theirTeam"),
+            CurrentAction = currentAction,
         };
+    }
+
+    private static IReadOnlyList<ChampSelectTeamMember> ParseChampSelectTeam(JsonElement root, string key)
+    {
+        if (!root.TryGetProperty(key, out var arr) || arr.ValueKind != JsonValueKind.Array)
+            return Array.Empty<ChampSelectTeamMember>();
+
+        var list = new List<ChampSelectTeamMember>();
+        foreach (var p in arr.EnumerateArray())
+        {
+            list.Add(new ChampSelectTeamMember
+            {
+                CellId = p.TryGetProperty("cellId", out var c) ? c.GetInt32() : 0,
+                SummonerName = p.TryGetProperty("summonerName", out var sn) ? sn.GetString() ?? "" : "",
+                AssignedPosition = p.TryGetProperty("assignedPosition", out var ap) ? ap.GetString() ?? "" : "",
+                ChampionId = p.TryGetProperty("championId", out var cid) ? cid.GetInt32() : 0,
+                ChampionPickIntent = p.TryGetProperty("championPickIntent", out var cpi) ? cpi.GetInt32() : 0,
+            });
+        }
+        return list;
     }
 
     public async Task<bool> PatchChampSelectActionAsync(int actionId, int championId, bool completed = true) =>

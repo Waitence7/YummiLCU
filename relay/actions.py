@@ -16,6 +16,7 @@ ACTION_HELP: dict[str, str] = {
     "leave_lobby": "로비 나가기",
     "party_ready": "파티 준비 ON",
     "champ_reroll": "챔프 리롤",
+    "champ_select_action": "밴/픽 확정",
     "quit_client": "롤 클라이언트 종료",
     "set_status": "상메 설정 (payload.text, 유니코드·줄바꿈)",
     "reset_status": "기본 상메(𝗬𝘂𝗺𝗺𝗶 𝗖𝗹𝗶𝗲𝗻𝘁)",
