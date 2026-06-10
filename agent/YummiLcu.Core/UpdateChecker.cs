@@ -7,8 +7,10 @@ public static class UpdateChecker
 {
     private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(8) };
 
+    /// <summary>앱 exe 버전 (Core.dll 과 분리 — 자동 업데이트 루프 방지).</summary>
     public static string CurrentVersion =>
-        Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ?? "0.0.0";
+        (Assembly.GetEntryAssembly() ?? Assembly.GetExecutingAssembly())
+        .GetName().Version?.ToString(3) ?? "0.0.0";
 
     public static async Task<UpdateInfo?> CheckAsync(string manifestUrl, CancellationToken ct = default)
     {
