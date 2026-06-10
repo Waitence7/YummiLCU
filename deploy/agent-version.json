@@ -1,10 +1,10 @@
 {
   "version": "0.5.5",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
-  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.5.4.exe",
-  "notes": "Build 2e4ce6e",
-  "sha256": "91e1e1c864fae38f71aec58ba0f28a74a325a1f7c5c0da9aae3602c5174fa705",
+  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.5.5.exe",
+  "notes": "에이전트 편의·Relay OAuth 보안",
+  "sha256": "bf98378d6c41033b729e217ed7ccd6ef6bca549794c4869e72e49d0af462b3cc",
   "patchUrl": "https://yummi.duckdns.org/agent/YummiAgent-patch.zip",
   "patchFrom": "0.5.2",
-  "patchSha256": "392248c4a3425f0adf1d917d8e75d284a9366f60037d756206c1ed983b663f86"
+  "patchSha256": "c4cdef507948074a28d8922172bfc841e7a0edfdd3848226cb927210b0994eb0"
 }
