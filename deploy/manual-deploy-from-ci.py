@@ -12,7 +12,7 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 REPO = "Waitence7/YummiLCU"
-RUN_ID = int(os.environ.get("AGENT_RUN_ID", "27258571000"))
+WORKFLOW = "build-yummi-agent.yml"
 LCU_DEPLOY = "/home/ubuntu/Yummi/YummiLcu/deploy/agent-version.json"
 WWW = "/var/www/yummi-agent"
 
@@ -56,13 +56,28 @@ def _download_artifact(token: str, url: str, dest: str) -> None:
     )
 
 
+def _latest_build_run_id(token: str) -> int:
+    if os.environ.get("AGENT_RUN_ID"):
+        return int(os.environ["AGENT_RUN_ID"])
+    runs = _api(
+        token,
+        f"https://api.github.com/repos/{REPO}/actions/workflows/{WORKFLOW}/runs?per_page=15",
+    ).get("workflow_runs", [])
+    for run in runs:
+        if run.get("conclusion") == "success":
+            return int(run["id"])
+    raise SystemExit("build 성공 run 없음")
+
+
 def main() -> int:
     token = _token()
+    run_id = _latest_build_run_id(token)
+    print(f"run {run_id}")
     arts = {
         a["name"]: a["archive_download_url"]
         for a in _api(
             token,
-            f"https://api.github.com/repos/{REPO}/actions/runs/{RUN_ID}/artifacts",
+            f"https://api.github.com/repos/{REPO}/actions/runs/{run_id}/artifacts",
         )["artifacts"]
     }
     if not arts:
