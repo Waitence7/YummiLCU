@@ -35,8 +35,13 @@ if ! command -v gh >/dev/null 2>&1; then
 fi
 
 if ! gh auth status >/dev/null 2>&1; then
-  echo "GitHub 로그인 필요: gh auth login" >&2
-  exit 1
+  echo "gh 미로그인 — manual-deploy-from-ci.py 로 artifact 배포 (SSH deploy-vm 실패 시 동일)"
+  RUN_ID="$(find_latest_build_run 2>/dev/null || true)"
+  if [[ -z "${RUN_ID:-}" ]]; then
+    echo "build 성공 run을 찾을 수 없습니다. gh auth login 후 재시도하세요." >&2
+    exit 1
+  fi
+  AGENT_RUN_ID="$RUN_ID" exec python3 "$ROOT/deploy/manual-deploy-from-ci.py"
 fi
 
 find_latest_build_run() {
@@ -86,6 +91,9 @@ if [[ -z "$ZIP" || ! -f "$ZIP" ]]; then
 fi
 
 MANIFEST="$WORKDIR/manifest/agent-version.json"
+if [[ ! -f "$MANIFEST" ]]; then
+  MANIFEST="$WORKDIR/agent-version-json/agent-version.json"
+fi
 if [[ ! -f "$MANIFEST" ]]; then
   SETUP_FOR_PUBLISH="$(find "$WORKDIR" -maxdepth 1 -name 'YummiAgent-Setup-*.exe' -print -quit || true)"
   echo "==> manifest 없음 — agent-publish.sh로 생성"
