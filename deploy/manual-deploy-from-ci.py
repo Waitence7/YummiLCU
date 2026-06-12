@@ -2,6 +2,7 @@
 """CI build artifact → /var/www/yummi-agent 수동 배포 (SSH deploy-vm 실패 시)."""
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -13,8 +14,9 @@ from urllib.request import Request, urlopen
 
 REPO = "Waitence7/YummiLCU"
 WORKFLOW = "build-yummi-agent.yml"
-LCU_DEPLOY = "/home/ubuntu/Yummi/YummiLcu/deploy/agent-version.json"
+LCU_DIR = "/home/ubuntu/Yummi/YummiLcu/deploy"
 WWW = "/var/www/yummi-agent"
+PUBLIC = "https://yummi.duckdns.org"
 
 
 def _token() -> str:
@@ -39,7 +41,6 @@ def _api(token: str, url: str) -> dict:
 
 
 def _download_artifact(token: str, url: str, dest: str) -> None:
-    """curl -L: GitHub 인증 후 Azure SAS 리다이렉트 (Authorization 미전달)."""
     subprocess.run(
         [
             "curl",
@@ -74,6 +75,14 @@ def _latest_build_run_id(token: str) -> int:
     raise SystemExit("build 성공 run 없음")
 
 
+def _sha256(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def main() -> int:
     token = _token()
     run_id = _latest_build_run_id(token)
@@ -99,21 +108,39 @@ def main() -> int:
         print(f"  ok {name}")
 
     manifest = os.path.join(tmpdir, "agent-version-json", "agent-version.json")
+    latest_manifest = os.path.join(tmpdir, "agent-version-json", "latest.json")
     with open(manifest, encoding="utf-8") as f:
         ver = json.load(f)["version"]
 
     portable = os.path.join(tmpdir, "YummiAgent-win-x64-portable")
     setup_dir = os.path.join(tmpdir, "YummiAgent-Setup")
+    bootstrapper_dir = os.path.join(tmpdir, "YummiAgent-Bootstrapper")
+    setup_src = os.path.join(setup_dir, "YummiAgent-Setup.exe")
+    if not os.path.isfile(setup_src):
+        setup_src = os.path.join(setup_dir, f"YummiAgent-Setup-{ver}.exe")
+    bootstrapper = os.path.join(bootstrapper_dir, "setup.exe")
+
+    if not os.path.isfile(latest_manifest) and os.path.isfile(setup_src):
+        latest = {
+            "version": ver,
+            "url": f"{PUBLIC}/agent/files/YummiAgent-Setup-{ver}.exe",
+            "sha256": _sha256(setup_src),
+        }
+        latest_manifest = os.path.join(tmpdir, "latest.json")
+        with open(latest_manifest, "w", encoding="utf-8") as f:
+            json.dump(latest, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+
     copies = [
         (os.path.join(portable, "YummiAgent-win-x64-portable.zip"), f"{WWW}/YummiAgent.zip"),
         (os.path.join(portable, "YummiAgent-patch.zip"), f"{WWW}/YummiAgent-patch.zip"),
-        (
-            os.path.join(setup_dir, f"YummiAgent-Setup-{ver}.exe"),
-            f"{WWW}/YummiAgent-Setup-{ver}.exe",
-        ),
+        (setup_src, f"{WWW}/files/YummiAgent-Setup-{ver}.exe"),
+        (setup_src, f"{WWW}/latest"),
+        (bootstrapper, f"{WWW}/setup.exe"),
         (manifest, f"{WWW}/agent-version.json"),
+        (latest_manifest, f"{WWW}/latest.json"),
     ]
-    subprocess.run(["sudo", "mkdir", "-p", WWW], check=True)
+    subprocess.run(["sudo", "mkdir", "-p", f"{WWW}/files"], check=True)
     for src, dst in copies:
         if not os.path.isfile(src):
             print(f"MISSING {src}", file=sys.stderr)
@@ -122,7 +149,9 @@ def main() -> int:
         subprocess.run(["sudo", "chmod", "644", dst], check=True)
         print(f"  → {dst}")
 
-    subprocess.run(["cp", manifest, LCU_DEPLOY], check=True)
+    os.makedirs(LCU_DIR, exist_ok=True)
+    subprocess.run(["cp", manifest, os.path.join(LCU_DIR, "agent-version.json")], check=True)
+    subprocess.run(["cp", latest_manifest, os.path.join(LCU_DIR, "latest.json")], check=True)
     print(f"배포 완료 v{ver}")
     return 0
 

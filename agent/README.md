@@ -84,7 +84,8 @@ agent/
 |--------|-----------|------|
 | `YummiAgent.zip` | ~240KB | 슬림 전체 (framework-dependent, .NET 8 Desktop Runtime 별도) |
 | `YummiAgent-patch.zip` | ~130KB | App.exe + Core.dll만 (슬림→슬림 패치) |
-| `YummiAgent-Setup-*.exe` | ~2MB | 최초 설치 (Inno Setup, .NET 8 Desktop Runtime 확인) |
+| `setup.exe` | ~1MB 이하 | 최신 설치 파일을 내려받는 부트스트래퍼
+| `YummiAgent-Setup-*.exe` | ~2MB | 버전별 실제 설치 파일 (Inno Setup, .NET 8 Desktop Runtime 확인) |
 
 구버전(**self-contained** 단일 exe 60MB+)은 슬림 zip으로 자동 갱신되지 않습니다. **설치 프로그램**으로 한 번 마이그레이션하세요.
 

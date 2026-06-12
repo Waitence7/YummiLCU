@@ -43,7 +43,7 @@ Discord Developer Portal → OAuth2 Redirect: `https://<도메인>/auth/discord/
 
 ## 에이전트 (유저 PC)
 
-- **처음 설치:** `YummiAgent-Setup-x.x.x.exe` (Inno Setup, .NET 8 Desktop Runtime 필요)  
+- **처음 설치:** `setup.exe` (작은 부트스트래퍼, 실행 시 최신 설치 파일 다운로드)  
 - **자동 업데이트:** 서버 zip → 기존 설치 폴더에 덮어쓰기 (슬림 빌드 기준 ~240KB)
 
 | 빌드 | 용도 |
@@ -91,7 +91,9 @@ UI·lockfile·실시간 push: [`agent/README.md`](agent/README.md).
 | `deploy/agent-version.json` | 버전·다운로드 URL·패치·SHA256 | Relay `GET /agent/version.json` |
 | `/var/www/yummi-agent/YummiAgent.zip` | 슬림 전체 zip | nginx 정적 |
 | `/var/www/yummi-agent/YummiAgent-patch.zip` | 슬림→슬림 패치 (선택) | nginx 정적 |
-| `/var/www/yummi-agent/YummiAgent-Setup-*.exe` | 최초 설치 | nginx 정적 |
+| `/var/www/yummi-agent/setup.exe` | 부트스트래퍼 | nginx 정적
+| `/var/www/yummi-agent/files/YummiAgent-Setup-*.exe` | 버전별 실제 설치 파일 | nginx 정적
+| `/var/www/yummi-agent/latest.json` | 최신 설치 파일 포인터·SHA256 | nginx 정적 |
 
 manifest 예시 (v0.5.3+):
 
@@ -99,7 +101,7 @@ manifest 예시 (v0.5.3+):
 {
   "version": "0.5.3",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
-  "installerUrl": "https://yummi.duckdns.org/agent/YummiAgent-Setup-0.5.3.exe",
+  "installerUrl": "https://yummi.duckdns.org/agent/setup.exe",
   "patchUrl": "https://yummi.duckdns.org/agent/YummiAgent-patch.zip",
   "patchFrom": "0.5.2",
   "notes": "변경 내용 한 줄",
@@ -192,6 +194,9 @@ cd ~/Yummi/YummiLcu
 
 - `/agent/version.json` → Relay 프록시
 - `/agent/YummiAgent.zip` → **정적 파일** (`alias /var/www/yummi-agent/YummiAgent.zip`)  
+- `/agent/setup.exe` → **고정 부트스트래퍼 링크** (`alias /var/www/yummi-agent/setup.exe`)  
+- `/agent/latest.json` → **최신 설치 파일 포인터** (`alias /var/www/yummi-agent/latest.json`)  
+- `/agent/files/` → **버전별 설치 파일 보관** (`alias /var/www/yummi-agent/files/`)  
   zip URL 404면 자동 업데이트 실패.
 
 ### 업데이트 트러블슈팅
@@ -217,5 +222,7 @@ cd ~/Yummi/YummiLcu
 2. [ ] Windows `build.bat` 또는 Actions로 포터블 zip  
 3. [ ] VM: `./deploy/agent-publish.sh <zip>`  
 4. [ ] `https://<도메인>/agent/version.json` 에 새 version 확인  
-5. [ ] `https://<도메인>/agent/YummiAgent.zip` 다운로드 확인  
-6. [ ] 테스트 PC에서 에이전트 재실행 → 자동 업데이트·`agent.json` 유지 확인
+5. [ ] `https://<도메인>/agent/YummiAgent.zip` 다운로드 확인
+6. [ ] `https://<도메인>/agent/setup.exe` 다운로드 확인
+7. [ ] `https://<도메인>/agent/latest.json` 최신 버전·sha256 확인  
+8. [ ] 테스트 PC에서 에이전트 재실행 → 자동 업데이트·`agent.json` 유지 확인

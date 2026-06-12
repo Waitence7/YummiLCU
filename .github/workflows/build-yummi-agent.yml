@@ -53,6 +53,12 @@ jobs:
           if (-not (Test-Path $iscc)) { $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" }
           & $iscc /DAppVersion=${{ steps.ver.outputs.version }} agent/installer/YummiAgent.iss
 
+      - name: Build setup bootstrapper
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) { $iscc = "${env:ProgramFiles}\Inno Setup 6\ISCC.exe" }
+          & $iscc /DAppVersion=${{ steps.ver.outputs.version }} agent/installer/YummiBootstrapper.iss
+
       - name: Zip artifact (slim full + patch)
         shell: pwsh
         run: |
@@ -78,7 +84,8 @@ jobs:
           }
           & ./deploy/sync-agent-version.ps1 -Notes $notes `
             -ZipPath "YummiAgent-win-x64-portable.zip" `
-            -PatchZipPath "YummiAgent-patch.zip"
+            -PatchZipPath "YummiAgent-patch.zip" `
+            -InstallerPath "agent/installer/output/YummiAgent-Setup.exe"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -91,13 +98,21 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: YummiAgent-Setup
-          path: agent/installer/output/YummiAgent-Setup-${{ steps.ver.outputs.version }}.exe
+          path: agent/installer/output/YummiAgent-Setup.exe
+          retention-days: 30
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YummiAgent-Bootstrapper
+          path: agent/installer/output/setup.exe
           retention-days: 30
 
       - uses: actions/upload-artifact@v4
         with:
           name: agent-version-json
-          path: deploy/agent-version.json
+          path: |
+            deploy/agent-version.json
+            deploy/latest.json
           retention-days: 30
 
   # VM 배포: GitHub Actions SCP/SSH 대신 Ubuntu VM에서 직접 실행

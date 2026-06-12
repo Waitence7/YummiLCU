@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# VM에서 에이전트 zip 배포 + version.json 동기화 (한 번에)
+# VM에서 에이전트 zip + installer + bootstrapper 배포 + manifest 동기화
 #
-#   ./deploy/agent-publish.sh                          # manifest만 csproj 버전으로 갱신
-#   ./deploy/agent-publish.sh /path/to/portable.zip [/path/to/YummiAgent-Setup-0.3.1.exe]
-#   AGENT_RELEASE_NOTES="솔랭 자동" ./deploy/agent-publish.sh ./YummiAgent.zip
+#   ./deploy/agent-publish.sh
+#   ./deploy/agent-publish.sh /path/to/portable.zip [/path/to/YummiAgent-Setup.exe] [/path/to/setup.exe]
+#   AGENT_RELEASE_NOTES="솔랭 자동" ./deploy/agent-publish.sh ./YummiAgent.zip ./YummiAgent-Setup.exe ./setup.exe
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,10 +11,12 @@ cd "$ROOT"
 
 CSPROJ="$ROOT/agent/YummiLcu.App/YummiLcu.App.csproj"
 MANIFEST="$ROOT/deploy/agent-version.json"
+LATEST_MANIFEST="$ROOT/deploy/latest.json"
 ZIP_SRC="${1:-}"
 INSTALLER_SRC="${2:-}"
+BOOTSTRAPPER_SRC="${3:-}"
 ZIP_DST="${AGENT_ZIP_PATH:-/var/www/yummi-agent/YummiAgent.zip}"
-INSTALLER_DST_DIR="${AGENT_INSTALLER_DIR:-/var/www/yummi-agent}"
+WWW="${AGENT_WWW_DIR:-/var/www/yummi-agent}"
 PUBLIC="${AGENT_PUBLIC_URL:-https://yummi.duckdns.org}"
 NOTES="${AGENT_RELEASE_NOTES:-}"
 
@@ -45,9 +47,11 @@ fi
 python3 - "$VERSION" "$PUBLIC" "$NOTES" "$MANIFEST" <<'PY'
 import json, sys
 version, public, notes, path = sys.argv[1:5]
+base = public.rstrip('/')
 data = {
     "version": version,
-    "url": f"{public.rstrip('/')}/agent/YummiAgent.zip",
+    "url": f"{base}/agent/YummiAgent.zip",
+    "installerUrl": f"{base}/agent/setup.exe",
     "notes": notes,
 }
 with open(path, "w", encoding="utf-8") as f:
@@ -56,23 +60,59 @@ with open(path, "w", encoding="utf-8") as f:
 print(json.dumps(data, ensure_ascii=False))
 PY
 
-# nginx가 읽을 수 있도록 /var/www 에도 복사 (home/ubuntu 는 www-data 접근 불가)
 if [[ -n "$INSTALLER_SRC" ]]; then
   if [[ ! -f "$INSTALLER_SRC" ]]; then
     echo "installer 없음: $INSTALLER_SRC" >&2
     exit 1
   fi
-  sudo mkdir -p "$INSTALLER_DST_DIR"
+  sudo mkdir -p "$WWW/files"
   INSTALLER_NAME="YummiAgent-Setup-${VERSION}.exe"
-  sudo cp "$INSTALLER_SRC" "$INSTALLER_DST_DIR/$INSTALLER_NAME"
-  sudo chmod 644 "$INSTALLER_DST_DIR/$INSTALLER_NAME"
-  echo "installer → $INSTALLER_DST_DIR/$INSTALLER_NAME"
+  sudo cp "$INSTALLER_SRC" "$WWW/files/$INSTALLER_NAME"
+  sudo cp "$INSTALLER_SRC" "$WWW/latest"
+  sudo chmod 644 "$WWW/files/$INSTALLER_NAME" "$WWW/latest"
+  echo "installer → $WWW/files/$INSTALLER_NAME"
+  echo "latest → $WWW/latest"
+
+  SHA256="$(sha256sum "$INSTALLER_SRC" | awk '{print $1}')"
+  python3 - "$VERSION" "$PUBLIC" "$NOTES" "$SHA256" "$LATEST_MANIFEST" <<'PY'
+import json, sys
+version, public, notes, sha256, path = sys.argv[1:6]
+base = public.rstrip('/')
+data = {
+    "version": version,
+    "url": f"{base}/agent/files/YummiAgent-Setup-{version}.exe",
+    "sha256": sha256,
+    "notes": notes,
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(data, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+print(json.dumps(data, ensure_ascii=False))
+PY
 fi
 
-PUBLIC_MANIFEST="${AGENT_MANIFEST_PATH:-/var/www/yummi-agent/agent-version.json}"
+if [[ -n "$BOOTSTRAPPER_SRC" ]]; then
+  if [[ ! -f "$BOOTSTRAPPER_SRC" ]]; then
+    echo "bootstrapper 없음: $BOOTSTRAPPER_SRC" >&2
+    exit 1
+  fi
+  sudo mkdir -p "$WWW"
+  sudo cp "$BOOTSTRAPPER_SRC" "$WWW/setup.exe"
+  sudo chmod 644 "$WWW/setup.exe"
+  echo "bootstrapper → $WWW/setup.exe"
+fi
+
+PUBLIC_MANIFEST="${AGENT_MANIFEST_PATH:-$WWW/agent-version.json}"
 sudo mkdir -p "$(dirname "$PUBLIC_MANIFEST")"
 sudo cp "$MANIFEST" "$PUBLIC_MANIFEST"
 sudo chmod 644 "$PUBLIC_MANIFEST"
 echo "manifest → $MANIFEST"
 echo "manifest → $PUBLIC_MANIFEST (nginx /agent/version.json)"
-echo "완료. PC 에이전트는 다음 실행 시 v$VERSION 자동 적용."
+
+if [[ -f "$LATEST_MANIFEST" ]]; then
+  sudo cp "$LATEST_MANIFEST" "$WWW/latest.json"
+  sudo chmod 644 "$WWW/latest.json"
+  echo "latest manifest → $WWW/latest.json"
+fi
+
+echo "완료. 설치 링크: ${PUBLIC%/}/agent/setup.exe"

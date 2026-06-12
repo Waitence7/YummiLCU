@@ -1,12 +1,14 @@
-# csproj Version → deploy/agent-version.json (Windows / CI)
+# csproj Version → deploy/agent-version.json + deploy/latest.json (Windows / CI)
 param(
     [string]$Csproj = "$PSScriptRoot\..\agent\YummiLcu.App\YummiLcu.App.csproj",
     [string]$Out = "$PSScriptRoot\agent-version.json",
+    [string]$LatestOut = "$PSScriptRoot\latest.json",
     [string]$PublicUrl = "https://yummi.duckdns.org",
     [string]$Notes = "",
     [string]$ZipPath = "",
     [string]$PatchZipPath = "",
-    [string]$PatchFrom = ""
+    [string]$PatchFrom = "",
+    [string]$InstallerPath = ""
 )
 
 [xml]$xml = Get-Content $Csproj
@@ -18,7 +20,7 @@ $base = $PublicUrl.TrimEnd('/')
 $obj = [ordered]@{
     version      = "$ver"
     url          = "$base/agent/YummiAgent.zip"
-    installerUrl = "$base/agent/YummiAgent-Setup-$ver.exe"
+    installerUrl = "$base/agent/setup.exe"
     notes        = $Notes
 }
 
@@ -47,3 +49,18 @@ $json = $obj | ConvertTo-Json
 Set-Content -Path $Out -Value $json -Encoding UTF8
 Write-Host "Wrote $Out"
 Write-Host $json
+
+if (-not $InstallerPath) { $InstallerPath = Join-Path (Get-Location) "agent\installer\output\YummiAgent-Setup.exe" }
+if (Test-Path $InstallerPath) {
+    $installerSha = (Get-FileHash -Path $InstallerPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $latest = [ordered]@{
+        version = "$ver"
+        url     = "$base/agent/files/YummiAgent-Setup-$ver.exe"
+        sha256  = $installerSha
+        notes   = $Notes
+    }
+    $latestJson = $latest | ConvertTo-Json
+    Set-Content -Path $LatestOut -Value $latestJson -Encoding UTF8
+    Write-Host "Wrote $LatestOut"
+    Write-Host $latestJson
+}

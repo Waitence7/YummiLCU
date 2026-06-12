@@ -24,17 +24,22 @@ if not exist "%ISCC%" (
   goto fail
 )
 
-echo [2/3] Inno Setup compile (version %APP_VER%)...
+echo [2/4] Inno Setup compile (version %APP_VER%)...
 "%ISCC%" /DAppVersion=%APP_VER% "installer\YummiAgent.iss"
 if errorlevel 1 goto fail
 
-echo [3/3] Zip portable (auto-update)...
+echo [3/4] Setup bootstrapper...
+"%ISCC%" /DAppVersion=%APP_VER% "installer\YummiBootstrapper.iss"
+if errorlevel 1 goto fail
+
+echo [4/4] Zip portable (auto-update)...
 set "PUB=YummiLcu.App\bin\Release\net8.0-windows\win-x64\publish"
 powershell -NoProfile -Command "Compress-Archive -Path '%PUB%\*' -DestinationPath 'installer\output\YummiAgent-win-x64-portable.zip' -Force"
 
 echo.
 echo OK
-echo   Installer: installer\output\YummiAgent-Setup-%APP_VER%.exe
+echo   Bootstrapper: installer\output\setup.exe
+echo   Installer:    installer\output\YummiAgent-Setup.exe
 echo   Zip:       installer\output\YummiAgent-win-x64-portable.zip
 start explorer "%~dp0installer\output"
 goto end
