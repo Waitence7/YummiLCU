@@ -2,9 +2,9 @@
   "version": "0.5.7",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
   "installerUrl": "https://yummi.duckdns.org/agent/setup.exe",
-  "notes": "Build 8179cc8",
-  "sha256": "9ab54c0fdb59aa06c680cb1a1e53d91f77cb6a39b499e072375e59dbd52cdc18",
+  "notes": "Build 9d1313e",
+  "sha256": "2ee243dfb868ed95908116ae46aa5b927aba690a7e6170098042b18fa0bd840b",
   "patchUrl": "https://yummi.duckdns.org/agent/YummiAgent-patch.zip",
   "patchFrom": "0.5.6",
-  "patchSha256": "f04ca063402e433014d3be26786d666dbaca2b56467780ff16828b6a5214b92b"
+  "patchSha256": "7072f337e6f24e1e2d52c3be3baa8ebd7fca47510b5e440e8f430263bf25e41a"
 }
