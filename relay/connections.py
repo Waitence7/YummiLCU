@@ -66,7 +66,7 @@ class ConnectionManager:
             logger.exception("session_bound 전송 실패 discord_id=%s", discord_id)
         return True
 
-    async def unregister_ws(self, ws: WebSocket) -> None:
+    async def unregister_ws(self, ws: WebSocket) -> tuple[int, dict[str, Any]] | None:
         offline_id: int | None = None
         offline_payload: dict[str, Any] | None = None
         async with self._lock:
@@ -77,7 +77,8 @@ class ConnectionManager:
                 offline_payload = self._offline_participant_status_locked(offline_id)
             self._drop_ws_locked(ws)
         if offline_id is not None and offline_payload is not None:
-            await self.forward_participant_status_update(offline_id, offline_payload)
+            return offline_id, offline_payload
+        return None
 
     def _drop_ws_locked(self, ws: WebSocket) -> None:
         wid = id(ws)

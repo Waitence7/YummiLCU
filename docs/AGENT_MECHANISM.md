@@ -105,8 +105,10 @@ flowchart TB
 |------|------|
 | `agent_hello` | 연결 시 버전·LCU 준비 상태 |
 | `party_lobby_update` | 로비 멤버 변경 → Relay → 봇 WS |
+| `participant_status_update` | 참가자 LCU 상태 (로비·매칭·챔프선 등) → 모집 패널 (v0.5.4+) |
 | `gameflow_update` | 게임 단계 변경 (Lobby, ChampSelect 등) |
 | `ready_check_update` | 레디체크 활성/타이머 → Relay → 봇 `/dm` DM 알림 |
+| `champ_select_update` | 챔프선 세션 → Relay → 봇 `/dm` 밴픽 패널 (v0.5.5+) |
 | `guild_match_eog` | 내전 종료 스냅샷 → Tournament API |
 
 ### 3.6 Relay → 봇 WebSocket (`/ws/bot`)
@@ -116,12 +118,15 @@ flowchart TB
 | 봇 → Relay | 용도 |
 |------------|------|
 | `subscribe_party` / `unsubscribe_party` | 모집 작성자 로비 실시간 감시 |
-| `subscribe_match_dm` / `unsubscribe_match_dm` | `/dm` 활성 사용자 레디체크 알림 |
+| `subscribe_match_dm` / `unsubscribe_match_dm` | `/dm` 활성 사용자 레디체크·챔프선 알림 |
+| `subscribe_participant_status` / `unsubscribe_participant_status` | 모집 참가자 LCU 상태 감시 |
 
 | Relay → 봇 | 용도 |
 |------------|------|
 | `party_lobby_update` | 모집 패널 로비 상태 갱신 |
+| `participant_status_update` | 모집 패널 참가자 상태 갱신 |
 | `ready_check_update` | 매치 DM (수락/거절 버튼) |
+| `champ_select_update` | 챔프선 DM 밴픽 패널 |
 
 구버전 에이전트는 `gameflow_update`의 `phase: ReadyCheck`로 `/dm`이 동작합니다 (Relay 폴백).
 

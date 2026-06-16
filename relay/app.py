@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 from relay import auth, config
 from relay.actions import ALLOWED_ACTIONS, is_allowed_action
 from relay.connections import ConnectionManager
+from relay.lcu_linked import is_lcu_linked, lcu_linked_map, mark_lcu_linked
 
 logger = logging.getLogger("yummi_lcu.relay")
 # endregion
@@ -150,7 +151,23 @@ async def _try_bind_discord(
     stored = await r.get(_ws_token_redis_key(session_id))
     if not stored or not secrets.compare_digest(stored, ws_token):
         return False
-    return await conn.bind_discord(session_id, discord_id)
+    bound = await conn.bind_discord(session_id, discord_id)
+    if bound:
+        await mark_lcu_linked(r, discord_id)
+    return bound
+
+
+async def _forward_participant_status(
+    conn: ConnectionManager,
+    r: redis.Redis,
+    discord_id: int,
+    data: dict[str, Any],
+) -> None:
+    payload = dict(data)
+    if payload.get("agent_online"):
+        await mark_lcu_linked(r, discord_id)
+    payload["lcu_linked"] = await is_lcu_linked(r, discord_id)
+    await conn.forward_participant_status_update(discord_id, payload)
 
 
 def _client_ip(request: Request) -> str:
@@ -430,6 +447,8 @@ async def _handle_agent_message(
             "os": str(data.get("os") or ""),
         }
         conn.set_agent_info(discord_id, info)
+        r: redis.Redis = websocket.app.state.redis
+        await mark_lcu_linked(r, discord_id)
         logger.info(
             "agent_hello discord_id=%s version=%s lcu_ready=%s",
             discord_id,
@@ -480,7 +499,8 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         stored = conn.set_participant_status(discord_id, payload)
-        await conn.forward_participant_status_update(discord_id, stored)
+        r: redis.Redis = websocket.app.state.redis
+        await _forward_participant_status(conn, r, discord_id, stored)
         return
 
     if msg_type == "command_result":
@@ -548,7 +568,10 @@ async def ws_agent(
     except WebSocketDisconnect:
         pass
     finally:
-        await conn.unregister_ws(websocket)
+        offline = await conn.unregister_ws(websocket)
+        if offline is not None:
+            did, payload = offline
+            await _forward_participant_status(conn, r, did, payload)
 
 
 # * ========================================================
@@ -556,7 +579,7 @@ async def ws_agent(
 # * ========================================================
 
 
-async def _handle_bot_message(conn: ConnectionManager, msg: str) -> None:
+async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str) -> None:
     if msg == "ping":
         return
     try:
@@ -608,8 +631,10 @@ async def _handle_bot_message(conn: ConnectionManager, msg: str) -> None:
                     raw_id, {"type": "request_participant_status"}
                 )
             cached = conn.get_participant_status(raw_id)
+            if cached is None:
+                cached = conn.get_participant_statuses([raw_id]).get(raw_id)
             if cached is not None:
-                await conn.forward_participant_status_update(raw_id, cached)
+                await _forward_participant_status(conn, r, raw_id, cached)
         return
     if msg_type == "unsubscribe_participant_status":
         raw_id = data.get("discord_id")
@@ -632,6 +657,7 @@ async def ws_bot(websocket: WebSocket) -> None:
         return
 
     conn: ConnectionManager = websocket.app.state.connections
+    r: redis.Redis = websocket.app.state.redis
     await conn.register_bot_ws(websocket)
 
     try:
@@ -640,7 +666,7 @@ async def ws_bot(websocket: WebSocket) -> None:
             if msg == "ping":
                 await websocket.send_json({"type": "pong"})
                 continue
-            await _handle_bot_message(conn, msg)
+            await _handle_bot_message(conn, r, msg)
     except WebSocketDisconnect:
         pass
     finally:
@@ -744,6 +770,21 @@ async def internal_participant_status(
     if len(discord_ids) > 50:
         raise HTTPException(400, "ids max 50")
     statuses = conn.get_participant_statuses(discord_ids)
+    r: redis.Redis = request.app.state.redis
+    linked = await lcu_linked_map(r, discord_ids)
+    for did in discord_ids:
+        row = statuses.get(did)
+        if row is None:
+            row = {
+                "status": "offline",
+                "phase": "None",
+                "game_started_at_ms": None,
+                "lcu_ready": False,
+                "agent_online": False,
+                "updated_at": 0.0,
+            }
+            statuses[did] = row
+        row["lcu_linked"] = linked.get(did, False)
     return JSONResponse({"statuses": {str(k): v for k, v in statuses.items()}})
 
 

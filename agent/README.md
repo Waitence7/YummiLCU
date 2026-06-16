@@ -31,7 +31,7 @@ agent/
 | `build-installer.bat` | Inno Setup + zip |
 | `dev-run.bat` | 디버그 실행 |
 
-실행 파일: `YummiLcu.App.exe` (현재 **v0.5.3**)
+실행 파일: `YummiLcu.App.exe` (현재 **v0.5.7**)
 
 ## 화면
 
@@ -41,7 +41,7 @@ agent/
 | Discord / Relay / LCU | 3단 연결 상태 표시 |
 | Discord 재로그인 | 저장 세션 삭제 후 재인증 |
 | lockfile | 롤 클라이언트 lockfile 경로 |
-| 설정 | 닷지 방지, 기본 상메, Windows 시작 시 실행 |
+| 설정 | 닷지 방지, 기본 상메, 매치 자동 수락, 롤 클라이언트 따라가기, Windows 시작 시 실행 |
 | 로그 | UI + `%LocalAppData%\YummiAgent\agent.log` |
 | 트레이 | 최소화 시 알림 영역, 더블클릭 복원 |
 
@@ -50,11 +50,20 @@ agent/
 ```json
 {
   "RelayPublicBaseUrl": "https://yummi.duckdns.org",
-  "LockfilePath": "%LocalAppData%\\Riot Games\\Riot Client\\Config\\lockfile",
+  "LockfilePath": "C:\\Riot Games\\League of Legends\\lockfile",
   "PreventQueueAfterDodge": true,
-  "ApplyDefaultStatusOnConnect": true
+  "ApplyDefaultStatusOnConnect": true,
+  "AutoAcceptMatch": false,
+  "FollowLeagueClient": true,
+  "RunAtWindowsStartup": false
 }
 ```
+
+| 필드 | 설명 |
+|------|------|
+| `AutoAcceptMatch` | 레디체크 자동 수락 (에이전트 로컬) |
+| `FollowLeagueClient` | 롤 클라이언트 실행·종료 감지 후 Relay 자동 연결 |
+| `RunAtWindowsStartup` | Windows 로그인 시 에이전트 자동 실행 |
 
 ## Relay + 봇 응답
 
@@ -73,10 +82,15 @@ agent/
 |------|------|
 | `agent_hello` | 연결 시 버전·LCU 준비 상태 |
 | `party_lobby_update` | 파티 로비 변경 → 모집 패널 실시간 갱신 |
+| `participant_status_update` | 참가자 LCU 상태 (로비·매칭·챔프선 등) → 모집 패널 (v0.5.4+) |
 | `gameflow_update` | 게임 단계 (Lobby, ReadyCheck, ChampSelect 등) |
 | `ready_check_update` | 레디체크 상세 → Discord `/dm` 수락·거절 알림 |
+| `champ_select_update` | 챔프선 세션 → Discord `/dm` 밴픽 패널 (v0.5.5+) |
+| `guild_match_eog` | 내전 종료 스냅샷 → Tournament API |
 
 `ready_check_update`가 없는 구버전 에이전트는 `gameflow_update`의 `ReadyCheck` 단계로 `/dm`이 동작합니다.
+
+봇 WebSocket 구독 (`/ws/bot`): `subscribe_party`, `subscribe_match_dm`, `subscribe_participant_status` 등 — 구현은 YummiBot `modules/LCU/relay_ws.py`.
 
 ## 자동 업데이트 (v0.5.3+ 슬림)
 

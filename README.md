@@ -7,7 +7,7 @@ Discord 봇([YummiBot](../YummiBot))과 유저 PC의 League Client (LCU)를 중�
 | 경로 | 설명 |
 |------|------|
 | `relay/` | FastAPI — OAuth, WebSocket, 봇용 internal HTTP |
-| `agent/` | C# WPF 에이전트 (유저 PC, v0.5.3) |
+| `agent/` | C# WPF 에이전트 (유저 PC, v0.5.7) |
 | `deploy/` | nginx, systemd, `agent-version.json`, `agent-publish.sh` |
 
 배포 **B**: YummiBot `main.py`와 Relay는 **별 프로세스**. 봇은 `http://127.0.0.1:8790` (HTTP + `/ws/bot`)으로 Relay와 통신.
@@ -60,8 +60,12 @@ UI·lockfile·실시간 push: [`agent/README.md`](agent/README.md).
 |------|------|
 | `/lcu` 패널 | 봇 HTTP → Relay → 에이전트 WS → LCU |
 | 모집 **게임 초대하기** | `invite_party_members` |
-| 모집 로비 실시간 갱신 | 에이전트 `party_lobby_update` → Relay `/ws/bot` → 봇 |
+| 모집 **로비 참가 확인** | `check_party_members` (`payload.check_riot_ids`) |
+| 모집 로비 실시간 갱신 | `party_lobby_update` → Relay `/ws/bot` → 봇 |
+| 모집 참가자 LCU 상태 | `participant_status_update` (v0.5.4+) — 로비·매칭·챔프선 등, Redis `lcu_linked` |
 | `/dm` 매치 알림 | `ready_check_update` (또는 `gameflow_update` ReadyCheck) → DM 수락/거절 버튼 |
+| `/dm` 챔프선 밴픽 | `champ_select_update` → DM 패널, `champ_select_action`으로 밴/픽 (v0.5.5+) |
+| 내전 종료 기록 | `guild_match_eog` → Tournament API (`/api/bot/guild-match/lcu-ingest`) |
 
 ---
 
@@ -99,7 +103,7 @@ manifest 예시 (v0.5.3+):
 
 ```json
 {
-  "version": "0.5.3",
+  "version": "0.5.7",
   "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
   "installerUrl": "https://yummi.duckdns.org/agent/setup.exe",
   "patchUrl": "https://yummi.duckdns.org/agent/YummiAgent-patch.zip",
@@ -168,6 +172,7 @@ cd ~/Yummi/YummiLcu
 
 - **`agent.json`은 Git에 올리지 마세요** — Relay URL, lockfile 경로 등. 예시만 `agent.json.example` 커밋.
 - **`RELAY_INTERNAL_SECRET`** 은 Relay·YummiBot만 공유. 유저 PC 에이전트에는 없음.
+- 에이전트 WebSocket은 **`session_id` + `ws_token`(첫 JSON 메시지) + OAuth 6자리 링크 코드** 3단계 (`docs/SECURITY.md`).
 - Discord OAuth는 **Relay 공개 URL** 기준. 도메인 바꾸면 Developer Portal Redirect도 수정.
 
 ### lockfile
@@ -180,9 +185,10 @@ cd ~/Yummi/YummiLcu
 ### LCU 명령 (whitelist)
 
 - 허용 명령은 **`relay/actions.py`** 와 **`agent/.../AllowedActions.cs`** 에 동일하게 있어야 함.
-- 새 action 추가 시 Relay·에이전트·YummiBot `lcu_relay.py` 를 함께 맞출 것.
-- 디스코드 `/lcu` — 롤 시작, 솔랭/일겜 돌리기, 매칭 수락 등. 실행·매칭은 수 분 걸릴 수 있음.
-- 디스코드 `/dm` — 매치 잡힘 시 DM 알림 (수락/거절 버튼). Redis + Relay `subscribe_match_dm` 구독.
+- 새 action 추가 시 Relay·에이전트·YummiBot `modules/LCU/lcu_relay.py` 를 함께 맞출 것.
+- 디스코드 `/lcu` — 롤 시작, 솔랭/일겜 돌리기, 매칭 수락, 챔프 리롤·밴픽 확정 등. 실행·매칭은 수 분 걸릴 수 있음.
+- 디스코드 `/dm` — 매치 잡힘 시 DM 알림 (수락/거절), 챔프선 시 밴픽 패널. Redis + Relay `subscribe_match_dm` 구독.
+- 모집 패널 — `check_party_members`로 로비 참가 여부 확인, `participant_status_update`로 실시간 상태 표시.
 
 ### 매칭·클라이언트
 
@@ -206,7 +212,7 @@ cd ~/Yummi/YummiLcu
 | 업데이트 안 됨 | VM `agent-version.json` version > PC exe 버전? zip URL 브라우저에서 다운로드 되는지? |
 | 구버전 self-contained | 60MB+ 단일 exe는 슬림 zip 자동 갱신 불가 → **Setup 설치**로 마이그레이션 |
 | exe만 있고 설정 날아감 | 같은 폴더에 `agent.json` 있는지 (업데이트는 json 보존) |
-| 개발 중 계속 재시작 | `AutoUpdateEnabled: false` 또는 manifest version 내리지 않기 |
+| 개발 중 계속 재시작 | `AutoUpdateEnabled: false` 또는 manifest version 내리지 않기 (v0.5.6+ 에서 동일 버전 재시작 루프 수정) |
 | Actions deploy skip | `vm-deploy-agent.sh --download-only` 또는 `agent-publish.sh`로 수동 배포 |
 
 ### 저장소
