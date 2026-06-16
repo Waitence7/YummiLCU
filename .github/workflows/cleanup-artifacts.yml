@@ -1,0 +1,80 @@
+# 오래된 Actions artifact 정리 — 저장 용량 한도 방지
+name: Cleanup Artifacts
+
+on:
+  schedule:
+    # 매일 04:00 UTC (KST 13:00)
+    - cron: "0 4 * * *"
+  workflow_dispatch:
+    inputs:
+      keep_runs:
+        description: "유지할 최근 성공 빌드 run 수"
+        required: false
+        default: "2"
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old artifacts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const keepRuns = Math.max(1, parseInt('${{ inputs.keep_runs || '2' }}', 10) || 2);
+            const workflowFile = 'build-yummi-agent.yml';
+
+            const runs = await github.paginate(
+              github.rest.actions.listWorkflowRuns,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: workflowFile,
+                status: 'success',
+                per_page: 30,
+              }
+            );
+
+            const keepRunIds = new Set();
+            for (const run of runs) {
+              const { data: jobsData } = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+              });
+              const buildOk = jobsData.jobs.some(
+                (j) => j.name === 'build' && j.conclusion === 'success'
+              );
+              if (buildOk) {
+                keepRunIds.add(run.id);
+                if (keepRunIds.size >= keepRuns) break;
+              }
+            }
+
+            core.info(`Keeping artifacts from ${keepRunIds.size} run(s): ${[...keepRunIds].join(', ')}`);
+
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              }
+            );
+
+            let deleted = 0;
+            let freed = 0;
+            for (const art of artifacts) {
+              if (keepRunIds.has(art.workflow_run.id)) continue;
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: art.id,
+              });
+              deleted += 1;
+              freed += art.size_in_bytes || 0;
+            }
+
+            core.info(`Deleted ${deleted} artifact(s), ~${(freed / 1024 / 1024).toFixed(1)} MB`);

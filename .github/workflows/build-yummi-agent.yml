@@ -93,19 +93,19 @@ jobs:
           path: |
             YummiAgent-win-x64-portable.zip
             YummiAgent-patch.zip
-          retention-days: 30
+          retention-days: 3
 
       - uses: actions/upload-artifact@v4
         with:
           name: YummiAgent-Setup
           path: agent/installer/output/YummiAgent-Setup.exe
-          retention-days: 30
+          retention-days: 3
 
       - uses: actions/upload-artifact@v4
         with:
           name: YummiAgent-Bootstrapper
           path: agent/installer/output/setup.exe
-          retention-days: 30
+          retention-days: 3
 
       - uses: actions/upload-artifact@v4
         with:
@@ -113,7 +113,7 @@ jobs:
           path: |
             deploy/agent-version.json
             deploy/latest.json
-          retention-days: 30
+          retention-days: 3
 
   # VM 배포: GitHub Actions SCP/SSH 대신 Ubuntu VM에서 직접 실행
   #   ./deploy/vm-deploy-agent.sh              # 빌드 트리거 + 대기 + 배포
