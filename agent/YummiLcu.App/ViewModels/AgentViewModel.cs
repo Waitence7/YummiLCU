@@ -223,7 +223,9 @@ public partial class AgentViewModel : ObservableObject, IDisposable
         string clip;
         try
         {
-            clip = Clipboard.ContainsText() ? Clipboard.GetText() : "";
+            clip = System.Windows.Clipboard.ContainsText()
+                ? System.Windows.Clipboard.GetText()
+                : "";
         }
         catch
         {
