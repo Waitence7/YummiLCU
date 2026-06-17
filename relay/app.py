@@ -45,6 +45,10 @@ _INTERNAL_AUTH_MAX_FAILS = 20
 _INTERNAL_AUTH_WINDOW_SEC = 60.0
 _INTERNAL_AUTH_REDIS_KEY = "relay:internal_auth_fail:{ip}"
 
+# OAuth 6자리 링크 코드 brute-force 방어: 세션별 실패 N회 시 코드 폐기/잠금
+OAUTH_LINK_MAX_ATTEMPTS = 5
+_OAUTH_LINK_ATTEMPT_REDIS_KEY = "relay:oauth_link_attempt:{session_id}"
+
 _LONG_COMMAND_ACTIONS = frozenset({"launch_client", "play_ranked_solo", "play_normal_draft"})
 _COMMAND_TIMEOUT_DEFAULT_SEC = 30.0
 _COMMAND_TIMEOUT_LONG_SEC = 300.0
@@ -69,6 +73,10 @@ def _ws_token_redis_key(session_id: str) -> str:
 
 def _oauth_link_pending_redis_key(session_id: str) -> str:
     return OAUTH_LINK_PENDING_KEY.format(session_id=session_id)
+
+
+def _oauth_link_attempt_redis_key(session_id: str) -> str:
+    return _OAUTH_LINK_ATTEMPT_REDIS_KEY.format(session_id=session_id)
 
 
 def _internal_auth_redis_key(ip: str) -> str:
@@ -109,6 +117,11 @@ async def _complete_oauth_link(
     session_id = conn.ws_session_id(websocket)
     if not session_id:
         return False
+    # brute-force 방어: 세션별 시도 횟수 초과 시 코드 폐기 후 거부(재-OAuth 필요)
+    if await _oauth_link_attempts_exceeded(r, session_id):
+        await r.delete(_oauth_link_pending_redis_key(session_id))
+        logger.warning("OAuth 링크 코드 시도 횟수 초과 — 세션 잠금 session=%s", session_id[:8])
+        return False
     raw_pending = await r.get(_oauth_link_pending_redis_key(session_id))
     if not raw_pending:
         return False
@@ -121,7 +134,13 @@ async def _complete_oauth_link(
     expected = str(pending.get("code") or "").strip()
     submitted = code.strip().replace(" ", "")
     if not expected or not secrets.compare_digest(expected, submitted):
+        count = await _record_oauth_link_failure(r, session_id)
+        if count >= OAUTH_LINK_MAX_ATTEMPTS:
+            await r.delete(_oauth_link_pending_redis_key(session_id))
+            logger.warning("OAuth 링크 코드 %d회 실패 — 코드 폐기 session=%s", count, session_id[:8])
         return False
+    # 성공: 시도 카운터 정리
+    await r.delete(_oauth_link_attempt_redis_key(session_id))
     try:
         discord_id = int(pending["discord_id"])
     except (KeyError, TypeError, ValueError):
@@ -196,6 +215,24 @@ async def _is_internal_auth_rate_limited(r: redis.Redis, ip: str) -> bool:
         return False
     try:
         return int(raw) >= _INTERNAL_AUTH_MAX_FAILS
+    except ValueError:
+        return False
+
+
+async def _record_oauth_link_failure(r: redis.Redis, session_id: str) -> int:
+    key = _oauth_link_attempt_redis_key(session_id)
+    count = await r.incr(key)
+    if count == 1:
+        await r.expire(key, OAUTH_LINK_CODE_TTL_SEC)
+    return count
+
+
+async def _oauth_link_attempts_exceeded(r: redis.Redis, session_id: str) -> bool:
+    raw = await r.get(_oauth_link_attempt_redis_key(session_id))
+    if raw is None:
+        return False
+    try:
+        return int(raw) >= OAUTH_LINK_MAX_ATTEMPTS
     except ValueError:
         return False
 
@@ -333,8 +370,12 @@ async def auth_callback(
     safe_code = html.escape(link_code, quote=True)
     return HTMLResponse(
         "<h1>Discord 로그인 완료</h1>"
-        f"<p>에이전트에 아래 <strong>6자리 코드</strong>를 입력하세요.</p>"
+        f"<p>아래 <strong>6자리 코드</strong>를 복사해 에이전트에서 '붙여넣기'를 누르세요.</p>"
         f"<p style='font-size:2rem;letter-spacing:0.3em;font-family:monospace'>{safe_code}</p>"
+        # link_code는 숫자(0-9)만 생성되므로 JS 문자열에 그대로 넣어도 안전하다.
+        f"<button type='button' style='font-size:1rem;padding:0.4em 1em;cursor:pointer' "
+        f"onclick=\"navigator.clipboard.writeText('{safe_code}').then(function(){{this.textContent='복사됨!';}}.bind(this)).catch(function(){{}});\">"
+        "코드 복사</button>"
         "<p>코드는 10분간 유효합니다. 이 창은 닫아도 됩니다.</p>",
         status_code=200,
     )

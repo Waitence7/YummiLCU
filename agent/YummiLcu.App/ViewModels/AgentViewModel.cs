@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -214,6 +215,29 @@ public partial class AgentViewModel : ObservableObject, IDisposable
         {
             AppendLog("코드가 올바르지 않거나 만료되었습니다.");
         }
+    }
+
+    [RelayCommand]
+    private async Task PasteOAuthLinkCodeAsync()
+    {
+        string clip;
+        try
+        {
+            clip = Clipboard.ContainsText() ? Clipboard.GetText() : "";
+        }
+        catch
+        {
+            // 다른 앱이 클립보드를 점유 중이면 실패할 수 있음
+            clip = "";
+        }
+        var digits = new string((clip ?? "").Where(char.IsDigit).ToArray());
+        if (digits.Length != 6)
+        {
+            AppendLog("클립보드에서 6자리 코드를 찾지 못했습니다. 브라우저에서 '코드 복사'를 누르세요.");
+            return;
+        }
+        OauthLinkCode = digits;
+        await SubmitOAuthLinkCodeAsync();
     }
 
     [RelayCommand]

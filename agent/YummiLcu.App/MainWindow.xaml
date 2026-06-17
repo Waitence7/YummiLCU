@@ -93,11 +93,12 @@
           </Style.Triggers>
         </Style>
       </StackPanel.Style>
-      <TextBlock Text="브라우저에 표시된 6자리 코드를 입력하세요." Margin="0,0,0,4" Foreground="#c45c26" />
+      <TextBlock Text="브라우저에서 '코드 복사'를 누른 뒤 '붙여넣기'를 누르세요. (직접 입력도 가능)" Margin="0,0,0,4" Foreground="#c45c26" />
       <StackPanel Orientation="Horizontal">
         <TextBox Text="{Binding OauthLinkCode, UpdateSourceTrigger=PropertyChanged}"
                  Width="120" MaxLength="6" FontFamily="Consolas" FontSize="16"
                  Margin="0,0,8,0" />
+        <Button Content="붙여넣기" Width="80" Margin="0,0,8,0" Command="{Binding PasteOAuthLinkCodeCommand}" />
         <Button Content="코드 확인" Width="80" Command="{Binding SubmitOAuthLinkCodeCommand}" />
       </StackPanel>
     </StackPanel>
