@@ -217,7 +217,7 @@ public sealed class RelaySession : IAsyncDisposable
             }
         }
 
-        AgentSessionStore.Save(_sessionId, _wsToken);
+        AgentSessionStore.Save(_sessionId, _wsToken, _config.RelayPublicBaseUrl);
         _ = Task.Run(() => SessionKeepAliveLoopAsync(sessionCt), sessionCt);
 
         SetStatus("로그인 완료 — LCU 확인 중...");

@@ -24,7 +24,7 @@
 |------|------|
 | Relay / 업데이트 | `agent.json` 로드 시 공개 URL HTTP → HTTPS 승격 |
 | 자동 업데이트 | zip URL **https 만**; manifest **`sha256` 필수** |
-| 세션 저장 | `relay-session.json` — Windows **DPAPI**(CurrentUser) 암호화 |
+| 세션 저장 | `relay-session.json` — Windows **DPAPI**(CurrentUser) 암호화, **14일 만료**, Relay URL 변경 시 재로그인 |
 | LCU | 인증서 검증은 **127.0.0.1 / localhost 만** 우회 |
 | lockfile | 로그에 lockfile 원문(비밀번호) 미포함 |
 
@@ -42,5 +42,11 @@
 - **코드 서명** 없는 zip 업데이트 — `sha256` 으로 무결성만 검증 (서버·manifest 보호 필요)
 - **Internal API** — `RELAY_INTERNAL_SECRET` 유출 시 연결된 모든 에이전트 명령 가능 (nginx + 시크릿 로테이션)
 - **WebSocket** — `session_id` + `ws_token`(첫 메시지) + OAuth 링크 코드 3단계
+
+## 검증 메모
+
+1. 기존(평문/구버전) `relay-session.json` 이 있으면 에이전트 시작 시 **자동 로그인되지 않고** 브라우저 재로그인이 떠야 함
+2. `agent.json` 기본값에서 `AutoUpdateEnabled` 는 `false` 여야 함
+3. Bootstrapper 는 `https://yummi.duckdns.org` 이외 호스트 또는 64자리 hex가 아닌 `sha256` manifest 를 **거부**해야 함
 
 자세한 흐름: [`AGENT_MECHANISM.md`](AGENT_MECHANISM.md)

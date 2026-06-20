@@ -9,8 +9,13 @@ namespace YummiLcu.Core;
 public static class AgentSessionStore
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
+    private const int CurrentStoreVersion = 3;
 
-    public sealed record SavedSession(string SessionId, string WsToken);
+    public sealed record SavedSession(
+        string SessionId,
+        string WsToken,
+        DateTimeOffset SavedAtUtc,
+        string RelayBaseUrl);
 
     private sealed record EncryptedStoreFile(int V, string Payload);
 
@@ -20,23 +25,28 @@ public static class AgentSessionStore
             "YummiAgent",
             "relay-session.json");
 
-    public static SavedSession CreateNew() =>
-        new(Guid.NewGuid().ToString(), Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)));
+    public static SavedSession CreateNew(string relayBaseUrl) =>
+        new(
+            Guid.NewGuid().ToString(),
+            Convert.ToBase64String(RandomNumberGenerator.GetBytes(32)),
+            DateTimeOffset.UtcNow,
+            NormalizeRelayBaseUrl(relayBaseUrl));
 
-    public static SavedSession? Load()
+    public static SavedSession? Load(AgentConfig config)
     {
         try
         {
             if (!File.Exists(StorePath)) return null;
             var json = File.ReadAllText(StorePath);
             var encrypted = JsonSerializer.Deserialize<EncryptedStoreFile>(json);
-            if (encrypted?.V == 2 && !string.IsNullOrWhiteSpace(encrypted.Payload))
+            if (encrypted?.V == CurrentStoreVersion && !string.IsNullOrWhiteSpace(encrypted.Payload))
             {
                 var plain = UnprotectPayload(encrypted.Payload);
                 if (plain is null) return null;
-                return DeserializeSession(plain);
+                return DeserializeSession(plain, config);
             }
-            return DeserializeSession(json);
+            Clear();
+            return null;
         }
         catch
         {
@@ -44,18 +54,24 @@ public static class AgentSessionStore
         }
     }
 
-    public static void Save(string sessionId, string wsToken)
+    public static void Save(string sessionId, string wsToken, string relayBaseUrl)
     {
         try
         {
             var dir = Path.GetDirectoryName(StorePath);
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
-            var inner = JsonSerializer.Serialize(new SavedSession(sessionId, wsToken), JsonOpts);
+            var inner = JsonSerializer.Serialize(
+                new SavedSession(
+                    sessionId,
+                    wsToken,
+                    DateTimeOffset.UtcNow,
+                    NormalizeRelayBaseUrl(relayBaseUrl)),
+                JsonOpts);
             var payload = ProtectPayload(inner);
-            var outer = payload is not null
-                ? JsonSerializer.Serialize(new EncryptedStoreFile(2, payload), JsonOpts)
-                : inner;
+            if (payload is null)
+                return;
+            var outer = JsonSerializer.Serialize(new EncryptedStoreFile(CurrentStoreVersion, payload), JsonOpts);
             File.WriteAllText(StorePath, outer);
         }
         catch
@@ -77,7 +93,7 @@ public static class AgentSessionStore
         }
     }
 
-    private static SavedSession? DeserializeSession(string json)
+    private static SavedSession? DeserializeSession(string json, AgentConfig config)
     {
         var row = JsonSerializer.Deserialize<SavedSession>(json);
         if (row is null ||
@@ -85,8 +101,23 @@ public static class AgentSessionStore
             string.IsNullOrWhiteSpace(row.WsToken) ||
             row.WsToken.Length < 16)
             return null;
+        if (row.SavedAtUtc == default)
+            return null;
+        if (!string.Equals(
+                row.RelayBaseUrl,
+                NormalizeRelayBaseUrl(config.RelayPublicBaseUrl),
+                StringComparison.OrdinalIgnoreCase))
+            return null;
+        var maxAgeDays = Math.Max(config.SavedSessionMaxAgeDays, 0);
+        if (maxAgeDays == 0)
+            return null;
+        if (DateTimeOffset.UtcNow - row.SavedAtUtc > TimeSpan.FromDays(maxAgeDays))
+            return null;
         return row;
     }
+
+    private static string NormalizeRelayBaseUrl(string relayBaseUrl) =>
+        relayBaseUrl.Trim().TrimEnd('/').ToLowerInvariant();
 
     private static string? ProtectPayload(string plain)
     {

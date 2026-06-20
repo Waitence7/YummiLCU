@@ -9,6 +9,7 @@
   "FollowLeagueClient": true,
   "UpdateManifestUrl": "https://yummi.duckdns.org/agent/version.json",
   "CheckUpdatesOnStartup": true,
-  "AutoUpdateEnabled": true,
+  "AutoUpdateEnabled": false,
+  "SavedSessionMaxAgeDays": 14,
   "RunAtWindowsStartup": false
 }

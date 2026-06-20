@@ -16,7 +16,8 @@ public sealed class AgentConfig
     public bool FollowLeagueClient { get; set; } = true;
     public string? UpdateManifestUrl { get; set; } = "https://yummi.duckdns.org/agent/version.json";
     public bool CheckUpdatesOnStartup { get; set; } = true;
-    public bool AutoUpdateEnabled { get; set; } = true;
+    public bool AutoUpdateEnabled { get; set; }
+    public int SavedSessionMaxAgeDays { get; set; } = 14;
     public bool RunAtWindowsStartup { get; set; }
     public bool UiTestMode { get; set; }
 
@@ -72,7 +73,14 @@ public sealed class AgentConfig
         if (uri.Scheme == Uri.UriSchemeHttps)
             return url.TrimEnd('/');
         if (uri.Scheme == Uri.UriSchemeHttp)
-            return $"https://{uri.Host}{(uri.IsDefaultPort ? "" : $":{uri.Port}")}";
+        {
+            var builder = new UriBuilder(uri)
+            {
+                Scheme = Uri.UriSchemeHttps,
+                Port = uri.IsDefaultPort ? -1 : uri.Port,
+            };
+            return builder.Uri.ToString().TrimEnd('/');
+        }
         return url;
     }
 

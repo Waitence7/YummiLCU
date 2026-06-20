@@ -384,6 +384,10 @@ async def auth_callback(
 @app.get("/auth/status")
 async def auth_status(request: Request, session_id: str = Query(..., min_length=8, max_length=64)) -> JSONResponse:
     """에이전트 폴링 — pending | link_pending | ok | expired."""
+    try:
+        uuid.UUID(session_id)
+    except ValueError as e:
+        raise HTTPException(400, "invalid session_id") from e
     r: redis.Redis = request.app.state.redis
     conn: ConnectionManager = request.app.state.connections
     st = await r.get(_status_redis_key(session_id))
@@ -397,6 +401,8 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
     try:
         discord_id = int(raw)
     except ValueError:
+        return JSONResponse({"status": "pending"})
+    if not conn.has_active_session_ws(session_id):
         return JSONResponse({"status": "pending"})
     # WS가 아직 없을 수 있음 — ws_token 검증 후 bind 시도
     await _try_bind_discord(conn, r, session_id, discord_id)

@@ -121,8 +121,8 @@ public partial class AgentViewModel : ObservableObject, IDisposable
     {
         SaveConfig();
         IsConnected = true;
-        var saved = AgentSessionStore.Load();
-        var session = saved ?? AgentSessionStore.CreateNew();
+        var saved = AgentSessionStore.Load(_config);
+        var session = saved ?? AgentSessionStore.CreateNew(_config.RelayPublicBaseUrl);
         if (saved is not null)
             AppendLog("저장된 Discord 로그인 세션 사용");
         _relay = new RelaySession(_config, session.SessionId, session.WsToken);

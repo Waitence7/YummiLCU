@@ -19,6 +19,7 @@ class ConnectionManager:
 
     def __init__(self) -> None:
         self._by_discord: dict[int, WebSocket] = {}
+        self._active_session_ws: dict[str, WebSocket] = {}
         self._session_ws: dict[str, WebSocket] = {}
         self._session_ws_token: dict[str, str] = {}  # session_id -> ws_token (에이전트만 보유)
         self._ws_discord: dict[int, int] = {}  # id(ws) -> discord_id
@@ -40,6 +41,7 @@ class ConnectionManager:
             old = self._session_ws.get(session_id)
             if old is not None and old is not ws:
                 self._drop_ws_locked(old)
+            self._active_session_ws[session_id] = ws
             self._session_ws[session_id] = ws
             self._session_ws_token[session_id] = ws_token
             wid = id(ws)
@@ -93,6 +95,9 @@ class ConnectionManager:
         if sid is not None and self._session_ws.get(sid) is ws:
             del self._session_ws[sid]
             self._session_ws_token.pop(sid, None)
+        for session_id, active_ws in list(self._active_session_ws.items()):
+            if active_ws is ws:
+                del self._active_session_ws[session_id]
         self._ws_session_id.pop(wid, None)
 
     def session_ws_token(self, session_id: str) -> str | None:
@@ -100,7 +105,7 @@ class ConnectionManager:
 
     def has_active_session_ws(self, session_id: str) -> bool:
         """OAuth 시작 전 에이전트 WS 가 붙어 있는지."""
-        return session_id in self._session_ws
+        return session_id in self._active_session_ws
 
     def ws_session_id(self, ws: WebSocket) -> str | None:
         return self._ws_session_id.get(id(ws))
