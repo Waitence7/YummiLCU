@@ -282,6 +282,11 @@ public sealed class LcuClient : IDisposable
             $"/lol-champ-select/v1/session/actions/{actionId}",
             $"{{\"championId\":{championId},\"completed\":{completed.ToString().ToLowerInvariant()}}}");
 
+    public async Task<bool> SetSummonerSpellsAsync(int spell1Id, int spell2Id) =>
+        await PatchJsonAsync(
+            "/lol-champ-select/v1/session/my-selection",
+            $"{{\"spell1Id\":{spell1Id},\"spell2Id\":{spell2Id}}}");
+
     public async Task<IReadOnlyList<PerkPageInfo>> GetPerkPagesAsync()
     {
         using var doc = await GetJsonAsync("/lol-perks/v1/pages");

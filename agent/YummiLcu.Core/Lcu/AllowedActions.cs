@@ -23,6 +23,9 @@ public static class AllowedActions
             ["party_ready"] = async ctx => await Bool(await ctx.Lcu.PutJsonAsync("/lol-lobby/v1/parties/ready", """{"ready":true}""")),
             ["champ_reroll"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/lol-champ-select/v1/session/my-selection/reroll")),
             ["champ_select_action"] = ChampSelectActionAsync,
+            ["set_summoner_spells"] = SetSummonerSpellsAsync,
+            ["list_rune_pages"] = ListRunePagesAsync,
+            ["set_rune_page"] = SetRunePageAsync,
             ["quit_client"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/process-control/v1/process/quit")),
             ["set_status"] = SetStatusAsync,
             ["reset_status"] = async ctx => await SetStatusTextAsync(ctx, StatusMessageHelper.DefaultYummiClient),
@@ -93,6 +96,41 @@ public static class AllowedActions
         return ActionResult.FromBool(ok);
     }
 
+    private static async Task<ActionResult> SetSummonerSpellsAsync(ActionContext ctx)
+    {
+        var spell1Id = PayloadInt(ctx.Payload, "spell1_id");
+        var spell2Id = PayloadInt(ctx.Payload, "spell2_id");
+        if (spell1Id is null or <= 0 || spell2Id is null or <= 0)
+            return new ActionResult(false, "spell1_id/spell2_id가 필요합니다.");
+        if (spell1Id == spell2Id)
+            return new ActionResult(false, "서로 다른 스펠을 선택하세요.");
+        var ok = await ctx.Lcu.SetSummonerSpellsAsync(spell1Id.Value, spell2Id.Value);
+        return ActionResult.FromBool(ok, "스펠 변경 완료", "스펠 변경 실패");
+    }
+
+    private static async Task<ActionResult> ListRunePagesAsync(ActionContext ctx)
+    {
+        var pages = await ctx.Lcu.GetPerkPagesAsync();
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            pages = pages
+                .Where(p => p.Id > 0)
+                .Select(p => new { id = p.Id, name = p.Name, current = p.IsActive })
+                .Take(25)
+                .ToList(),
+        });
+        return new ActionResult(true, $"{pages.Count}개 룬 페이지", data);
+    }
+
+    private static async Task<ActionResult> SetRunePageAsync(ActionContext ctx)
+    {
+        var pageId = PayloadLong(ctx.Payload, "page_id");
+        if (pageId is null or <= 0)
+            return new ActionResult(false, "page_id가 필요합니다.");
+        var ok = await ctx.Lcu.SetCurrentPerkPageAsync(pageId.Value);
+        return ActionResult.FromBool(ok, "룬 페이지 변경 완료", "룬 페이지 변경 실패");
+    }
+
     private static int? PayloadInt(JsonElement? payload, string key)
     {
         if (payload is null || payload.Value.ValueKind != JsonValueKind.Object) return null;
@@ -110,6 +148,18 @@ public static class AllowedActions
         if (payload is null || payload.Value.ValueKind != JsonValueKind.Object) return null;
         if (!payload.Value.TryGetProperty(key, out var el)) return null;
         return el.GetString();
+    }
+
+    private static long? PayloadLong(JsonElement? payload, string key)
+    {
+        if (payload is null || payload.Value.ValueKind != JsonValueKind.Object) return null;
+        if (!payload.Value.TryGetProperty(key, out var el)) return null;
+        return el.ValueKind switch
+        {
+            JsonValueKind.Number when el.TryGetInt64(out var n) => n,
+            JsonValueKind.String when long.TryParse(el.GetString(), out var parsed) => parsed,
+            _ => null,
+        };
     }
 
     private static IReadOnlyList<string> PayloadStringArray(JsonElement? payload, string key)
