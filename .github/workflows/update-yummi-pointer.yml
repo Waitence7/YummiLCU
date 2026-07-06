@@ -1,0 +1,25 @@
+name: Update Yummi pointer
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Notify the Yummi release repository
+        env:
+          GH_TOKEN: ${{ secrets.YUMMI_AUTOMATION_TOKEN }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          if [[ -z "$GH_TOKEN" ]]; then
+            echo "::warning::YUMMI_AUTOMATION_TOKEN is not configured"
+            exit 0
+          fi
+          gh api repos/YummiLabs/Yummi/dispatches \
+            --method POST \
+            -f event_type=yummi-lcu-updated \
+            -f "client_payload[sha]=$SHA"
