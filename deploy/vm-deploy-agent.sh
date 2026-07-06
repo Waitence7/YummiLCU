@@ -80,7 +80,10 @@ gh run download "$RUN_ID" --repo "$REPO" -n YummiAgent-Setup -D "$WORKDIR" 2>/de
 gh run download "$RUN_ID" --repo "$REPO" -n YummiAgent-Bootstrapper -D "$WORKDIR" 2>/dev/null || true
 gh run download "$RUN_ID" --repo "$REPO" -n agent-version-json -D "$WORKDIR/manifest" 2>/dev/null || true
 
-ZIP="$(find "$WORKDIR" -maxdepth 1 \( -name 'YummiAgent-win-x64-portable.zip' -o -name '*.zip' \) -print -quit)"
+ZIP="$WORKDIR/YummiAgent-win-x64-portable.zip"
+if [[ ! -f "$ZIP" ]]; then
+  ZIP="$(find "$WORKDIR" -maxdepth 1 -name '*.zip' ! -name 'YummiAgent-patch.zip' -print -quit)"
+fi
 if [[ -z "$ZIP" || ! -f "$ZIP" ]]; then
   echo "zip을 찾을 수 없습니다: $WORKDIR" >&2
   ls -laR "$WORKDIR" >&2 || true
