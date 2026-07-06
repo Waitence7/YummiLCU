@@ -144,6 +144,8 @@ mkdir -p "$LCU/deploy"
 cp "$MANIFEST" "$LCU/deploy/agent-version.json"
 sudo cp "$MANIFEST" "$WWW/agent-version.json"
 sudo chmod 644 "$WWW/agent-version.json"
+sudo cp "$MANIFEST" "$WWW/version.json"
+sudo chmod 644 "$WWW/version.json"
 
 if [[ -f "$LATEST_MANIFEST" ]]; then
   cp "$LATEST_MANIFEST" "$LCU/deploy/latest.json"

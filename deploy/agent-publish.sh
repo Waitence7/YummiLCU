@@ -108,6 +108,11 @@ sudo cp "$MANIFEST" "$PUBLIC_MANIFEST"
 sudo chmod 644 "$PUBLIC_MANIFEST"
 echo "manifest → $MANIFEST"
 echo "manifest → $PUBLIC_MANIFEST (nginx /agent/version.json)"
+if [[ "$PUBLIC_MANIFEST" == "$WWW/agent-version.json" ]]; then
+  sudo cp "$MANIFEST" "$WWW/version.json"
+  sudo chmod 644 "$WWW/version.json"
+  echo "manifest alias → $WWW/version.json"
+fi
 
 if [[ -f "$LATEST_MANIFEST" ]]; then
   sudo cp "$LATEST_MANIFEST" "$WWW/latest.json"
