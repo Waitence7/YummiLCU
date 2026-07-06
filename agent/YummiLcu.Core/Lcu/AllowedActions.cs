@@ -85,7 +85,7 @@ public static class AllowedActions
     {
         var actionId = PayloadInt(ctx.Payload, "action_id");
         var championId = PayloadInt(ctx.Payload, "champion_id");
-        if (actionId is null or <= 0)
+        if (actionId is null or < 0)
             return new ActionResult(false, "action_id가 필요합니다.");
         if (championId is null or <= 0)
             return new ActionResult(false, "champion_id가 필요합니다.");
