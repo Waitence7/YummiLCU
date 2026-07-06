@@ -20,6 +20,8 @@ ACTION_HELP: dict[str, str] = {
     "set_summoner_spells": "소환사 주문 변경",
     "list_rune_pages": "룬 페이지 목록",
     "set_rune_page": "룬 페이지 선택",
+    "get_current_rune_page": "현재 룬 페이지",
+    "update_rune_page": "룬 직접 구성",
     "quit_client": "롤 클라이언트 종료",
     "set_status": "상메 설정 (payload.text, 유니코드·줄바꿈)",
     "reset_status": "기본 상메(𝗬𝘂𝗺𝗺𝗶 𝗖𝗹𝗶𝗲𝗻𝘁)",

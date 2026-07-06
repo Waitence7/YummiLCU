@@ -26,6 +26,8 @@ public static class AllowedActions
             ["set_summoner_spells"] = SetSummonerSpellsAsync,
             ["list_rune_pages"] = ListRunePagesAsync,
             ["set_rune_page"] = SetRunePageAsync,
+            ["get_current_rune_page"] = GetCurrentRunePageAsync,
+            ["update_rune_page"] = UpdateRunePageAsync,
             ["quit_client"] = async ctx => await Bool(await ctx.Lcu.PostAsync("/process-control/v1/process/quit")),
             ["set_status"] = SetStatusAsync,
             ["reset_status"] = async ctx => await SetStatusTextAsync(ctx, StatusMessageHelper.DefaultYummiClient),
@@ -129,6 +131,65 @@ public static class AllowedActions
             return new ActionResult(false, "page_id가 필요합니다.");
         var ok = await ctx.Lcu.SetCurrentPerkPageAsync(pageId.Value);
         return ActionResult.FromBool(ok, "룬 페이지 변경 완료", "룬 페이지 변경 실패");
+    }
+
+    private static async Task<ActionResult> GetCurrentRunePageAsync(ActionContext ctx)
+    {
+        var page = await ctx.Lcu.GetCurrentPerkPageAsync();
+        if (page is null)
+            return new ActionResult(false, "현재 룬 페이지를 읽지 못했습니다.");
+        var data = JsonSerializer.SerializeToElement(new
+        {
+            id = page.Id,
+            name = page.Name,
+            primary_style_id = page.PrimaryStyleId,
+            sub_style_id = page.SubStyleId,
+            selected_perk_ids = page.SelectedPerkIds,
+            current = page.IsCurrent,
+        });
+        return new ActionResult(true, "현재 룬 페이지", data);
+    }
+
+    private static async Task<ActionResult> UpdateRunePageAsync(ActionContext ctx)
+    {
+        var pageId = PayloadLong(ctx.Payload, "page_id");
+        var name = PayloadString(ctx.Payload, "name");
+        var primaryStyleId = PayloadInt(ctx.Payload, "primary_style_id");
+        var subStyleId = PayloadInt(ctx.Payload, "sub_style_id");
+        var perkIds = PayloadIntArray(ctx.Payload, "selected_perk_ids");
+        if (pageId is null or <= 0)
+            return new ActionResult(false, "page_id가 필요합니다.");
+        if (primaryStyleId is null or <= 0 || subStyleId is null or <= 0)
+            return new ActionResult(false, "primary_style_id/sub_style_id가 필요합니다.");
+        if (perkIds.Count != 9)
+            return new ActionResult(false, "selected_perk_ids는 9개여야 합니다.");
+
+        var ok = await ctx.Lcu.UpdatePerkPageAsync(
+            pageId.Value,
+            string.IsNullOrWhiteSpace(name) ? "Yummi" : name.Trim(),
+            primaryStyleId.Value,
+            subStyleId.Value,
+            perkIds,
+            current: true);
+        return ActionResult.FromBool(ok, "룬 구성 저장 완료", "룬 구성 저장 실패");
+    }
+
+    private static List<int> PayloadIntArray(JsonElement? payload, string key)
+    {
+        if (payload is null || payload.Value.ValueKind != JsonValueKind.Object)
+            return new List<int>();
+        if (!payload.Value.TryGetProperty(key, out var el) || el.ValueKind != JsonValueKind.Array)
+            return new List<int>();
+
+        var list = new List<int>();
+        foreach (var item in el.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.Number && item.TryGetInt32(out var n) && n > 0)
+                list.Add(n);
+            else if (item.ValueKind == JsonValueKind.String && int.TryParse(item.GetString(), out var parsed) && parsed > 0)
+                list.Add(parsed);
+        }
+        return list;
     }
 
     private static int? PayloadInt(JsonElement? payload, string key)

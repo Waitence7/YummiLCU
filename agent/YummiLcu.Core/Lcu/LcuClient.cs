@@ -310,6 +310,63 @@ public sealed class LcuClient : IDisposable
     public async Task<bool> SetCurrentPerkPageAsync(long pageId) =>
         await PutJsonAsync("/lol-perks/v1/pages", $"{{\"id\":{pageId}}}");
 
+    public async Task<PerkPageDetail?> GetCurrentPerkPageAsync()
+    {
+        using var doc = await GetJsonAsync("/lol-perks/v1/currentpage");
+        if (doc is null) return null;
+        return ParsePerkPageDetail(doc.RootElement);
+    }
+
+    public async Task<bool> UpdatePerkPageAsync(
+        long pageId,
+        string name,
+        int primaryStyleId,
+        int subStyleId,
+        IReadOnlyList<int> selectedPerkIds,
+        bool current = true)
+    {
+        var payload = new
+        {
+            id = pageId,
+            name,
+            primaryStyleId,
+            subStyleId,
+            selectedPerkIds,
+            current,
+        };
+        var json = JsonSerializer.Serialize(payload);
+        return await PutJsonAsync($"/lol-perks/v1/pages/{pageId}", json);
+    }
+
+    private static PerkPageDetail? ParsePerkPageDetail(JsonElement root)
+    {
+        if (root.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            return null;
+        if (!root.TryGetProperty("id", out var idEl) || !idEl.TryGetInt64(out var pageId) || pageId <= 0)
+            return null;
+
+        var selected = new List<int>();
+        if (root.TryGetProperty("selectedPerkIds", out var idsEl) && idsEl.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in idsEl.EnumerateArray())
+            {
+                if (item.TryGetInt32(out var pid) && pid > 0)
+                    selected.Add(pid);
+            }
+        }
+
+        return new PerkPageDetail
+        {
+            Id = pageId,
+            Name = root.TryGetProperty("name", out var nameEl) ? nameEl.GetString() ?? "" : "",
+            PrimaryStyleId = root.TryGetProperty("primaryStyleId", out var pEl) ? pEl.GetInt32() : 0,
+            SubStyleId = root.TryGetProperty("subStyleId", out var sEl) ? sEl.GetInt32() : 0,
+            SelectedPerkIds = selected,
+            IsCurrent = root.TryGetProperty("current", out var curEl) && curEl.GetBoolean(),
+            IsDeletable = root.TryGetProperty("isDeletable", out var delEl) && delEl.GetBoolean(),
+        };
+    }
+
     public async Task<string?> GetGameflowPhaseAsync()
     {
         var doc = await GetJsonAsync("/lol-gameflow/v1/gameflow-phase");
