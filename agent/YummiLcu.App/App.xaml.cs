@@ -25,6 +25,12 @@ public partial class App : System.Windows.Application
         if (IsTestModeArg(e.Args))
             config.UiTestMode = true;
 
+        if (!config.UiTestMode && !LeagueClientWatcher.IsClientPresent(config))
+        {
+            Shutdown();
+            return;
+        }
+
         if (!config.UiTestMode)
         {
             try
@@ -51,12 +57,7 @@ public partial class App : System.Windows.Application
         MainWindow = main;
         main.Show();
 
-        if (config.FollowLeagueClient)
-        {
-            _vm.StartLeagueWatcherIfEnabled();
-            if (!LeagueClientWatcher.IsClientPresent(config))
-                main.HideToTray();
-        }
+        _vm.StartLeagueWatcherIfEnabled();
 
         _activateListenCts = new CancellationTokenSource();
         var listenCt = _activateListenCts.Token;

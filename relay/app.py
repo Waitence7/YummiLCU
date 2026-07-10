@@ -449,6 +449,40 @@ async def _forward_guild_match_eog(
         logger.exception("내전 LCU ingest 요청 실패 discord_id=%s", discord_id)
 
 
+async def _forward_match_eog(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+    payload: dict[str, Any],
+) -> None:
+    api_base = config.tournament_api_base_url()
+    token = config.tournament_bot_internal_token()
+    if not token:
+        logger.warning("TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — LCU 종료 매치 저장 생략")
+        return
+
+    url = f"{api_base}/api/bot/lcu/matches/eog-ingest"
+    headers = {
+        "content-type": "application/json",
+        "x-internal-bot-token": token,
+        "x-actor-discord-user-id": str(discord_id),
+    }
+    body = {"rawData": payload}
+    try:
+        async with http.post(url, headers=headers, json=body) as res:
+            text = await res.text()
+            if res.status >= 400:
+                logger.warning(
+                    "LCU 종료 매치 저장 실패 discord_id=%s status=%s body=%s",
+                    discord_id,
+                    res.status,
+                    text[:500],
+                )
+                return
+            logger.info("LCU 종료 매치 저장 OK discord_id=%s body=%s", discord_id, text[:300])
+    except Exception:
+        logger.exception("LCU 종료 매치 저장 요청 실패 discord_id=%s", discord_id)
+
+
 async def _handle_agent_message(
     websocket: WebSocket,
     conn: ConnectionManager,
@@ -482,6 +516,16 @@ async def _handle_agent_message(
             return
         http: aiohttp.ClientSession = websocket.app.state.http
         await _forward_guild_match_eog(http, discord_id, payload)
+        return
+
+    if msg_type == "match_eog":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("payload")
+        if discord_id is None or not isinstance(payload, dict):
+            logger.warning("match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
+            return
+        http: aiohttp.ClientSession = websocket.app.state.http
+        await _forward_match_eog(http, discord_id, payload)
         return
 
     if msg_type == "agent_hello":

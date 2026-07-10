@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using YummiLcu.Core.Lcu;
 
 namespace YummiLcu.Core;
@@ -6,6 +7,13 @@ namespace YummiLcu.Core;
 public sealed class LeagueClientWatcher
 {
     private static readonly TimeSpan PollInterval = TimeSpan.FromMilliseconds(1500);
+    private static readonly string[] LeagueProcessNames =
+    [
+        "LeagueClient",
+        "LeagueClientUx",
+        "LeagueClientUxRender",
+        "League of Legends"
+    ];
 
     private bool _present;
     private bool _suppressStartUntilAbsent;
@@ -29,9 +37,30 @@ public sealed class LeagueClientWatcher
     public static bool IsClientPresent(Func<string?> resolvePath)
     {
         var path = resolvePath();
-        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
-            return false;
-        return LcuClient.ReadLockfileSignature(path) is not null;
+        if (!string.IsNullOrWhiteSpace(path)
+            && File.Exists(path)
+            && LcuClient.ReadLockfileSignature(path) is not null)
+        {
+            return true;
+        }
+        return IsLeagueProcessRunning();
+    }
+
+    private static bool IsLeagueProcessRunning()
+    {
+        foreach (var name in LeagueProcessNames)
+        {
+            try
+            {
+                if (Process.GetProcessesByName(name).Length > 0)
+                    return true;
+            }
+            catch
+            {
+                // 프로세스 열거 실패 시 다른 이름을 계속 확인합니다.
+            }
+        }
+        return false;
     }
 
     public async Task RunAsync(AgentConfig config, CancellationToken ct) =>

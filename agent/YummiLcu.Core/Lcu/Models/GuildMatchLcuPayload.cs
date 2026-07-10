@@ -37,6 +37,9 @@ public sealed class GuildMatchLcuPayload
 
     [JsonPropertyName("eogStats")]
     public object? EogStats { get; init; }
+
+    [JsonPropertyName("gameflowSession")]
+    public object? GameflowSession { get; init; }
 }
 
 public sealed class GuildMatchLcuGameResult

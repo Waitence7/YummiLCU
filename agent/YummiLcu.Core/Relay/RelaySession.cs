@@ -765,21 +765,32 @@ public sealed class RelaySession : IAsyncDisposable
         if (_lcu is null) return;
 
         GuildMatchLcuPayload? payload = null;
-        for (var attempt = 0; attempt < 5 && payload is null; attempt++)
+        for (var attempt = 0; attempt < 5; attempt++)
         {
             payload = await _lcu.BuildGuildMatchEogPayloadAsync(phase);
-            if (payload is null)
+            if (payload is not null && payload.Participants.Count >= 2)
+                break;
+            if (attempt < 4)
                 await Task.Delay(1500, ct);
         }
 
-        if (payload is null || payload.Participants.Count < 2)
+        if (payload is null)
+        {
+            LogLine("LCU 종료 매치 스냅샷: 정보를 아직 읽지 못했습니다.");
+            return;
+        }
+
+        await SendAgentMessageAsync(new { type = "match_eog", payload }, ct);
+        _eogSnapshotSent = true;
+        LogLine($"LCU 종료 매치 스냅샷 전송 ({payload.Participants.Count}명)");
+
+        if (payload.Participants.Count < 2)
         {
             LogLine("내전 LCU 스냅샷: 참가자 정보를 아직 읽지 못했습니다.");
             return;
         }
 
         await SendAgentMessageAsync(new { type = "guild_match_eog", payload }, ct);
-        _eogSnapshotSent = true;
         LogLine($"내전 LCU 스냅샷 전송 ({payload.Participants.Count}명)");
     }
 

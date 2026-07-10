@@ -41,17 +41,14 @@ public sealed class AgentConfig
             try
             {
                 var json = File.ReadAllText(path);
-                using var doc = JsonDocument.Parse(json);
-                var hasFollowLeague = doc.RootElement.TryGetProperty("FollowLeagueClient", out _);
                 cfg = JsonSerializer.Deserialize<AgentConfig>(json) ?? new AgentConfig();
-                if (!hasFollowLeague)
-                    cfg.FollowLeagueClient = true;
             }
             catch
             {
                 cfg = new AgentConfig();
             }
         }
+        cfg.FollowLeagueClient = true;
         cfg.EnsureSecureCommunication();
         return cfg;
     }

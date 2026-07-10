@@ -51,11 +51,8 @@ public partial class AgentViewModel : ObservableObject, IDisposable
 
     public void StartLeagueWatcherIfEnabled()
     {
-        if (!_config.FollowLeagueClient || _leagueWatcherCts is not null)
+        if (_leagueWatcherCts is not null)
             return;
-
-        if (!RunAtWindowsStartup)
-            AppendLog("팁: 롤 켜기 전 에이전트가 꺼져 있으면 자동 연결되지 않습니다. Windows 시작 시 자동 실행을 켜 두세요.");
 
         _leagueWatcher = new LeagueClientWatcher();
         _leagueWatcher.LeagueClientStarted += OnLeagueClientStarted;
@@ -303,14 +300,13 @@ public partial class AgentViewModel : ObservableObject, IDisposable
 
     partial void OnFollowLeagueClientChanged(bool value)
     {
-        _config.FollowLeagueClient = value;
+        _config.FollowLeagueClient = true;
+        if (!value)
+            FollowLeagueClient = true;
         try { _config.Save(); }
         catch { /* ignore */ }
 
-        if (value)
-            StartLeagueWatcherIfEnabled();
-        else
-            StopLeagueWatcher();
+        StartLeagueWatcherIfEnabled();
     }
 
     partial void OnRunAtWindowsStartupChanged(bool value)

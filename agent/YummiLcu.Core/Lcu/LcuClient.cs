@@ -692,7 +692,7 @@ public sealed class LcuClient : IDisposable
             ParseSessionParticipants(gameData, participants);
         }
 
-        if (participants.Count < 2) return null;
+        if (participants.Count < 2 && eogDoc is null && sessionDoc is null) return null;
 
         var gameResult = BuildGameResult(participants, reporterGameName, reporterTagLine, reporterWon);
 
@@ -702,7 +702,10 @@ public sealed class LcuClient : IDisposable
             CapturedAt = DateTime.UtcNow.ToString("o"),
             Participants = participants,
             GameResult = gameResult,
-            EogStats = eogDoc is null ? null : JsonSerializer.Deserialize<object>(eogDoc.RootElement.GetRawText())
+            EogStats = eogDoc is null ? null : JsonSerializer.Deserialize<object>(eogDoc.RootElement.GetRawText()),
+            GameflowSession = sessionDoc is null
+                ? null
+                : JsonSerializer.Deserialize<object>(sessionDoc.RootElement.GetRawText())
         };
     }
 
