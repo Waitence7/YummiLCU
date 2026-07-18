@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "notes": "Tauri 0.6.3 release",
-  "version": "0.6.3",
-  "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.3.zip",
-  "sha256": "b0f3d33fce7671e4e4bc059ca22f46828c695389fe3b95f0c6300b45bb44364b",
+  "notes": "Tauri 0.6.4 release",
+  "version": "0.6.4",
+  "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.4.zip",
+  "sha256": "20eaf382ab0923f8f0e82029f3754255565f05ece0ab50d3582ac05c6a065cbd",
   "legacy": {
     "version": "0.5.11",
     "url": "https://yummi.duckdns.org/agent/releases/legacy/legacy-0.5.11.zip",
@@ -12,10 +12,10 @@
     "notes": "Legacy 0.5.11 release"
   },
   "tauri": {
-    "version": "0.6.3",
-    "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.3.zip",
-    "sha256": "b0f3d33fce7671e4e4bc059ca22f46828c695389fe3b95f0c6300b45bb44364b",
+    "version": "0.6.4",
+    "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.4.zip",
+    "sha256": "20eaf382ab0923f8f0e82029f3754255565f05ece0ab50d3582ac05c6a065cbd",
     "executable": "yummi-lcu-tauri.exe",
-    "notes": "Tauri 0.6.3 release"
+    "notes": "Tauri 0.6.4 release"
   }
 }
