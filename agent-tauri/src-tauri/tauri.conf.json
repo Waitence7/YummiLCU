@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Yummi LCU Agent",
+  "version": "0.6.1",
+  "identifier": "com.yummilabs.lcu-agent",
+  "build": { "beforeDevCommand": "npm run dev", "beforeBuildCommand": "npm run build", "devUrl": "http://localhost:1420", "frontendDist": "../dist" },
+  "app": { "windows": [{ "title": "Yummi LCU Agent", "width": 640, "height": 620, "minWidth": 560, "minHeight": 520, "resizable": true }], "security": { "csp": null } },
+  "bundle": { "active": true, "targets": ["nsis", "msi"], "windows": { "nsis": { "installMode": "currentUser" } }, "icon": ["icons/icon.ico"] }
+}
