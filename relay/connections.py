@@ -48,7 +48,9 @@ class ConnectionManager:
             self._ws_session[wid] = session_id
             self._ws_session_id[wid] = session_id
 
-    async def bind_discord(self, session_id: str, discord_id: int) -> bool:
+    async def bind_discord(
+        self, session_id: str, discord_id: int, profile: dict[str, str] | None = None
+    ) -> bool:
         """ws_token 이 등록된 session WS만 discord_id에 바인딩합니다."""
         async with self._lock:
             ws = self._session_ws.pop(session_id, None)
@@ -63,7 +65,13 @@ class ConnectionManager:
             self._ws_discord[id(ws)] = discord_id
             logger.info("에이전트 등록: discord_id=%s session=%s", discord_id, session_id[:8])
         try:
-            await ws.send_json({"type": "session_bound", "discord_id": int(discord_id)})
+            payload: dict[str, Any] = {"type": "session_bound", "discord_id": int(discord_id)}
+            if profile:
+                if profile.get("name"):
+                    payload["discord_name"] = profile["name"]
+                if profile.get("avatar"):
+                    payload["discord_avatar"] = profile["avatar"]
+            await ws.send_json(payload)
         except Exception:
             logger.exception("session_bound 전송 실패 discord_id=%s", discord_id)
         return True

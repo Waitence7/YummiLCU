@@ -36,6 +36,7 @@ SESSION_KEY = "relay:session:{session_id}"
 SESSION_STATUS_KEY = "relay:session_status:{session_id}"
 WS_TOKEN_KEY = "relay:ws_token:{session_id}"
 OAUTH_LINK_PENDING_KEY = "relay:oauth_link_pending:{session_id}"
+DISCORD_PROFILE_KEY = "relay:discord_profile:{session_id}"
 OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
 OAUTH_LINK_CODE_TTL_SEC = 600
@@ -73,6 +74,21 @@ def _ws_token_redis_key(session_id: str) -> str:
 
 def _oauth_link_pending_redis_key(session_id: str) -> str:
     return OAUTH_LINK_PENDING_KEY.format(session_id=session_id)
+
+
+def _discord_profile_redis_key(session_id: str) -> str:
+    return DISCORD_PROFILE_KEY.format(session_id=session_id)
+
+
+def _discord_profile(user: dict[str, Any], discord_id: int) -> dict[str, str]:
+    """Tauri UI에 표시할 공개 Discord 프로필만 보관한다. 토큰은 저장하지 않는다."""
+    name = str(user.get("global_name") or user.get("username") or "Discord 사용자").strip()[:64]
+    profile = {"name": name or "Discord 사용자"}
+    avatar = user.get("avatar")
+    if isinstance(avatar, str) and avatar:
+        ext = "gif" if avatar.startswith("a_") else "png"
+        profile["avatar"] = f"https://cdn.discordapp.com/avatars/{discord_id}/{avatar}.{ext}?size=128"
+    return profile
 
 
 def _oauth_link_attempt_redis_key(session_id: str) -> str:
@@ -150,6 +166,8 @@ async def _complete_oauth_link(
 
     ttl = config.relay_session_ttl_sec()
     await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
+    profile = pending.get("profile") if isinstance(pending.get("profile"), dict) else {}
+    await r.set(_discord_profile_redis_key(session_id), json.dumps(profile), ex=ttl)
     await r.set(_status_redis_key(session_id), "ok", ex=ttl)
     await r.delete(_oauth_link_pending_redis_key(session_id))
     bound = await _try_bind_discord(conn, r, session_id, discord_id)
@@ -170,7 +188,20 @@ async def _try_bind_discord(
     stored = await r.get(_ws_token_redis_key(session_id))
     if not stored or not secrets.compare_digest(stored, ws_token):
         return False
-    bound = await conn.bind_discord(session_id, discord_id)
+    profile: dict[str, str] = {}
+    raw_profile = await r.get(_discord_profile_redis_key(session_id))
+    if raw_profile:
+        try:
+            parsed = json.loads(raw_profile)
+            if isinstance(parsed, dict):
+                profile = {
+                    key: str(value)[:512]
+                    for key, value in parsed.items()
+                    if key in {"name", "avatar"} and isinstance(value, str)
+                }
+        except json.JSONDecodeError:
+            pass
+    bound = await conn.bind_discord(session_id, discord_id, profile)
     if bound:
         await mark_lcu_linked(r, discord_id)
     return bound
@@ -363,7 +394,11 @@ async def auth_callback(
 
     ttl = config.relay_session_ttl_sec()
     link_code = _generate_link_code()
-    pending = json.dumps({"discord_id": discord_id, "code": link_code})
+    pending = json.dumps({
+        "discord_id": discord_id,
+        "code": link_code,
+        "profile": _discord_profile(user or {}, discord_id),
+    })
     await r.set(_oauth_link_pending_redis_key(session_id), pending, ex=OAUTH_LINK_CODE_TTL_SEC)
     await r.set(_status_redis_key(session_id), "link_pending", ex=ttl)
     logger.info("OAuth 대기(링크 코드) discord_id=%s session=%s", discord_id, session_id[:8])
