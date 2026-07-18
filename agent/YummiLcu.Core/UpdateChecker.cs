@@ -20,10 +20,11 @@ public static class UpdateChecker
         try
         {
             var json = await Http.GetStringAsync(manifestUrl.Trim(), ct);
-            var info = JsonSerializer.Deserialize<UpdateInfo>(json, new JsonSerializerOptions
+            var manifest = JsonSerializer.Deserialize<ReleaseManifest>(json, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true,
             });
+            var info = manifest?.SelectLegacy();
             if (info is null || string.IsNullOrWhiteSpace(info.Version)) return null;
             if (Version.Parse(info.Version) <= Version.Parse(CurrentVersion)) return null;
             if (!string.IsNullOrWhiteSpace(info.Url) && !IsHttpsUrl(info.Url))
@@ -84,5 +85,40 @@ public static class UpdateChecker
 
         public string? PreferredDownloadUrl =>
             !string.IsNullOrWhiteSpace(InstallerUrl) ? InstallerUrl : Url;
+    }
+
+    /// <summary>
+    /// v2 manifest keeps the C# agent under the legacy target and the Rust/Tauri
+    /// agent under tauri.  Root fields are retained so old agents can still read
+    /// a v2 manifest during a rolling deployment.
+    /// </summary>
+    public sealed class ReleaseManifest
+    {
+        public string? Version { get; set; }
+        public string? Url { get; set; }
+        public string? InstallerUrl { get; set; }
+        public string? Notes { get; set; }
+        public string? Sha256 { get; set; }
+        public string? PatchUrl { get; set; }
+        public string? PatchFrom { get; set; }
+        public string? PatchSha256 { get; set; }
+        public UpdateInfo? Legacy { get; set; }
+
+        public UpdateInfo? SelectLegacy()
+        {
+            if (Legacy is { Version.Length: > 0 }) return Legacy;
+            if (string.IsNullOrWhiteSpace(Version)) return null;
+            return new UpdateInfo
+            {
+                Version = Version,
+                Url = Url,
+                InstallerUrl = InstallerUrl,
+                Notes = Notes,
+                Sha256 = Sha256,
+                PatchUrl = PatchUrl,
+                PatchFrom = PatchFrom,
+                PatchSha256 = PatchSha256,
+            };
+        }
     }
 }

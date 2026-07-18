@@ -22,14 +22,6 @@ public static class AgentUpdater
     {
         var targetDir = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar);
 
-        if (!IsFrameworkDependentLayout(targetDir))
-        {
-            var installer = info.PreferredDownloadUrl;
-            if (!string.IsNullOrWhiteSpace(installer))
-                return (false, "구버전(단일 exe) 설치입니다. 설치 프로그램으로 v" + info.Version + " 을 받아 주세요.");
-            return (false, "자동 zip 업데이트는 슬림 설치(0.5.3+)에서만 지원됩니다.");
-        }
-
         var usePatch = !string.IsNullOrWhiteSpace(info.PatchUrl)
             && !string.IsNullOrWhiteSpace(info.PatchFrom)
             && Version.TryParse(UpdateChecker.CurrentVersion, out var cur)
