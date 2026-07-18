@@ -1,0 +1,29 @@
+[package]
+name = "yummi-lcu-tauri"
+version = "0.6.7"
+edition = "2021"
+
+[lib]
+name = "yummi_lcu_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.2", features = [] }
+
+[dependencies]
+base64 = "0.22"
+dirs = "6"
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tauri = { version = "2.5", features = ["tray-icon"] }
+tauri-plugin-opener = "2.2"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-tungstenite = { version = "0.26", features = ["native-tls"] }
+url = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+zip = "2.4"
+windows = { version = "0.60", features = ["Win32_Security_Cryptography", "Win32_System_Registry", "Win32_System_Memory", "Win32_Foundation"] }
