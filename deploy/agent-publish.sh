@@ -11,8 +11,15 @@ cd "$ROOT"
 CSPROJ="$ROOT/agent/YummiLcu.App/YummiLcu.App.csproj"
 MANIFEST="$ROOT/deploy/agent-version.json"
 LEGACY_ZIP="${1:-}"
-TAURI_ZIP="${2:-}"
-INSTALLER_SRC="${3:-}"
+# Backward compatible: the former form was "legacy.zip installer.exe".
+# The new form is "legacy.zip tauri-portable.zip [legacy-installer.exe]".
+if [[ "${2:-}" == *.exe ]]; then
+  TAURI_ZIP=""
+  INSTALLER_SRC="${2:-}"
+else
+  TAURI_ZIP="${2:-}"
+  INSTALLER_SRC="${3:-}"
+fi
 WWW="${AGENT_WWW_DIR:-/var/www/yummi-agent}"
 PUBLIC="${AGENT_PUBLIC_URL:-https://yummi.duckdns.org}"
 NOTES="${AGENT_RELEASE_NOTES:-}"
