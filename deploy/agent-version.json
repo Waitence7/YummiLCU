@@ -1,10 +1,14 @@
 {
-  "version": "0.5.10",
-  "url": "https://yummi.duckdns.org/agent/YummiAgent.zip",
-  "installerUrl": "https://yummi.duckdns.org/agent/setup.exe",
-  "notes": "Build 96a49ff",
-  "sha256": "7dfd6e52fafeaf279ec41f7d856e21bfc6e4d1454c20bbe759ff6eed75c99d96",
-  "patchUrl": "https://yummi.duckdns.org/agent/YummiAgent-patch.zip",
-  "patchFrom": "0.5.9",
-  "patchSha256": "1427d69d75df55af0c3db4b216f50d11cfe06b7f8288d77e9e7761d485f242ac"
+  "schemaVersion": 2,
+  "notes": "Legacy 0.5.11 release",
+  "version": "0.5.11",
+  "url": "https://yummi.duckdns.org/agent/releases/legacy/legacy-0.5.11.zip",
+  "sha256": "6b535d60653924f583ab6047ccdfde2abe5cad026e8575ab6835aa7195e987d6",
+  "legacy": {
+    "version": "0.5.11",
+    "url": "https://yummi.duckdns.org/agent/releases/legacy/legacy-0.5.11.zip",
+    "sha256": "6b535d60653924f583ab6047ccdfde2abe5cad026e8575ab6835aa7195e987d6",
+    "executable": "YummiLcu.App.exe",
+    "notes": "Legacy 0.5.11 release"
+  }
 }
