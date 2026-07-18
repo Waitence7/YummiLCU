@@ -10,5 +10,12 @@
     "sha256": "6b535d60653924f583ab6047ccdfde2abe5cad026e8575ab6835aa7195e987d6",
     "executable": "YummiLcu.App.exe",
     "notes": "Legacy 0.5.11 release"
+  },
+  "tauri": {
+    "version": "0.6.2",
+    "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.2.zip",
+    "sha256": "711e3af895cb079d991bf908a28bce8b4772547b4c91cd838842bf3ba0bcad8e",
+    "executable": "yummi-lcu-tauri.exe",
+    "notes": "Tauri 0.6.2 release"
   }
 }
