@@ -25,8 +25,9 @@ fn urlencoding(s:&str)->String { s.replace('%',"%25").replace(' ',"%20").replace
 #[cfg(not(windows))] fn sync_windows_startup(_:bool)->AgentResult<()> { Ok(()) }
 
 #[derive(Clone, Serialize)]
-struct UiState { status:String, relay:bool, lcu:bool, discord_id:Option<u64>, discord_name:Option<String>, discord_avatar:Option<String>, logs:Vec<String>, oauth_pending:bool, config:Config }
-impl UiState { fn new(c:Config)->Self{Self{status:"연결 시작 → Discord 로그인".into(),relay:false,lcu:false,discord_id:None,discord_name:None,discord_avatar:None,logs:vec![],oauth_pending:false,config:c}} }
+struct UiState { status:String, relay:bool, lcu:bool, discord_id:Option<u64>, discord_name:Option<String>, discord_avatar:Option<String>, logs:Vec<String>, oauth_pending:bool, app_version:String, downloaded_at:Option<u64>, config:Config }
+fn installed_at()->Option<u64>{let exe=std::env::current_exe().ok()?;let meta=fs::metadata(exe).ok()?;let time=meta.created().or_else(|_|meta.modified()).ok()?;time.duration_since(UNIX_EPOCH).ok().map(|d|d.as_secs())}
+impl UiState { fn new(c:Config)->Self{Self{status:"연결 시작 → Discord 로그인".into(),relay:false,lcu:false,discord_id:None,discord_name:None,discord_avatar:None,logs:vec![],oauth_pending:false,app_version:env!("CARGO_PKG_VERSION").into(),downloaded_at:installed_at(),config:c}} }
 pub struct AgentState { config: RwLock<Config>, ui: Mutex<UiState>, cancel: Mutex<Option<tokio::sync::watch::Sender<bool>>>, oauth_tx: Mutex<Option<mpsc::Sender<String>>>, command_lock: Mutex<()> }
 impl AgentState { async fn log(&self,app:&AppHandle,msg:impl Into<String>){let mut u=self.ui.lock().await;u.logs.push(msg.into());if u.logs.len()>300{u.logs.remove(0);}let _=app.emit("agent-state",u.clone());} async fn emit(&self,app:&AppHandle){let u=self.ui.lock().await;let _=app.emit("agent-state",u.clone());} }
 

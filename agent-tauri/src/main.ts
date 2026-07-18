@@ -1,7 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import './style.css';
 
-type State = { status: string; relay: boolean; lcu: boolean; discord_id?: number; discord_name?: string; discord_avatar?: string; logs: string[]; oauth_pending: boolean; config: Config };
+type State = { status: string; relay: boolean; lcu: boolean; discord_id?: number; discord_name?: string; discord_avatar?: string; logs: string[]; oauth_pending: boolean; app_version?: string; downloaded_at?: number; config: Config };
 type Config = { RelayPublicBaseUrl: string; LockfilePath?: string; PreventQueueAfterDodge: boolean; ApplyDefaultStatusOnConnect: boolean; AutoAcceptMatch: boolean; FollowLeagueClient: boolean; RunAtWindowsStartup: boolean; UpdateManifestUrl?: string; CheckUpdatesOnStartup: boolean; AutoUpdateEnabled: boolean };
 const initial: State = { status: '연결 시작 → Discord 로그인', relay: false, lcu: false, logs: [], oauth_pending: false, config: { RelayPublicBaseUrl: 'https://yummi.duckdns.org', PreventQueueAfterDodge: true, ApplyDefaultStatusOnConnect: true, AutoAcceptMatch: false, FollowLeagueClient: true, RunAtWindowsStartup: false, CheckUpdatesOnStartup: true, AutoUpdateEnabled: true } };
 let state = initial;
@@ -16,7 +16,7 @@ function render() {
   <div class="status"><span class="dot ${state.relay?'on':''}"></span> Relay <span class="dot ${state.lcu?'on':''}"></span> LCU <span class="discord">Discord: ${state.discord_id ?? '—'}</span></div>
   ${state.oauth_pending ? '<div class="oauth"><b>브라우저에 표시된 6자리 코드를 입력하세요.</b><input id="oauth" maxlength="6"/><button id="submit-oauth">코드 확인</button></div>' : ''}
   <fieldset><legend>설정</legend><label><input type="checkbox" id="dodge" ${c.PreventQueueAfterDodge?'checked':''}/> 닷지 후 매칭 자동 재시작 방지</label><label><input type="checkbox" id="status" ${c.ApplyDefaultStatusOnConnect?'checked':''}/> 연결 시 기본 상메 적용</label><label><input type="checkbox" id="accept" ${c.AutoAcceptMatch?'checked':''}/> 매치 자동 수락</label><label><input type="checkbox" id="startup" ${c.RunAtWindowsStartup?'checked':''}/> Windows 시작 시 자동 실행</label></fieldset>
-  <details class="advanced"><summary>고급 설정</summary><label>Relay URL<input id="relay" value="${esc(c.RelayPublicBaseUrl)}"/></label><label>League lockfile 경로<input id="lockfile" value="${esc(c.LockfilePath ?? '')}" placeholder="자동 감지 (기본값)"/></label><small>일반적으로 변경할 필요가 없습니다.</small></details><fieldset class="log"><legend>로그</legend><pre>${esc(state.logs.join('\n'))}</pre></fieldset></section>`;
+  <details class="advanced"><summary>고급 설정</summary><label>Relay URL<input id="relay" value="${esc(c.RelayPublicBaseUrl)}"/></label><label>League lockfile 경로<input id="lockfile" value="${esc(c.LockfilePath ?? '')}" placeholder="자동 감지 (기본값)"/></label><small>일반적으로 변경할 필요가 없습니다.</small></details><fieldset class="log"><legend>로그</legend><pre>${esc(state.logs.join('\n'))}</pre></fieldset><footer>v${esc(state.app_version || '—')} · 다운로드 ${state.downloaded_at ? new Date(state.downloaded_at * 1000).toLocaleString('ko-KR') : '—'}</footer></section>`;
   bind();
 }
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T | undefined> { try { return await invoke<T>(cmd, args); } catch (e) { addLog(String(e)); return undefined; } }
