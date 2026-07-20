@@ -1,10 +1,20 @@
 import unittest
+from unittest.mock import patch
 
-from relay.app import _agent_hello_info
+from relay import config
+from relay.app import (
+    MAX_WS_AUTH_MESSAGE_BYTES,
+    _agent_hello_info,
+    _read_ws_auth_payload,
+    _safe_compare_digest,
+)
 from relay.connections import ConnectionManager
 
 
 class AgentHelloTests(unittest.TestCase):
+    def test_non_ascii_secret_comparison_fails_closed(self) -> None:
+        self.assertFalse(_safe_compare_digest("１２３４５６", "１２３４５６"))
+
     def test_legacy_agent_hello_uses_compatible_defaults(self) -> None:
         info = _agent_hello_info(
             {"type": "agent_hello", "version": "0.5.9", "os": "windows", "lcu_ready": True}
@@ -33,11 +43,29 @@ class AgentHelloTests(unittest.TestCase):
 
 
 class _WebSocketStub:
+    def __init__(self) -> None:
+        self.payload: dict[str, object] | None = None
+        self.closed = False
+
+    async def send_json(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    async def close(self, code: int = 1000) -> None:
+        self.closed = code == 1000
+
+
+class _AuthWebSocketStub:
+    async def receive_text(self) -> str:
+        return "x" * (MAX_WS_AUTH_MESSAGE_BYTES + 1)
+
     async def send_json(self, payload: dict[str, object]) -> None:
         self.payload = payload
 
 
 class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
+    async def test_oversized_auth_message_is_rejected(self) -> None:
+        self.assertIsNone(await _read_ws_auth_payload(_AuthWebSocketStub()))
+
     async def test_hello_before_oauth_binding_is_preserved(self) -> None:
         manager = ConnectionManager()
         websocket = _WebSocketStub()
@@ -48,3 +76,27 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.bind_discord("session-1", 42))
 
         self.assertEqual(manager.agent_info(42), info)
+
+    async def test_replacing_session_closes_previous_websocket(self) -> None:
+        manager = ConnectionManager()
+        previous = _WebSocketStub()
+        current = _WebSocketStub()
+        await manager.attach_session("session-1", previous, "token-1")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        await manager.attach_session("session-1", current, "token-2")
+
+        self.assertTrue(previous.closed)
+        self.assertTrue(manager.has_active_session_ws("session-1"))
+
+
+class RelayUrlSecurityTests(unittest.TestCase):
+    def test_public_relay_requires_https_or_exact_loopback(self) -> None:
+        with patch.dict("os.environ", {"RELAY_PUBLIC_BASE_URL": "https://relay.example"}):
+            config.relay_public_base_url_must_be_https()
+        with patch.dict("os.environ", {"RELAY_PUBLIC_BASE_URL": "http://localhost:8790"}):
+            config.relay_public_base_url_must_be_https()
+        with patch.dict(
+            "os.environ", {"RELAY_PUBLIC_BASE_URL": "http://localhost.attacker.test"}
+        ):
+            with self.assertRaises(RuntimeError):
+                config.relay_public_base_url_must_be_https()

@@ -43,8 +43,7 @@ async def exchange_code(session: aiohttp.ClientSession, code: str) -> dict[str, 
     try:
         async with session.post(f"{DISCORD_API}/oauth2/token", data=data, headers=headers) as resp:
             if resp.status != 200:
-                body = await resp.text()
-                logger.error("OAuth token 실패 status=%s body=%s", resp.status, body[:500])
+                logger.error("OAuth token 실패 status=%s", resp.status)
                 return None
             return await resp.json()
     except Exception:

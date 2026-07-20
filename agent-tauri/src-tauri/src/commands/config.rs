@@ -19,6 +19,7 @@ pub(crate) async fn save_config(
     mut config: Config,
 ) -> Result<(), String> {
     config.normalize();
+    config.validate().map_err(|error| error.to_string())?;
     sync_windows_startup(config.run_at_windows_startup).map_err(|error| error.to_string())?;
     config.save().map_err(|error| error.to_string())?;
 

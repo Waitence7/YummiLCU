@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "notes": "Tauri 0.6.6 release",
-  "version": "0.6.6",
-  "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.6.zip",
-  "sha256": "3b5913056ac11e6dc28bcc6c7ac1c82533fda447b32f2298101638b28f96f529",
+  "notes": "Tauri 0.6.8: 실시간 LCU 이벤트 및 Relay 연결 보안 강화",
+  "version": "0.6.8",
+  "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.8.zip",
+  "sha256": "da534f6f98c7e34d31c1cc8de4d3fb094382aa6614742df7b9b0073ef8e80fb9",
   "legacy": {
     "version": "0.5.11",
     "url": "https://yummi.duckdns.org/agent/releases/legacy/legacy-0.5.11.zip",
@@ -12,10 +12,10 @@
     "notes": "Legacy 0.5.11 release"
   },
   "tauri": {
-    "version": "0.6.6",
-    "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.6.zip",
-    "sha256": "3b5913056ac11e6dc28bcc6c7ac1c82533fda447b32f2298101638b28f96f529",
+    "version": "0.6.8",
+    "url": "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.6.8.zip",
+    "sha256": "da534f6f98c7e34d31c1cc8de4d3fb094382aa6614742df7b9b0073ef8e80fb9",
     "executable": "yummi-lcu-tauri.exe",
-    "notes": "Tauri 0.6.6 release"
+    "notes": "Tauri 0.6.8: 실시간 LCU 이벤트 및 Relay 연결 보안 강화"
   }
 }

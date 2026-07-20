@@ -5,6 +5,8 @@ fn empty_object() -> Value {
     json!({})
 }
 
+pub(crate) const MAX_RELAY_MESSAGE_BYTES: usize = 256 * 1024;
+
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub(crate) enum IncomingMessage {
@@ -27,6 +29,48 @@ pub(crate) enum IncomingMessage {
     Pong,
     #[serde(other)]
     Unknown,
+}
+
+impl IncomingMessage {
+    pub(crate) fn parse(text: &str) -> Result<Self, &'static str> {
+        if text.len() > MAX_RELAY_MESSAGE_BYTES {
+            return Err("Relay message too large");
+        }
+        let message: Self = serde_json::from_str(text).map_err(|_| "invalid Relay message")?;
+        match &message {
+            Self::Command {
+                action,
+                request_id,
+                payload,
+            } if action.is_empty()
+                || action.len() > 64
+                || request_id.is_empty()
+                || request_id.len() > 128
+                || !payload.is_object() =>
+            {
+                Err("invalid Relay command")
+            }
+            Self::SessionBound {
+                discord_id,
+                discord_name,
+                username,
+                discord_avatar,
+                avatar_url,
+            } if discord_id.is_some_and(|value| value == 0)
+                || [discord_name, username]
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.len() > 128)
+                || [discord_avatar, avatar_url]
+                    .into_iter()
+                    .flatten()
+                    .any(|value| value.len() > 2_048) =>
+            {
+                Err("invalid Relay session metadata")
+            }
+            _ => Ok(message),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -162,7 +206,7 @@ impl CommandResult {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct AuthMessage<'a> {
     #[serde(rename = "type")]
     message_type: &'static str,
@@ -258,7 +302,7 @@ impl AgentEventMessage {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub(crate) struct OAuthCodeMessage<'a> {
     #[serde(rename = "type")]
     message_type: &'static str,
@@ -294,12 +338,9 @@ mod tests {
 
     #[test]
     fn relay_command_deserializes() {
-        let message: IncomingMessage = serde_json::from_value(json!({
-            "type": "command",
-            "action": "play_normal_draft",
-            "request_id": "request-42",
-            "payload": {"source": "discord"}
-        }))
+        let message = IncomingMessage::parse(
+            r#"{"type":"command","action":"play_normal_draft","request_id":"request-42","payload":{"source":"discord"}}"#,
+        )
         .unwrap();
 
         assert_eq!(
@@ -309,6 +350,31 @@ mod tests {
                 request_id: "request-42".into(),
                 payload: json!({"source": "discord"}),
             }
+        );
+    }
+
+    #[test]
+    fn oversized_or_malformed_commands_are_rejected() {
+        let oversized = "x".repeat(MAX_RELAY_MESSAGE_BYTES + 1);
+        assert_eq!(
+            IncomingMessage::parse(&oversized),
+            Err("Relay message too large")
+        );
+        assert!(IncomingMessage::parse(
+            r#"{"type":"command","action":"ping","request_id":"","payload":{}}"#
+        )
+        .is_err());
+        assert!(IncomingMessage::parse(
+            r#"{"type":"command","action":"ping","request_id":"id","payload":[]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn unknown_message_types_are_safely_ignored() {
+        assert_eq!(
+            IncomingMessage::parse(r#"{"type":"future_message","data":{}}"#).unwrap(),
+            IncomingMessage::Unknown
         );
     }
 

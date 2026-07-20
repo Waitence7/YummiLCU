@@ -3,8 +3,10 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from dotenv import load_dotenv
 
@@ -47,12 +49,32 @@ def relay_public_base_url() -> str:
 
 def relay_public_base_url_must_be_https() -> None:
     """공개 Relay URL 이 localhost 가 아니면 HTTPS 만 허용."""
-    base = relay_public_base_url().lower()
-    if "localhost" in base or "127.0.0.1" in base:
-        return
-    if not base.startswith("https://"):
+    base = relay_public_base_url()
+    try:
+        parsed = urlsplit(base)
+        host = parsed.hostname or ""
+        if host.lower() == "localhost":
+            loopback = True
+        else:
+            try:
+                loopback = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                loopback = False
+    except ValueError:
+        loopback = False
+        parsed = urlsplit("")
+    valid_scheme = parsed.scheme == "https" or (parsed.scheme == "http" and loopback)
+    if (
+        not valid_scheme
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path not in ("", "/")
+    ):
         raise RuntimeError(
-            "RELAY_PUBLIC_BASE_URL must use https:// for non-localhost deployments"
+            "RELAY_PUBLIC_BASE_URL must be an HTTPS origin (HTTP is loopback-only)"
         )
 
 

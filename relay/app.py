@@ -41,6 +41,8 @@ OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
 OAUTH_LINK_CODE_TTL_SEC = 600
 WS_AUTH_TIMEOUT_SEC = 15.0
+MAX_WS_AUTH_MESSAGE_BYTES = 4 * 1024
+MAX_AGENT_MESSAGE_BYTES = 256 * 1024
 
 _INTERNAL_AUTH_MAX_FAILS = 20
 _INTERNAL_AUTH_WINDOW_SEC = 60.0
@@ -54,6 +56,13 @@ _LONG_COMMAND_ACTIONS = frozenset({"launch_client", "play_ranked_solo", "play_no
 _COMMAND_TIMEOUT_DEFAULT_SEC = 30.0
 _COMMAND_TIMEOUT_LONG_SEC = 300.0
 _MAX_PARTY_INVITE_RIOT_IDS = 20
+
+
+def _safe_compare_digest(left: str, right: str) -> bool:
+    try:
+        return secrets.compare_digest(left, right)
+    except TypeError:
+        return False
 
 
 def _session_redis_key(session_id: str) -> str:
@@ -110,7 +119,7 @@ async def _claim_or_verify_ws_token(r: redis.Redis, session_id: str, ws_token: s
     ttl = config.relay_session_ttl_sec()
     if stored is None:
         return bool(await r.set(key, ws_token, ex=ttl, nx=True))
-    return secrets.compare_digest(stored, ws_token)
+    return _safe_compare_digest(stored, ws_token)
 
 
 async def _refresh_session_ttl(r: redis.Redis, session_id: str) -> None:
@@ -149,7 +158,7 @@ async def _complete_oauth_link(
         return False
     expected = str(pending.get("code") or "").strip()
     submitted = code.strip().replace(" ", "")
-    if not expected or not secrets.compare_digest(expected, submitted):
+    if not expected or not _safe_compare_digest(expected, submitted):
         count = await _record_oauth_link_failure(r, session_id)
         if count >= OAUTH_LINK_MAX_ATTEMPTS:
             await r.delete(_oauth_link_pending_redis_key(session_id))
@@ -186,7 +195,7 @@ async def _try_bind_discord(
     if not ws_token:
         return False
     stored = await r.get(_ws_token_redis_key(session_id))
-    if not stored or not secrets.compare_digest(stored, ws_token):
+    if not stored or not _safe_compare_digest(stored, ws_token):
         return False
     profile: dict[str, str] = {}
     raw_profile = await r.get(_discord_profile_redis_key(session_id))
@@ -280,6 +289,8 @@ async def _read_ws_auth_payload(websocket: WebSocket) -> dict[str, Any] | None:
             msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_SEC)
         except (asyncio.TimeoutError, WebSocketDisconnect):
             return None
+    if len(msg.encode("utf-8")) > MAX_WS_AUTH_MESSAGE_BYTES:
+        return None
     try:
         data = json.loads(msg)
     except json.JSONDecodeError:
@@ -470,16 +481,14 @@ async def _forward_guild_match_eog(
     body = {"rawData": payload}
     try:
         async with http.post(url, headers=headers, json=body) as res:
-            text = await res.text()
             if res.status >= 400:
                 logger.warning(
-                    "내전 LCU ingest 실패 discord_id=%s status=%s body=%s",
+                    "내전 LCU ingest 실패 discord_id=%s status=%s",
                     discord_id,
                     res.status,
-                    text[:500],
                 )
                 return
-            logger.info("내전 LCU ingest OK discord_id=%s body=%s", discord_id, text[:300])
+            logger.info("내전 LCU ingest OK discord_id=%s", discord_id)
     except Exception:
         logger.exception("내전 LCU ingest 요청 실패 discord_id=%s", discord_id)
 
@@ -504,16 +513,14 @@ async def _forward_match_eog(
     body = {"rawData": payload}
     try:
         async with http.post(url, headers=headers, json=body) as res:
-            text = await res.text()
             if res.status >= 400:
                 logger.warning(
-                    "LCU 종료 매치 저장 실패 discord_id=%s status=%s body=%s",
+                    "LCU 종료 매치 저장 실패 discord_id=%s status=%s",
                     discord_id,
                     res.status,
-                    text[:500],
                 )
                 return
-            logger.info("LCU 종료 매치 저장 OK discord_id=%s body=%s", discord_id, text[:300])
+            logger.info("LCU 종료 매치 저장 OK discord_id=%s", discord_id)
     except Exception:
         logger.exception("LCU 종료 매치 저장 요청 실패 discord_id=%s", discord_id)
 
@@ -540,14 +547,19 @@ def _agent_hello_info(data: dict[str, Any]) -> dict[str, Any]:
     capabilities: dict[str, bool] = {}
     if isinstance(raw_capabilities, dict):
         for key, value in raw_capabilities.items():
-            if isinstance(key, str) and isinstance(value, bool):
+            if (
+                len(capabilities) < 64
+                and isinstance(key, str)
+                and len(key) <= 64
+                and isinstance(value, bool)
+            ):
                 capabilities[key] = value
             else:
                 logger.warning("agent_hello의 잘못된 capability를 무시합니다")
 
     return {
-        "version": version if isinstance(version, str) else "",
-        "os": os_name if isinstance(os_name, str) else "",
+        "version": version[:64] if isinstance(version, str) else "",
+        "os": os_name[:32] if isinstance(os_name, str) else "",
         "lcu_ready": lcu_ready if isinstance(lcu_ready, bool) else False,
         "protocol_version": protocol_version
         if isinstance(protocol_version, int)
@@ -573,7 +585,12 @@ async def _handle_agent_message(
     msg_type = data.get("type")
     if msg_type == "complete_oauth_link":
         code = data.get("code")
-        if not isinstance(code, str) or not code.strip():
+        if (
+            not isinstance(code, str)
+            or len(code.strip()) != 6
+            or not code.strip().isascii()
+            or not code.strip().isdigit()
+        ):
             return
         r: redis.Redis = websocket.app.state.redis
         ok = await _complete_oauth_link(conn, r, websocket, code)
@@ -697,7 +714,13 @@ async def ws_agent(
         await websocket.close(code=1008)
         return
     ws_token = auth_payload.get("ws_token")
-    if not isinstance(ws_token, str) or len(ws_token) < 16 or len(ws_token) > 128:
+    if (
+        not isinstance(ws_token, str)
+        or len(ws_token) < 16
+        or len(ws_token) > 128
+        or not ws_token.isascii()
+        or not all(character.isprintable() and not character.isspace() for character in ws_token)
+    ):
         await websocket.close(code=1008)
         return
 
@@ -719,6 +742,9 @@ async def ws_agent(
     try:
         while True:
             msg = await websocket.receive_text()
+            if len(msg.encode("utf-8")) > MAX_AGENT_MESSAGE_BYTES:
+                await websocket.close(code=1009)
+                return
             if msg == "ping":
                 sid = conn.ws_session_id(websocket)
                 if sid:
@@ -813,7 +839,7 @@ async def ws_bot(websocket: WebSocket) -> None:
         await websocket.close(code=1008)
         return
     secret = auth_payload.get("secret")
-    if not isinstance(secret, str) or not secrets.compare_digest(secret, expected):
+    if not isinstance(secret, str) or not _safe_compare_digest(secret, expected):
         await websocket.close(code=1008)
         return
 
@@ -858,7 +884,7 @@ async def _verify_internal_secret(
     expected = config.relay_internal_secret()
     if not expected:
         raise HTTPException(503, "internal API not configured")
-    if not x_relay_internal_secret or not secrets.compare_digest(x_relay_internal_secret, expected):
+    if not x_relay_internal_secret or not _safe_compare_digest(x_relay_internal_secret, expected):
         await _record_internal_auth_failure(r, ip)
         raise HTTPException(401, "unauthorized")
 

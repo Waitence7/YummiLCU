@@ -38,21 +38,29 @@ class ConnectionManager:
 
     async def attach_session(self, session_id: str, ws: WebSocket, ws_token: str) -> None:
         """OAuth 완료 전 session_id + ws_token 으로 WS를 임시 보관합니다."""
+        replaced: WebSocket | None = None
         async with self._lock:
-            old = self._session_ws.get(session_id)
+            old = self._active_session_ws.get(session_id)
             if old is not None and old is not ws:
                 self._drop_ws_locked(old)
+                replaced = old
             self._active_session_ws[session_id] = ws
             self._session_ws[session_id] = ws
             self._session_ws_token[session_id] = ws_token
             wid = id(ws)
             self._ws_session[wid] = session_id
             self._ws_session_id[wid] = session_id
+        if replaced is not None:
+            try:
+                await replaced.close(code=1000)
+            except Exception:
+                logger.warning("교체된 에이전트 WebSocket 종료 실패")
 
     async def bind_discord(
         self, session_id: str, discord_id: int, profile: dict[str, str] | None = None
     ) -> bool:
         """ws_token 이 등록된 session WS만 discord_id에 바인딩합니다."""
+        replaced: WebSocket | None = None
         async with self._lock:
             ws = self._session_ws.pop(session_id, None)
             ws_token = self._session_ws_token.pop(session_id, None)
@@ -62,12 +70,18 @@ class ConnectionManager:
             prev = self._by_discord.get(discord_id)
             if prev is not None and prev is not ws:
                 self._drop_ws_locked(prev)
+                replaced = prev
             self._by_discord[discord_id] = ws
             self._ws_discord[id(ws)] = discord_id
             pending_agent_info = self._pending_agent_info_by_ws.pop(id(ws), None)
             if pending_agent_info is not None:
                 self._agent_info[discord_id] = pending_agent_info
             logger.info("에이전트 등록: discord_id=%s session=%s", discord_id, session_id[:8])
+        if replaced is not None:
+            try:
+                await replaced.close(code=1000)
+            except Exception:
+                logger.warning("교체된 Discord Agent WebSocket 종료 실패")
         try:
             payload: dict[str, Any] = {"type": "session_bound", "discord_id": int(discord_id)}
             if profile:

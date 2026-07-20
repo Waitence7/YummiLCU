@@ -3,9 +3,12 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
+use tokio::time::{sleep, timeout, Duration};
 use tokio_tungstenite::{
     connect_async_tls_with_config,
-    tungstenite::{client::IntoClientRequest, http::header::AUTHORIZATION, Message},
+    tungstenite::{
+        client::IntoClientRequest, http::header::AUTHORIZATION, protocol::WebSocketConfig, Message,
+    },
     Connector,
 };
 
@@ -19,6 +22,9 @@ const CHAMP_SELECT: &str = "/lol-champ-select/v1/session";
 const LOBBY: &str = "/lol-lobby/v2/lobby";
 const EOG_STATS: &str = "/lol-end-of-game/v1/eog-stats-block";
 const GAMEFLOW_SESSION: &str = "/lol-gameflow/v1/session";
+const LCU_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(1);
+const MAX_LCU_EVENT_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
 pub(crate) struct LcuEventPoller {
@@ -41,12 +47,15 @@ impl LcuEventPoller {
                 return;
             }
             let Some(path) = lockfile_path(&config) else {
-                if stop.changed().await.is_err() {
+                if !wait_for_socket_retry(&mut stop).await {
                     return;
                 }
                 continue;
             };
             let Ok(client) = LcuClient::from_lockfile(&path) else {
+                if !wait_for_socket_retry(&mut stop).await {
+                    return;
+                }
                 continue;
             };
             let (port, password) = client.event_connection();
@@ -54,11 +63,19 @@ impl LcuEventPoller {
                 Ok(request) => request,
                 Err(_) => return,
             };
-            let token = base64::Engine::encode(
+            let mut credentials = format!("riot:{password}");
+            let mut token = base64::Engine::encode(
                 &base64::engine::general_purpose::STANDARD,
-                format!("riot:{password}"),
+                credentials.as_bytes(),
             );
-            let Ok(header) = format!("Basic {token}").parse() else {
+            let header = format!("Basic {token}").parse();
+            // Both values are ASCII, so NUL replacement keeps each String valid before drop.
+            unsafe {
+                credentials.as_bytes_mut().fill(0);
+                token.as_bytes_mut().fill(0);
+            }
+            drop(client);
+            let Ok(header) = header else {
                 return;
             };
             request.headers_mut().insert(AUTHORIZATION, header);
@@ -69,12 +86,19 @@ impl LcuEventPoller {
             };
             let connected = connect_async_tls_with_config(
                 request,
-                None,
+                Some(
+                    WebSocketConfig::default()
+                        .max_message_size(Some(MAX_LCU_EVENT_MESSAGE_BYTES))
+                        .max_frame_size(Some(MAX_LCU_EVENT_MESSAGE_BYTES)),
+                ),
                 false,
                 Some(Connector::NativeTls(tls)),
-            )
-            .await;
-            let Ok((mut socket, _)) = connected else {
+            );
+            let Ok(Ok((mut socket, _))) = timeout(LCU_SOCKET_CONNECT_TIMEOUT, connected).await
+            else {
+                if !wait_for_socket_retry(&mut stop).await {
+                    return;
+                }
                 continue;
             };
             if socket
@@ -82,17 +106,26 @@ impl LcuEventPoller {
                 .await
                 .is_err()
             {
+                if !wait_for_socket_retry(&mut stop).await {
+                    return;
+                }
                 continue;
             }
             loop {
                 tokio::select! {
                     changed_stop = stop.changed() => { if changed_stop.is_err() || *stop.borrow() { return; } }
                     message = futures_util::StreamExt::next(&mut socket) => match message {
-                        Some(Ok(Message::Text(text))) if is_lcu_event(text.as_str()) => { if changed.send(()).await.is_err() { return; } }
+                        Some(Ok(Message::Text(text))) if is_lcu_event(text.as_str()) => {
+                            if changed.is_closed() { return; }
+                            let _ = changed.try_send(());
+                        }
                         Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                         _ => {}
                     }
                 }
+            }
+            if !wait_for_socket_retry(&mut stop).await {
+                return;
             }
         }
     }
@@ -179,6 +212,13 @@ impl LcuEventPoller {
             );
         }
         events
+    }
+}
+
+async fn wait_for_socket_retry(stop: &mut watch::Receiver<bool>) -> bool {
+    tokio::select! {
+        _ = sleep(LCU_SOCKET_RETRY_DELAY) => !*stop.borrow(),
+        changed = stop.changed() => changed.is_ok() && !*stop.borrow(),
     }
 }
 

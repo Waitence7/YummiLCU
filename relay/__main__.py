@@ -8,6 +8,7 @@ import logging
 import uvicorn
 
 from relay import config
+from relay.app import MAX_AGENT_MESSAGE_BYTES
 
 # endregion
 
@@ -22,6 +23,10 @@ def main() -> None:
         host=config.relay_host(),
         port=config.relay_port(),
         reload=False,
+        ws_max_size=MAX_AGENT_MESSAGE_BYTES,
+        # Discord returns its one-time authorization code in the callback query string.
+        # Keep application diagnostics, but do not persist sensitive queries in Uvicorn access logs.
+        access_log=False,
     )
 
 

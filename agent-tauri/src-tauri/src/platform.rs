@@ -1,4 +1,6 @@
 use crate::error::{AgentError, AgentResult};
+use tauri::AppHandle;
+use tauri_plugin_opener::OpenerExt;
 
 #[cfg(windows)]
 pub(crate) fn sync_windows_startup(enabled: bool) -> AgentResult<()> {
@@ -39,13 +41,10 @@ pub(crate) fn sync_windows_startup(_: bool) -> AgentResult<()> {
     Ok(())
 }
 
-pub(crate) fn open_login_url(url: &str) {
-    #[cfg(windows)]
-    {
-        let _ = std::process::Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn();
-    }
+pub(crate) fn open_login_url(app: &AppHandle, url: &str) -> AgentResult<()> {
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| AgentError::Relay("Discord 로그인 페이지 열기 실패".into()))
 }
 
 #[cfg(windows)]

@@ -16,8 +16,6 @@ pub(crate) enum AgentError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
-    #[error(transparent)]
-    Http(#[from] reqwest::Error),
 }
 
 pub(crate) type AgentResult<T> = std::result::Result<T, AgentError>;

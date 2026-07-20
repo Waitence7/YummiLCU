@@ -6,11 +6,14 @@ use std::{
     time::Duration,
 };
 
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tokio::time::sleep;
+use url::Url;
+use uuid::Uuid;
 
 use crate::{
     error::{AgentError, AgentResult},
@@ -35,6 +38,11 @@ struct UpdateManifest {
     tauri: Option<UpdateTarget>,
 }
 
+const MAX_UPDATE_MANIFEST_BYTES: usize = 256 * 1024;
+const MAX_UPDATE_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
+const MAX_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES: usize = 4_096;
+
 impl UpdateManifest {
     fn select_tauri(self) -> Option<UpdateTarget> {
         self.tauri
@@ -42,11 +50,18 @@ impl UpdateManifest {
 }
 
 fn version_tuple(value: &str) -> Option<(u64, u64, u64)> {
-    let mut parts = value.trim().split('.').map(|part| part.parse::<u64>().ok());
+    let value = value.trim();
+    if value.is_empty() || value.len() > 32 {
+        return None;
+    }
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.len() > 3 || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
     Some((
-        parts.next()??,
-        parts.next().unwrap_or(Some(0))?,
-        parts.next().unwrap_or(Some(0))?,
+        parts[0].parse().ok()?,
+        parts.get(1).map_or(Some(0), |part| part.parse().ok())?,
+        parts.get(2).map_or(Some(0), |part| part.parse().ok())?,
     ))
 }
 
@@ -80,6 +95,10 @@ fn safe_extract<R: Read + std::io::Seek>(
     archive: &mut zip::ZipArchive<R>,
     output: &Path,
 ) -> AgentResult<()> {
+    if archive.len() > MAX_ARCHIVE_ENTRIES {
+        return Err(AgentError::Update("업데이트 ZIP 파일 수 제한 초과".into()));
+    }
+    let mut extracted_bytes = 0_u64;
     for index in 0..archive.len() {
         let mut file = archive
             .by_index(index)
@@ -87,6 +106,10 @@ fn safe_extract<R: Read + std::io::Seek>(
         let Some(name) = file.enclosed_name() else {
             continue;
         };
+        extracted_bytes = extracted_bytes
+            .checked_add(file.size())
+            .filter(|size| *size <= MAX_EXTRACTED_BYTES)
+            .ok_or_else(|| AgentError::Update("업데이트 ZIP 압축 해제 크기 제한 초과".into()))?;
         let destination = output.join(name);
         if file.is_dir() {
             fs::create_dir_all(&destination)?;
@@ -99,6 +122,40 @@ fn safe_extract<R: Read + std::io::Seek>(
         }
     }
     Ok(())
+}
+
+async fn download_limited(client: &Client, url: Url, max_bytes: usize) -> AgentResult<Vec<u8>> {
+    let response = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|_| AgentError::Update("업데이트 다운로드 연결 실패".into()))?;
+    if !response.status().is_success() {
+        return Err(AgentError::Update(format!(
+            "업데이트 다운로드 실패 (HTTP {})",
+            response.status()
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_bytes as u64)
+    {
+        return Err(AgentError::Update(
+            "업데이트 다운로드 크기 제한 초과".into(),
+        ));
+    }
+    let mut bytes = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|_| AgentError::Update("업데이트 다운로드 실패".into()))?;
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(AgentError::Update(
+                "업데이트 다운로드 크기 제한 초과".into(),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 async fn apply_update(
@@ -131,9 +188,14 @@ async fn apply_update(
     };
     let parsed = url::Url::parse(&url)
         .map_err(|error| AgentError::Update(format!("업데이트 URL 오류: {error}")))?;
-    if parsed.scheme() != "https" {
+    if parsed.scheme() != "https"
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
         return Err(AgentError::Update(
-            "업데이트 다운로드는 HTTPS만 허용됩니다.".into(),
+            "업데이트 다운로드는 인증 정보가 없는 HTTPS URL만 허용됩니다.".into(),
         ));
     }
 
@@ -146,16 +208,18 @@ async fn apply_update(
             )),
         )
         .await;
-    let bytes = Client::new().get(parsed).send().await?.bytes().await?;
+    let client = Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|_| AgentError::Update("업데이트 HTTP client 생성 실패".into()))?;
+    let bytes = download_limited(&client, parsed, MAX_UPDATE_ARCHIVE_BYTES).await?;
     validate_hash(&bytes, &hash)?;
 
-    let work = std::env::temp_dir()
-        .join("yummi-lcu-update")
-        .join(&target_manifest.version);
-    if work.exists() {
-        fs::remove_dir_all(&work)?;
-    }
-    fs::create_dir_all(&work)?;
+    let work_root = std::env::temp_dir().join("yummi-lcu-update");
+    fs::create_dir_all(&work_root)?;
+    let work = work_root.join(Uuid::new_v4().to_string());
+    fs::create_dir(&work)?;
     let extract = work.join("extract");
     fs::create_dir_all(&extract)?;
     let mut archive = zip::ZipArchive::new(Cursor::new(bytes))
@@ -258,10 +322,28 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
         return;
     };
     sleep(Duration::from_secs(2)).await;
-    let Ok(response) = Client::new().get(&url).send().await else {
+    let Ok(parsed) = Url::parse(&url) else {
         return;
     };
-    let Ok(manifest) = response.json::<UpdateManifest>().await else {
+    if parsed.scheme() != "https"
+        || parsed.host().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.fragment().is_some()
+    {
+        return;
+    }
+    let Ok(client) = Client::builder()
+        .https_only(true)
+        .timeout(Duration::from_secs(30))
+        .build()
+    else {
+        return;
+    };
+    let Ok(bytes) = download_limited(&client, parsed, MAX_UPDATE_MANIFEST_BYTES).await else {
+        return;
+    };
+    let Ok(manifest) = serde_json::from_slice::<UpdateManifest>(&bytes) else {
         return;
     };
     match apply_update(manifest, &app, &state).await {
@@ -313,5 +395,12 @@ mod tests {
     fn sha256_mismatch_stops_update_validation() {
         let wrong_hash = "00".repeat(32);
         assert!(validate_hash(b"yummi", &wrong_hash).is_err());
+    }
+
+    #[test]
+    fn update_version_rejects_extra_or_path_like_segments() {
+        assert_eq!(version_tuple("0.6.8"), Some((0, 6, 8)));
+        assert!(version_tuple(r"0.6.8.\..\outside").is_none());
+        assert!(version_tuple("0.6.8-beta").is_none());
     }
 }

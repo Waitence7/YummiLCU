@@ -4,14 +4,17 @@ use std::{
 };
 
 use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
 use tauri::AppHandle;
 use tokio::{
     sync::{mpsc, watch, Mutex},
     task::JoinHandle,
     time::{interval, sleep, timeout, Instant, MissedTickBehavior},
 };
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async_with_config,
+    tungstenite::{protocol::WebSocketConfig, Message},
+};
 
 use crate::{
     error::{AgentError, AgentResult},
@@ -23,12 +26,13 @@ use crate::{
 
 use super::protocol::{
     Action, AgentEventMessage, AgentHelloMessage, AuthMessage, CommandResult, IncomingMessage,
-    OAuthCodeMessage, PongMessage,
+    OAuthCodeMessage, PongMessage, MAX_RELAY_MESSAGE_BYTES,
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
 const LCU_EVENT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 
@@ -166,15 +170,19 @@ impl RelaySupervisor {
         Self::start(app, state).await
     }
 
-    pub(crate) async fn submit_oauth_code(&self, code: String) -> AgentResult<()> {
+    pub(crate) async fn submit_oauth_code(&self, mut code: String) -> AgentResult<()> {
         let sender = self.control.lock().await.oauth_tx.clone();
         let Some(sender) = sender else {
+            unsafe { code.as_bytes_mut().fill(0) };
             return Err(AgentError::Relay("먼저 연결을 시작하세요.".into()));
         };
-        sender
-            .send(code)
-            .await
-            .map_err(|_| AgentError::Relay("Relay 연결이 없습니다.".into()))
+        match sender.send(code).await {
+            Ok(()) => Ok(()),
+            Err(mut error) => {
+                unsafe { error.0.as_bytes_mut().fill(0) };
+                Err(AgentError::Relay("Relay 연결이 없습니다.".into()))
+            }
+        }
     }
 
     async fn set_connection_state(
@@ -263,8 +271,10 @@ async fn run_supervisor(
         .await
         {
             Ok(ConnectionEnd::Stopped) => break,
-            Ok(ConnectionEnd::Closed) => {
-                attempt = 0;
+            Ok(ConnectionEnd::Closed { authenticated }) => {
+                if authenticated {
+                    attempt = 0;
+                }
                 state.log(&app, "Relay 연결 종료 — 재연결 대기").await;
             }
             Err(error) => {
@@ -294,7 +304,7 @@ async fn run_supervisor(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectionEnd {
     Stopped,
-    Closed,
+    Closed { authenticated: bool },
 }
 
 async fn connect_once(
@@ -312,18 +322,29 @@ async fn connect_once(
             let _ = changed;
             return Ok(ConnectionEnd::Stopped);
         }
-        result = timeout(CONNECT_TIMEOUT, connect_async(url)) => result,
+        result = timeout(
+            CONNECT_TIMEOUT,
+            connect_async_with_config(
+                url,
+                Some(
+                    WebSocketConfig::default()
+                        .max_message_size(Some(MAX_RELAY_MESSAGE_BYTES))
+                        .max_frame_size(Some(MAX_RELAY_MESSAGE_BYTES)),
+                ),
+                false,
+            ),
+        ) => result,
     };
     let (mut websocket, _) = connection
         .map_err(|_| AgentError::Relay("Relay 연결 시간 초과".into()))?
-        .map_err(|error| AgentError::Relay(error.to_string()))?;
+        .map_err(|_| AgentError::Relay("Relay TLS/WebSocket 연결 실패".into()))?;
 
     websocket
         .send(Message::Text(
             serde_json::to_string(&AuthMessage::new(&session.ws_token))?.into(),
         ))
         .await
-        .map_err(|error| AgentError::Relay(error.to_string()))?;
+        .map_err(|_| AgentError::Relay("Relay 인증 메시지 전송 실패".into()))?;
     if *stop_rx.borrow() {
         let _ = websocket.close(None).await;
         return Ok(ConnectionEnd::Stopped);
@@ -332,7 +353,7 @@ async fn connect_once(
     websocket
         .send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await
-        .map_err(|error| AgentError::Relay(error.to_string()))?;
+        .map_err(|_| AgentError::Relay("Relay hello 전송 실패".into()))?;
     state
         .relay
         .set_connection_state(app, state, generation, RelayConnectionState::Authenticating)
@@ -355,8 +376,10 @@ async fn connect_once(
         )
         .await;
     if *needs_login {
-        open_login_url(&config.login_url(&session.session_id));
+        open_login_url(app, &config.login_url(&session.session_id)?)?;
     }
+    let auth_started = Instant::now();
+    let mut login_opened = *needs_login;
     let _ = session::save(session);
 
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
@@ -383,10 +406,12 @@ async fn connect_once(
                 return Ok(ConnectionEnd::Stopped);
             }
             code = oauth_rx.recv() => {
-                if let Some(code) = code {
-                    websocket.send(Message::Text(
-                        serde_json::to_string(&OAuthCodeMessage::new(&code))?.into()
-                    )).await.map_err(|error| AgentError::Relay(error.to_string()))?;
+                if let Some(mut code) = code {
+                    let message = serde_json::to_string(&OAuthCodeMessage::new(&code))?;
+                    let sent = websocket.send(Message::Text(message.into())).await;
+                    // The code is ASCII, so zeroing its bytes keeps the String valid before drop.
+                    unsafe { code.as_bytes_mut().fill(0) };
+                    sent.map_err(|_| AgentError::Relay("OAuth 코드 전송 실패".into()))?;
                 }
             }
             message = websocket.next() => {
@@ -394,16 +419,18 @@ async fn connect_once(
                     Some(Ok(Message::Text(text))) if text.as_str() == "ping" => {
                         websocket.send(Message::Text(
                             serde_json::to_string(&PongMessage::new())?.into()
-                        )).await.map_err(|error| AgentError::Relay(error.to_string()))?;
+                        )).await.map_err(|_| AgentError::Relay("Relay pong 전송 실패".into()))?;
                     }
                     Some(Ok(Message::Text(text))) => {
-                        let incoming: IncomingMessage = serde_json::from_str(text.as_str())?;
+                        let incoming = IncomingMessage::parse(text.as_str())
+                            .map_err(|message| AgentError::Relay(message.into()))?;
                         match incoming {
                             IncomingMessage::Pong => awaiting_pong = None,
                             IncomingMessage::SessionBound { .. } => {
                                 *needs_login = false;
-                                handle_incoming(app, state, &mut websocket, incoming).await?;
+                                handle_incoming(app, state, &mut websocket, incoming, false).await?;
                                 session_bound = true;
+                                state.relay.set_oauth_sender(generation, None).await;
                                 if lcu_socket_watch.is_none() {
                                     let (stop_tx, stop_rx) = watch::channel(false);
                                     let event_config = config.clone();
@@ -420,29 +447,35 @@ async fn connect_once(
                                     RelayConnectionState::Connected,
                                 ).await;
                             }
-                            _ => handle_incoming(app, state, &mut websocket, incoming).await?,
+                            _ => handle_incoming(
+                                app,
+                                state,
+                                &mut websocket,
+                                incoming,
+                                session_bound,
+                            ).await?,
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
                         websocket.send(Message::Pong(payload)).await
-                            .map_err(|error| AgentError::Relay(error.to_string()))?;
+                            .map_err(|_| AgentError::Relay("Relay pong 전송 실패".into()))?;
                     }
                     Some(Ok(Message::Pong(_))) => awaiting_pong = None,
                     Some(Ok(Message::Close(_))) | None => {
                         state.relay.set_oauth_sender(generation, None).await;
-                        return Ok(ConnectionEnd::Closed);
+                        return Ok(ConnectionEnd::Closed { authenticated: session_bound });
                     }
                     Some(Ok(_)) => {}
-                    Some(Err(error)) => {
+                    Some(Err(_)) => {
                         state.relay.set_oauth_sender(generation, None).await;
-                        return Err(AgentError::Relay(error.to_string()));
+                        return Err(AgentError::Relay("Relay 메시지 수신 실패".into()));
                     }
                 }
             }
             _ = heartbeat.tick() => {
                 if awaiting_pong.is_none() {
                     websocket.send(Message::Text("ping".into())).await
-                        .map_err(|error| AgentError::Relay(error.to_string()))?;
+                        .map_err(|_| AgentError::Relay("Relay heartbeat 전송 실패".into()))?;
                     awaiting_pong = Some(Instant::now());
                 }
             }
@@ -451,21 +484,33 @@ async fn connect_once(
                     state.relay.set_oauth_sender(generation, None).await;
                     return Err(AgentError::Relay("Relay heartbeat 응답 시간 초과".into()));
                 }
+                if should_start_login(session_bound, login_opened, auth_started.elapsed()) {
+                    *needs_login = true;
+                    login_opened = true;
+                    state.set_oauth_pending(app, true, "저장된 세션이 만료되어 Discord 재인증이 필요합니다.").await;
+                    open_login_url(app, &config.login_url(&session.session_id)?)?;
+                }
             }
             _ = lcu_event_poll.tick(), if session_bound => {
                 let config = state.config.read().await.clone();
                 for (message_type, data) in lcu_events.poll(&config).await {
-                    websocket.send(Message::Text(
-                        serde_json::to_string(&AgentEventMessage::new(message_type, data))?.into()
-                    )).await.map_err(|error| AgentError::Relay(error.to_string()))?;
+                    let Some(message) = serialize_agent_event(message_type, data)? else {
+                        state.log(app, "LCU 이벤트가 Relay 크기 제한을 초과해 생략됨").await;
+                        continue;
+                    };
+                    websocket.send(Message::Text(message.into())).await
+                        .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
                 }
             }
             Some(()) = lcu_event_rx.recv(), if session_bound => {
                 let config = state.config.read().await.clone();
                 for (message_type, data) in lcu_events.poll(&config).await {
-                    websocket.send(Message::Text(
-                        serde_json::to_string(&AgentEventMessage::new(message_type, data))?.into()
-                    )).await.map_err(|error| AgentError::Relay(error.to_string()))?;
+                    let Some(message) = serialize_agent_event(message_type, data)? else {
+                        state.log(app, "LCU 이벤트가 Relay 크기 제한을 초과해 생략됨").await;
+                        continue;
+                    };
+                    websocket.send(Message::Text(message.into())).await
+                        .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
                 }
             }
         }
@@ -477,6 +522,7 @@ async fn handle_incoming<S>(
     state: &Arc<AppState>,
     websocket: &mut S,
     incoming: IncomingMessage,
+    session_bound: bool,
 ) -> AgentResult<()>
 where
     S: futures_util::Sink<Message> + Unpin,
@@ -488,6 +534,19 @@ where
             request_id,
             payload,
         } => {
+            if !command_is_authorized(session_bound) {
+                let result =
+                    CommandResult::failure(request_id, "Relay 인증이 완료되지 않았습니다.");
+                websocket
+                    .send(Message::Text(serde_json::to_string(&result)?.into()))
+                    .await
+                    .map_err(|_| AgentError::Relay("Relay 응답 전송 실패".into()))?;
+                state.log(app, "인증 전 Relay 명령 차단").await;
+                return Ok(());
+            }
+            let action_label = Action::parse(&action)
+                .map(Action::as_str)
+                .unwrap_or("unknown");
             let result = match Action::parse(&action) {
                 None => CommandResult::failure(request_id, "unknown action"),
                 Some(Action::LaunchClient) => {
@@ -522,8 +581,8 @@ where
             websocket
                 .send(Message::Text(serde_json::to_string(&result)?.into()))
                 .await
-                .map_err(|error| AgentError::Relay(error.to_string()))?;
-            state.log(app, format!("명령 실행: {action}")).await;
+                .map_err(|_| AgentError::Relay("Relay 응답 전송 실패".into()))?;
+            state.log(app, format!("명령 실행: {action_label}")).await;
         }
         IncomingMessage::SessionBound {
             discord_id,
@@ -537,7 +596,7 @@ where
                     app,
                     discord_id,
                     discord_name.or(username),
-                    discord_avatar.or(avatar_url),
+                    safe_avatar_url(discord_avatar.or(avatar_url)),
                 )
                 .await;
         }
@@ -546,12 +605,35 @@ where
     Ok(())
 }
 
+fn command_is_authorized(session_bound: bool) -> bool {
+    session_bound
+}
+
+fn safe_avatar_url(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let url = url::Url::parse(&value).ok()?;
+    (url.scheme() == "https"
+        && url.host().is_some()
+        && url.username().is_empty()
+        && url.password().is_none())
+    .then_some(value)
+}
+
+fn serialize_agent_event(message_type: &'static str, data: Value) -> AgentResult<Option<String>> {
+    let message = serde_json::to_string(&AgentEventMessage::new(message_type, data))?;
+    Ok((message.len() <= MAX_RELAY_MESSAGE_BYTES).then_some(message))
+}
+
 fn should_reconnect(manual_stop: bool) -> bool {
     !manual_stop
 }
 
 fn heartbeat_timed_out(awaiting_since: Option<Instant>, now: Instant) -> bool {
     awaiting_since.is_some_and(|started| now.duration_since(started) >= HEARTBEAT_TIMEOUT)
+}
+
+fn should_start_login(session_bound: bool, login_opened: bool, elapsed: Duration) -> bool {
+    !session_bound && !login_opened && elapsed >= SESSION_RESTORE_TIMEOUT
 }
 
 fn backoff_delay(attempt: u32) -> Duration {
@@ -596,8 +678,40 @@ mod tests {
     }
 
     #[test]
+    fn expired_saved_session_falls_back_to_login_once() {
+        assert!(!should_start_login(false, false, Duration::from_secs(4)));
+        assert!(should_start_login(false, false, SESSION_RESTORE_TIMEOUT));
+        assert!(!should_start_login(false, true, Duration::from_secs(30)));
+        assert!(!should_start_login(true, false, Duration::from_secs(30)));
+    }
+
+    #[test]
     fn reconnect_backoff_is_capped() {
         assert!(backoff_delay(1) <= Duration::from_millis(1_500));
         assert!(backoff_delay(20) <= MAX_BACKOFF);
+    }
+
+    #[test]
+    fn commands_require_session_binding() {
+        assert!(!command_is_authorized(false));
+        assert!(command_is_authorized(true));
+    }
+
+    #[test]
+    fn relay_avatar_is_limited_to_https_urls() {
+        assert!(safe_avatar_url(Some("file:///C:/secret.png".into())).is_none());
+        assert!(safe_avatar_url(Some("http://cdn.example/avatar.png".into())).is_none());
+        assert_eq!(
+            safe_avatar_url(Some("https://cdn.example/avatar.png".into())).as_deref(),
+            Some("https://cdn.example/avatar.png")
+        );
+    }
+
+    #[test]
+    fn oversized_lcu_event_is_not_forwarded_to_relay() {
+        let data = json!({"value": "x".repeat(MAX_RELAY_MESSAGE_BYTES)});
+        assert!(serialize_agent_event("gameflow_update", data)
+            .unwrap()
+            .is_none());
     }
 }
