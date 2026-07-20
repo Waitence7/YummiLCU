@@ -2,7 +2,7 @@
 # VM에서 Legacy(C#)와 Tauri(Rust) 에이전트를 함께 배포합니다.
 #
 #   ./deploy/agent-publish.sh
-#   ./deploy/agent-publish.sh /path/to/legacy.zip /path/to/tauri-portable.zip [legacy-installer]
+#   ./deploy/agent-publish.sh /path/to/legacy.zip /path/to/tauri-portable.zip [legacy-installer] [tauri-installer]
 #
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -11,14 +11,16 @@ cd "$ROOT"
 CSPROJ="$ROOT/agent/YummiLcu.App/YummiLcu.App.csproj"
 MANIFEST="$ROOT/deploy/agent-version.json"
 LEGACY_ZIP="${1:-}"
+TAURI_INSTALLER_SRC=""
 # Backward compatible: the former form was "legacy.zip installer.exe".
-# The new form is "legacy.zip tauri-portable.zip [legacy-installer.exe]".
+# The new form is "legacy.zip tauri-portable.zip [legacy-installer.exe] [tauri-installer.exe]".
 if [[ "${2:-}" == *.exe ]]; then
   TAURI_ZIP=""
   INSTALLER_SRC="${2:-}"
 else
   TAURI_ZIP="${2:-}"
   INSTALLER_SRC="${3:-}"
+  TAURI_INSTALLER_SRC="${4:-}"
 fi
 WWW="${AGENT_WWW_DIR:-/var/www/yummi-agent}"
 PUBLIC="${AGENT_PUBLIC_URL:-https://yummi.duckdns.org}"
@@ -56,6 +58,40 @@ publish_zip() {
 
 publish_zip legacy "$VERSION" "$LEGACY_ZIP" "YummiLcu.App.exe" "YummiAgent.zip"
 publish_zip tauri "$TAURI_VERSION" "$TAURI_ZIP" "yummi-lcu-tauri.exe" "YummiLcuTauri.zip"
+
+publish_tauri_installer() {
+  local src="$1"
+  [[ -z "$src" ]] && return 0
+  if [[ ! -f "$src" ]]; then
+    echo "Tauri installer 없음: $src" >&2
+    exit 1
+  fi
+
+  local dir="$WWW/releases/tauri"
+  local name="Yummi-LCU-Agent-${TAURI_VERSION}-setup.exe"
+  local expected_sha
+  expected_sha="$(sha256sum "$src" | awk '{print $1}')"
+  sudo mkdir -p "$dir"
+
+  local destination temporary actual_sha
+  for destination in "$dir/$name" "$dir/latest-setup.exe" "$WWW/setup.exe"; do
+    temporary="${destination}.tmp.$$"
+    sudo install -m 0644 "$src" "$temporary"
+    actual_sha="$(sha256sum "$temporary" | awk '{print $1}')"
+    if [[ "$actual_sha" != "$expected_sha" ]]; then
+      sudo rm -f "$temporary"
+      echo "Tauri installer SHA-256 검증 실패: $destination" >&2
+      exit 1
+    fi
+    sudo mv -f "$temporary" "$destination"
+  done
+
+  echo "tauri installer → $dir/$name"
+  echo "tauri installer alias → $dir/latest-setup.exe"
+  echo "website setup alias → $WWW/setup.exe"
+}
+
+publish_tauri_installer "$TAURI_INSTALLER_SRC"
 
 legacy_sha="$(test -f "$ROOT/deploy/.legacy.sha256" && cat "$ROOT/deploy/.legacy.sha256" || true)"
 tauri_sha="$(test -f "$ROOT/deploy/.tauri.sha256" && cat "$ROOT/deploy/.tauri.sha256" || true)"
