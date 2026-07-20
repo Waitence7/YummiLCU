@@ -33,6 +33,7 @@ class ConnectionManager:
         self._participant_status_subscribers: set[int] = set()
         self._participant_status: dict[int, dict[str, Any]] = {}
         self._agent_info: dict[int, dict[str, Any]] = {}
+        self._pending_agent_info_by_ws: dict[int, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
     async def attach_session(self, session_id: str, ws: WebSocket, ws_token: str) -> None:
@@ -63,6 +64,9 @@ class ConnectionManager:
                 self._drop_ws_locked(prev)
             self._by_discord[discord_id] = ws
             self._ws_discord[id(ws)] = discord_id
+            pending_agent_info = self._pending_agent_info_by_ws.pop(id(ws), None)
+            if pending_agent_info is not None:
+                self._agent_info[discord_id] = pending_agent_info
             logger.info("에이전트 등록: discord_id=%s session=%s", discord_id, session_id[:8])
         try:
             payload: dict[str, Any] = {"type": "session_bound", "discord_id": int(discord_id)}
@@ -93,6 +97,7 @@ class ConnectionManager:
     def _drop_ws_locked(self, ws: WebSocket) -> None:
         wid = id(ws)
         did = self._ws_discord.pop(wid, None)
+        self._pending_agent_info_by_ws.pop(wid, None)
         if did is not None:
             if self._by_discord.get(did) is ws:
                 del self._by_discord[did]
@@ -127,8 +132,15 @@ class ConnectionManager:
     def is_online(self, discord_id: int) -> bool:
         return discord_id in self._by_discord
 
-    def set_agent_info(self, discord_id: int, info: dict[str, Any]) -> None:
-        self._agent_info[int(discord_id)] = dict(info)
+    async def set_agent_info_for_ws(self, ws: WebSocket, info: dict[str, Any]) -> int | None:
+        """OAuth 바인딩 전 hello는 WS 단위로 보관했다가 bind_discord에서 이전한다."""
+        async with self._lock:
+            discord_id = self._ws_discord.get(id(ws))
+            if discord_id is None:
+                self._pending_agent_info_by_ws[id(ws)] = dict(info)
+                return None
+            self._agent_info[discord_id] = dict(info)
+            return discord_id
 
     def agent_info(self, discord_id: int) -> dict[str, Any] | None:
         row = self._agent_info.get(int(discord_id))

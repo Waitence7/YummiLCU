@@ -9,3 +9,8 @@ agent/**/obj/
 .vs/
 *.user
 *.suo
+
+# Tauri frontend and Rust incremental build caches
+agent-tauri/node_modules/
+agent-tauri/dist/
+agent-tauri/src-tauri/target/

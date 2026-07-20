@@ -1,31 +1,81 @@
-import { invoke } from '@tauri-apps/api/core';
 import './style.css';
 
-type State = { status: string; relay: boolean; lcu: boolean; discord_id?: number; discord_name?: string; discord_avatar?: string; logs: string[]; oauth_pending: boolean; app_version?: string; downloaded_at?: number; config: Config };
-type Config = { RelayPublicBaseUrl: string; LockfilePath?: string; PreventQueueAfterDodge: boolean; ApplyDefaultStatusOnConnect: boolean; AutoAcceptMatch: boolean; FollowLeagueClient: boolean; RunAtWindowsStartup: boolean; UpdateManifestUrl?: string; CheckUpdatesOnStartup: boolean; AutoUpdateEnabled: boolean };
-const initial: State = { status: '연결 시작 → Discord 로그인', relay: false, lcu: false, logs: [], oauth_pending: false, config: { RelayPublicBaseUrl: 'https://yummi.duckdns.org', PreventQueueAfterDodge: true, ApplyDefaultStatusOnConnect: true, AutoAcceptMatch: false, FollowLeagueClient: true, RunAtWindowsStartup: false, CheckUpdatesOnStartup: true, AutoUpdateEnabled: true } };
-let state = initial;
-let recent: any;
-const app = document.querySelector<HTMLElement>('#app')!;
-const esc = (s: string) => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]!));
-function render() {
-  const c = state.config;
-  const avatar = state.discord_avatar || (state.discord_id ? `https://cdn.discordapp.com/embed/avatars/${state.discord_id % 6}.png` : '');
-  const account = state.discord_id ? `<div class="account"><img src="${esc(avatar)}"/><div><strong>${esc(state.discord_name || 'Discord 사용자')}</strong><small>${state.discord_id}</small></div></div>` : '<div class="account guest"><span>●</span><div><strong>Discord 미연결</strong><small>연결 시작 필요</small></div></div>';
-  app.innerHTML = `<section class="shell"><header><div><h1>Yummi LCU Agent</h1><p>${esc(state.status)}</p></div><div class="account-area">${account}</div></header>
-  <div class="buttons"><button id="start">연결 시작</button><button id="stop">중지</button><button id="relogin">Discord 재로그인</button></div>
-  <div class="status"><span class="dot ${state.relay?'on':''}"></span> Relay <span class="dot ${state.lcu?'on':''}"></span> LCU <span class="discord">Discord: ${state.discord_id ?? '—'}</span></div>
-  <div class="recent"><b>최근 경기</b>${recent ? ` <span>${esc(String(recent.champion))} · ${recent.win ? '승리' : '패배'} · ${recent.kills ?? 0}/${recent.deaths ?? 0}/${recent.assists ?? 0} · CS ${recent.cs ?? 0} · ${Number(recent.gold ?? 0).toLocaleString()}G · ${Math.floor((recent.duration ?? 0)/60)}분</span>` : ' <span>League Client 연결 후 확인할 수 있습니다.</span>'}<button id="recent">새로고침</button></div>
-  ${state.oauth_pending ? '<div class="oauth"><b>브라우저에 표시된 6자리 코드를 입력하세요.</b><input id="oauth" maxlength="6"/><button id="submit-oauth">코드 확인</button></div>' : ''}
-  <fieldset><legend>설정</legend><label><input type="checkbox" id="dodge" ${c.PreventQueueAfterDodge?'checked':''}/> 닷지 후 매칭 자동 재시작 방지</label><label><input type="checkbox" id="status" ${c.ApplyDefaultStatusOnConnect?'checked':''}/> 연결 시 기본 상메 적용</label><label><input type="checkbox" id="accept" ${c.AutoAcceptMatch?'checked':''}/> 매치 자동 수락</label><label><input type="checkbox" id="startup" ${c.RunAtWindowsStartup?'checked':''}/> Windows 시작 시 자동 실행</label></fieldset>
-  <details class="advanced"><summary>고급 설정</summary><label>Relay URL<input id="relay" value="${esc(c.RelayPublicBaseUrl)}"/></label><label>League lockfile 경로<input id="lockfile" value="${esc(c.LockfilePath ?? '')}" placeholder="자동 감지 (기본값)"/></label><small>일반적으로 변경할 필요가 없습니다.</small></details><fieldset class="log"><legend>로그</legend><pre>${esc(state.logs.join('\n'))}</pre></fieldset><footer>v${esc(state.app_version || '—')} · 다운로드 ${state.downloaded_at ? new Date(state.downloaded_at * 1000).toLocaleString('ko-KR') : '—'}</footer></section>`;
-  bind();
-}
-async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T | undefined> { try { return await invoke<T>(cmd, args); } catch (e) { addLog(String(e)); return undefined; } }
-function addLog(s: string) { state.logs = [...state.logs.slice(-299), s]; render(); }
-function configFromUi() { const c = state.config; const relay=document.querySelector<HTMLInputElement>('#relay'); const lockfile=document.querySelector<HTMLInputElement>('#lockfile'); if(relay)c.RelayPublicBaseUrl=relay.value; if(lockfile)c.LockfilePath=lockfile.value||undefined; c.PreventQueueAfterDodge=!!document.querySelector<HTMLInputElement>('#dodge')?.checked; c.ApplyDefaultStatusOnConnect=!!document.querySelector<HTMLInputElement>('#status')?.checked; c.AutoAcceptMatch=!!document.querySelector<HTMLInputElement>('#accept')?.checked; c.RunAtWindowsStartup=!!document.querySelector<HTMLInputElement>('#startup')?.checked; }
-function bind() { document.querySelector('#start')?.addEventListener('click', async () => { configFromUi(); await call('save_config', { config: state.config }); await call('start_agent'); }); document.querySelector('#stop')?.addEventListener('click', () => call('stop_agent')); document.querySelector('#relogin')?.addEventListener('click', () => call('relogin')); document.querySelector('#submit-oauth')?.addEventListener('click', () => call('submit_oauth_code', { code: document.querySelector<HTMLInputElement>('#oauth')?.value ?? '' })); document.querySelector('#recent')?.addEventListener('click', async()=>{const row=await call<any>('recent_match');if(row){recent=row;render();}}); }
-window.addEventListener('DOMContentLoaded', async () => { const loaded = await call<Config>('load_config'); if (loaded) state.config = loaded; render(); });
+import {
+  loadConfig,
+  recentMatch,
+  relogin,
+  saveConfig,
+  startAgent,
+  stopAgent,
+  submitOAuthCode,
+} from './api/commands';
+import { listenToAgentState } from './events/agent-state';
+import { createStore } from './state/store';
+import { initialState, type RecentMatch } from './state/types';
+import { mountApp } from './views/app';
+
+const root = document.querySelector<HTMLElement>('#app');
+if (!root) throw new Error('Missing #app');
+
+const store = createStore(initialState);
+let recent: RecentMatch | undefined;
+let recentRequest = 0;
+
+const addLog = (message: string) => {
+  store.update((state) => ({
+    ...state,
+    logs: [...state.logs.slice(-299), message],
+  }));
+};
+
+const execute = async (operation: () => Promise<unknown>): Promise<boolean> => {
+  try {
+    await operation();
+    return true;
+  } catch (error) {
+    addLog(String(error));
+    return false;
+  }
+};
+
+const view = mountApp(root, {
+  async start(config) {
+    const saved = await execute(() => saveConfig(config));
+    return saved && execute(startAgent);
+  },
+  async stop() {
+    await execute(stopAgent);
+  },
+  async relogin() {
+    await execute(relogin);
+  },
+  async submitOAuth(code) {
+    await execute(() => submitOAuthCode(code));
+  },
+  async refreshRecent() {
+    const request = ++recentRequest;
+    try {
+      const result = await recentMatch();
+      if (request !== recentRequest) return;
+      recent = result;
+      view.render(store.get(), recent);
+    } catch (error) {
+      if (request === recentRequest) addLog(String(error));
+    }
+  },
+});
+
+store.subscribe((state) => view.render(state, recent));
+
+void listenToAgentState((state) => store.set(state)).catch((error) => addLog(String(error)));
+
+window.addEventListener('DOMContentLoaded', async () => {
+  try {
+    const config = await loadConfig();
+    store.update((state) => ({ ...state, config }));
+  } catch (error) {
+    addLog(String(error));
+  }
+});
+
 window.addEventListener('tauri://app-ready', () => undefined);
-// Rust emits state updates; this listener is registered lazily to keep browser preview usable.
-import('@tauri-apps/api/event').then(({ listen }) => listen<State>('agent-state', e => { state = e.payload; render(); }));

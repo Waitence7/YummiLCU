@@ -5471,11 +5471,12 @@ dependencies = [
 
 [[package]]
 name = "yummi-lcu-tauri"
-version = "0.6.1"
+version = "0.6.7"
 dependencies = [
  "base64 0.22.1",
  "dirs",
  "futures-util",
+ "native-tls",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

@@ -518,6 +518,46 @@ async def _forward_match_eog(
         logger.exception("LCU 종료 매치 저장 요청 실패 discord_id=%s", discord_id)
 
 
+def _agent_hello_info(data: dict[str, Any]) -> dict[str, Any]:
+    """Legacy hello와 capability handshake를 안전한 세션 metadata로 정규화한다."""
+    version = data.get("version")
+    os_name = data.get("os")
+    lcu_ready = data.get("lcu_ready")
+    protocol_version = data.get("protocol_version", 0)
+    raw_capabilities = data.get("capabilities", {})
+    has_invalid_fields = (
+        not isinstance(version, str)
+        or not isinstance(os_name, str)
+        or not isinstance(lcu_ready, bool)
+        or isinstance(protocol_version, bool)
+        or not isinstance(protocol_version, int)
+        or protocol_version < 0
+        or not isinstance(raw_capabilities, dict)
+    )
+    if has_invalid_fields:
+        logger.warning("agent_hello 필드가 없거나 형식이 올바르지 않아 기본값을 사용합니다")
+
+    capabilities: dict[str, bool] = {}
+    if isinstance(raw_capabilities, dict):
+        for key, value in raw_capabilities.items():
+            if isinstance(key, str) and isinstance(value, bool):
+                capabilities[key] = value
+            else:
+                logger.warning("agent_hello의 잘못된 capability를 무시합니다")
+
+    return {
+        "version": version if isinstance(version, str) else "",
+        "os": os_name if isinstance(os_name, str) else "",
+        "lcu_ready": lcu_ready if isinstance(lcu_ready, bool) else False,
+        "protocol_version": protocol_version
+        if isinstance(protocol_version, int)
+        and not isinstance(protocol_version, bool)
+        and protocol_version >= 0
+        else 0,
+        "capabilities": capabilities,
+    }
+
+
 async def _handle_agent_message(
     websocket: WebSocket,
     conn: ConnectionManager,
@@ -564,15 +604,10 @@ async def _handle_agent_message(
         return
 
     if msg_type == "agent_hello":
-        discord_id = conn.discord_id_for_ws(websocket)
+        info = _agent_hello_info(data)
+        discord_id = await conn.set_agent_info_for_ws(websocket, info)
         if discord_id is None:
             return
-        info = {
-            "version": str(data.get("version") or ""),
-            "lcu_ready": bool(data.get("lcu_ready")),
-            "os": str(data.get("os") or ""),
-        }
-        conn.set_agent_info(discord_id, info)
         r: redis.Redis = websocket.app.state.redis
         await mark_lcu_linked(r, discord_id)
         logger.info(
