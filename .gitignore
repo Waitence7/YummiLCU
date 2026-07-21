@@ -14,3 +14,5 @@ agent/**/obj/
 agent-tauri/node_modules/
 agent-tauri/dist/
 agent-tauri/src-tauri/target/
+
+agent-tauri/dist-preview/

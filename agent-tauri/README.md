@@ -15,7 +15,8 @@ Tauri 개발 실행에는 Windows WebView2와 Rust MSVC 툴체인이 필요합�
 
 ## 현재 구현
 
-- Vanilla TypeScript 설정/로그 UI
+- React 19 + Tailwind CSS v4 탭 UI (내전 · 편의기능 · 음성(예정) · 로그)
+- 브라우저 개발용 목 브리지 (`npm run dev` 후 Tauri 없이 UI 확인 가능, `src/api/mock.ts`)
 - Relay WSS 연결 및 `auth`/`command_result` 메시지
 - lockfile 파싱, loopback LCU HTTPS Basic 인증
 - 기존 action whitelist와 핵심 queue/lobby/match/status/champ-select endpoint
