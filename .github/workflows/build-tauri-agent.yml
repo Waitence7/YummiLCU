@@ -2,10 +2,15 @@ name: Build Tauri Agent (Windows)
 
 on:
   push:
-    branches: [main, agent/tauri-rust-migration]
+    branches: [main]
     paths:
       - "agent-tauri/**"
-      - "deploy/sync-tauri-agent-version.mjs"
+      - "scripts/sync-tauri-agent-version.mjs"
+      - ".github/workflows/build-tauri-agent.yml"
+  pull_request:
+    paths:
+      - "agent-tauri/**"
+      - "scripts/sync-tauri-agent-version.mjs"
       - ".github/workflows/build-tauri-agent.yml"
   workflow_dispatch:
     inputs:
@@ -26,11 +31,6 @@ on:
         description: "rollout percent (0-100)"
         required: false
         default: "100"
-      publish:
-        description: "VM 정적 배포까지 수행"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -57,6 +57,7 @@ jobs:
           cache-dependency-path: agent-tauri/package-lock.json
 
       - name: Configure update verification keys
+        if: github.event_name != 'pull_request'
         env:
           MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
         run: |
@@ -114,6 +115,7 @@ jobs:
           if ($msi) { "msi=$($msi.FullName)" >> $env:GITHUB_OUTPUT }
 
       - name: Code sign Windows artifacts
+        if: github.event_name != 'pull_request'
         env:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
@@ -156,6 +158,7 @@ jobs:
           }
 
       - name: Build portable zip and signed manifest
+        if: github.event_name != 'pull_request'
         id: manifest
         env:
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
@@ -171,9 +174,10 @@ jobs:
           $zip = "tauri-$version.zip"
           Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
           $notes = if ($env:RELEASE_NOTES) { $env:RELEASE_NOTES } else { "Tauri $version build $($env:GITHUB_SHA.Substring(0, 7))" }
-          node deploy/sync-tauri-agent-version.mjs `
+          node scripts/sync-tauri-agent-version.mjs `
             --zip $zip `
             --exe $stageExe `
+            --out agent-version.json `
             --notes $notes `
             --channel $env:CHANNEL `
             --rollout-percent $env:ROLLOUT_PERCENT
@@ -181,12 +185,14 @@ jobs:
           "zip=$zip" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: YummiLcuTauri-win-x64-portable
           path: ${{ steps.manifest.outputs.zip }}
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: YummiLcuTauri-Installers
           path: |
@@ -196,66 +202,8 @@ jobs:
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
         with:
           name: agent-version-json
-          path: deploy/agent-version.json
+          path: agent-version.json
           retention-days: 7
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: YummiLcuTauri-win-x64-portable
-          path: dist
-      - uses: actions/download-artifact@v4
-        with:
-          name: YummiLcuTauri-Installers
-          path: dist/installers
-      - uses: actions/download-artifact@v4
-        with:
-          name: agent-version-json
-          path: dist/manifest
-
-      - name: Publish to VM
-        env:
-          VM_HOST: ${{ secrets.VM_HOST }}
-          VM_USER: ${{ secrets.VM_USER }}
-          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
-          AGENT_WWW_DIR: ${{ vars.AGENT_WWW_DIR || '/var/www/yummi-agent' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${VM_HOST:-}" || -z "${VM_USER:-}" || -z "${VM_SSH_KEY:-}" ]]; then
-            echo "::warning::VM_HOST, VM_USER, or VM_SSH_KEY is not configured; publish skipped"
-            exit 0
-          fi
-          mkdir -p ~/.ssh
-          install -m 600 /dev/null ~/.ssh/yummi-agent-deploy
-          printf '%s\n' "$VM_SSH_KEY" > ~/.ssh/yummi-agent-deploy
-          ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts
-
-          version="$(python3 -c 'import json; print(json.load(open("dist/manifest/agent-version.json"))["tauri"]["version"])')"
-          work="/tmp/yummi-tauri-agent-$version"
-          ssh -i ~/.ssh/yummi-agent-deploy "$VM_USER@$VM_HOST" "rm -rf '$work' && mkdir -p '$work'"
-          scp -i ~/.ssh/yummi-agent-deploy dist/tauri-"$version".zip "$VM_USER@$VM_HOST:$work/tauri-$version.zip"
-          scp -i ~/.ssh/yummi-agent-deploy dist/manifest/agent-version.json "$VM_USER@$VM_HOST:$work/agent-version.json"
-          installer="$(find dist/installers -maxdepth 1 -name '*.exe' -print -quit || true)"
-          if [[ -n "$installer" ]]; then
-            scp -i ~/.ssh/yummi-agent-deploy "$installer" "$VM_USER@$VM_HOST:$work/setup.exe"
-          fi
-          ssh -i ~/.ssh/yummi-agent-deploy "$VM_USER@$VM_HOST" "set -euo pipefail
-            WWW='${AGENT_WWW_DIR:-/var/www/yummi-agent}'
-            sudo mkdir -p \"\$WWW/releases/tauri\"
-            sudo install -m 0644 '$work/tauri-$version.zip' \"\$WWW/releases/tauri/tauri-$version.zip\"
-            sudo install -m 0644 '$work/agent-version.json' \"\$WWW/agent-version.json\"
-            sudo install -m 0644 '$work/agent-version.json' \"\$WWW/version.json\"
-            if [[ -f '$work/setup.exe' ]]; then
-              sudo install -m 0644 '$work/setup.exe' \"\$WWW/releases/tauri/Yummi-LCU-Agent-$version-setup.exe\"
-              sudo install -m 0644 '$work/setup.exe' \"\$WWW/releases/tauri/latest-setup.exe\"
-              sudo install -m 0644 '$work/setup.exe' \"\$WWW/setup.exe\"
-            fi
-            rm -rf '$work'
-          "

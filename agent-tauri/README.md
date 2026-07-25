@@ -1,6 +1,6 @@
 # Yummi LCU Agent (Tauri + Rust)
 
-Windows 에이전트의 Tauri 전환 작업본입니다. 기존 Python Relay의 `/ws/agent` 연결과 `agent.json` 설정 형식을 기준으로 합니다.
+Windows 에이전트의 Tauri/Rust 구현입니다. Yummi Relay의 `/ws/agent` WebSocket 연결과 `agent.json` 설정 형식을 기준으로 합니다.
 
 ## 개발
 

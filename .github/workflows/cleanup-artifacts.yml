@@ -24,7 +24,7 @@ jobs:
         with:
           script: |
             const keepRuns = Math.max(1, parseInt('${{ inputs.keep_runs || '2' }}', 10) || 2);
-            const workflowFile = 'build-yummi-agent.yml';
+            const workflowFile = 'build-tauri-agent.yml';
 
             const runs = await github.paginate(
               github.rest.actions.listWorkflowRuns,

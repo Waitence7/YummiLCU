@@ -26,6 +26,16 @@ Yummi LCU Agent와 통신하는 다음 서버 측 구성요소는 이 저장소�
 
 서버 측 구성요소는 Agent 설치 파일에 포함되지 않으며, 별도의 서버 환경에서 실행됩니다.
 
+## 저장소 구성
+
+| 경로 | 설명 |
+|------|------|
+| `agent-tauri/` | Tauri/Rust Windows Agent 소스 코드 |
+| `scripts/sync-tauri-agent-version.mjs` | CI에서 업데이트 manifest를 생성하고 서명하는 스크립트 |
+| `.github/workflows/build-tauri-agent.yml` | Windows Agent 빌드 및 릴리스 산출물 생성 workflow |
+| `SECURITY.md` | 공개 범위와 보안 보고 안내 |
+| `LICENSE` | GNU Affero General Public License v3.0 |
+
 ## 데이터 흐름
 
 Yummi LCU Agent는 Discord에서 요청된 기능을 사용자의 로컬 League Client와 연결합니다.
@@ -89,9 +99,9 @@ cargo check
 
 Tauri 개발 실행에는 Windows WebView2와 Rust MSVC 툴체인이 필요합니다.
 
-## 빌드 및 배포
+## 빌드 및 릴리스 산출물
 
-Windows용 Agent 빌드는 GitHub Actions의 `build-tauri-agent.yml` 워크플로에서 수행합니다.
+Windows용 Agent 빌드는 GitHub Actions의 `build-tauri-agent.yml` 워크플로에서 수행합니다. 이 공개 저장소의 workflow는 Windows 설치 파일, 포터블 zip, 서명된 업데이트 manifest를 산출물로 만들며, 서버 배포는 포함하지 않습니다.
 
 ```powershell
 gh workflow run build-tauri-agent.yml -f channel=stable -f rollout_percent=100

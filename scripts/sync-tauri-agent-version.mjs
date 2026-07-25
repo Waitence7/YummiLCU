@@ -71,7 +71,7 @@ function signPayload(payload, privateKeyPem) {
 
 const args = readArgs(process.argv.slice(2));
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const manifestPath = path.resolve(args.out ?? path.join(root, "deploy", "agent-version.json"));
+const manifestPath = path.resolve(args.out ?? path.join(root, "agent-version.json"));
 const publicUrl = (args["public-url"] ?? process.env.AGENT_PUBLIC_URL ?? "https://yummi.duckdns.org").replace(/\/+$/, "");
 const zipPath = path.resolve(args.zip ?? "");
 const exePath = path.resolve(args.exe ?? "");
