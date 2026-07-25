@@ -95,8 +95,8 @@ def oauth_configured() -> bool:
 
 
 def tournament_api_base_url() -> str:
-    return _env("TOURNAMENT_API_BASE_URL", "http://127.0.0.1:4000").rstrip("/")
+    return _env("YUMMI_API_BASE_URL", "http://127.0.0.1:4000").rstrip("/")
 
 
 def tournament_bot_internal_token() -> str:
-    return _env("TOURNAMENT_BOT_INTERNAL_TOKEN")
+    return _env("YUMMI_BOT_INTERNAL_TOKEN")

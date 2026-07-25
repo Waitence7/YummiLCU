@@ -469,7 +469,7 @@ async def _forward_guild_match_eog(
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
     if not token:
-        logger.warning("TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — 내전 LCU 전송 생략")
+        logger.warning("YUMMI_BOT_INTERNAL_TOKEN 미설정 — 내전 LCU 전송 생략")
         return
 
     url = f"{api_base}/api/bot/guild-match/lcu-ingest"
@@ -501,7 +501,7 @@ async def _forward_match_eog(
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
     if not token:
-        logger.warning("TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — LCU 종료 매치 저장 생략")
+        logger.warning("YUMMI_BOT_INTERNAL_TOKEN 미설정 — LCU 종료 매치 저장 생략")
         return
 
     url = f"{api_base}/api/bot/lcu/matches/eog-ingest"
@@ -701,7 +701,7 @@ async def ws_agent(
     websocket: WebSocket,
     session_id: str = Query(..., min_length=8, max_length=64),
 ) -> None:
-    """C# 에이전트 연결. session_id(URL) + 첫 메시지 ws_token 으로 OAuth 바인딩 보호."""
+    """Agent 연결. session_id(URL) + 첫 메시지 ws_token 으로 OAuth 바인딩 보호."""
     try:
         uuid.UUID(session_id)
     except ValueError:
