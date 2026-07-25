@@ -30,6 +30,7 @@ pub struct Config {
     pub update_manifest_url: Option<String>,
     pub check_updates_on_startup: bool,
     pub auto_update_enabled: bool,
+    pub update_channel: String,
     pub saved_session_max_age_days: u64,
     pub run_at_windows_startup: bool,
     pub ui_test_mode: bool,
@@ -48,6 +49,7 @@ impl Default for Config {
             update_manifest_url: Some(PUBLIC_UPDATE_MANIFEST_URL.into()),
             check_updates_on_startup: true,
             auto_update_enabled: true,
+            update_channel: "stable".into(),
             saved_session_max_age_days: 14,
             run_at_windows_startup: true,
             ui_test_mode: false,
@@ -156,6 +158,7 @@ impl Config {
     pub(crate) fn validate(&self) -> AgentResult<()> {
         validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
         validate_update_url(self.update_manifest_url.as_deref(), cfg!(debug_assertions))?;
+        validate_update_channel(&self.update_channel)?;
         if self
             .lockfile_path
             .as_deref()
@@ -185,6 +188,15 @@ impl Config {
         url.set_query(None);
         url.query_pairs_mut().append_pair("session_id", session_id);
         Ok(url.into())
+    }
+}
+
+pub(crate) fn validate_update_channel(raw: &str) -> AgentResult<()> {
+    match raw.trim() {
+        "stable" | "beta" | "dev" => Ok(()),
+        _ => Err(AgentError::Config(
+            "업데이트 채널은 stable, beta, dev 중 하나여야 합니다.".into(),
+        )),
     }
 }
 
@@ -264,6 +276,7 @@ mod tests {
         assert!(!config.prevent_queue_after_dodge);
         assert_eq!(config.auth_poll_interval_ms, 1500);
         assert!(config.follow_league_client);
+        assert_eq!(config.update_channel, "stable");
         assert_eq!(config.saved_session_max_age_days, 14);
     }
 
@@ -315,5 +328,13 @@ mod tests {
         config.normalize();
 
         assert!(!config.auto_update_enabled);
+    }
+
+    #[test]
+    fn update_channel_is_limited_to_known_release_tracks() {
+        assert!(validate_update_channel("stable").is_ok());
+        assert!(validate_update_channel("beta").is_ok());
+        assert!(validate_update_channel("dev").is_ok());
+        assert!(validate_update_channel("nightly").is_err());
     }
 }

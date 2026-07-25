@@ -9,6 +9,7 @@ export type Config = {
   UpdateManifestUrl?: string | null;
   CheckUpdatesOnStartup: boolean;
   AutoUpdateEnabled: boolean;
+  UpdateChannel: 'stable' | 'beta' | 'dev';
   SavedSessionMaxAgeDays: number;
   RunAtWindowsStartup: boolean;
   UiTestMode: boolean;
@@ -60,6 +61,7 @@ export const initialState: AgentState = {
     UpdateManifestUrl: 'https://yummi.duckdns.org/agent/version.json',
     CheckUpdatesOnStartup: true,
     AutoUpdateEnabled: true,
+    UpdateChannel: 'stable',
     SavedSessionMaxAgeDays: 14,
     RunAtWindowsStartup: false,
     UiTestMode: false,

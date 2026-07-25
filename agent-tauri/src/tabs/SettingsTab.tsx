@@ -64,6 +64,7 @@ function AdvancedCard({
 }) {
   const [relayUrl, setRelayUrl] = useState(config.RelayPublicBaseUrl);
   const [lockfile, setLockfile] = useState(config.LockfilePath ?? '');
+  const [updateChannel, setUpdateChannel] = useState(config.UpdateChannel);
   const [dirty, setDirty] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -71,12 +72,14 @@ function AdvancedCard({
     if (dirty) return;
     setRelayUrl(config.RelayPublicBaseUrl);
     setLockfile(config.LockfilePath ?? '');
+    setUpdateChannel(config.UpdateChannel);
   }, [config, dirty]);
 
   const save = async () => {
     const ok = await onPatchConfig({
       RelayPublicBaseUrl: relayUrl,
       LockfilePath: lockfile || undefined,
+      UpdateChannel: updateChannel,
     });
     if (ok) {
       setDirty(false);
@@ -112,6 +115,21 @@ function AdvancedCard({
               setDirty(true);
             }}
           />
+        </label>
+        <label className="block">
+          <span className="mb-1 block text-[12px] text-zinc-400">업데이트 채널</span>
+          <select
+            className="w-full rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-[12px] text-zinc-200 focus:border-indigo-400/50 focus:outline-none"
+            value={updateChannel}
+            onChange={(event) => {
+              setUpdateChannel(event.target.value as Config['UpdateChannel']);
+              setDirty(true);
+            }}
+          >
+            <option value="stable">stable</option>
+            <option value="beta">beta</option>
+            <option value="dev">dev</option>
+          </select>
         </label>
         <div className="flex items-center gap-2">
           <Button variant="primary" disabled={!dirty} onClick={() => void save()}>
