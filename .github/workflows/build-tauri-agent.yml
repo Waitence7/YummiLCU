@@ -1,0 +1,261 @@
+name: Build Tauri Agent (Windows)
+
+on:
+  push:
+    branches: [main, agent/tauri-rust-migration]
+    paths:
+      - "agent-tauri/**"
+      - "deploy/sync-tauri-agent-version.mjs"
+      - ".github/workflows/build-tauri-agent.yml"
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "배포 노트"
+        required: false
+        default: ""
+      channel:
+        description: "업데이트 채널"
+        required: false
+        default: "stable"
+        type: choice
+        options:
+          - stable
+          - beta
+          - dev
+      rollout_percent:
+        description: "rollout percent (0-100)"
+        required: false
+        default: "100"
+      publish:
+        description: "VM 정적 배포까지 수행"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PUBLIC_KEY_VAR: ${{ vars.YUMMI_AGENT_MANIFEST_PUBLIC_KEY }}
+      PUBLIC_KEY_SECRET: ${{ secrets.YUMMI_AGENT_MANIFEST_PUBLIC_KEY }}
+      CERT_THUMBPRINT_VAR: ${{ vars.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
+      CERT_THUMBPRINT_SECRET: ${{ secrets.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: agent-tauri/package-lock.json
+
+      - name: Configure update verification keys
+        env:
+          MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+        run: |
+          if (-not $env:MANIFEST_SIGNING_KEY) {
+            throw "YUMMI_AGENT_MANIFEST_SIGNING_KEY secret is required"
+          }
+          $publicKey = if ($env:PUBLIC_KEY_VAR) { $env:PUBLIC_KEY_VAR } else { $env:PUBLIC_KEY_SECRET }
+          if (-not $publicKey) {
+            throw "YUMMI_AGENT_MANIFEST_PUBLIC_KEY variable or secret is required"
+          }
+          "YUMMI_AGENT_MANIFEST_PUBLIC_KEY=$publicKey" >> $env:GITHUB_ENV
+          $thumbprint = if ($env:CERT_THUMBPRINT_VAR) { $env:CERT_THUMBPRINT_VAR } else { $env:CERT_THUMBPRINT_SECRET }
+          if ($thumbprint) {
+            "YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
+          }
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Install frontend dependencies
+        working-directory: agent-tauri
+        run: npm ci
+
+      - name: Typecheck and build frontend
+        working-directory: agent-tauri
+        run: npm run build
+
+      - name: Rust tests
+        working-directory: agent-tauri/src-tauri
+        run: cargo test --locked
+
+      - name: Build Tauri bundles
+        working-directory: agent-tauri
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc
+
+      - name: Locate Tauri artifacts
+        id: artifacts
+        run: |
+          $releaseRoot = "agent-tauri/src-tauri/target/x86_64-pc-windows-msvc/release"
+          if (-not (Test-Path $releaseRoot)) {
+            $releaseRoot = "agent-tauri/src-tauri/target/release"
+          }
+          $exe = Join-Path $releaseRoot "yummi-lcu-tauri.exe"
+          if (-not (Test-Path $exe)) { throw "Tauri exe not found: $exe" }
+          $nsis = Get-ChildItem "$releaseRoot/bundle/nsis" -Filter "*.exe" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          $msi = Get-ChildItem "$releaseRoot/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          "exe=$exe" >> $env:GITHUB_OUTPUT
+          if ($nsis) { "nsis=$($nsis.FullName)" >> $env:GITHUB_OUTPUT }
+          if ($msi) { "msi=$($msi.FullName)" >> $env:GITHUB_OUTPUT }
+
+      - name: Code sign Windows artifacts
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $files = @("${{ steps.artifacts.outputs.exe }}")
+          if ("${{ steps.artifacts.outputs.nsis }}") { $files += "${{ steps.artifacts.outputs.nsis }}" }
+          if ("${{ steps.artifacts.outputs.msi }}") { $files += "${{ steps.artifacts.outputs.msi }}" }
+
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            if ($env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT) {
+              throw "YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT is set but WINDOWS_CERTIFICATE is missing"
+            }
+            Write-Warning "WINDOWS_CERTIFICATE is not configured; artifacts are unsigned"
+            exit 0
+          }
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            throw "WINDOWS_CERTIFICATE_PASSWORD is required when WINDOWS_CERTIFICATE is configured"
+          }
+
+          $certPath = Join-Path $env:RUNNER_TEMP "yummi-agent-code-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $cert) { throw "failed to import code signing certificate" }
+          if ($env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT -and
+              ($cert.Thumbprint.ToLowerInvariant() -ne $env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT.ToLowerInvariant())) {
+            throw "imported certificate thumbprint does not match YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT"
+          }
+
+          foreach ($file in $files) {
+            Set-AuthenticodeSignature `
+              -FilePath $file `
+              -Certificate $cert `
+              -TimestampServer "http://timestamp.digicert.com" `
+              -HashAlgorithm SHA256 | Format-List
+            $sig = Get-AuthenticodeSignature -FilePath $file
+            if ($sig.Status -ne "Valid") {
+              throw "code signing validation failed for $file: $($sig.Status)"
+            }
+          }
+
+      - name: Build portable zip and signed manifest
+        id: manifest
+        env:
+          YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
+          CHANNEL: ${{ github.event.inputs.channel || 'stable' }}
+          ROLLOUT_PERCENT: ${{ github.event.inputs.rollout_percent || '100' }}
+        run: |
+          $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
+          $stage = Join-Path $env:RUNNER_TEMP "tauri-portable"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $stageExe = Join-Path $stage "yummi-lcu-tauri.exe"
+          Copy-Item "${{ steps.artifacts.outputs.exe }}" $stageExe -Force
+          $zip = "tauri-$version.zip"
+          Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+          $notes = if ($env:RELEASE_NOTES) { $env:RELEASE_NOTES } else { "Tauri $version build $($env:GITHUB_SHA.Substring(0, 7))" }
+          node deploy/sync-tauri-agent-version.mjs `
+            --zip $zip `
+            --exe $stageExe `
+            --notes $notes `
+            --channel $env:CHANNEL `
+            --rollout-percent $env:ROLLOUT_PERCENT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YummiLcuTauri-win-x64-portable
+          path: ${{ steps.manifest.outputs.zip }}
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YummiLcuTauri-Installers
+          path: |
+            ${{ steps.artifacts.outputs.nsis }}
+            ${{ steps.artifacts.outputs.msi }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-version-json
+          path: deploy/agent-version.json
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.publish == true }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: YummiLcuTauri-win-x64-portable
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: YummiLcuTauri-Installers
+          path: dist/installers
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-version-json
+          path: dist/manifest
+
+      - name: Publish to VM
+        env:
+          VM_HOST: ${{ secrets.VM_HOST }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
+          AGENT_WWW_DIR: ${{ vars.AGENT_WWW_DIR || '/var/www/yummi-agent' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${VM_HOST:-}" || -z "${VM_USER:-}" || -z "${VM_SSH_KEY:-}" ]]; then
+            echo "::warning::VM_HOST, VM_USER, or VM_SSH_KEY is not configured; publish skipped"
+            exit 0
+          fi
+          mkdir -p ~/.ssh
+          install -m 600 /dev/null ~/.ssh/yummi-agent-deploy
+          printf '%s\n' "$VM_SSH_KEY" > ~/.ssh/yummi-agent-deploy
+          ssh-keyscan -H "$VM_HOST" >> ~/.ssh/known_hosts
+
+          version="$(python3 -c 'import json; print(json.load(open("dist/manifest/agent-version.json"))["tauri"]["version"])')"
+          work="/tmp/yummi-tauri-agent-$version"
+          ssh -i ~/.ssh/yummi-agent-deploy "$VM_USER@$VM_HOST" "rm -rf '$work' && mkdir -p '$work'"
+          scp -i ~/.ssh/yummi-agent-deploy dist/tauri-"$version".zip "$VM_USER@$VM_HOST:$work/tauri-$version.zip"
+          scp -i ~/.ssh/yummi-agent-deploy dist/manifest/agent-version.json "$VM_USER@$VM_HOST:$work/agent-version.json"
+          installer="$(find dist/installers -maxdepth 1 -name '*.exe' -print -quit || true)"
+          if [[ -n "$installer" ]]; then
+            scp -i ~/.ssh/yummi-agent-deploy "$installer" "$VM_USER@$VM_HOST:$work/setup.exe"
+          fi
+          ssh -i ~/.ssh/yummi-agent-deploy "$VM_USER@$VM_HOST" "set -euo pipefail
+            WWW='${AGENT_WWW_DIR:-/var/www/yummi-agent}'
+            sudo mkdir -p \"\$WWW/releases/tauri\"
+            sudo install -m 0644 '$work/tauri-$version.zip' \"\$WWW/releases/tauri/tauri-$version.zip\"
+            sudo install -m 0644 '$work/agent-version.json' \"\$WWW/agent-version.json\"
+            sudo install -m 0644 '$work/agent-version.json' \"\$WWW/version.json\"
+            if [[ -f '$work/setup.exe' ]]; then
+              sudo install -m 0644 '$work/setup.exe' \"\$WWW/releases/tauri/Yummi-LCU-Agent-$version-setup.exe\"
+              sudo install -m 0644 '$work/setup.exe' \"\$WWW/releases/tauri/latest-setup.exe\"
+              sudo install -m 0644 '$work/setup.exe' \"\$WWW/setup.exe\"
+            fi
+            rm -rf '$work'
+          "
