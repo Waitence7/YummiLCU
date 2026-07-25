@@ -164,6 +164,50 @@ cd ~/Yummi/YummiLcu
 ./deploy/vm-deploy-agent.sh --download-only   # 마지막 성공 빌드 artifact → /var/www/yummi-agent/
 ```
 
+### Tauri 에이전트 배포
+
+Tauri 에이전트는 자체 updater를 유지한다. `agent-version.json`의 `tauri` 블록을 Ed25519 서명으로 검증한 뒤 zip SHA-256, 파일 목록, 채널, rollout 조건을 통과해야 설치한다.
+
+필수 GitHub 설정:
+
+| 이름 | 위치 | 설명 |
+|------|------|------|
+| `YUMMI_AGENT_MANIFEST_SIGNING_KEY` | Secret | Ed25519 private key PEM 또는 PEM base64 |
+| `YUMMI_AGENT_MANIFEST_PUBLIC_KEY` | Variable 또는 Secret | 앱에 embed할 raw Ed25519 public key base64 |
+| `WINDOWS_CERTIFICATE` | Secret | 선택: PFX base64 |
+| `WINDOWS_CERTIFICATE_PASSWORD` | Secret | 선택: PFX 암호 |
+| `YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT` | Variable 또는 Secret | 선택: Authenticode 검증 thumbprint |
+
+키 생성 예시:
+
+```bash
+openssl genpkey -algorithm ED25519 -out yummi-agent-manifest.key
+base64 -w0 yummi-agent-manifest.key
+node -e "const{readFileSync}=require('fs');const{createPublicKey}=require('crypto');const k=createPublicKey(readFileSync('yummi-agent-manifest.key'));const d=k.export({format:'der',type:'spki'});console.log(d.subarray(d.length-32).toString('base64'))"
+```
+
+Windows Actions 빌드:
+
+```bash
+gh workflow run build-tauri-agent.yml \
+  -f channel=stable \
+  -f rollout_percent=100 \
+  -f release_notes="Tauri release"
+```
+
+VM에서 artifact 배포:
+
+```bash
+cd ~/Yummi/YummiLcu
+./deploy/vm-deploy-tauri-agent.sh --download-only
+```
+
+한 번에 빌드 트리거 후 배포:
+
+```bash
+AGENT_RELEASE_NOTES="Tauri release" ./deploy/vm-deploy-tauri-agent.sh
+```
+
 ---
 
 ## 알아둘 것

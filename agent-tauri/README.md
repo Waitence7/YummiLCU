@@ -22,5 +22,25 @@ Tauri 개발 실행에는 Windows WebView2와 Rust MSVC 툴체인이 필요합�
 - 기존 action whitelist와 핵심 queue/lobby/match/status/champ-select endpoint
 - DPAPI 세션 저장 포맷(`V: 3`) 호환 기반
 - HTTPS URL 보정, 자동 재연결, 300개 로그 제한
+- 자체 updater: signed `agent-version.json` tauri 블록, zip/file SHA-256 검증, 채널/rollout, rollback-safe install
 
 실제 League Client와 Relay를 이용한 smoke test는 해당 Windows PC의 `agent.json`과 lockfile 설정 후 수행해야 합니다.
+
+## 배포
+
+Windows Actions workflow:
+
+```powershell
+gh workflow run build-tauri-agent.yml -f channel=stable -f rollout_percent=100
+```
+
+필수:
+
+- `YUMMI_AGENT_MANIFEST_SIGNING_KEY`
+- `YUMMI_AGENT_MANIFEST_PUBLIC_KEY`
+
+선택:
+
+- `WINDOWS_CERTIFICATE`
+- `WINDOWS_CERTIFICATE_PASSWORD`
+- `YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT`
