@@ -79,6 +79,11 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-tauri/src-tauri
+
       - name: Install frontend dependencies
         working-directory: agent-tauri
         run: npm ci
