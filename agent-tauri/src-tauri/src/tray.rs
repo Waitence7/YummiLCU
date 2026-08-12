@@ -71,6 +71,10 @@ pub(crate) fn request_main_window(app: &AppHandle) {
     });
 }
 
+pub(crate) fn remove(app: &AppHandle) {
+    let _ = app.remove_tray_by_id(TRAY_ID);
+}
+
 fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         window.show()?;
@@ -105,6 +109,7 @@ fn request_exit(app: &AppHandle) {
 
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        remove(&app);
         if let Some(state) = app.try_state::<Arc<AppState>>() {
             state.begin_shutdown();
             RelaySupervisor::stop(&app, state.inner()).await;

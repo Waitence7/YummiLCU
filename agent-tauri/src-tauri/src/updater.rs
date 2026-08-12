@@ -1,7 +1,7 @@
 use std::{
     collections::BTreeMap,
-    fs,
-    io::{Cursor, Read},
+    fs::{self, OpenOptions},
+    io::{Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -62,6 +62,73 @@ const MAX_UPDATE_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 const OFFICIAL_UPDATE_HOST: &str = "yummi.duckdns.org";
+const UPDATE_LOCK_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
+
+struct UpdateLock {
+    path: PathBuf,
+    token: String,
+    remove_on_drop: bool,
+}
+
+impl UpdateLock {
+    fn acquire(path: PathBuf) -> AgentResult<Self> {
+        let token = Uuid::new_v4().to_string();
+        match Self::create(path.clone(), token.clone()) {
+            Ok(lock) => Ok(lock),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                if !update_lock_is_stale(&path) {
+                    return Err(AgentError::Update("이미 업데이트가 진행 중입니다.".into()));
+                }
+                fs::remove_file(&path).map_err(|error| {
+                    AgentError::Update(format!("오래된 업데이트 잠금 정리 실패: {error}"))
+                })?;
+                Self::create(path, token).map_err(|error| {
+                    AgentError::Update(format!("업데이트 잠금 생성 실패: {error}"))
+                })
+            }
+            Err(error) => Err(AgentError::Update(format!(
+                "업데이트 잠금 생성 실패: {error}"
+            ))),
+        }
+    }
+
+    fn create(path: PathBuf, token: String) -> std::io::Result<Self> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)?;
+        if let Err(error) = writeln!(file, "{token}") {
+            let _ = fs::remove_file(&path);
+            return Err(error);
+        }
+        Ok(Self {
+            path,
+            token,
+            remove_on_drop: true,
+        })
+    }
+
+    #[cfg(windows)]
+    fn hand_off(mut self) {
+        self.remove_on_drop = false;
+    }
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        if self.remove_on_drop {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn update_lock_is_stale(path: &Path) -> bool {
+    fs::metadata(path)
+        .ok()
+        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|age| age >= UPDATE_LOCK_STALE_AFTER)
+}
 
 impl UpdateManifest {
     fn select_tauri(self) -> Option<UpdateTarget> {
@@ -429,6 +496,31 @@ async fn apply_update(
         return Ok(false);
     }
 
+    let executable_name = target_manifest
+        .executable
+        .as_deref()
+        .unwrap_or("yummi-lcu-tauri.exe");
+    if !executable_name.eq_ignore_ascii_case("yummi-lcu-tauri.exe") {
+        return Err(AgentError::Update(
+            "Tauri 대상 실행 파일이 올바르지 않습니다.".into(),
+        ));
+    }
+    let target = std::env::current_exe()
+        .map_err(|error| AgentError::Update(format!("현재 실행 파일 확인 실패: {error}")))?;
+    if !target
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(executable_name))
+    {
+        return Err(AgentError::Update(
+            "현재 설치는 Tauri 배포물이 아닙니다.".into(),
+        ));
+    }
+    let target_dir = target
+        .parent()
+        .ok_or_else(|| AgentError::Update("앱 폴더를 찾지 못했습니다.".into()))?;
+    let update_lock_path = target_dir.join(".yummi-update.lock");
+    let update_lock = UpdateLock::acquire(update_lock_path.clone())?;
+
     let use_patch = target_manifest.patch_from.as_deref() == Some(current_version)
         && target_manifest.patch_url.is_some();
     let url = if use_patch {
@@ -476,15 +568,6 @@ async fn apply_update(
     safe_extract(&mut archive, &extract)?;
     validate_manifest_files(&extract, target_manifest.files.as_deref())?;
 
-    let executable_name = target_manifest
-        .executable
-        .as_deref()
-        .unwrap_or("yummi-lcu-tauri.exe");
-    if !executable_name.eq_ignore_ascii_case("yummi-lcu-tauri.exe") {
-        return Err(AgentError::Update(
-            "Tauri 대상 실행 파일이 올바르지 않습니다.".into(),
-        ));
-    }
     let source = std::iter::once(extract.join(executable_name))
         .chain(
             fs::read_dir(&extract)
@@ -501,23 +584,6 @@ async fn apply_update(
         )
         .find(|path| path.exists())
         .ok_or_else(|| AgentError::Update("업데이트 ZIP에 Tauri 실행 파일이 없습니다.".into()))?;
-    let target = std::env::current_exe()
-        .map_err(|error| AgentError::Update(format!("현재 실행 파일 확인 실패: {error}")))?;
-    if !target
-        .file_name()
-        .is_some_and(|name| name.eq_ignore_ascii_case(executable_name))
-    {
-        return Err(AgentError::Update(
-            "현재 설치는 Tauri 배포물이 아닙니다.".into(),
-        ));
-    }
-    let target_dir = target
-        .parent()
-        .ok_or_else(|| AgentError::Update("앱 폴더를 찾지 못했습니다.".into()))?;
-    let update_lock = target_dir.join(".yummi-update.lock");
-    if update_lock.exists() {
-        return Err(AgentError::Update("이미 업데이트가 진행 중입니다.".into()));
-    }
     let script = work.join("apply-update.cmd");
     let source_dir = source
         .parent()
@@ -531,9 +597,11 @@ async fn apply_update(
         "@echo off\r\n\
          setlocal\r\n\
          timeout /t 2 /nobreak >nul\r\n\
-         if exist \"{}\" exit /b 2\r\n\
-         echo updating > \"{}\"\r\n\
-         if errorlevel 1 exit /b 3\r\n\
+         set \"UPDATE_TOKEN=\"\r\n\
+         set /p UPDATE_TOKEN=<\"{}\"\r\n\
+         if /I not \"%UPDATE_TOKEN%\"==\"{}\" exit /b 2\r\n\
+         taskkill /F /IM \"{}\" >nul 2>&1\r\n\
+         timeout /t 1 /nobreak >nul\r\n\
          mkdir \"{}\" >nul 2>&1\r\n\
          robocopy \"{}\" \"{}\" /E /XF agent.json .yummi-update.lock >nul\r\n\
          if errorlevel 8 goto fail\r\n\
@@ -545,8 +613,9 @@ async fn apply_update(
          start \"\" \"{}\"\r\n\
          rmdir /S /Q \"{}\" >nul 2>&1\r\n\
          del \"%~f0\"\r\n",
-        update_lock.display(),
-        update_lock.display(),
+        update_lock_path.display(),
+        update_lock.token,
+        executable_name,
         backup_dir.display(),
         target_dir.display(),
         backup_dir.display(),
@@ -554,7 +623,7 @@ async fn apply_update(
         source_dir.display(),
         target_dir.display(),
         target.display(),
-        update_lock.display(),
+        update_lock_path.display(),
         target.display(),
         backup_dir.display(),
     );
@@ -572,11 +641,11 @@ async fn apply_update(
         script_text,
         backup_dir.display(),
         target_dir.display(),
-        update_lock.display(),
-        update_lock.display(),
+        update_lock_path.display(),
+        update_lock_path.display(),
         target.display(),
-        update_lock.display(),
-        update_lock.display(),
+        update_lock_path.display(),
+        update_lock_path.display(),
     );
     fs::write(&script, script_text)?;
 
@@ -596,6 +665,7 @@ async fn apply_update(
             .creation_flags(0x08000000)
             .spawn()
             .map_err(|error| AgentError::Update(format!("업데이트 실행 실패: {error}")))?;
+        update_lock.hand_off();
     }
     Ok(true)
 }
@@ -643,6 +713,8 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
         Ok(true) => {
             state.log(&app, "새 버전을 설치하고 재시작합니다.").await;
             sleep(Duration::from_secs(1)).await;
+            state.begin_shutdown();
+            crate::tray::remove(&app);
             app.exit(0);
         }
         Ok(false) => {}
@@ -772,5 +844,21 @@ mod tests {
             &Url::parse("https://yummi.duckdns.org/other/tauri.zip").unwrap()
         )
         .is_err());
+    }
+
+    #[test]
+    fn update_lock_is_exclusive_and_removed_when_owner_drops() {
+        let directory = std::env::temp_dir().join(format!("yummi-update-lock-{}", Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let path = directory.join(".yummi-update.lock");
+
+        let first = UpdateLock::acquire(path.clone()).unwrap();
+        assert!(UpdateLock::acquire(path.clone()).is_err());
+        drop(first);
+        assert!(!path.exists());
+
+        drop(UpdateLock::acquire(path.clone()).unwrap());
+        assert!(!path.exists());
+        fs::remove_dir(directory).unwrap();
     }
 }
