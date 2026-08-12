@@ -39,6 +39,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
     defaults:
       run:
         shell: pwsh
@@ -212,3 +214,67 @@ jobs:
           name: agent-version-json
           path: agent-version.json
           retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name == 'workflow_dispatch'
+        with:
+          name: agent-release
+          path: |
+            ${{ steps.manifest.outputs.zip }}
+            agent-version.json
+          retention-days: 7
+
+  deploy:
+    name: Deploy agent update files
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && vars.VM_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-release
+          path: release
+
+      - name: Upload update files to VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_PORT || 22 }}
+          source: "release/agent-version.json,release/tauri-${{ needs.build.outputs.version }}.zip"
+          target: "/tmp/yummi-agent-deploy-${{ github.run_id }}"
+          strip_components: 1
+
+      - name: Install update files on VM
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_ID: ${{ github.run_id }}
+          AGENT_WWW_DIR: ${{ vars.AGENT_WWW_DIR || '/var/www/yummi-agent' }}
+        with:
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          port: ${{ secrets.VM_PORT || 22 }}
+          envs: RELEASE_VERSION,RELEASE_ID,AGENT_WWW_DIR
+          script: |
+            set -euo pipefail
+            staging="/tmp/yummi-agent-deploy-${RELEASE_ID}"
+            zip="$staging/tauri-${RELEASE_VERSION}.zip"
+            manifest="$staging/agent-version.json"
+            test -s "$zip"
+            test -s "$manifest"
+            jq -e --arg version "$RELEASE_VERSION" '.tauri.version == $version and .version == $version' "$manifest" >/dev/null
+
+            sudo install -d -m 0755 "$AGENT_WWW_DIR/releases/tauri"
+            # ZIP을 먼저 배치하고 manifest를 마지막에 교체해 중간 상태를 노출하지 않는다.
+            sudo install -m 0644 "$zip" "$AGENT_WWW_DIR/releases/tauri/tauri-${RELEASE_VERSION}.zip"
+            sudo install -m 0644 "$manifest" "$AGENT_WWW_DIR/agent-version.json"
+            sudo cp "$AGENT_WWW_DIR/agent-version.json" "$AGENT_WWW_DIR/version.json"
+            rm -rf "$staging"
+
+            sudo jq -e --arg version "$RELEASE_VERSION" '.tauri.version == $version and .version == $version' "$AGENT_WWW_DIR/agent-version.json" >/dev/null
+            sudo stat -c '%n %s bytes' "$AGENT_WWW_DIR/agent-version.json" "$AGENT_WWW_DIR/releases/tauri/tauri-${RELEASE_VERSION}.zip"
