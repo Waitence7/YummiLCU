@@ -4,6 +4,8 @@
  */
 import { initialState, type AgentState, type Config, type RecentMatch } from '../state/types';
 
+const MAX_UI_LOGS = 2_000;
+
 let state: AgentState = structuredClone(initialState);
 const listeners = new Set<(state: AgentState) => void>();
 const timers: ReturnType<typeof setTimeout>[] = [];
@@ -15,7 +17,10 @@ function emit() {
 
 function log(message: string) {
   const time = new Date().toLocaleTimeString('ko-KR', { hour12: false });
-  state.logs = [...state.logs.slice(-199), `[${time}] ${message}`];
+  state.logs = [
+    ...state.logs.slice(-(MAX_UI_LOGS - 1)),
+    `[${time}] ${message}`,
+  ];
 }
 
 function later(ms: number, run: () => void) {

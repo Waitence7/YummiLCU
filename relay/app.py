@@ -814,12 +814,25 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
     if msg_type == "subscribe_live_game":
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:
-            conn.subscribe_live_game(raw_id)
+            recruitment_id = data.get("recruitment_id")
+            if not isinstance(recruitment_id, (str, int)):
+                recruitment_id = None
+            conn.subscribe_live_game(raw_id, str(recruitment_id)[:128] if recruitment_id else None)
+            logger.info(
+                "봇 live_game 구독 요청: discord_id=%s 모집_id=%s",
+                raw_id,
+                recruitment_id or "없음",
+            )
         return
     if msg_type == "unsubscribe_live_game":
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:
             conn.unsubscribe_live_game(raw_id)
+            logger.info(
+                "봇 live_game 구독 해제 요청: discord_id=%s 모집_id=%s",
+                raw_id,
+                data.get("recruitment_id") or "없음",
+            )
         return
     if msg_type == "subscribe_match_dm":
         raw_id = data.get("discord_id")

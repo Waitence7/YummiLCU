@@ -12,7 +12,7 @@ export function LogsTab({ logs }: { logs: string[] }) {
     <div className="flex h-full flex-col rounded-xl border border-slate-200 bg-white">
       <div className="flex items-center justify-between border-b border-slate-200 px-3 py-2">
         <span className="text-[12px] font-semibold text-slate-700">로그</span>
-        <span className="text-[11px] text-slate-500">{logs.length}줄 · 최근 200줄 유지</span>
+        <span className="text-[11px] text-slate-500">{logs.length}줄 · 최근 2,000줄 유지</span>
       </div>
       <pre
         ref={scroller}

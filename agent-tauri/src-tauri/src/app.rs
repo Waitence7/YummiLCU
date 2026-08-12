@@ -107,7 +107,10 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
     }
     let config = state.config.read().await.clone();
     let Some(path) = lockfile_path(&config) else {
-        return LcuConnectionState::ClientStopped;
+        return match LcuClient::probe_live_game().await {
+            Ok(()) => LcuConnectionState::LoggedIn,
+            Err(_) => LcuConnectionState::ClientStopped,
+        };
     };
 
     let current = state.lcu_state().await;
@@ -142,6 +145,9 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
     }
     match client.probe_logged_in().await {
         Ok(()) => LcuConnectionState::LoggedIn,
-        Err(_) => LcuConnectionState::Error,
+        Err(_) => match LcuClient::probe_live_game().await {
+            Ok(()) => LcuConnectionState::LoggedIn,
+            Err(_) => LcuConnectionState::Error,
+        },
     }
 }

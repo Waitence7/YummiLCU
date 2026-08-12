@@ -4,7 +4,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{watch, Mutex, RwLock};
 
-const MAX_UI_LOGS: usize = 200;
+const MAX_UI_LOGS: usize = 2_000;
 
 use crate::{
     config::Config,
@@ -171,6 +171,8 @@ impl AppState {
                 if changed {
                     self.ui.lock().await.lcu = next.is_ready();
                     self.emit(app).await;
+                    self.log(app, format!("LCU 상태 변경: {}", lcu_state_label(next)))
+                        .await;
                 }
             }
             AgentEvent::RelayStateChanged(next) => {
@@ -209,6 +211,17 @@ impl AppState {
     }
 }
 
+fn lcu_state_label(state: LcuConnectionState) -> &'static str {
+    match state {
+        LcuConnectionState::ClientStopped => "클라이언트 중지",
+        LcuConnectionState::LockfileFound => "lockfile 발견",
+        LcuConnectionState::Connecting => "연결 중",
+        LcuConnectionState::Connected => "연결됨",
+        LcuConnectionState::LoggedIn => "로그인됨",
+        LcuConnectionState::Error => "오류",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{UiState, MAX_UI_LOGS};
@@ -223,6 +236,9 @@ mod tests {
 
         assert_eq!(state.logs.len(), MAX_UI_LOGS);
         assert_eq!(state.logs.front().map(String::as_str), Some("log-5"));
-        assert_eq!(state.logs.back().map(String::as_str), Some("log-204"));
+        assert_eq!(
+            state.logs.back().map(String::as_str),
+            Some(format!("log-{}", MAX_UI_LOGS + 4).as_str())
+        );
     }
 }

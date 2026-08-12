@@ -39,9 +39,25 @@ pub(crate) struct LcuEventPoller {
     live_game: Option<String>,
     last_live_game_poll: Option<Instant>,
     eog_sent: bool,
+    diagnostics: Vec<String>,
+    lockfile_available: Option<bool>,
+    lcu_available: Option<bool>,
+    live_client_available: Option<bool>,
+    live_game_id: Option<String>,
 }
 
 impl LcuEventPoller {
+    fn diagnostic(&mut self, message: impl Into<String>) {
+        self.diagnostics.push(message.into());
+        if self.diagnostics.len() > 64 {
+            self.diagnostics.remove(0);
+        }
+    }
+
+    pub(crate) fn take_diagnostics(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.diagnostics)
+    }
+
     pub(crate) async fn watch_socket(
         config: Config,
         changed: mpsc::Sender<()>,
@@ -135,21 +151,119 @@ impl LcuEventPoller {
         }
     }
     pub(crate) async fn poll(&mut self, config: &Config) -> Vec<(&'static str, Value)> {
+        let mut events = Vec::new();
+
+        // Live Client Data is independent of the League Client lockfile. This is
+        // especially important for spectators and PC cafes where LCU discovery or
+        // gameflow may be unavailable while the local game API is still running.
+        let should_poll = self
+            .last_live_game_poll
+            .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
+        if should_poll {
+            self.last_live_game_poll = Some(Instant::now());
+            match LcuClient::live_game_request(LIVE_GAME_DATA).await {
+                Ok(value) => {
+                    if self.live_client_available != Some(true) {
+                        self.diagnostic("Live Client Data API 연결됨 (127.0.0.1:2999)");
+                    }
+                    self.live_client_available = Some(true);
+                    let live_events_response =
+                        LcuClient::live_game_request(LIVE_GAME_EVENTS).await.ok();
+                    if let Some(payload) = live_game_payload(&value, live_events_response.as_ref())
+                    {
+                        let game_id = payload
+                            .pointer("/game/id")
+                            .map(Value::to_string)
+                            .unwrap_or_else(|| "unknown".into());
+                        if self.live_game_id.as_deref() != Some(game_id.as_str()) {
+                            self.diagnostic(format!(
+                                "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건, active_player={}",
+                                payload
+                                    .get("participants")
+                                    .and_then(Value::as_array)
+                                    .map_or(0, Vec::len),
+                                payload
+                                    .get("events")
+                                    .and_then(Value::as_array)
+                                    .map_or(0, Vec::len),
+                                if payload.get("active_player").is_some_and(|v| !v.is_null()) {
+                                    "yes"
+                                } else {
+                                    "no (관전자)"
+                                }
+                            ));
+                            self.live_game_id = Some(game_id);
+                        }
+                        push_changed(
+                            &mut self.live_game,
+                            live_game_fingerprint(&payload),
+                            "live_game_update",
+                            payload,
+                            &mut events,
+                        );
+                    } else {
+                        self.live_game = None;
+                    }
+                }
+                Err(error) => {
+                    if self.live_client_available != Some(false) {
+                        self.diagnostic(format!("Live Client Data API 응답 없음: {error}"));
+                    }
+                    self.live_client_available = Some(false);
+                    self.live_game_id = None;
+                    self.live_game = None;
+                }
+            }
+        }
+
         let Some(path) = lockfile_path(config) else {
-            return Vec::new();
+            if self.lockfile_available != Some(false) {
+                self.diagnostic("LCU lockfile 없음 — 관전 API 독립 조회만 계속함");
+            }
+            self.lockfile_available = Some(false);
+            self.lcu_available = Some(false);
+            return events;
         };
+        if self.lockfile_available != Some(true) {
+            self.diagnostic(format!("LCU lockfile 발견: {}", path.display()));
+        }
+        self.lockfile_available = Some(true);
         let Ok(client) = LcuClient::from_lockfile(&path) else {
-            return Vec::new();
+            if self.lcu_available != Some(false) {
+                self.diagnostic("LCU lockfile 읽기 실패 — 관전 API 독립 조회는 계속함");
+            }
+            self.lcu_available = Some(false);
+            return events;
         };
 
-        let Ok(phase_value) = client.request(Method::GET, GAMEFLOW_PHASE, None).await else {
-            return Vec::new();
+        let phase_value = match client.request(Method::GET, GAMEFLOW_PHASE, None).await {
+            Ok(value) => value,
+            Err(error) => {
+                if self.lcu_available != Some(false) {
+                    self.diagnostic(format!("LCU gameflow API 응답 실패: {error}"));
+                }
+                self.lcu_available = Some(false);
+                return events;
+            }
         };
         let Some(phase) = phase_value.as_str().map(str::to_owned) else {
-            return Vec::new();
+            if self.lcu_available != Some(false) {
+                self.diagnostic("LCU gameflow API 응답 형식 오류");
+            }
+            self.lcu_available = Some(false);
+            return events;
         };
-        let mut events = Vec::new();
+        if self.lcu_available != Some(true) {
+            self.diagnostic("LCU gameflow API 연결됨");
+        }
+        self.lcu_available = Some(true);
         let previous_phase = self.gameflow.clone();
+        if previous_phase.as_deref() != Some(phase.as_str()) {
+            self.diagnostic(format!(
+                "게임 단계 변경: {} -> {phase}",
+                previous_phase.as_deref().unwrap_or("초기")
+            ));
+        }
         push_changed(
             &mut self.gameflow,
             phase.clone(),
@@ -176,35 +290,6 @@ impl LcuEventPoller {
             "Lobby" | "None" | "ChampSelect" | "Matchmaking"
         ) {
             self.eog_sent = false;
-        }
-
-        // Spectating does not consistently report the LCU phase as InProgress.
-        // Probe the local game client directly; port 2999 is only available while
-        // playing or spectating, so a successful response is the source of truth.
-        let should_poll = self
-            .last_live_game_poll
-            .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
-        if should_poll {
-            self.last_live_game_poll = Some(Instant::now());
-            match client.live_game_request(LIVE_GAME_DATA).await {
-                Ok(value) => {
-                    let live_events_response =
-                        client.live_game_request(LIVE_GAME_EVENTS).await.ok();
-                    if let Some(payload) = live_game_payload(&value, live_events_response.as_ref())
-                    {
-                        push_changed(
-                            &mut self.live_game,
-                            live_game_fingerprint(&payload),
-                            "live_game_update",
-                            payload,
-                            &mut events,
-                        );
-                    } else {
-                        self.live_game = None;
-                    }
-                }
-                Err(_) => self.live_game = None,
-            }
         }
 
         if let Ok(value) = client.request(Method::GET, READY_CHECK, None).await {

@@ -14,6 +14,7 @@ const OWNED_CHAMPIONS_ENDPOINT: &str = "/lol-champions/v1/owned-champions-minima
 const MAX_LOCKFILE_BYTES: u64 = 4 * 1024;
 const MAX_LCU_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const LCU_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
+const LIVE_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 struct SensitiveBuffer(Vec<u8>);
 
@@ -122,9 +123,22 @@ impl LcuClient {
         read_json_response(request, "LCU").await
     }
 
-    pub(super) async fn live_game_request(&self, endpoint: &str) -> AgentResult<Value> {
+    pub(crate) async fn live_game_request(endpoint: &str) -> AgentResult<Value> {
         let url = live_client_url(endpoint)?;
-        read_json_response(self.http.get(url), "Live Client Data").await
+        let http = Client::builder()
+            .danger_accept_invalid_certs(true)
+            .https_only(true)
+            .redirect(Policy::none())
+            .timeout(LIVE_CLIENT_REQUEST_TIMEOUT)
+            .build()
+            .map_err(|_| AgentError::Lcu("Live Client Data HTTP client 생성 실패".into()))?;
+        read_json_response(http.get(url), "Live Client Data").await
+    }
+
+    pub(crate) async fn probe_live_game() -> AgentResult<()> {
+        Self::live_game_request("/liveclientdata/allgamedata")
+            .await
+            .map(|_| ())
     }
 
     pub(crate) async fn probe_logged_in(&self) -> AgentResult<()> {

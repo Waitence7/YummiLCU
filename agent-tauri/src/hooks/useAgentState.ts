@@ -4,6 +4,8 @@ import * as api from '../api/commands';
 import { listenToAgentState } from '../events/agent-state';
 import { initialState, type AgentState, type Config, type RecentMatch } from '../state/types';
 
+const MAX_UI_LOGS = 2_000;
+
 export type RecentState = {
   match: RecentMatch | null;
   loading: boolean;
@@ -38,7 +40,7 @@ export function useAgentState(): {
   const addLog = useCallback((message: string) => {
     setState((current) => ({
       ...current,
-      logs: [...current.logs.slice(-199), message],
+      logs: [...current.logs.slice(-(MAX_UI_LOGS - 1)), message],
     }));
   }, []);
 

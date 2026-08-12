@@ -186,6 +186,10 @@ pub(crate) struct CommandResult {
 }
 
 impl CommandResult {
+    pub(crate) const fn is_ok(&self) -> bool {
+        self.ok
+    }
+
     pub(crate) fn from_parts(
         request_id: String,
         ok: bool,

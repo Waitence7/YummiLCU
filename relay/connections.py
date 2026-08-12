@@ -32,6 +32,7 @@ class ConnectionManager:
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._gameflow_subscribers: set[int] = set()
         self._live_game_subscribers: set[int] = set()
+        self._live_game_recruitments: dict[int, str | None] = {}
         self._match_dm_subscribers: set[int] = set()
         self._participant_status_subscribers: set[int] = set()
         self._participant_status: dict[int, dict[str, Any]] = {}
@@ -230,11 +231,27 @@ class ConnectionManager:
     def unsubscribe_gameflow(self, discord_id: int) -> None:
         self._gameflow_subscribers.discard(int(discord_id))
 
-    def subscribe_live_game(self, discord_id: int) -> None:
-        self._live_game_subscribers.add(int(discord_id))
+    def subscribe_live_game(self, discord_id: int, recruitment_id: str | None = None) -> None:
+        did = int(discord_id)
+        self._live_game_subscribers.add(did)
+        self._live_game_recruitments[did] = recruitment_id
+        logger.info(
+            "live_game 구독 등록: discord_id=%s 대상=사용자 단위 모집_id=%s 총=%s",
+            did,
+            recruitment_id or "없음",
+            len(self._live_game_subscribers),
+        )
 
     def unsubscribe_live_game(self, discord_id: int) -> None:
-        self._live_game_subscribers.discard(int(discord_id))
+        did = int(discord_id)
+        self._live_game_subscribers.discard(did)
+        recruitment_id = self._live_game_recruitments.pop(did, None)
+        logger.info(
+            "live_game 구독 해제: discord_id=%s 대상=사용자 단위 모집_id=%s 총=%s",
+            did,
+            recruitment_id or "없음",
+            len(self._live_game_subscribers),
+        )
 
     def subscribe_match_dm(self, discord_id: int) -> None:
         self._match_dm_subscribers.add(int(discord_id))
@@ -423,29 +440,66 @@ class ConnectionManager:
             return False
 
     async def forward_live_game_update(self, discord_id: int, data: dict[str, Any]) -> bool:
+        did = int(discord_id)
+        game_id = (data.get("game") or {}).get("id") if isinstance(data.get("game"), dict) else None
+        participant_count = len(data.get("participants", [])) if isinstance(data.get("participants"), list) else 0
+        event_count = len(data.get("events", [])) if isinstance(data.get("events"), list) else 0
         async with self._lock:
-            self.set_live_game(discord_id, data)
+            self.set_live_game(did, data)
+            recruitment_id = self._live_game_recruitments.get(did)
             # 기존 gameflow 구독 봇도 별도 구독 명령 없이 실시간 경기 정보를 받을 수 있게
             # 하되, 어느 이벤트에도 구독하지 않은 세션으로는 전달하지 않습니다.
             if (
-                int(discord_id) not in self._live_game_subscribers
-                and int(discord_id) not in self._gameflow_subscribers
+                did not in self._live_game_subscribers
+                and did not in self._gameflow_subscribers
             ):
+                logger.info(
+                    "live_game_update 저장만 함: discord_id=%s game_id=%s participants=%s events=%s "
+                    "전송=아니오 사유=구독자없음 모집_id=%s",
+                    did,
+                    game_id,
+                    participant_count,
+                    event_count,
+                    recruitment_id or "없음",
+                )
                 return False
             ws = self._bot_ws
         if ws is None:
+            logger.warning(
+                "live_game_update 전송 불가: discord_id=%s game_id=%s participants=%s events=%s "
+                "전송=아니오 사유=봇WS없음 모집_id=%s",
+                did,
+                game_id,
+                participant_count,
+                event_count,
+                recruitment_id or "없음",
+            )
             return False
         try:
             await ws.send_json(
                 {
                     "type": "live_game_update",
-                    "discord_id": int(discord_id),
+                    "discord_id": did,
                     "data": data,
                 }
             )
+            logger.info(
+                "live_game_update 전송 완료: discord_id=%s game_id=%s participants=%s events=%s "
+                "전송=봇WS 모집_id=%s 대상=사용자 구독",
+                did,
+                game_id,
+                participant_count,
+                event_count,
+                recruitment_id or "없음",
+            )
             return True
         except Exception:
-            logger.exception("봇 WS live_game_update 전달 실패 discord_id=%s", discord_id)
+            logger.exception(
+                "봇 WS live_game_update 전달 실패: discord_id=%s game_id=%s 모집_id=%s",
+                did,
+                game_id,
+                recruitment_id or "없음",
+            )
             await self.unregister_bot_ws(ws)
             return False
 

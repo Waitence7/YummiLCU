@@ -205,6 +205,9 @@ impl RelaySupervisor {
             state
                 .publish(app, AgentEvent::RelayStateChanged(next))
                 .await;
+            state
+                .log(app, format!("Relay 상태 변경: {}", relay_state_label(next)))
+                .await;
         }
     }
 
@@ -338,6 +341,7 @@ async fn connect_once(
     let (mut websocket, _) = connection
         .map_err(|_| AgentError::Relay("Relay 연결 시간 초과".into()))?
         .map_err(|_| AgentError::Relay("Relay TLS/WebSocket 연결 실패".into()))?;
+    state.log(app, "Relay WebSocket 연결 성공").await;
 
     websocket
         .send(Message::Text(
@@ -345,6 +349,7 @@ async fn connect_once(
         ))
         .await
         .map_err(|_| AgentError::Relay("Relay 인증 메시지 전송 실패".into()))?;
+    state.log(app, "Relay 인증 메시지 전송 완료").await;
     if *stop_rx.borrow() {
         let _ = websocket.close(None).await;
         return Ok(ConnectionEnd::Stopped);
@@ -354,6 +359,15 @@ async fn connect_once(
         .send(Message::Text(serde_json::to_string(&hello)?.into()))
         .await
         .map_err(|_| AgentError::Relay("Relay hello 전송 실패".into()))?;
+    state
+        .log(
+            app,
+            format!(
+                "Agent hello 전송: lcu_ready={}",
+                state.lcu_state().await.is_ready()
+            ),
+        )
+        .await;
     state
         .relay
         .set_connection_state(app, state, generation, RelayConnectionState::Authenticating)
@@ -408,11 +422,13 @@ async fn connect_once(
             }
             code = oauth_rx.recv() => {
                 if let Some(mut code) = code {
+                    state.log(app, "Discord OAuth 코드 전송 시작").await;
                     let message = serde_json::to_string(&OAuthCodeMessage::new(&code))?;
                     let sent = websocket.send(Message::Text(message.into())).await;
                     // The code is ASCII, so zeroing its bytes keeps the String valid before drop.
                     unsafe { code.as_bytes_mut().fill(0) };
                     sent.map_err(|_| AgentError::Relay("OAuth 코드 전송 실패".into()))?;
+                    state.log(app, "Discord OAuth 코드 전송 완료").await;
                 }
             }
             message = websocket.next() => {
@@ -431,6 +447,7 @@ async fn connect_once(
                                 *needs_login = false;
                                 handle_incoming(app, state, &mut websocket, incoming, false).await?;
                                 session_bound = true;
+                                state.log(app, "Relay 세션 인증 완료 — LCU 이벤트 감시 시작").await;
                                 state.relay.set_oauth_sender(generation, None).await;
                                 if lcu_socket_watch.is_none() {
                                     let (stop_tx, stop_rx) = watch::channel(false);
@@ -478,6 +495,7 @@ async fn connect_once(
                     websocket.send(Message::Text("ping".into())).await
                         .map_err(|_| AgentError::Relay("Relay heartbeat 전송 실패".into()))?;
                     awaiting_pong = Some(Instant::now());
+                    state.log(app, "Relay heartbeat 전송").await;
                 }
             }
             _ = watchdog.tick() => {
@@ -495,6 +513,7 @@ async fn connect_once(
             _ = lcu_event_poll.tick(), if session_bound => {
                 let config = state.config.read().await.clone();
                 for (message_type, data) in lcu_events.poll(&config).await {
+                    let event_log = event_summary(message_type, &data);
                     let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
                         .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
                     let Some(message) = serialize_agent_event(message_type, data)? else {
@@ -503,15 +522,20 @@ async fn connect_once(
                     };
                     websocket.send(Message::Text(message.into())).await
                         .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
+                    state.log(app, format!("Relay 이벤트 전송: {event_log}")).await;
                     if let Some(count) = live_participant_count {
                         live_game_announced = true;
                         state.log(app, format!("실시간 관전 데이터 서버 전송 확인 ({count}명)")).await;
                     }
                 }
+                for diagnostic in lcu_events.take_diagnostics() {
+                    state.log(app, format!("LCU 진단: {diagnostic}")).await;
+                }
             }
             Some(()) = lcu_event_rx.recv(), if session_bound => {
                 let config = state.config.read().await.clone();
                 for (message_type, data) in lcu_events.poll(&config).await {
+                    let event_log = event_summary(message_type, &data);
                     let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
                         .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
                     let Some(message) = serialize_agent_event(message_type, data)? else {
@@ -520,10 +544,14 @@ async fn connect_once(
                     };
                     websocket.send(Message::Text(message.into())).await
                         .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
+                    state.log(app, format!("Relay 이벤트 전송: {event_log}")).await;
                     if let Some(count) = live_participant_count {
                         live_game_announced = true;
                         state.log(app, format!("실시간 관전 데이터 서버 전송 확인 ({count}명)")).await;
                     }
+                }
+                for diagnostic in lcu_events.take_diagnostics() {
+                    state.log(app, format!("LCU 진단: {diagnostic}")).await;
                 }
             }
         }
@@ -595,7 +623,10 @@ where
                 .await
                 .map_err(|_| AgentError::Relay("Relay 응답 전송 실패".into()))?;
             if !parsed_action.is_some_and(Action::is_background) {
-                state.log(app, format!("명령 실행: {action_label}")).await;
+                let result_label = if result.is_ok() { "성공" } else { "실패" };
+                state
+                    .log(app, format!("명령 완료: {action_label} ({result_label})"))
+                    .await;
             }
         }
         IncomingMessage::SessionBound {
@@ -636,6 +667,70 @@ fn safe_avatar_url(value: Option<String>) -> Option<String> {
 fn serialize_agent_event(message_type: &'static str, data: Value) -> AgentResult<Option<String>> {
     let message = serde_json::to_string(&AgentEventMessage::new(message_type, data))?;
     Ok((message.len() <= MAX_RELAY_MESSAGE_BYTES).then_some(message))
+}
+
+fn relay_state_label(state: RelayConnectionState) -> &'static str {
+    match state {
+        RelayConnectionState::Stopped => "중지됨",
+        RelayConnectionState::Connecting => "연결 중",
+        RelayConnectionState::Authenticating => "인증 중",
+        RelayConnectionState::Connected => "연결됨",
+        RelayConnectionState::Reconnecting => "재연결 대기",
+        RelayConnectionState::Failed => "실패",
+    }
+}
+
+fn event_summary(message_type: &str, data: &Value) -> String {
+    match message_type {
+        "live_game_update" => format!(
+            "live_game_update game_id={} participants={} events={} active_player={}",
+            data.pointer("/game/id")
+                .map(Value::to_string)
+                .unwrap_or_else(|| "unknown".into()),
+            data.get("participants")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            data.get("events")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            if data.get("active_player").is_some_and(|v| !v.is_null()) {
+                "yes"
+            } else {
+                "no"
+            }
+        ),
+        "gameflow_update" => format!(
+            "gameflow_update phase={}",
+            data.pointer("/phase")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        "ready_check_update" => format!(
+            "ready_check_update active={}",
+            data.get("active").and_then(Value::as_bool).unwrap_or(false)
+        ),
+        "champ_select_update" => format!(
+            "champ_select_update active={} current_action={}",
+            data.get("active").and_then(Value::as_bool).unwrap_or(false),
+            data.get("current_action").is_some_and(|v| !v.is_null())
+        ),
+        "party_lobby_update" => format!(
+            "party_lobby_update members={}",
+            data.get("members")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len)
+        ),
+        "participant_status_update" => format!(
+            "participant_status_update status={} phase={}",
+            data.get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            data.get("phase")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown")
+        ),
+        other => other.to_owned(),
+    }
 }
 
 fn should_reconnect(manual_stop: bool) -> bool {
