@@ -1,7 +1,7 @@
 import './style.css';
 
 import {
-  loadConfig,
+  getAgentState,
   recentMatch,
   relogin,
   saveConfig,
@@ -67,15 +67,31 @@ const view = mountApp(root, {
 
 store.subscribe((state) => view.render(state, recent));
 
-void listenToAgentState((state) => store.set(state)).catch((error) => addLog(String(error)));
-
-window.addEventListener('DOMContentLoaded', async () => {
+let unlistenAgentState: (() => void) | undefined;
+const initialize = async () => {
   try {
-    const config = await loadConfig();
-    store.update((state) => ({ ...state, config }));
+    unlistenAgentState = await listenToAgentState((state) => store.set(state));
+    const snapshot = await getAgentState();
+    store.set(snapshot);
+    if (snapshot.lcu) {
+      const request = ++recentRequest;
+      try {
+        const result = await recentMatch();
+        if (request === recentRequest) {
+          recent = result;
+          view.render(store.get(), recent);
+        }
+      } catch {
+        // State restoration is best-effort while the League Client reconnects.
+      }
+    }
   } catch (error) {
     addLog(String(error));
   }
-});
+};
+
+void initialize();
+
+window.addEventListener('beforeunload', () => unlistenAgentState?.(), { once: true });
 
 window.addEventListener('tauri://app-ready', () => undefined);

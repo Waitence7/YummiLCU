@@ -671,6 +671,14 @@ async def _handle_agent_message(
             )
         return
 
+    if msg_type == "live_game_update":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("data")
+        if discord_id is None or not isinstance(payload, dict):
+            return
+        await conn.forward_live_game_update(discord_id, payload)
+        return
+
     if msg_type == "participant_status_update":
         discord_id = conn.discord_id_for_ws(websocket)
         payload = data.get("data")
@@ -798,6 +806,16 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:
             conn.unsubscribe_gameflow(raw_id)
+        return
+    if msg_type == "subscribe_live_game":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.subscribe_live_game(raw_id)
+        return
+    if msg_type == "unsubscribe_live_game":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and raw_id > 0:
+            conn.unsubscribe_live_game(raw_id)
         return
     if msg_type == "subscribe_match_dm":
         raw_id = data.get("discord_id")

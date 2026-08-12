@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager, RunEvent};
 use tokio::time::sleep;
 
 use crate::{
@@ -9,6 +9,7 @@ use crate::{
     lcu::{lockfile_path, LcuClient, LcuConnectionState},
     platform::sync_windows_startup,
     state::{AgentEvent, AppState},
+    tray,
     updater::auto_update_on_startup,
 };
 
@@ -20,7 +21,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
     let connect_state = state.clone();
     let lcu_state = state.clone();
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
@@ -30,9 +31,11 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::agent::stop_agent,
             crate::commands::agent::relogin,
             crate::commands::agent::submit_oauth_code,
+            crate::commands::agent::get_agent_state,
             crate::commands::lcu::recent_match
         ])
         .setup(move |app| {
+            tray::setup(app)?;
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_update_on_startup(handle.clone(), update_state));
             tauri::async_runtime::spawn(watch_lcu(handle.clone(), lcu_state));
@@ -41,14 +44,40 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             });
             Ok(())
         })
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())?;
+
+    app.run(|app, event| {
+        if let RunEvent::ExitRequested { code, api, .. } = event {
+            if should_keep_running(code) {
+                api.prevent_exit();
+            } else if let Some(state) = app.try_state::<Arc<AppState>>() {
+                state.begin_shutdown();
+            }
+        }
+    });
+    Ok(())
+}
+
+fn should_keep_running(exit_code: Option<i32>) -> bool {
+    exit_code.is_none()
 }
 
 async fn watch_lcu(app: AppHandle, state: Arc<AppState>) {
+    let mut shutdown = state.shutdown_receiver();
     loop {
+        if *shutdown.borrow() {
+            break;
+        }
         let next = inspect_lcu(&app, &state).await;
         state.publish(&app, AgentEvent::LcuStateChanged(next)).await;
-        sleep(Duration::from_secs(2)).await;
+        tokio::select! {
+            _ = sleep(Duration::from_secs(4)) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -94,5 +123,17 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
     match client.probe_logged_in().await {
         Ok(()) => LcuConnectionState::LoggedIn,
         Err(_) => LcuConnectionState::Error,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_keep_running;
+
+    #[test]
+    fn user_window_close_keeps_background_services_running() {
+        assert!(should_keep_running(None));
+        assert!(!should_keep_running(Some(0)));
+        assert!(!should_keep_running(Some(1)));
     }
 }

@@ -88,6 +88,19 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(previous.closed)
         self.assertTrue(manager.has_active_session_ws("session-1"))
 
+    async def test_live_game_updates_are_forwarded_only_to_subscribers(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.register_bot_ws(websocket)
+
+        self.assertFalse(await manager.forward_live_game_update(42, {"participants": []}))
+        manager.subscribe_live_game(42)
+        self.assertTrue(
+            await manager.forward_live_game_update(42, {"participants": [{"kills": 3}]})
+        )
+        self.assertEqual(websocket.payload["type"], "live_game_update")
+        self.assertEqual(websocket.payload["data"]["participants"][0]["kills"], 3)
+
 
 class RelayUrlSecurityTests(unittest.TestCase):
     def test_public_relay_requires_https_or_exact_loopback(self) -> None:

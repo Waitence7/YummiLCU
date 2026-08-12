@@ -7,6 +7,7 @@ mod platform;
 mod relay;
 mod session;
 mod state;
+mod tray;
 mod updater;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

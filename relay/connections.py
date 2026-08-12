@@ -29,6 +29,7 @@ class ConnectionManager:
         self._bot_ws: WebSocket | None = None
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._gameflow_subscribers: set[int] = set()
+        self._live_game_subscribers: set[int] = set()
         self._match_dm_subscribers: set[int] = set()
         self._participant_status_subscribers: set[int] = set()
         self._participant_status: dict[int, dict[str, Any]] = {}
@@ -229,6 +230,12 @@ class ConnectionManager:
     def unsubscribe_gameflow(self, discord_id: int) -> None:
         self._gameflow_subscribers.discard(int(discord_id))
 
+    def subscribe_live_game(self, discord_id: int) -> None:
+        self._live_game_subscribers.add(int(discord_id))
+
+    def unsubscribe_live_game(self, discord_id: int) -> None:
+        self._live_game_subscribers.discard(int(discord_id))
+
     def subscribe_match_dm(self, discord_id: int) -> None:
         self._match_dm_subscribers.add(int(discord_id))
 
@@ -395,6 +402,32 @@ class ConnectionManager:
             return True
         except Exception:
             logger.exception("봇 WS gameflow_update 전달 실패 discord_id=%s", discord_id)
+            await self.unregister_bot_ws(ws)
+            return False
+
+    async def forward_live_game_update(self, discord_id: int, data: dict[str, Any]) -> bool:
+        async with self._lock:
+            # 기존 gameflow 구독 봇도 별도 구독 명령 없이 실시간 경기 정보를 받을 수 있게
+            # 하되, 어느 이벤트에도 구독하지 않은 세션으로는 전달하지 않습니다.
+            if (
+                int(discord_id) not in self._live_game_subscribers
+                and int(discord_id) not in self._gameflow_subscribers
+            ):
+                return False
+            ws = self._bot_ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(
+                {
+                    "type": "live_game_update",
+                    "discord_id": int(discord_id),
+                    "data": data,
+                }
+            )
+            return True
+        except Exception:
+            logger.exception("봇 WS live_game_update 전달 실패 discord_id=%s", discord_id)
             await self.unregister_bot_ws(ws)
             return False
 
