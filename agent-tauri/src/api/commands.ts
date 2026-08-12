@@ -1,4 +1,4 @@
-import type { Config, RecentMatch } from '../state/types';
+import type { AgentState, Config, RecentMatch } from '../state/types';
 
 /**
  * 브라우저(비 Tauri) 환경에서는 목 브리지로 대체해 UI를 확인할 수 있게 한다.
@@ -18,6 +18,7 @@ async function call<T>(command: string, args?: Record<string, unknown>): Promise
   return invoke<T>(command, args);
 }
 
+export const getAgentState = () => call<AgentState>('get_agent_state');
 export const loadConfig = () => call<Config>('load_config');
 export const saveConfig = (config: Config) => call<void>('save_config', { config });
 export const startAgent = () => call<void>('start_agent');

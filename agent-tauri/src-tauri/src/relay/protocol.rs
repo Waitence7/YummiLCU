@@ -240,6 +240,7 @@ pub(crate) struct AgentCapabilities {
     champ_select_events: bool,
     party_events: bool,
     eog_events: bool,
+    live_game_events: bool,
 }
 
 impl AgentCapabilities {
@@ -261,6 +262,7 @@ impl AgentCapabilities {
             champ_select_events: true,
             party_events: true,
             eog_events: true,
+            live_game_events: true,
         }
     }
 }
@@ -423,6 +425,7 @@ mod tests {
         assert_eq!(value["capabilities"]["runes"], true);
         assert_eq!(value["capabilities"]["gameflow_events"], true);
         assert_eq!(value["capabilities"]["party_events"], true);
+        assert_eq!(value["capabilities"]["live_game_events"], true);
     }
 
     #[test]

@@ -2,7 +2,11 @@ use std::sync::Arc;
 
 use tauri::{AppHandle, State};
 
-use crate::{relay::supervisor::RelaySupervisor, session, state::AppState};
+use crate::{
+    relay::supervisor::RelaySupervisor,
+    session,
+    state::{AppState, UiState},
+};
 
 pub(crate) async fn start_agent_inner(app: AppHandle, state: Arc<AppState>) -> Result<(), String> {
     RelaySupervisor::start(app, state)
@@ -16,6 +20,11 @@ pub(crate) async fn start_agent(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     start_agent_inner(app, state.inner().clone()).await
+}
+
+#[tauri::command]
+pub(crate) async fn get_agent_state(state: State<'_, Arc<AppState>>) -> Result<UiState, String> {
+    Ok(state.snapshot().await)
 }
 
 #[tauri::command]

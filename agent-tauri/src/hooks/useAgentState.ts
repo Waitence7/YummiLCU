@@ -54,11 +54,18 @@ export function useAgentState(): {
       })
       .catch((error) => addLog(String(error)));
     api
-      .loadConfig()
-      .then((config) => {
-        if (!cancelled) setState((current) => ({ ...current, config }));
+      .getAgentState()
+      .then((snapshot) => {
+        if (!cancelled) setState(snapshot);
       })
-      .catch((error) => addLog(String(error)));
+      .catch(() => {
+        api
+          .loadConfig()
+          .then((config) => {
+            if (!cancelled) setState((current) => ({ ...current, config }));
+          })
+          .catch((error) => addLog(String(error)));
+      });
     return () => {
       cancelled = true;
       unlisten?.();

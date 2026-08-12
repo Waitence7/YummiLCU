@@ -1,8 +1,10 @@
-use std::{sync::Arc, time::UNIX_EPOCH};
+use std::{collections::VecDeque, sync::Arc, time::UNIX_EPOCH};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
+
+const MAX_UI_LOGS: usize = 200;
 
 use crate::{
     config::Config,
@@ -18,7 +20,7 @@ pub(crate) struct UiState {
     discord_id: Option<u64>,
     discord_name: Option<String>,
     discord_avatar: Option<String>,
-    logs: Vec<String>,
+    logs: VecDeque<String>,
     oauth_pending: bool,
     update_message: Option<String>,
     app_version: String,
@@ -35,12 +37,19 @@ impl UiState {
             discord_id: None,
             discord_name: None,
             discord_avatar: None,
-            logs: Vec::new(),
+            logs: VecDeque::new(),
             oauth_pending: false,
             update_message: None,
             app_version: env!("CARGO_PKG_VERSION").into(),
             downloaded_at: installed_at(),
             config,
+        }
+    }
+
+    fn push_log(&mut self, message: String) {
+        self.logs.push_back(message);
+        if self.logs.len() > MAX_UI_LOGS {
+            self.logs.pop_front();
         }
     }
 }
@@ -66,26 +75,26 @@ pub(crate) struct AppState {
     pub(crate) relay: Arc<RelaySupervisor>,
     pub(crate) command_lock: Mutex<()>,
     lcu_state: RwLock<LcuConnectionState>,
+    shutdown: watch::Sender<bool>,
 }
 
 impl AppState {
     pub(crate) fn new(config: Config) -> Self {
+        let (shutdown, _) = watch::channel(false);
         Self {
             config: RwLock::new(config.clone()),
             ui: Mutex::new(UiState::new(config)),
             relay: Arc::new(RelaySupervisor::new()),
             command_lock: Mutex::new(()),
             lcu_state: RwLock::new(LcuConnectionState::ClientStopped),
+            shutdown,
         }
     }
 
     pub(crate) async fn log(&self, app: &AppHandle, message: impl Into<String>) {
         let snapshot = {
             let mut ui = self.ui.lock().await;
-            ui.logs.push(message.into());
-            if ui.logs.len() > 300 {
-                ui.logs.remove(0);
-            }
+            ui.push_log(message.into());
             ui.clone()
         };
         let _ = app.emit("agent-state", snapshot);
@@ -101,8 +110,12 @@ impl AppState {
     }
 
     pub(crate) async fn emit(&self, app: &AppHandle) {
-        let snapshot = self.ui.lock().await.clone();
+        let snapshot = self.snapshot().await;
         let _ = app.emit("agent-state", snapshot);
+    }
+
+    pub(crate) async fn snapshot(&self) -> UiState {
+        self.ui.lock().await.clone()
     }
 
     pub(crate) async fn update_config(&self, config: Config) {
@@ -175,6 +188,14 @@ impl AppState {
         *self.lcu_state.read().await
     }
 
+    pub(crate) fn shutdown_receiver(&self) -> watch::Receiver<bool> {
+        self.shutdown.subscribe()
+    }
+
+    pub(crate) fn begin_shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
     pub(crate) async fn mark_stopped(&self, app: &AppHandle) {
         {
             let mut ui = self.ui.lock().await;
@@ -185,5 +206,23 @@ impl AppState {
         }
         *self.lcu_state.write().await = LcuConnectionState::ClientStopped;
         self.emit(app).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{UiState, MAX_UI_LOGS};
+    use crate::config::Config;
+
+    #[test]
+    fn ui_log_history_is_fifo_and_bounded() {
+        let mut state = UiState::new(Config::default());
+        for index in 0..(MAX_UI_LOGS + 5) {
+            state.push_log(format!("log-{index}"));
+        }
+
+        assert_eq!(state.logs.len(), MAX_UI_LOGS);
+        assert_eq!(state.logs.front().map(String::as_str), Some("log-5"));
+        assert_eq!(state.logs.back().map(String::as_str), Some("log-204"));
     }
 }

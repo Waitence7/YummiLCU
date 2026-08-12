@@ -3,7 +3,7 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::{
     connect_async_tls_with_config,
     tungstenite::{
@@ -22,8 +22,10 @@ const CHAMP_SELECT: &str = "/lol-champ-select/v1/session";
 const LOBBY: &str = "/lol-lobby/v2/lobby";
 const EOG_STATS: &str = "/lol-end-of-game/v1/eog-stats-block";
 const GAMEFLOW_SESSION: &str = "/lol-gameflow/v1/session";
+const LIVE_GAME_DATA: &str = "/liveclientdata/allgamedata";
 const LCU_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(1);
+const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const MAX_LCU_EVENT_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
@@ -33,6 +35,8 @@ pub(crate) struct LcuEventPoller {
     champ_select: Option<String>,
     party: Option<String>,
     participant: Option<String>,
+    live_game: Option<String>,
+    last_live_game_poll: Option<Instant>,
     eog_sent: bool,
 }
 
@@ -173,6 +177,29 @@ impl LcuEventPoller {
             self.eog_sent = false;
         }
 
+        if phase == "InProgress" {
+            let should_poll = self
+                .last_live_game_poll
+                .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
+            if should_poll {
+                self.last_live_game_poll = Some(Instant::now());
+                if let Ok(value) = client.request(Method::GET, LIVE_GAME_DATA, None).await {
+                    if let Some(payload) = live_game_payload(&value) {
+                        push_changed(
+                            &mut self.live_game,
+                            live_game_fingerprint(&payload),
+                            "live_game_update",
+                            payload,
+                            &mut events,
+                        );
+                    }
+                }
+            }
+        } else {
+            self.live_game = None;
+            self.last_live_game_poll = None;
+        }
+
         if let Ok(value) = client.request(Method::GET, READY_CHECK, None).await {
             let payload = ready_check_payload(&value);
             push_changed(
@@ -290,6 +317,14 @@ fn fingerprint(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
+fn live_game_fingerprint(value: &Value) -> String {
+    let mut stable = value.clone();
+    if let Some(object) = stable.as_object_mut() {
+        object.remove("captured_at_ms");
+    }
+    fingerprint(&stable)
+}
+
 fn ready_check_payload(value: &Value) -> Value {
     let state = value.get("state").and_then(Value::as_str).unwrap_or("");
     let player_response = value
@@ -401,6 +436,94 @@ fn participant_status(phase: &str, party: &Value) -> Value {
     json!({"status": status, "phase": phase, "game_started_at_ms": Value::Null, "lcu_ready": true, "agent_online": true})
 }
 
+fn live_game_payload(value: &Value) -> Option<Value> {
+    let game_data = value.get("gameData")?.as_object()?;
+    let players = value
+        .get("allPlayers")
+        .or_else(|| value.get("players"))
+        .and_then(Value::as_array)?;
+    if players.is_empty() {
+        return None;
+    }
+
+    let participants = players
+        .iter()
+        .take(10)
+        .map(live_player_payload)
+        .collect::<Vec<_>>();
+    Some(json!({
+        "source": "lcu-agent",
+        "phase": "InProgress",
+        "captured_at_ms": SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+        "game": {
+            "id": game_data.get("gameId").cloned().unwrap_or(Value::Null),
+            "mode": game_data.get("gameMode").cloned().unwrap_or(Value::Null),
+            "map": game_data.get("mapName").cloned().unwrap_or(Value::Null),
+            "map_number": game_data.get("mapNumber").cloned().unwrap_or(Value::Null),
+            "terrain": game_data.get("mapTerrain").cloned().unwrap_or(Value::Null),
+            "time_seconds": game_data.get("gameTime").cloned().unwrap_or(Value::Null),
+        },
+        "active_player": active_player_payload(value.get("activePlayer")),
+        "participants": participants,
+    }))
+}
+
+fn live_player_payload(player: &Value) -> Value {
+    let scores = player.get("scores");
+    let items = player
+        .get("items")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .take(7)
+        .map(|item| {
+            json!({
+                "id": item.get("itemID").or_else(|| item.get("id")).cloned().unwrap_or(Value::Null),
+                "name": item.get("displayName").or_else(|| item.get("name")).cloned().unwrap_or(Value::Null),
+                "count": item.get("count").cloned().unwrap_or(Value::from(1)),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "summoner_name": player.get("summonerName").cloned().unwrap_or(Value::Null),
+        "champion_name": player.get("championName").cloned().unwrap_or(Value::Null),
+        "team": player.get("team").cloned().unwrap_or(Value::Null),
+        "position": player.get("position").cloned().unwrap_or(Value::Null),
+        "is_bot": player.get("isBot").cloned().unwrap_or(Value::Bool(false)),
+        "is_dead": player.get("isDead").cloned().unwrap_or(Value::Bool(false)),
+        "level": player.get("level").cloned().unwrap_or(Value::Null),
+        "gold": player.get("gold").or_else(|| player.get("currentGold")).cloned().unwrap_or(Value::Null),
+        "kills": scores.and_then(|value| value.get("kills")).cloned().unwrap_or(Value::from(0)),
+        "deaths": scores.and_then(|value| value.get("deaths")).cloned().unwrap_or(Value::from(0)),
+        "assists": scores.and_then(|value| value.get("assists")).cloned().unwrap_or(Value::from(0)),
+        "creep_score": scores.and_then(|value| value.get("creepScore")).cloned().unwrap_or(Value::from(0)),
+        "ward_score": scores.and_then(|value| value.get("wardScore")).cloned().unwrap_or(Value::from(0)),
+        "items": items,
+        "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null),
+    })
+}
+
+fn active_player_payload(value: Option<&Value>) -> Value {
+    let Some(player) = value else {
+        return Value::Null;
+    };
+    let scores = player.get("scores");
+    json!({
+        "summoner_name": player.get("summonerName").cloned().unwrap_or(Value::Null),
+        "level": player.get("level").cloned().unwrap_or(Value::Null),
+        "current_gold": player.get("currentGold").cloned().unwrap_or(Value::Null),
+        "kills": scores.and_then(|value| value.get("kills")).cloned().unwrap_or(Value::from(0)),
+        "deaths": scores.and_then(|value| value.get("deaths")).cloned().unwrap_or(Value::from(0)),
+        "assists": scores.and_then(|value| value.get("assists")).cloned().unwrap_or(Value::from(0)),
+        "creep_score": scores.and_then(|value| value.get("creepScore")).cloned().unwrap_or(Value::from(0)),
+        "champion_stats": player.get("championStats").cloned().unwrap_or(Value::Null),
+        "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,5 +549,34 @@ mod tests {
         assert_eq!(payload["active"], true);
         assert_eq!(payload["actions"][0]["champion_id"], 10);
         assert_eq!(payload["current_action"]["id"], 7);
+    }
+
+    #[test]
+    fn live_game_payload_includes_participant_kda_and_items() {
+        let payload = live_game_payload(&json!({
+            "gameData": {"gameId": 42, "gameMode": "CLASSIC", "gameTime": 120.5},
+            "activePlayer": {"summonerName": "Me", "scores": {"kills": 2, "deaths": 1, "assists": 3}},
+            "allPlayers": [{
+                "summonerName": "Me", "championName": "Ahri", "team": "ORDER",
+                "scores": {"kills": 2, "deaths": 1, "assists": 3, "creepScore": 80},
+                "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1}]
+            }]
+        }))
+        .unwrap();
+        assert_eq!(payload["game"]["id"], 42);
+        assert_eq!(payload["participants"][0]["kills"], 2);
+        assert_eq!(payload["participants"][0]["deaths"], 1);
+        assert_eq!(payload["participants"][0]["assists"], 3);
+        assert_eq!(payload["participants"][0]["items"][0]["id"], 1056);
+    }
+
+    #[test]
+    fn live_game_fingerprint_ignores_capture_timestamp() {
+        let first = json!({"captured_at_ms": 1, "game": {"id": 42}});
+        let second = json!({"captured_at_ms": 2, "game": {"id": 42}});
+        assert_eq!(
+            live_game_fingerprint(&first),
+            live_game_fingerprint(&second)
+        );
     }
 }

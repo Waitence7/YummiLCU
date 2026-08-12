@@ -33,6 +33,8 @@ export async function mockInvoke<T>(
   args?: Record<string, unknown>,
 ): Promise<T> {
   switch (command) {
+    case 'get_agent_state':
+      return structuredClone(state) as T;
     case 'load_config':
       return structuredClone(state.config) as T;
     case 'save_config': {
