@@ -1012,3 +1012,23 @@ async def internal_online(
         if agent:
             body["agent"] = agent
     return JSONResponse(body)
+
+
+@app.get("/internal/live-game/{discord_id}")
+async def internal_live_game(
+    request: Request,
+    discord_id: int,
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    """해당 Agent가 마지막으로 수집한 짧은 TTL의 라이브 게임 상태."""
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    conn: ConnectionManager = request.app.state.connections
+    cached = conn.get_live_game(discord_id)
+    return JSONResponse(
+        {
+            "online": conn.is_online(discord_id),
+            "live": cached is not None,
+            "data": cached["data"] if cached else None,
+            "age_ms": cached["age_ms"] if cached else None,
+        }
+    )

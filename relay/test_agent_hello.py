@@ -102,6 +102,15 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.payload["type"], "live_game_update")
         self.assertEqual(websocket.payload["data"]["participants"][0]["kills"], 3)
 
+    async def test_live_game_update_is_cached_without_bot_subscription(self) -> None:
+        manager = ConnectionManager()
+        payload = {"game": {"time_seconds": 42}, "participants": []}
+
+        self.assertFalse(await manager.forward_live_game_update(42, payload))
+        cached = manager.get_live_game(42)
+        self.assertIsNotNone(cached)
+        self.assertEqual(cached["data"], payload)
+
 
 class RelayUrlSecurityTests(unittest.TestCase):
     def test_public_relay_requires_https_or_exact_loopback(self) -> None:

@@ -23,6 +23,7 @@ const LOBBY: &str = "/lol-lobby/v2/lobby";
 const EOG_STATS: &str = "/lol-end-of-game/v1/eog-stats-block";
 const GAMEFLOW_SESSION: &str = "/lol-gameflow/v1/session";
 const LIVE_GAME_DATA: &str = "/liveclientdata/allgamedata";
+const LIVE_GAME_EVENTS: &str = "/liveclientdata/eventdata";
 const LCU_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(1);
 const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(3);
@@ -184,7 +185,12 @@ impl LcuEventPoller {
             if should_poll {
                 self.last_live_game_poll = Some(Instant::now());
                 if let Ok(value) = client.request(Method::GET, LIVE_GAME_DATA, None).await {
-                    if let Some(payload) = live_game_payload(&value) {
+                    let live_events_response = client
+                        .request(Method::GET, LIVE_GAME_EVENTS, None)
+                        .await
+                        .ok();
+                    if let Some(payload) = live_game_payload(&value, live_events_response.as_ref())
+                    {
                         push_changed(
                             &mut self.live_game,
                             live_game_fingerprint(&payload),
@@ -436,7 +442,7 @@ fn participant_status(phase: &str, party: &Value) -> Value {
     json!({"status": status, "phase": phase, "game_started_at_ms": Value::Null, "lcu_ready": true, "agent_online": true})
 }
 
-fn live_game_payload(value: &Value) -> Option<Value> {
+fn live_game_payload(value: &Value, events: Option<&Value>) -> Option<Value> {
     let game_data = value.get("gameData")?.as_object()?;
     let players = value
         .get("allPlayers")
@@ -468,7 +474,45 @@ fn live_game_payload(value: &Value) -> Option<Value> {
         },
         "active_player": active_player_payload(value.get("activePlayer")),
         "participants": participants,
+        "events": live_events_payload(events),
     }))
+}
+
+fn live_events_payload(value: Option<&Value>) -> Vec<Value> {
+    let Some(events) = value
+        .and_then(|value| value.get("Events").or_else(|| value.get("events")))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+
+    events
+        .iter()
+        .filter_map(|event| {
+            let name = event
+                .get("EventName")
+                .or_else(|| event.get("eventName"))
+                .and_then(Value::as_str)?;
+            let assisters = event
+                .get("Assisters")
+                .or_else(|| event.get("assisters"))
+                .and_then(Value::as_array)
+                .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+                .unwrap_or_default();
+            Some(json!({
+                "id": event.get("EventID").or_else(|| event.get("eventId")).cloned().unwrap_or(Value::Null),
+                "name": name,
+                "time_seconds": event.get("EventTime").or_else(|| event.get("eventTime")).cloned().unwrap_or(Value::Null),
+                "killer_name": event.get("KillerName").or_else(|| event.get("killerName")).cloned().unwrap_or(Value::Null),
+                "victim_name": event.get("VictimName").or_else(|| event.get("victimName")).cloned().unwrap_or(Value::Null),
+                "assisters": assisters,
+                "dragon_type": event.get("DragonType").or_else(|| event.get("dragonType")).cloned().unwrap_or(Value::Null),
+                "turret_killed": event.get("TurretKilled").or_else(|| event.get("turretKilled")).cloned().unwrap_or(Value::Null),
+                "inhibitor_killed": event.get("InhibKilled").or_else(|| event.get("inhibKilled")).cloned().unwrap_or(Value::Null),
+                "monster_type": event.get("MonsterType").or_else(|| event.get("monsterType")).cloned().unwrap_or(Value::Null),
+            }))
+        })
+        .collect()
 }
 
 fn live_player_payload(player: &Value) -> Value {
@@ -561,13 +605,31 @@ mod tests {
                 "scores": {"kills": 2, "deaths": 1, "assists": 3, "creepScore": 80},
                 "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1}]
             }]
-        }))
+        }), None)
         .unwrap();
         assert_eq!(payload["game"]["id"], 42);
         assert_eq!(payload["participants"][0]["kills"], 2);
         assert_eq!(payload["participants"][0]["deaths"], 1);
         assert_eq!(payload["participants"][0]["assists"], 3);
         assert_eq!(payload["participants"][0]["items"][0]["id"], 1056);
+    }
+
+    #[test]
+    fn live_game_payload_includes_kill_and_objective_events() {
+        let payload = live_game_payload(
+            &json!({
+                "gameData": {"gameId": 42, "gameTime": 120.5},
+                "allPlayers": [{"summonerName": "Me", "team": "ORDER"}]
+            }),
+            Some(&json!({"Events": [
+                {"EventID": 1, "EventName": "ChampionKill", "EventTime": 61.2, "KillerName": "Me", "VictimName": "Enemy", "Assisters": ["Ally"]},
+                {"EventID": 2, "EventName": "DragonKill", "EventTime": 90.0, "DragonType": "EarthDragon"}
+            ]})),
+        )
+        .unwrap();
+        assert_eq!(payload["events"][0]["killer_name"], "Me");
+        assert_eq!(payload["events"][0]["victim_name"], "Enemy");
+        assert_eq!(payload["events"][1]["dragon_type"], "EarthDragon");
     }
 
     #[test]

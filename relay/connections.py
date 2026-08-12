@@ -13,6 +13,8 @@ from fastapi import WebSocket
 logger = logging.getLogger("yummi_lcu.relay.connections")
 # endregion
 
+LIVE_GAME_CACHE_TTL_SEC = 15.0
+
 
 class ConnectionManager:
     """에이전트·봇 WebSocket 연결을 discord_id로 라우팅합니다."""
@@ -33,6 +35,7 @@ class ConnectionManager:
         self._match_dm_subscribers: set[int] = set()
         self._participant_status_subscribers: set[int] = set()
         self._participant_status: dict[int, dict[str, Any]] = {}
+        self._live_game: dict[int, tuple[float, dict[str, Any]]] = {}
         self._agent_info: dict[int, dict[str, Any]] = {}
         self._pending_agent_info_by_ws: dict[int, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
@@ -117,6 +120,7 @@ class ConnectionManager:
             if self._by_discord.get(did) is ws:
                 del self._by_discord[did]
             self._agent_info.pop(did, None)
+            self._live_game.pop(did, None)
             self._cancel_pending_for_discord_locked(did)
             logger.info("에이전트 해제: discord_id=%s", did)
         sid = self._ws_session.pop(wid, None)
@@ -315,6 +319,23 @@ class ConnectionManager:
                 }
         return out
 
+    def set_live_game(self, discord_id: int, data: dict[str, Any]) -> None:
+        self._live_game[int(discord_id)] = (time.monotonic(), dict(data))
+
+    def get_live_game(self, discord_id: int) -> dict[str, Any] | None:
+        cached = self._live_game.get(int(discord_id))
+        if cached is None:
+            return None
+        received_at, data = cached
+        age = time.monotonic() - received_at
+        if age > LIVE_GAME_CACHE_TTL_SEC:
+            self._live_game.pop(int(discord_id), None)
+            return None
+        return {
+            "data": dict(data),
+            "age_ms": max(0, int(age * 1000)),
+        }
+
     async def forward_participant_status_update(
         self, discord_id: int, data: dict[str, Any]
     ) -> bool:
@@ -407,6 +428,7 @@ class ConnectionManager:
 
     async def forward_live_game_update(self, discord_id: int, data: dict[str, Any]) -> bool:
         async with self._lock:
+            self.set_live_game(discord_id, data)
             # 기존 gameflow 구독 봇도 별도 구독 명령 없이 실시간 경기 정보를 받을 수 있게
             # 하되, 어느 이벤트에도 구독하지 않은 세션으로는 전달하지 않습니다.
             if (
