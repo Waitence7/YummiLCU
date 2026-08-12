@@ -738,12 +738,16 @@ async def ws_agent(
         return
 
     conn: ConnectionManager = websocket.app.state.connections
-    await conn.attach_session(session_id, websocket, ws_token)
+    attached = await conn.attach_session(session_id, websocket, ws_token)
 
     raw = await r.get(_session_redis_key(session_id))
     if raw is not None:
         try:
-            await _try_bind_discord(conn, r, session_id, int(raw))
+            discord_id = int(raw)
+            if attached:
+                await _try_bind_discord(conn, r, session_id, discord_id)
+            else:
+                await websocket.send_json({"type": "session_bound", "discord_id": discord_id})
         except ValueError:
             pass
 

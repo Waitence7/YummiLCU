@@ -40,25 +40,21 @@ class ConnectionManager:
         self._pending_agent_info_by_ws: dict[int, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
-    async def attach_session(self, session_id: str, ws: WebSocket, ws_token: str) -> None:
-        """OAuth 완료 전 session_id + ws_token 으로 WS를 임시 보관합니다."""
-        replaced: WebSocket | None = None
+    async def attach_session(self, session_id: str, ws: WebSocket, ws_token: str) -> bool:
+        """세션의 첫 WS만 활성화하고 중복 WS는 연결된 대기 상태로 둡니다."""
         async with self._lock:
             old = self._active_session_ws.get(session_id)
             if old is not None and old is not ws:
-                self._drop_ws_locked(old)
-                replaced = old
+                self._ws_session_id[id(ws)] = session_id
+                logger.warning("중복 에이전트 대기: session=%s", session_id[:8])
+                return False
             self._active_session_ws[session_id] = ws
             self._session_ws[session_id] = ws
             self._session_ws_token[session_id] = ws_token
             wid = id(ws)
             self._ws_session[wid] = session_id
             self._ws_session_id[wid] = session_id
-        if replaced is not None:
-            try:
-                await replaced.close(code=1000)
-            except Exception:
-                logger.warning("교체된 에이전트 WebSocket 종료 실패")
+        return True
 
     async def bind_discord(
         self, session_id: str, discord_id: int, profile: dict[str, str] | None = None

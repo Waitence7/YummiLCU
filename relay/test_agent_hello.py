@@ -78,15 +78,17 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(manager.agent_info(42), info)
 
-    async def test_replacing_session_closes_previous_websocket(self) -> None:
+    async def test_duplicate_session_keeps_first_websocket_active(self) -> None:
         manager = ConnectionManager()
         previous = _WebSocketStub()
         current = _WebSocketStub()
-        await manager.attach_session("session-1", previous, "token-1")
+        self.assertTrue(await manager.attach_session("session-1", previous, "token-1"))
         self.assertTrue(await manager.bind_discord("session-1", 42))
-        await manager.attach_session("session-1", current, "token-2")
+        self.assertFalse(await manager.attach_session("session-1", current, "token-2"))
 
-        self.assertTrue(previous.closed)
+        self.assertFalse(previous.closed)
+        self.assertEqual(manager.discord_id_for_ws(previous), 42)
+        self.assertIsNone(manager.discord_id_for_ws(current))
         self.assertTrue(manager.has_active_session_ws("session-1"))
 
     async def test_live_game_updates_are_forwarded_only_to_subscribers(self) -> None:

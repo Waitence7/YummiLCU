@@ -169,6 +169,10 @@ impl Action {
             Self::CheckPartyMembers => "check_party_members",
         }
     }
+
+    pub(crate) const fn is_background(self) -> bool {
+        matches!(self, Self::CheckPartyMembers)
+    }
 }
 
 #[derive(Debug, Serialize)]

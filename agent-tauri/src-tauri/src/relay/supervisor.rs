@@ -544,10 +544,9 @@ where
                 state.log(app, "인증 전 Relay 명령 차단").await;
                 return Ok(());
             }
-            let action_label = Action::parse(&action)
-                .map(Action::as_str)
-                .unwrap_or("unknown");
-            let result = match Action::parse(&action) {
+            let parsed_action = Action::parse(&action);
+            let action_label = parsed_action.map(Action::as_str).unwrap_or("unknown");
+            let result = match parsed_action {
                 None => CommandResult::failure(request_id, "unknown action"),
                 Some(Action::LaunchClient) => {
                     let (ok, message) = launch_league_client();
@@ -582,7 +581,9 @@ where
                 .send(Message::Text(serde_json::to_string(&result)?.into()))
                 .await
                 .map_err(|_| AgentError::Relay("Relay 응답 전송 실패".into()))?;
-            state.log(app, format!("명령 실행: {action_label}")).await;
+            if !parsed_action.is_some_and(Action::is_background) {
+                state.log(app, format!("명령 실행: {action_label}")).await;
+            }
         }
         IncomingMessage::SessionBound {
             discord_id,
