@@ -184,11 +184,9 @@ impl LcuEventPoller {
                 .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
             if should_poll {
                 self.last_live_game_poll = Some(Instant::now());
-                if let Ok(value) = client.request(Method::GET, LIVE_GAME_DATA, None).await {
-                    let live_events_response = client
-                        .request(Method::GET, LIVE_GAME_EVENTS, None)
-                        .await
-                        .ok();
+                if let Ok(value) = client.live_game_request(LIVE_GAME_DATA).await {
+                    let live_events_response =
+                        client.live_game_request(LIVE_GAME_EVENTS).await.ok();
                     if let Some(payload) = live_game_payload(&value, live_events_response.as_ref())
                     {
                         push_changed(

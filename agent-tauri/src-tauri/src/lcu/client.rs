@@ -118,33 +118,12 @@ impl LcuClient {
         } else {
             request
         };
-        let response = request
-            .send()
-            .await
-            .map_err(|_| AgentError::Lcu("LCU 요청 실패".into()))?;
-        let status = response.status();
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_LCU_RESPONSE_BYTES as u64)
-        {
-            return Err(AgentError::Lcu("LCU 응답이 너무 큽니다.".into()));
-        }
-        let mut body = Vec::new();
-        let mut chunks = response.bytes_stream();
-        while let Some(chunk) = chunks.next().await {
-            let chunk = chunk.map_err(|_| AgentError::Lcu("LCU 응답 읽기 실패".into()))?;
-            if body.len().saturating_add(chunk.len()) > MAX_LCU_RESPONSE_BYTES {
-                return Err(AgentError::Lcu("LCU 응답이 너무 큽니다.".into()));
-            }
-            body.extend_from_slice(&chunk);
-        }
-        if !status.is_success() {
-            return Err(AgentError::Lcu(format!("LCU 요청 실패 (HTTP {status})")));
-        }
-        if body.is_empty() {
-            return Ok(Value::Null);
-        }
-        serde_json::from_slice(&body).map_err(|_| AgentError::Lcu("LCU 응답 형식 오류".into()))
+        read_json_response(request, "LCU").await
+    }
+
+    pub(super) async fn live_game_request(&self, endpoint: &str) -> AgentResult<Value> {
+        let url = live_client_url(endpoint)?;
+        read_json_response(self.http.get(url), "Live Client Data").await
     }
 
     pub(crate) async fn probe_logged_in(&self) -> AgentResult<()> {
@@ -235,6 +214,38 @@ impl LcuClient {
     }
 }
 
+async fn read_json_response(request: RequestBuilder, service: &str) -> AgentResult<Value> {
+    let response = request
+        .send()
+        .await
+        .map_err(|_| AgentError::Lcu(format!("{service} 요청 실패")))?;
+    let status = response.status();
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_LCU_RESPONSE_BYTES as u64)
+    {
+        return Err(AgentError::Lcu(format!("{service} 응답이 너무 큽니다.")));
+    }
+    let mut body = Vec::new();
+    let mut chunks = response.bytes_stream();
+    while let Some(chunk) = chunks.next().await {
+        let chunk = chunk.map_err(|_| AgentError::Lcu(format!("{service} 응답 읽기 실패")))?;
+        if body.len().saturating_add(chunk.len()) > MAX_LCU_RESPONSE_BYTES {
+            return Err(AgentError::Lcu(format!("{service} 응답이 너무 큽니다.")));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    if !status.is_success() {
+        return Err(AgentError::Lcu(format!(
+            "{service} 요청 실패 (HTTP {status})"
+        )));
+    }
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&body).map_err(|_| AgentError::Lcu(format!("{service} 응답 형식 오류")))
+}
+
 fn lcu_url(port: u16, endpoint: &str) -> AgentResult<Url> {
     if !endpoint.starts_with('/')
         || endpoint.starts_with("//")
@@ -249,6 +260,19 @@ fn lcu_url(port: u16, endpoint: &str) -> AgentResult<Url> {
         return Err(AgentError::Lcu("LCU loopback 검증 실패".into()));
     }
     Ok(url)
+}
+
+fn live_client_url(endpoint: &str) -> AgentResult<Url> {
+    if !matches!(
+        endpoint,
+        "/liveclientdata/allgamedata" | "/liveclientdata/eventdata"
+    ) {
+        return Err(AgentError::Lcu(
+            "허용되지 않은 Live Client Data endpoint".into(),
+        ));
+    }
+    Url::parse(&format!("https://127.0.0.1:2999{endpoint}"))
+        .map_err(|_| AgentError::Lcu("Live Client Data endpoint 오류".into()))
 }
 
 #[cfg(test)]
@@ -293,5 +317,16 @@ mod tests {
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert!(lcu_url(2999, "https://example.test/steal").is_err());
         assert!(lcu_url(2999, "//example.test/steal").is_err());
+    }
+
+    #[test]
+    fn live_client_urls_are_fixed_to_game_client_port() {
+        let url = live_client_url("/liveclientdata/allgamedata").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "https://127.0.0.1:2999/liveclientdata/allgamedata"
+        );
+        assert!(live_client_url("https://example.test/steal").is_err());
+        assert!(live_client_url("/lol-summoner/v1/current-summoner").is_err());
     }
 }
