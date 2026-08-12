@@ -237,6 +237,22 @@ jobs:
           name: agent-release
           path: release
 
+      - name: Publish update archive
+        env:
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          archive="release/tauri-${RELEASE_VERSION}.zip"
+          test -s "$archive"
+          test -n "$AGENT_DEPLOY_TOKEN"
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -X PUT \
+            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@$archive" \
+            "https://yummi.duckdns.org/agent-deploy/archive/${RELEASE_VERSION}"
+
       - name: Publish update manifest
         env:
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
@@ -251,21 +267,6 @@ jobs:
             -H "Content-Type: application/json" \
             --data-binary "@release/agent-version.json" \
             "https://yummi.duckdns.org/agent-deploy/manifest"
-
-      - name: Publish update archive
-        env:
-          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
-        run: |
-          set -euo pipefail
-          archive="release/tauri-${RELEASE_VERSION}.zip"
-          test -s "$archive"
-          curl --fail-with-body --silent --show-error --retry 3 \
-            -X PUT \
-            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
-            -H "Content-Type: application/zip" \
-            --data-binary "@$archive" \
-            "https://yummi.duckdns.org/agent-deploy/archive/${RELEASE_VERSION}"
 
       - name: Verify public update files
         env:

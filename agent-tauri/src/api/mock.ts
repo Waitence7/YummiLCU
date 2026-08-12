@@ -15,7 +15,7 @@ function emit() {
 
 function log(message: string) {
   const time = new Date().toLocaleTimeString('ko-KR', { hour12: false });
-  state.logs = [...state.logs.slice(-299), `[${time}] ${message}`];
+  state.logs = [...state.logs.slice(-199), `[${time}] ${message}`];
 }
 
 function later(ms: number, run: () => void) {

@@ -38,7 +38,7 @@ export function useAgentState(): {
   const addLog = useCallback((message: string) => {
     setState((current) => ({
       ...current,
-      logs: [...current.logs.slice(-299), message],
+      logs: [...current.logs.slice(-199), message],
     }));
   }, []);
 

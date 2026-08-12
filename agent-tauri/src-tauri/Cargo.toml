@@ -1,6 +1,6 @@
 [package]
 name = "yummi-lcu-tauri"
-version = "0.6.9"
+version = "0.6.10"
 edition = "2021"
 
 [lib]
@@ -29,3 +29,6 @@ url = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 zip = "2.4"
 windows = { version = "0.60", features = ["Win32_Security_Cryptography", "Win32_System_Registry", "Win32_System_Memory", "Win32_Foundation"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2"

@@ -16,7 +16,7 @@ export function Banners({
       {state.update_message && (
         <div
           role="status"
-          className="border-b border-indigo-400/20 bg-indigo-500/10 px-4 py-2 text-[12px] text-indigo-200"
+          className="border-b border-indigo-200 bg-indigo-50 px-4 py-2 text-[12px] text-indigo-700"
         >
           {state.update_message}
         </div>
@@ -40,8 +40,8 @@ function OAuthBanner({ onSubmit }: { onSubmit(code: string): Promise<boolean> })
   };
 
   return (
-    <div className="border-b border-amber-400/20 bg-amber-500/10 px-4 py-2.5">
-      <p className="text-[12px] font-medium text-amber-200">
+    <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5">
+      <p className="text-[12px] font-medium text-amber-800">
         브라우저에 표시된 6자리 코드를 입력하세요.
       </p>
       <div className="mt-1.5 flex items-center gap-2">

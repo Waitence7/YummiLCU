@@ -51,7 +51,7 @@ impl Default for Config {
             auto_update_enabled: true,
             update_channel: "stable".into(),
             saved_session_max_age_days: 14,
-            run_at_windows_startup: true,
+            run_at_windows_startup: false,
             ui_test_mode: false,
         }
     }

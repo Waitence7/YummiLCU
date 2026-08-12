@@ -17,7 +17,7 @@ export function GuildMatchTab({
   return (
     <div className="space-y-3">
       <Card title="내전 연동 상태" action={<Badge tone={linked ? 'ok' : 'neutral'}>{linked ? '연동됨' : '대기 중'}</Badge>}>
-        <ul className="space-y-2 text-[12px] text-zinc-400">
+        <ul className="space-y-2 text-[12px] text-slate-600">
           <ConnectionRow
             on={state.relay}
             label="Yummi 서버 (Relay)"
@@ -35,7 +35,7 @@ export function GuildMatchTab({
         title="내전 결과 자동 보고"
         action={<Badge tone={linked ? 'ok' : 'warn'}>{linked ? '활성' : '연동 필요'}</Badge>}
       >
-        <p className="text-[12px] leading-relaxed text-zinc-400">
+        <p className="text-[12px] leading-relaxed text-slate-600">
           내전(커스텀 게임)이 끝나면 경기 결과가 Yummi 봇으로 자동 전송되어 전적·티어 반영과
           디스코드 결과 공지가 이루어집니다. 별도 조작 없이 에이전트가 연결되어 있으면 동작합니다.
         </p>
@@ -68,8 +68,8 @@ function ConnectionRow({ on, label, detail }: { on: boolean; label: string; deta
   return (
     <li className="flex items-center gap-2.5">
       <Dot on={on} />
-      <span className="w-40 shrink-0 font-medium text-zinc-300">{label}</span>
-      <span className="truncate text-zinc-500">{detail}</span>
+      <span className="w-40 shrink-0 font-medium text-slate-700">{label}</span>
+      <span className="truncate text-slate-500">{detail}</span>
     </li>
   );
 }
@@ -77,7 +77,7 @@ function ConnectionRow({ on, label, detail }: { on: boolean; label: string; deta
 function RecentMatchBody({ recent, lcu }: { recent: RecentState; lcu: boolean }) {
   if (recent.match) return <RecentMatchCard match={recent.match} />;
   return (
-    <p className="text-[12px] text-zinc-500">
+    <p className="text-[12px] text-slate-500">
       {recent.error ?? (lcu ? '새로고침을 눌러 최근 경기를 확인하세요.' : 'League Client 연결 후 확인할 수 있습니다.')}
     </p>
   );
@@ -90,15 +90,15 @@ function RecentMatchCard({ match }: { match: RecentMatch }) {
       <div
         className={`grid size-12 shrink-0 place-items-center rounded-lg border text-[11px] font-bold ${
           match.win
-            ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-300'
-            : 'border-rose-400/30 bg-rose-500/10 text-rose-300'
+            ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+            : 'border-rose-200 bg-rose-50 text-rose-700'
         }`}
       >
         {match.win ? '승리' : '패배'}
       </div>
       <div className="min-w-0">
-        <p className="text-[13px] font-semibold text-zinc-200">{String(match.champion)}</p>
-        <p className="mt-0.5 text-[11px] text-zinc-500">
+        <p className="text-[13px] font-semibold text-slate-800">{String(match.champion)}</p>
+        <p className="mt-0.5 text-[11px] text-slate-500">
           KDA {kda} · CS {match.cs ?? 0} · {Number(match.gold ?? 0).toLocaleString()}G ·{' '}
           {Math.floor((match.duration ?? 0) / 60)}분
         </p>

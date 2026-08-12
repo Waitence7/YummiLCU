@@ -22,7 +22,7 @@ export function App() {
   const [tab, setTab] = useState<TabId>('guild');
 
   return (
-    <div className="flex h-full flex-col bg-zinc-950 text-zinc-200">
+    <div className="flex h-full flex-col bg-white text-slate-800">
       <Header
         state={state}
         onStart={() => void actions.start()}
@@ -31,7 +31,7 @@ export function App() {
       />
       <Banners state={state} onSubmitOAuth={actions.submitOAuth} />
 
-      <nav className="flex gap-1 border-b border-white/8 bg-zinc-950/80 px-3 pt-2">
+      <nav className="flex gap-1 border-b border-slate-200 bg-white px-3 pt-2">
         {TABS.map(({ id, label, badge }) => (
           <button
             key={id}
@@ -39,13 +39,13 @@ export function App() {
             onClick={() => setTab(id)}
             className={`relative rounded-t-lg px-3.5 py-2 text-[12px] font-medium transition-colors ${
               tab === id
-                ? 'bg-zinc-900 text-zinc-100 shadow-[inset_0_2px_0_#818cf8]'
-                : 'text-zinc-500 hover:text-zinc-300'
+                ? 'bg-slate-100 text-slate-900 shadow-[inset_0_2px_0_#6366f1]'
+                : 'text-slate-500 hover:text-slate-700'
             }`}
           >
             {label}
             {badge && (
-              <span className="ml-1.5 rounded-full bg-indigo-500/15 px-1.5 py-px text-[10px] text-indigo-300">
+              <span className="ml-1.5 rounded-full bg-indigo-50 px-1.5 py-px text-[10px] text-indigo-600">
                 {badge}
               </span>
             )}
@@ -53,7 +53,7 @@ export function App() {
         ))}
       </nav>
 
-      <main className="min-h-0 flex-1 overflow-y-auto bg-zinc-900 p-3">
+      <main className="min-h-0 flex-1 overflow-y-auto bg-slate-50 p-3">
         {tab === 'guild' && (
           <GuildMatchTab
             state={state}
@@ -69,7 +69,7 @@ export function App() {
         {tab === 'logs' && <LogsTab logs={state.logs} />}
       </main>
 
-      <footer className="flex items-center justify-between border-t border-white/8 bg-zinc-950/80 px-4 py-1.5 text-[10px] text-zinc-600">
+      <footer className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-1.5 text-[10px] text-slate-500">
         <span>v{state.app_version || '—'}</span>
         <span>
           다운로드{' '}

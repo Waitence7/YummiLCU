@@ -13,6 +13,8 @@ body,
 
 body {
   margin: 0;
+  background: #f8fafc;
+  color: #1e293b;
   overflow: hidden;
   user-select: none;
   -webkit-user-select: none;
@@ -23,9 +25,9 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgb(255 255 255 / 0.12);
+  background: rgb(100 116 139 / 0.28);
   border-radius: 8px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: rgb(255 255 255 / 0.2);
+  background: rgb(100 116 139 / 0.42);
 }

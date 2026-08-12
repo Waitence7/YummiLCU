@@ -15,26 +15,22 @@ const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "yummi-agent-tray";
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
+static OPENING_MAIN_WINDOW: AtomicBool = AtomicBool::new(false);
+static EXITING: AtomicBool = AtomicBool::new(false);
 
 pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, OPEN_MENU_ID, "열기", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT_MENU_ID, "종료", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
     let icon = tauri::include_image!("icons/yummibot-desktop.png");
-    let opening = Arc::new(AtomicBool::new(false));
-    let exiting = Arc::new(AtomicBool::new(false));
-
-    let menu_opening = opening.clone();
-    let menu_exiting = exiting.clone();
-    let tray_opening = opening;
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .tooltip("Yummi LCU Agent")
         .on_menu_event(move |app, event| match event.id.as_ref() {
-            OPEN_MENU_ID => request_main_window(app, menu_opening.clone()),
-            QUIT_MENU_ID => request_exit(app, menu_exiting.clone()),
+            OPEN_MENU_ID => request_main_window(app),
+            QUIT_MENU_ID => request_exit(app),
             _ => {}
         })
         .on_tray_icon_event(move |tray, event| {
@@ -46,21 +42,21 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
                     ..
                 }
             ) {
-                request_main_window(tray.app_handle(), tray_opening.clone());
+                request_main_window(tray.app_handle());
             }
         })
         .build(app)?;
     Ok(())
 }
 
-fn request_main_window(app: &AppHandle, opening: Arc<AtomicBool>) {
+pub(crate) fn request_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
         return;
     }
-    if opening.swap(true, Ordering::AcqRel) {
+    if OPENING_MAIN_WINDOW.swap(true, Ordering::AcqRel) {
         return;
     }
 
@@ -68,7 +64,7 @@ fn request_main_window(app: &AppHandle, opening: Arc<AtomicBool>) {
     let app = app.clone();
     std::thread::spawn(move || {
         let result = create_main_window(&app);
-        opening.store(false, Ordering::Release);
+        OPENING_MAIN_WINDOW.store(false, Ordering::Release);
         if let Err(error) = result {
             eprintln!("main window creation failed: {error}");
         }
@@ -102,8 +98,8 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn request_exit(app: &AppHandle, exiting: Arc<AtomicBool>) {
-    if exiting.swap(true, Ordering::AcqRel) {
+fn request_exit(app: &AppHandle) {
+    if EXITING.swap(true, Ordering::AcqRel) {
         return;
     }
 

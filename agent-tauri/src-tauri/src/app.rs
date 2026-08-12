@@ -21,7 +21,15 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
     let connect_state = state.clone();
     let lcu_state = state.clone();
 
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            tray::request_main_window(app);
+        }));
+    }
+
+    let app = builder
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![

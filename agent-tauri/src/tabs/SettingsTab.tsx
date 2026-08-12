@@ -13,7 +13,7 @@ export function SettingsTab({
   return (
     <div className="space-y-3">
       <Card title="편의 기능">
-        <div className="divide-y divide-white/5">
+        <div className="divide-y divide-slate-100">
           <Toggle
             checked={config.PreventQueueAfterDodge}
             onChange={(next) => void onPatchConfig({ PreventQueueAfterDodge: next })}
@@ -31,21 +31,6 @@ export function SettingsTab({
             onChange={(next) => void onPatchConfig({ AutoAcceptMatch: next })}
             label="매치 자동 수락"
             description="수락 창이 뜨면 자동으로 수락합니다."
-          />
-        </div>
-      </Card>
-
-      <Card title="앱">
-        <div className="divide-y divide-white/5">
-          <Toggle
-            checked={config.RunAtWindowsStartup}
-            onChange={(next) => void onPatchConfig({ RunAtWindowsStartup: next })}
-            label="Windows 시작 시 자동 실행"
-          />
-          <Toggle
-            checked={config.AutoUpdateEnabled}
-            onChange={(next) => void onPatchConfig({ AutoUpdateEnabled: next })}
-            label="시작 시 자동 업데이트 설치 (권장)"
           />
         </div>
       </Card>
@@ -89,14 +74,40 @@ function AdvancedCard({
   };
 
   return (
-    <details className="group rounded-xl border border-white/8 bg-zinc-900/40">
-      <summary className="cursor-pointer list-none px-4 py-3 text-[13px] font-semibold text-zinc-400 select-none group-open:text-zinc-200">
+    <details className="group rounded-xl border border-slate-200 bg-white">
+      <summary className="cursor-pointer list-none px-4 py-3 text-[13px] font-semibold text-slate-600 select-none group-open:text-slate-900">
         고급 설정
-        <span className="float-right text-zinc-600 transition-transform group-open:rotate-180">▾</span>
+        <span className="float-right text-slate-400 transition-transform group-open:rotate-180">▾</span>
       </summary>
       <div className="space-y-3 px-4 pb-4">
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3">
+          <p className="pt-2 text-[12px] font-semibold text-slate-700">Windows 시작</p>
+          <Toggle
+            checked={config.RunAtWindowsStartup}
+            onChange={(next) => void onPatchConfig({ RunAtWindowsStartup: next })}
+            label="Windows 로그인 시 자동 실행"
+            description="Windows 로그인 후 앱과 트레이 아이콘을 자동으로 실행합니다."
+          />
+        </div>
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3">
+          <p className="pt-2 text-[12px] font-semibold text-slate-700">시작 시 업데이트</p>
+          <div className="divide-y divide-slate-200">
+            <Toggle
+              checked={config.CheckUpdatesOnStartup}
+              onChange={(next) => void onPatchConfig({ CheckUpdatesOnStartup: next })}
+              label="시작 시 업데이트 확인"
+              description="앱을 시작할 때 새 버전이 있는지 확인합니다."
+            />
+            <Toggle
+              checked={config.AutoUpdateEnabled}
+              onChange={(next) => void onPatchConfig({ AutoUpdateEnabled: next })}
+              label="시작 시 업데이트 자동 설치"
+              description="확인된 업데이트를 시작 과정에서 자동으로 설치합니다."
+            />
+          </div>
+        </div>
         <label className="block">
-          <span className="mb-1 block text-[12px] text-zinc-400">Relay URL</span>
+          <span className="mb-1 block text-[12px] text-slate-600">Relay URL</span>
           <TextInput
             value={relayUrl}
             onChange={(event) => {
@@ -106,7 +117,7 @@ function AdvancedCard({
           />
         </label>
         <label className="block">
-          <span className="mb-1 block text-[12px] text-zinc-400">League lockfile 경로</span>
+          <span className="mb-1 block text-[12px] text-slate-600">League lockfile 경로</span>
           <TextInput
             value={lockfile}
             placeholder="자동 감지 (기본값)"
@@ -117,9 +128,9 @@ function AdvancedCard({
           />
         </label>
         <label className="block">
-          <span className="mb-1 block text-[12px] text-zinc-400">업데이트 채널</span>
+          <span className="mb-1 block text-[12px] text-slate-600">업데이트 채널</span>
           <select
-            className="w-full rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 text-[12px] text-zinc-200 focus:border-indigo-400/50 focus:outline-none"
+            className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[12px] text-slate-800 focus:border-indigo-400/70 focus:outline-none"
             value={updateChannel}
             onChange={(event) => {
               setUpdateChannel(event.target.value as Config['UpdateChannel']);
@@ -135,8 +146,8 @@ function AdvancedCard({
           <Button variant="primary" disabled={!dirty} onClick={() => void save()}>
             저장
           </Button>
-          {saved && <span className="text-[11px] text-emerald-400">저장됨</span>}
-          <span className="ml-auto text-[11px] text-zinc-600">일반적으로 변경할 필요가 없습니다.</span>
+          {saved && <span className="text-[11px] text-emerald-600">저장됨</span>}
+          <span className="ml-auto text-[11px] text-slate-500">일반적으로 변경할 필요가 없습니다.</span>
         </div>
       </div>
     </details>
