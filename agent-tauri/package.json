@@ -1,11 +1,12 @@
 {
   "name": "yummi-lcu-tauri",
   "private": true,
-  "version": "0.6.13",
+  "version": "0.6.14",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "icon:windows:optimize": "node scripts/reorder-ico-entries.mjs src-tauri/icons/icon.ico",
     "tauri": "tauri"
   },
   "devDependencies": {

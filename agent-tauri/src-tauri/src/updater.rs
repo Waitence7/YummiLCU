@@ -20,7 +20,9 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::{
+    config::Config,
     error::{AgentError, AgentResult},
+    lcu::{lockfile_path, LcuClient},
     state::AppState,
 };
 
@@ -62,6 +64,8 @@ const MAX_UPDATE_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 const OFFICIAL_UPDATE_HOST: &str = "yummi.duckdns.org";
+const AUTO_UPDATE_INITIAL_DELAY: Duration = Duration::from_secs(2);
+const AUTO_UPDATE_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[cfg(windows)]
 struct WindowsUpdateMutex(windows::Win32::Foundation::HANDLE);
@@ -448,13 +452,25 @@ async fn apply_update(
     manifest: UpdateManifest,
     app: &AppHandle,
     state: &AppState,
-    config_channel: &str,
+    config: &Config,
 ) -> AgentResult<bool> {
     let Some(target_manifest) = manifest.select_tauri() else {
         return Ok(false);
     };
     let current_version = env!("CARGO_PKG_VERSION");
-    if !should_apply_target(&target_manifest, current_version, config_channel) {
+    if !should_apply_target(&target_manifest, current_version, &config.update_channel) {
+        return Ok(false);
+    }
+    if update_blocked_by_game(config).await {
+        state
+            .log(
+                app,
+                format!(
+                    "새 버전 {}이 있지만 게임 진행 중이라 업데이트를 보류합니다.",
+                    target_manifest.version
+                ),
+            )
+            .await;
         return Ok(false);
     }
 
@@ -630,15 +646,28 @@ async fn apply_update(
 }
 
 pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>) {
-    let config = state.config.read().await.clone();
-    if !config.check_updates_on_startup || !config.auto_update_enabled {
+    let mut shutdown = state.shutdown_receiver();
+    if !wait_for_update_check(&mut shutdown, AUTO_UPDATE_INITIAL_DELAY).await {
         return;
     }
-    let Some(url) = config.update_manifest_url else {
-        return;
-    };
-    sleep(Duration::from_secs(2)).await;
-    let Ok(parsed) = Url::parse(&url) else {
+    loop {
+        let config = state.config.read().await.clone();
+        if config.check_updates_on_startup && config.auto_update_enabled {
+            if let Some(url) = config.update_manifest_url.clone() {
+                check_and_apply_update(&url, &config, &app, &state).await;
+                if *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+        if !wait_for_update_check(&mut shutdown, AUTO_UPDATE_RECHECK_INTERVAL).await {
+            return;
+        }
+    }
+}
+
+async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, state: &AppState) {
+    let Ok(parsed) = Url::parse(url) else {
         return;
     };
     if parsed.scheme() != "https"
@@ -663,27 +692,25 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
         Ok(manifest) => manifest,
         Err(error) => {
             state
-                .log(&app, format!("자동 업데이트 manifest 검증 실패: {error}"))
+                .log(app, format!("자동 업데이트 manifest 검증 실패: {error}"))
                 .await;
             return;
         }
     };
-    match apply_update(manifest, &app, &state, &config.update_channel).await {
+    match apply_update(manifest, app, state, config).await {
         Ok(true) => {
-            state.log(&app, "새 버전을 설치하고 재시작합니다.").await;
+            state.log(app, "새 버전을 설치하고 재시작합니다.").await;
             sleep(Duration::from_secs(1)).await;
             state.begin_shutdown();
-            crate::tray::remove(&app);
+            crate::tray::remove(app);
             app.exit(0);
         }
         Ok(false) => {}
         Err(error) => {
-            state
-                .log(&app, format!("자동 업데이트 실패: {error}"))
-                .await;
+            state.log(app, format!("자동 업데이트 실패: {error}")).await;
             state
                 .set_update_message(
-                    &app,
+                    app,
                     Some(format!(
                         "자동 업데이트에 실패했습니다. 앱을 계속 사용할 수 있습니다: {error}"
                     )),
@@ -691,6 +718,43 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
                 .await;
         }
     }
+}
+
+async fn wait_for_update_check(
+    shutdown: &mut tokio::sync::watch::Receiver<bool>,
+    duration: Duration,
+) -> bool {
+    tokio::select! {
+        _ = sleep(duration) => !*shutdown.borrow(),
+        changed = shutdown.changed() => changed.is_ok() && !*shutdown.borrow(),
+    }
+}
+
+async fn update_blocked_by_game(config: &Config) -> bool {
+    let Some(path) = lockfile_path(config) else {
+        return false;
+    };
+    let Ok(client) = LcuClient::from_lockfile(&path) else {
+        return false;
+    };
+    client
+        .gameflow_phase()
+        .await
+        .is_ok_and(|phase| blocks_update_for_gameflow_phase(&phase))
+}
+
+fn blocks_update_for_gameflow_phase(phase: &str) -> bool {
+    matches!(
+        phase,
+        "Matchmaking"
+            | "ReadyCheck"
+            | "ChampSelect"
+            | "InProgress"
+            | "Reconnect"
+            | "PreEndOfGame"
+            | "EndOfGame"
+            | "WaitingForStats"
+    )
 }
 
 #[cfg(test)]
@@ -803,5 +867,24 @@ mod tests {
             &Url::parse("https://yummi.duckdns.org/other/tauri.zip").unwrap()
         )
         .is_err());
+    }
+
+    #[test]
+    fn active_gameflow_phases_defer_updates() {
+        for phase in [
+            "Matchmaking",
+            "ReadyCheck",
+            "ChampSelect",
+            "InProgress",
+            "Reconnect",
+            "PreEndOfGame",
+            "EndOfGame",
+            "WaitingForStats",
+        ] {
+            assert!(blocks_update_for_gameflow_phase(phase), "{phase}");
+        }
+        for phase in ["None", "Lobby", "TerminatedInError"] {
+            assert!(!blocks_update_for_gameflow_phase(phase), "{phase}");
+        }
     }
 }

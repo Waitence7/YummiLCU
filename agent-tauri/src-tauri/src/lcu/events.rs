@@ -178,13 +178,16 @@ impl LcuEventPoller {
             self.eog_sent = false;
         }
 
-        if phase == "InProgress" {
-            let should_poll = self
-                .last_live_game_poll
-                .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
-            if should_poll {
-                self.last_live_game_poll = Some(Instant::now());
-                if let Ok(value) = client.live_game_request(LIVE_GAME_DATA).await {
+        // Spectating does not consistently report the LCU phase as InProgress.
+        // Probe the local game client directly; port 2999 is only available while
+        // playing or spectating, so a successful response is the source of truth.
+        let should_poll = self
+            .last_live_game_poll
+            .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
+        if should_poll {
+            self.last_live_game_poll = Some(Instant::now());
+            match client.live_game_request(LIVE_GAME_DATA).await {
+                Ok(value) => {
                     let live_events_response =
                         client.live_game_request(LIVE_GAME_EVENTS).await.ok();
                     if let Some(payload) = live_game_payload(&value, live_events_response.as_ref())
@@ -196,12 +199,12 @@ impl LcuEventPoller {
                             payload,
                             &mut events,
                         );
+                    } else {
+                        self.live_game = None;
                     }
                 }
+                Err(_) => self.live_game = None,
             }
-        } else {
-            self.live_game = None;
-            self.last_live_game_poll = None;
         }
 
         if let Ok(value) = client.request(Method::GET, READY_CHECK, None).await {
@@ -628,6 +631,25 @@ mod tests {
         assert_eq!(payload["events"][0]["killer_name"], "Me");
         assert_eq!(payload["events"][0]["victim_name"], "Enemy");
         assert_eq!(payload["events"][1]["dragon_type"], "EarthDragon");
+    }
+
+    #[test]
+    fn spectator_live_game_payload_does_not_require_active_player() {
+        let payload = live_game_payload(
+            &json!({
+                "gameData": {"gameId": 84, "gameMode": "CLASSIC", "gameTime": 300.0},
+                "allPlayers": [
+                    {"summonerName": "Blue", "championName": "Ahri", "team": "ORDER"},
+                    {"summonerName": "Red", "championName": "Garen", "team": "CHAOS"}
+                ]
+            }),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(payload["game"]["id"], 84);
+        assert!(payload["active_player"].is_null());
+        assert_eq!(payload["participants"].as_array().unwrap().len(), 2);
     }
 
     #[test]

@@ -390,6 +390,7 @@ async fn connect_once(
     watchdog.tick().await;
     let mut awaiting_pong: Option<Instant> = None;
     let mut lcu_events = LcuEventPoller::default();
+    let mut live_game_announced = false;
     let mut lcu_event_poll = interval(LCU_EVENT_POLL_INTERVAL);
     lcu_event_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     lcu_event_poll.tick().await;
@@ -494,23 +495,35 @@ async fn connect_once(
             _ = lcu_event_poll.tick(), if session_bound => {
                 let config = state.config.read().await.clone();
                 for (message_type, data) in lcu_events.poll(&config).await {
+                    let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
+                        .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
                     let Some(message) = serialize_agent_event(message_type, data)? else {
                         state.log(app, "LCU 이벤트가 Relay 크기 제한을 초과해 생략됨").await;
                         continue;
                     };
                     websocket.send(Message::Text(message.into())).await
                         .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
+                    if let Some(count) = live_participant_count {
+                        live_game_announced = true;
+                        state.log(app, format!("실시간 관전 데이터 서버 전송 확인 ({count}명)")).await;
+                    }
                 }
             }
             Some(()) = lcu_event_rx.recv(), if session_bound => {
                 let config = state.config.read().await.clone();
                 for (message_type, data) in lcu_events.poll(&config).await {
+                    let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
+                        .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
                     let Some(message) = serialize_agent_event(message_type, data)? else {
                         state.log(app, "LCU 이벤트가 Relay 크기 제한을 초과해 생략됨").await;
                         continue;
                     };
                     websocket.send(Message::Text(message.into())).await
                         .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
+                    if let Some(count) = live_participant_count {
+                        live_game_announced = true;
+                        state.log(app, format!("실시간 관전 데이터 서버 전송 확인 ({count}명)")).await;
+                    }
                 }
             }
         }
