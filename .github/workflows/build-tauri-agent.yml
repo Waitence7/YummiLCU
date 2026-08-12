@@ -1,17 +1,6 @@
 name: Build Tauri Agent (Windows)
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "agent-tauri/**"
-      - "scripts/sync-tauri-agent-version.mjs"
-      - ".github/workflows/build-tauri-agent.yml"
-  pull_request:
-    paths:
-      - "agent-tauri/**"
-      - "scripts/sync-tauri-agent-version.mjs"
-      - ".github/workflows/build-tauri-agent.yml"
   workflow_dispatch:
     inputs:
       release_notes:
@@ -227,7 +216,7 @@ jobs:
   deploy:
     name: Deploy agent update files
     needs: build
-    if: github.event_name == 'workflow_dispatch' && vars.VM_DEPLOY_ENABLED == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
