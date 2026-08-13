@@ -552,11 +552,16 @@ fn live_game_payload(value: &Value, events: Option<&Value>) -> Option<Value> {
             .as_millis(),
         "game": {
             "id": game_data.get("gameId").cloned().unwrap_or(Value::Null),
+            "game_id": game_data.get("gameId").cloned().unwrap_or(Value::Null),
             "mode": game_data.get("gameMode").cloned().unwrap_or(Value::Null),
+            "game_mode": game_data.get("gameMode").cloned().unwrap_or(Value::Null),
             "map": game_data.get("mapName").cloned().unwrap_or(Value::Null),
+            "map_name": game_data.get("mapName").cloned().unwrap_or(Value::Null),
             "map_number": game_data.get("mapNumber").cloned().unwrap_or(Value::Null),
             "terrain": game_data.get("mapTerrain").cloned().unwrap_or(Value::Null),
             "time_seconds": game_data.get("gameTime").cloned().unwrap_or(Value::Null),
+            "game_time": game_data.get("gameTime").cloned().unwrap_or(Value::Null),
+            "raw": game_data.clone(),
         },
         "active_player": active_player_payload(value.get("activePlayer")),
         "participants": participants,
@@ -591,11 +596,18 @@ fn live_events_payload(value: Option<&Value>) -> Vec<Value> {
                 "time_seconds": event.get("EventTime").or_else(|| event.get("eventTime")).cloned().unwrap_or(Value::Null),
                 "killer_name": event.get("KillerName").or_else(|| event.get("killerName")).cloned().unwrap_or(Value::Null),
                 "victim_name": event.get("VictimName").or_else(|| event.get("victimName")).cloned().unwrap_or(Value::Null),
+                "killer_team": event.get("KillerTeam").or_else(|| event.get("killerTeam")).cloned().unwrap_or(Value::Null),
+                "victim_team": event.get("VictimTeam").or_else(|| event.get("victimTeam")).cloned().unwrap_or(Value::Null),
+                "team": event.get("Team").or_else(|| event.get("team")).cloned().unwrap_or(Value::Null),
+                "killer_champion": event.get("KillerChampion").or_else(|| event.get("killerChampion")).cloned().unwrap_or(Value::Null),
+                "victim_champion": event.get("VictimChampion").or_else(|| event.get("victimChampion")).cloned().unwrap_or(Value::Null),
+                "multi_kill": event.get("MultiKill").or_else(|| event.get("multiKill")).or_else(|| event.get("Multikill")).cloned().unwrap_or(Value::Null),
                 "assisters": assisters,
                 "dragon_type": event.get("DragonType").or_else(|| event.get("dragonType")).cloned().unwrap_or(Value::Null),
                 "turret_killed": event.get("TurretKilled").or_else(|| event.get("turretKilled")).cloned().unwrap_or(Value::Null),
                 "inhibitor_killed": event.get("InhibKilled").or_else(|| event.get("inhibKilled")).cloned().unwrap_or(Value::Null),
                 "monster_type": event.get("MonsterType").or_else(|| event.get("monsterType")).cloned().unwrap_or(Value::Null),
+                "raw": event.clone(),
             }))
         })
         .collect()
@@ -612,27 +624,45 @@ fn live_player_payload(player: &Value) -> Value {
         .map(|item| {
             json!({
                 "id": item.get("itemID").or_else(|| item.get("id")).cloned().unwrap_or(Value::Null),
+                "item_id": item.get("itemID").or_else(|| item.get("id")).cloned().unwrap_or(Value::Null),
                 "name": item.get("displayName").or_else(|| item.get("name")).cloned().unwrap_or(Value::Null),
+                "display_name": item.get("displayName").or_else(|| item.get("name")).cloned().unwrap_or(Value::Null),
                 "count": item.get("count").cloned().unwrap_or(Value::from(1)),
+                "can_use": item.get("canUse").cloned().unwrap_or(Value::Null),
+                "consumable": item.get("consumable").cloned().unwrap_or(Value::Null),
+                "price": item.get("price").cloned().unwrap_or(Value::Null),
+                "raw_description": item.get("rawDescription").cloned().unwrap_or(Value::Null),
+                "raw_display_name": item.get("rawDisplayName").cloned().unwrap_or(Value::Null),
+                "slot": item.get("slot").cloned().unwrap_or(Value::Null),
+                "raw": item.clone(),
             })
         })
         .collect::<Vec<_>>();
     json!({
         "summoner_name": player.get("summonerName").cloned().unwrap_or(Value::Null),
+        "riot_id": player.get("riotId").or_else(|| player.get("riot_id")).cloned().unwrap_or(Value::Null),
+        "riot_id_game_name": player.get("riotIdGameName").or_else(|| player.get("gameName")).cloned().unwrap_or(Value::Null),
+        "riot_id_tag_line": player.get("riotIdTagLine").or_else(|| player.get("tagLine")).cloned().unwrap_or(Value::Null),
         "champion_name": player.get("championName").cloned().unwrap_or(Value::Null),
+        "raw_champion_name": player.get("rawChampionName").cloned().unwrap_or(Value::Null),
         "team": player.get("team").cloned().unwrap_or(Value::Null),
         "position": player.get("position").cloned().unwrap_or(Value::Null),
         "is_bot": player.get("isBot").cloned().unwrap_or(Value::Bool(false)),
         "is_dead": player.get("isDead").cloned().unwrap_or(Value::Bool(false)),
+        "respawn_timer": player.get("respawnTimer").cloned().unwrap_or(Value::Null),
         "level": player.get("level").cloned().unwrap_or(Value::Null),
+        "skin_id": player.get("skinID").cloned().unwrap_or(Value::Null),
         "gold": player.get("gold").or_else(|| player.get("currentGold")).cloned().unwrap_or(Value::Null),
         "kills": scores.and_then(|value| value.get("kills")).cloned().unwrap_or(Value::from(0)),
         "deaths": scores.and_then(|value| value.get("deaths")).cloned().unwrap_or(Value::from(0)),
         "assists": scores.and_then(|value| value.get("assists")).cloned().unwrap_or(Value::from(0)),
         "creep_score": scores.and_then(|value| value.get("creepScore")).cloned().unwrap_or(Value::from(0)),
         "ward_score": scores.and_then(|value| value.get("wardScore")).cloned().unwrap_or(Value::from(0)),
+        "scores": scores.cloned().unwrap_or(Value::Null),
+        "runes": player.get("runes").cloned().unwrap_or(Value::Null),
         "items": items,
         "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null),
+        "raw": player.clone(),
     })
 }
 
@@ -643,14 +673,23 @@ fn active_player_payload(value: Option<&Value>) -> Value {
     let scores = player.get("scores");
     json!({
         "summoner_name": player.get("summonerName").cloned().unwrap_or(Value::Null),
+        "riot_id": player.get("riotId").or_else(|| player.get("riot_id")).cloned().unwrap_or(Value::Null),
+        "riot_id_game_name": player.get("riotIdGameName").or_else(|| player.get("gameName")).cloned().unwrap_or(Value::Null),
+        "riot_id_tag_line": player.get("riotIdTagLine").or_else(|| player.get("tagLine")).cloned().unwrap_or(Value::Null),
         "level": player.get("level").cloned().unwrap_or(Value::Null),
         "current_gold": player.get("currentGold").cloned().unwrap_or(Value::Null),
         "kills": scores.and_then(|value| value.get("kills")).cloned().unwrap_or(Value::from(0)),
         "deaths": scores.and_then(|value| value.get("deaths")).cloned().unwrap_or(Value::from(0)),
         "assists": scores.and_then(|value| value.get("assists")).cloned().unwrap_or(Value::from(0)),
         "creep_score": scores.and_then(|value| value.get("creepScore")).cloned().unwrap_or(Value::from(0)),
+        "ward_score": scores.and_then(|value| value.get("wardScore")).cloned().unwrap_or(Value::from(0)),
+        "scores": scores.cloned().unwrap_or(Value::Null),
+        "abilities": player.get("abilities").cloned().unwrap_or(Value::Null),
         "champion_stats": player.get("championStats").cloned().unwrap_or(Value::Null),
+        "full_runes": player.get("fullRunes").cloned().unwrap_or(Value::Null),
+        "runes": player.get("runes").cloned().unwrap_or(Value::Null),
         "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null),
+        "raw": player.clone(),
     })
 }
 
@@ -687,9 +726,11 @@ mod tests {
             "gameData": {"gameId": 42, "gameMode": "CLASSIC", "gameTime": 120.5},
             "activePlayer": {"summonerName": "Me", "scores": {"kills": 2, "deaths": 1, "assists": 3}},
             "allPlayers": [{
-                "summonerName": "Me", "championName": "Ahri", "team": "ORDER",
+                "summonerName": "Me", "riotId": "Me#KR1", "riotIdGameName": "Me", "riotIdTagLine": "KR1",
+                "championName": "Ahri", "rawChampionName": "game_character_displayname_Ahri", "team": "ORDER",
+                "position": "MIDDLE", "respawnTimer": 0.0, "skinID": 123, "runes": {"keystone": {"id": 8112}},
                 "scores": {"kills": 2, "deaths": 1, "assists": 3, "creepScore": 80},
-                "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1}]
+                "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1, "slot": 0, "canUse": true}]
             }]
         }), None)
         .unwrap();
@@ -698,6 +739,9 @@ mod tests {
         assert_eq!(payload["participants"][0]["deaths"], 1);
         assert_eq!(payload["participants"][0]["assists"], 3);
         assert_eq!(payload["participants"][0]["items"][0]["id"], 1056);
+        assert_eq!(payload["participants"][0]["riot_id"], "Me#KR1");
+        assert_eq!(payload["participants"][0]["position"], "MIDDLE");
+        assert_eq!(payload["participants"][0]["items"][0]["slot"], 0);
     }
 
     #[test]
@@ -708,13 +752,15 @@ mod tests {
                 "allPlayers": [{"summonerName": "Me", "team": "ORDER"}]
             }),
             Some(&json!({"Events": [
-                {"EventID": 1, "EventName": "ChampionKill", "EventTime": 61.2, "KillerName": "Me", "VictimName": "Enemy", "Assisters": ["Ally"]},
+                {"EventID": 1, "EventName": "ChampionKill", "EventTime": 61.2, "KillerName": "Me", "VictimName": "Enemy", "MultiKill": 2, "Assisters": ["Ally"]},
                 {"EventID": 2, "EventName": "DragonKill", "EventTime": 90.0, "DragonType": "EarthDragon"}
             ]})),
         )
         .unwrap();
         assert_eq!(payload["events"][0]["killer_name"], "Me");
         assert_eq!(payload["events"][0]["victim_name"], "Enemy");
+        assert_eq!(payload["events"][0]["multi_kill"], 2);
+        assert_eq!(payload["events"][0]["raw"]["EventName"], "ChampionKill");
         assert_eq!(payload["events"][1]["dragon_type"], "EarthDragon");
     }
 
