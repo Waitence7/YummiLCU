@@ -1,6 +1,6 @@
 use std::{sync::Arc, time::Duration};
 
-use tauri::{AppHandle, Manager, RunEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use tokio::time::sleep;
 
 use crate::{
@@ -44,6 +44,9 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
         ])
         .setup(move |app| {
             tray::setup(app)?;
+            // Login startup is intentionally headless: keep the relay and LCU
+            // watchers alive while exposing only the tray icon.
+            tray::hide_main_window(app.handle());
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_update_on_startup(handle.clone(), update_state));
             tauri::async_runtime::spawn(watch_lcu(handle.clone(), lcu_state));
@@ -54,14 +57,25 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
         })
         .build(tauri::generate_context!())?;
 
-    app.run(|app, event| {
-        if let RunEvent::ExitRequested { code, api, .. } = event {
+    app.run(|app, event| match event {
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::CloseRequested { api, .. },
+            ..
+        } if label == "main" => {
+            // Closing the window means minimize-to-tray, not stopping the
+            // relay. The explicit tray menu remains the only exit path.
+            api.prevent_close();
+            tray::hide_main_window(app);
+        }
+        RunEvent::ExitRequested { code, api, .. } => {
             if should_keep_running(code) {
                 api.prevent_exit();
             } else if let Some(state) = app.try_state::<Arc<AppState>>() {
                 state.begin_shutdown();
             }
         }
+        _ => {}
     });
     Ok(())
 }

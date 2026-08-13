@@ -18,6 +18,8 @@ pub(crate) async fn save_config(
     state: State<'_, Arc<AppState>>,
     mut config: Config,
 ) -> Result<(), String> {
+    // Keep the agent alive after login; the UI is a tray-only background app.
+    config.run_at_windows_startup = true;
     config.normalize();
     config.validate().map_err(|error| error.to_string())?;
     sync_windows_startup(config.run_at_windows_startup).map_err(|error| error.to_string())?;

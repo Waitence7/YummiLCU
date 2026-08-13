@@ -51,7 +51,9 @@ impl Default for Config {
             auto_update_enabled: true,
             update_channel: "stable".into(),
             saved_session_max_age_days: 14,
-            run_at_windows_startup: false,
+            // The agent is a tray/background process. It must be running after
+            // Windows login even when its main window is not visible.
+            run_at_windows_startup: true,
             ui_test_mode: false,
         }
     }
@@ -110,6 +112,10 @@ impl Config {
             .and_then(|raw| serde_json::from_str::<Self>(&raw).ok())
             .unwrap_or_default();
         config.normalize();
+        // The desktop agent is intentionally a background tray service. Older
+        // installs may still contain RunAtWindowsStartup=false from the former
+        // visible-window behavior, so migrate that value in memory.
+        config.run_at_windows_startup = true;
         let defaults = Self::default();
         if validate_relay_base_url(&config.relay_public_base_url, cfg!(debug_assertions)).is_err() {
             config.relay_public_base_url = defaults.relay_public_base_url;

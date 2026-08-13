@@ -63,7 +63,7 @@ export const initialState: AgentState = {
     AutoUpdateEnabled: true,
     UpdateChannel: 'stable',
     SavedSessionMaxAgeDays: 14,
-    RunAtWindowsStartup: false,
+    RunAtWindowsStartup: true,
     UiTestMode: false,
   },
 };

@@ -84,9 +84,10 @@ function AdvancedCard({
           <p className="pt-2 text-[12px] font-semibold text-slate-700">Windows 시작</p>
           <Toggle
             checked={config.RunAtWindowsStartup}
-            onChange={(next) => void onPatchConfig({ RunAtWindowsStartup: next })}
-            label="Windows 로그인 시 자동 실행"
-            description="Windows 로그인 후 앱과 트레이 아이콘을 자동으로 실행합니다."
+            onChange={() => undefined}
+            disabled
+            label="Windows 로그인 시 백그라운드 자동 실행"
+            description="로그인 후 창과 작업표시줄 없이 트레이에서 자동 실행되며, LCU 연결과 Relay 동작을 유지합니다."
           />
         </div>
         <div className="rounded-lg border border-slate-200 bg-slate-50 px-3">

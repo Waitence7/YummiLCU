@@ -18,3 +18,8 @@ agent-tauri/node_modules/
 agent-tauri/dist/
 agent-tauri/dist-preview/
 agent-tauri/src-tauri/target/
+
+# Generated relay/Tauri files
+**/__pycache__/
+*.py[cod]
+agent-tauri/src-tauri/gen/schemas/

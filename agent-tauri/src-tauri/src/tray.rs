@@ -52,6 +52,7 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
 pub(crate) fn request_main_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.unminimize();
+        let _ = window.set_skip_taskbar(false);
         let _ = window.show();
         let _ = window.set_focus();
         return;
@@ -75,8 +76,16 @@ pub(crate) fn remove(app: &AppHandle) {
     let _ = app.remove_tray_by_id(TRAY_ID);
 }
 
+pub(crate) fn hide_main_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.set_skip_taskbar(true);
+        let _ = window.hide();
+    }
+}
+
 fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        window.set_skip_taskbar(false)?;
         window.show()?;
         window.unminimize()?;
         window.set_focus()?;
@@ -98,6 +107,9 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
             .resizable(false)
             .build()?
     };
+    window.set_skip_taskbar(false)?;
+    window.show()?;
+    window.unminimize()?;
     window.set_focus()?;
     Ok(())
 }
