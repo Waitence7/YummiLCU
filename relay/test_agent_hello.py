@@ -46,10 +46,12 @@ class AgentHelloTests(unittest.TestCase):
 class _WebSocketStub:
     def __init__(self) -> None:
         self.payload: dict[str, object] | None = None
+        self.payloads: list[dict[str, object]] = []
         self.closed = False
 
     async def send_json(self, payload: dict[str, object]) -> None:
         self.payload = payload
+        self.payloads.append(payload)
 
     async def close(self, code: int = 1000) -> None:
         self.closed = code == 1000
@@ -112,6 +114,22 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         cached = manager.get_live_game(42)
         self.assertIsNotNone(cached)
         self.assertEqual(cached["data"], payload)
+
+    async def test_agent_polling_follows_live_game_subscribers(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        self.assertEqual(websocket.payloads[-1], {"type": "live_game_polling", "enabled": False})
+
+        manager.subscribe_live_game(42)
+        self.assertTrue(await manager.sync_live_game_polling(42))
+        self.assertEqual(websocket.payloads[-1], {"type": "live_game_polling", "enabled": True})
+
+        manager.unsubscribe_live_game(42)
+        self.assertTrue(await manager.sync_live_game_polling(42))
+        self.assertEqual(websocket.payloads[-1], {"type": "live_game_polling", "enabled": False})
 
 
 class RelayUrlSecurityTests(unittest.TestCase):

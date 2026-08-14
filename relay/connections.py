@@ -91,6 +91,7 @@ class ConnectionManager:
                 if profile.get("avatar"):
                     payload["discord_avatar"] = profile["avatar"]
             await ws.send_json(payload)
+            await self.sync_live_game_polling(discord_id)
         except Exception:
             logger.exception("session_bound 전송 실패 discord_id=%s", discord_id)
         return True
@@ -230,6 +231,31 @@ class ConnectionManager:
 
     def unsubscribe_gameflow(self, discord_id: int) -> None:
         self._gameflow_subscribers.discard(int(discord_id))
+        self._clear_live_game_cache_if_unsubscribed(discord_id)
+
+    def live_game_polling_required(self, discord_id: int) -> bool:
+        did = int(discord_id)
+        return did in self._live_game_subscribers or did in self._gameflow_subscribers
+
+    async def sync_live_game_polling(self, discord_id: int) -> bool:
+        did = int(discord_id)
+        enabled = self.live_game_polling_required(did)
+        sent = await self.send_command(
+            did,
+            {"type": "live_game_polling", "enabled": enabled},
+        )
+        logger.info(
+            "live_game polling 상태 동기화: discord_id=%s enabled=%s 전송=%s",
+            did,
+            enabled,
+            sent,
+        )
+        return sent
+
+    def _clear_live_game_cache_if_unsubscribed(self, discord_id: int) -> None:
+        did = int(discord_id)
+        if not self.live_game_polling_required(did):
+            self._live_game.pop(did, None)
 
     def subscribe_live_game(self, discord_id: int, recruitment_id: str | None = None) -> None:
         did = int(discord_id)
@@ -252,6 +278,7 @@ class ConnectionManager:
             recruitment_id or "없음",
             len(self._live_game_subscribers),
         )
+        self._clear_live_game_cache_if_unsubscribed(did)
 
     def subscribe_match_dm(self, discord_id: int) -> None:
         self._match_dm_subscribers.add(int(discord_id))

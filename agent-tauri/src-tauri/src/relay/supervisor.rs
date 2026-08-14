@@ -445,7 +445,7 @@ async fn connect_once(
                             IncomingMessage::Pong => awaiting_pong = None,
                             IncomingMessage::SessionBound { .. } => {
                                 *needs_login = false;
-                                handle_incoming(app, state, &mut websocket, incoming, false).await?;
+                                handle_incoming(app, state, &mut websocket, incoming, false, &mut lcu_events).await?;
                                 session_bound = true;
                                 state.log(app, "Relay 세션 인증 완료 — LCU 이벤트 감시 시작").await;
                                 state.relay.set_oauth_sender(generation, None).await;
@@ -471,6 +471,7 @@ async fn connect_once(
                                 &mut websocket,
                                 incoming,
                                 session_bound,
+                                &mut lcu_events,
                             ).await?,
                         }
                     }
@@ -564,6 +565,7 @@ async fn handle_incoming<S>(
     websocket: &mut S,
     incoming: IncomingMessage,
     session_bound: bool,
+    lcu_events: &mut LcuEventPoller,
 ) -> AgentResult<()>
 where
     S: futures_util::Sink<Message> + Unpin,
@@ -644,6 +646,21 @@ where
                     safe_avatar_url(discord_avatar.or(avatar_url)),
                 )
                 .await;
+        }
+        IncomingMessage::LiveGamePolling { enabled } => {
+            if session_bound {
+                lcu_events.set_live_game_polling(enabled);
+                state
+                    .log(
+                        app,
+                        if enabled {
+                            "Relay live game polling 활성화"
+                        } else {
+                            "Relay live game polling 비활성화 — 구독자 없음"
+                        },
+                    )
+                    .await;
+            }
         }
         IncomingMessage::Pong | IncomingMessage::Unknown => {}
     }

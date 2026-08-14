@@ -27,6 +27,8 @@ pub(crate) enum IncomingMessage {
     },
     #[serde(rename = "pong")]
     Pong,
+    #[serde(rename = "live_game_polling")]
+    LiveGamePolling { enabled: bool },
     #[serde(other)]
     Unknown,
 }
@@ -385,6 +387,14 @@ mod tests {
         assert_eq!(
             IncomingMessage::parse(r#"{"type":"future_message","data":{}}"#).unwrap(),
             IncomingMessage::Unknown
+        );
+    }
+
+    #[test]
+    fn live_game_polling_control_deserializes() {
+        assert_eq!(
+            IncomingMessage::parse(r#"{"type":"live_game_polling","enabled":false}"#).unwrap(),
+            IncomingMessage::LiveGamePolling { enabled: false }
         );
     }
 

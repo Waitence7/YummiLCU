@@ -38,6 +38,8 @@ pub(crate) struct LcuEventPoller {
     participant: Option<String>,
     live_game: Option<String>,
     last_live_game_poll: Option<Instant>,
+    // None keeps legacy agents compatible until Relay sends the first control message.
+    live_game_polling: Option<bool>,
     eog_sent: bool,
     diagnostics: Vec<String>,
     lockfile_available: Option<bool>,
@@ -47,6 +49,17 @@ pub(crate) struct LcuEventPoller {
 }
 
 impl LcuEventPoller {
+    pub(crate) fn set_live_game_polling(&mut self, enabled: bool) {
+        if self.live_game_polling != Some(enabled) {
+            self.live_game_polling = Some(enabled);
+            self.last_live_game_poll = None;
+            if !enabled {
+                self.live_game = None;
+                self.live_game_id = None;
+            }
+        }
+    }
+
     fn diagnostic(&mut self, message: impl Into<String>) {
         self.diagnostics.push(message.into());
         if self.diagnostics.len() > 64 {
@@ -156,27 +169,29 @@ impl LcuEventPoller {
         // Live Client Data is independent of the League Client lockfile. This is
         // especially important for spectators and PC cafes where LCU discovery or
         // gameflow may be unavailable while the local game API is still running.
-        let should_poll = self
-            .last_live_game_poll
-            .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
-        if should_poll {
-            self.last_live_game_poll = Some(Instant::now());
-            match LcuClient::live_game_request(LIVE_GAME_DATA).await {
-                Ok(value) => {
-                    if self.live_client_available != Some(true) {
-                        self.diagnostic("Live Client Data API 연결됨 (127.0.0.1:2999)");
-                    }
-                    self.live_client_available = Some(true);
-                    let live_events_response =
-                        LcuClient::live_game_request(LIVE_GAME_EVENTS).await.ok();
-                    if let Some(payload) = live_game_payload(&value, live_events_response.as_ref())
-                    {
-                        let game_id = payload
-                            .pointer("/game/id")
-                            .map(Value::to_string)
-                            .unwrap_or_else(|| "unknown".into());
-                        if self.live_game_id.as_deref() != Some(game_id.as_str()) {
-                            self.diagnostic(format!(
+        if self.live_game_polling.unwrap_or(true) {
+            let should_poll = self
+                .last_live_game_poll
+                .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
+            if should_poll {
+                self.last_live_game_poll = Some(Instant::now());
+                match LcuClient::live_game_request(LIVE_GAME_DATA).await {
+                    Ok(value) => {
+                        if self.live_client_available != Some(true) {
+                            self.diagnostic("Live Client Data API 연결됨 (127.0.0.1:2999)");
+                        }
+                        self.live_client_available = Some(true);
+                        let live_events_response =
+                            LcuClient::live_game_request(LIVE_GAME_EVENTS).await.ok();
+                        if let Some(payload) =
+                            live_game_payload(&value, live_events_response.as_ref())
+                        {
+                            let game_id = payload
+                                .pointer("/game/id")
+                                .map(Value::to_string)
+                                .unwrap_or_else(|| "unknown".into());
+                            if self.live_game_id.as_deref() != Some(game_id.as_str()) {
+                                self.diagnostic(format!(
                                 "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건, active_player={}",
                                 payload
                                     .get("participants")
@@ -192,26 +207,27 @@ impl LcuEventPoller {
                                     "no (관전자)"
                                 }
                             ));
-                            self.live_game_id = Some(game_id);
+                                self.live_game_id = Some(game_id);
+                            }
+                            push_changed(
+                                &mut self.live_game,
+                                live_game_fingerprint(&payload),
+                                "live_game_update",
+                                payload,
+                                &mut events,
+                            );
+                        } else {
+                            self.live_game = None;
                         }
-                        push_changed(
-                            &mut self.live_game,
-                            live_game_fingerprint(&payload),
-                            "live_game_update",
-                            payload,
-                            &mut events,
-                        );
-                    } else {
+                    }
+                    Err(error) => {
+                        if self.live_client_available != Some(false) {
+                            self.diagnostic(format!("Live Client Data API 응답 없음: {error}"));
+                        }
+                        self.live_client_available = Some(false);
+                        self.live_game_id = None;
                         self.live_game = None;
                     }
-                }
-                Err(error) => {
-                    if self.live_client_available != Some(false) {
-                        self.diagnostic(format!("Live Client Data API 응답 없음: {error}"));
-                    }
-                    self.live_client_available = Some(false);
-                    self.live_game_id = None;
-                    self.live_game = None;
                 }
             }
         }

@@ -56,6 +56,8 @@ _LONG_COMMAND_ACTIONS = frozenset({"launch_client", "play_ranked_solo", "play_no
 _COMMAND_TIMEOUT_DEFAULT_SEC = 30.0
 _COMMAND_TIMEOUT_LONG_SEC = 300.0
 _MAX_PARTY_INVITE_RIOT_IDS = 20
+_LIVE_GAME_WEB_INGEST_MIN_INTERVAL_SEC = 10.0
+_live_game_web_ingest_at: dict[int, float] = {}
 
 
 def _safe_compare_digest(left: str, right: str) -> bool:
@@ -493,6 +495,42 @@ async def _forward_guild_match_eog(
         logger.exception("내전 LCU ingest 요청 실패 discord_id=%s", discord_id)
 
 
+async def _forward_guild_match_live(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+    payload: dict[str, Any],
+) -> None:
+    """관전자 Agent의 라이브 스냅샷도 웹 공개 경기 화면에서 사용할 수 있게 저장한다."""
+    now = time.monotonic()
+    previous = _live_game_web_ingest_at.get(int(discord_id), 0.0)
+    if now - previous < _LIVE_GAME_WEB_INGEST_MIN_INTERVAL_SEC:
+        return
+    _live_game_web_ingest_at[int(discord_id)] = now
+
+    api_base = config.tournament_api_base_url()
+    token = config.tournament_bot_internal_token()
+    if not token:
+        return
+    url = f"{api_base}/api/bot/guild-match/lcu-live-ingest"
+    headers = {
+        "content-type": "application/json",
+        "x-internal-bot-token": token,
+        "x-actor-discord-user-id": str(discord_id),
+    }
+    try:
+        async with http.post(url, headers=headers, json={"rawData": payload}) as res:
+            if res.status >= 400:
+                logger.warning(
+                    "내전 라이브 LCU ingest 실패 discord_id=%s status=%s",
+                    discord_id,
+                    res.status,
+                )
+                return
+            logger.info("내전 라이브 LCU ingest OK discord_id=%s", discord_id)
+    except Exception:
+        logger.exception("내전 라이브 LCU ingest 요청 실패 discord_id=%s", discord_id)
+
+
 async def _forward_match_eog(
     http: aiohttp.ClientSession,
     discord_id: int,
@@ -677,6 +715,7 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         await conn.forward_live_game_update(discord_id, payload)
+        await _forward_guild_match_live(websocket.app.state.http, discord_id, payload)
         return
 
     if msg_type == "participant_status_update":
@@ -805,11 +844,13 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:
             conn.subscribe_gameflow(raw_id)
+            await conn.sync_live_game_polling(raw_id)
         return
     if msg_type == "unsubscribe_gameflow":
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:
             conn.unsubscribe_gameflow(raw_id)
+            await conn.sync_live_game_polling(raw_id)
         return
     if msg_type == "subscribe_live_game":
         raw_id = data.get("discord_id")
@@ -818,6 +859,7 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
             if not isinstance(recruitment_id, (str, int)):
                 recruitment_id = None
             conn.subscribe_live_game(raw_id, str(recruitment_id)[:128] if recruitment_id else None)
+            await conn.sync_live_game_polling(raw_id)
             logger.info(
                 "봇 live_game 구독 요청: discord_id=%s 모집_id=%s",
                 raw_id,
@@ -828,6 +870,7 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:
             conn.unsubscribe_live_game(raw_id)
+            await conn.sync_live_game_polling(raw_id)
             logger.info(
                 "봇 live_game 구독 해제 요청: discord_id=%s 모집_id=%s",
                 raw_id,
