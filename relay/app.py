@@ -640,17 +640,18 @@ async def _handle_agent_message(
 
     if msg_type == "guild_match_eog":
         discord_id = conn.discord_id_for_ws(websocket)
-        payload = data.get("payload")
+        payload = data.get("payload", data.get("data"))
         if discord_id is None or not isinstance(payload, dict):
             logger.warning("guild_match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return
         http: aiohttp.ClientSession = websocket.app.state.http
+        await conn.forward_guild_match_eog(discord_id, payload)
         await _forward_guild_match_eog(http, discord_id, payload)
         return
 
     if msg_type == "match_eog":
         discord_id = conn.discord_id_for_ws(websocket)
-        payload = data.get("payload")
+        payload = data.get("payload", data.get("data"))
         if discord_id is None or not isinstance(payload, dict):
             logger.warning("match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return

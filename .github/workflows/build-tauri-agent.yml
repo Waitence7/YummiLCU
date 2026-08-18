@@ -167,8 +167,12 @@ jobs:
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           $stageExe = Join-Path $stage "yummi-lcu-tauri.exe"
           Copy-Item "${{ steps.artifacts.outputs.exe }}" $stageExe -Force
+          $nsisPath = "${{ steps.artifacts.outputs.nsis }}"
+          if (-not $nsisPath -or -not (Test-Path $nsisPath)) { throw "NSIS installer not found" }
+          $setup = "Yummi-LCU-Agent-$version-setup.exe"
+          Copy-Item $nsisPath $setup -Force
           $zip = "tauri-$version.zip"
-          Compress-Archive -Path "$stage/*" -DestinationPath $zip -Force
+          Compress-Archive -Path $stageExe -DestinationPath $zip -Force
           $notes = if ($env:RELEASE_NOTES) { $env:RELEASE_NOTES } else { "Tauri $version build $($env:GITHUB_SHA.Substring(0, 7))" }
           node scripts/sync-tauri-agent-version.mjs `
             --zip $zip `
@@ -179,6 +183,7 @@ jobs:
             --rollout-percent $env:ROLLOUT_PERCENT
           "version=$version" >> $env:GITHUB_OUTPUT
           "zip=$zip" >> $env:GITHUB_OUTPUT
+          "setup=$setup" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
         if: github.event_name != 'pull_request'
@@ -211,6 +216,7 @@ jobs:
           path: |
             ${{ steps.manifest.outputs.zip }}
             agent-version.json
+            ${{ steps.manifest.outputs.setup }}
           retention-days: 7
 
   deploy:
@@ -241,6 +247,22 @@ jobs:
             --data-binary "@release/agent-version.json" \
             "https://yummi.duckdns.org/agent-deploy/manifest"
 
+      - name: Stage latest installer
+        env:
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          set -euo pipefail
+          installer="release/Yummi-LCU-Agent-${RELEASE_VERSION}-setup.exe"
+          test -s "$installer"
+          test -n "$AGENT_DEPLOY_TOKEN"
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -X PUT \
+            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@$installer" \
+            "https://yummi.duckdns.org/agent-deploy/installer/${RELEASE_VERSION}"
+
       - name: Verify archive and publish update
         env:
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
@@ -266,3 +288,5 @@ jobs:
           jq -e --arg version "$RELEASE_VERSION" '.tauri.version == $version and .version == $version' <<<"$manifest" >/dev/null
           curl --fail --silent --show-error --retry 3 --head \
             "https://yummi.duckdns.org/agent/releases/tauri/tauri-${RELEASE_VERSION}.zip" >/dev/null
+          curl --fail --silent --show-error --retry 3 --head \
+            "https://yummi.duckdns.org/agent/releases/tauri/latest-setup.exe" >/dev/null

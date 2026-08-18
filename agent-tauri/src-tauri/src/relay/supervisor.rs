@@ -722,6 +722,15 @@ fn event_summary(message_type: &str, data: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("unknown")
         ),
+        "match_eog" | "guild_match_eog" => format!(
+            "{message_type} participants={} none_reason={}",
+            data.get("participants")
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len),
+            data.get("eog_none_reason")
+                .and_then(Value::as_str)
+                .unwrap_or("none")
+        ),
         "ready_check_update" => format!(
             "ready_check_update active={}",
             data.get("active").and_then(Value::as_bool).unwrap_or(false)

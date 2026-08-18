@@ -403,7 +403,7 @@ class ConnectionManager:
 
     async def forward_champ_select_update(self, discord_id: int, data: dict[str, Any]) -> bool:
         async with self._lock:
-            if int(discord_id) not in self._match_dm_subscribers:
+            if int(discord_id) not in (self._match_dm_subscribers | self._gameflow_subscribers):
                 return False
             ws = self._bot_ws
         if ws is None:
@@ -463,6 +463,28 @@ class ConnectionManager:
             return True
         except Exception:
             logger.exception("봇 WS gameflow_update 전달 실패 discord_id=%s", discord_id)
+            await self.unregister_bot_ws(ws)
+            return False
+
+    async def forward_guild_match_eog(self, discord_id: int, data: dict[str, Any]) -> bool:
+        """내전 EOG 결과를 gameflow 구독 중인 Bot에도 전달합니다."""
+        async with self._lock:
+            if int(discord_id) not in self._gameflow_subscribers:
+                return False
+            ws = self._bot_ws
+        if ws is None:
+            return False
+        try:
+            await ws.send_json(
+                {
+                    "type": "guild_match_eog",
+                    "discord_id": int(discord_id),
+                    "data": data,
+                }
+            )
+            return True
+        except Exception:
+            logger.exception("봇 WS guild_match_eog 전달 실패 discord_id=%s", discord_id)
             await self.unregister_bot_ws(ws)
             return False
 

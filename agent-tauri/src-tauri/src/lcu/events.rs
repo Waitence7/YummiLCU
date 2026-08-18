@@ -296,11 +296,10 @@ impl LcuEventPoller {
                 Some("InProgress") | Some("PreEndOfGame")
             )
         {
-            if let Some(payload) = eog_payload(&client, &phase).await {
-                events.push(("match_eog", payload.clone()));
-                events.push(("guild_match_eog", payload));
-                self.eog_sent = true;
-            }
+            let payload = eog_payload(&client, &phase).await;
+            events.push(("match_eog", payload.clone()));
+            events.push(("guild_match_eog", payload));
+            self.eog_sent = true;
         } else if matches!(
             phase.as_str(),
             "Lobby" | "None" | "ChampSelect" | "Matchmaking"
@@ -357,13 +356,22 @@ async fn wait_for_socket_retry(stop: &mut watch::Receiver<bool>) -> bool {
     }
 }
 
-async fn eog_payload(client: &LcuClient, phase: &str) -> Option<Value> {
-    let eog = client.request(Method::GET, EOG_STATS, None).await.ok();
+async fn eog_payload(client: &LcuClient, phase: &str) -> Value {
+    let mut none_reasons = Vec::new();
+    let eog = match client.request(Method::GET, EOG_STATS, None).await {
+        Ok(value) => Some(value),
+        Err(_) => {
+            none_reasons.push("eog_stats_request_failed");
+            None
+        }
+    };
     let session = client
         .request(Method::GET, GAMEFLOW_SESSION, None)
         .await
         .ok();
     let mut participants = Vec::new();
+    let mut missing_name_count = 0;
+    let mut missing_tag_count = 0;
     if let Some(teams) = eog
         .as_ref()
         .and_then(|value| value.get("teams"))
@@ -377,19 +385,51 @@ async fn eog_payload(client: &LcuClient, phase: &str) -> Option<Value> {
                 .into_iter()
                 .flatten()
             {
-                let name = player
+                let Some(name) = player
                     .get("riotIdGameName")
                     .or_else(|| player.get("summonerName"))
-                    .and_then(Value::as_str)?;
+                    .and_then(Value::as_str)
+                else {
+                    missing_name_count += 1;
+                    continue;
+                };
                 let tag = player
                     .get("riotIdTagline")
                     .or_else(|| player.get("riotIdTagLine"))
-                    .and_then(Value::as_str)?;
+                    .and_then(Value::as_str);
+                if tag.is_none() {
+                    missing_tag_count += 1;
+                }
                 participants.push(json!({"gameName": name, "tagLine": tag, "teamId": player.get("teamId").cloned().unwrap_or(Value::Null), "won": player.get("win").cloned().or_else(|| winning.map(Value::Bool)).unwrap_or(Value::Null)}));
             }
         }
     }
-    (participants.len() >= 2).then(|| json!({"source":"lcu-agent","gameflowPhase":phase,"capturedAt":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string(),"participants":participants,"eogStats":eog,"gameflowSession":session}))
+    if eog
+        .as_ref()
+        .and_then(|value| value.get("teams"))
+        .and_then(Value::as_array)
+        .is_none()
+    {
+        none_reasons.push("eog_stats_teams_missing");
+    }
+    if missing_name_count > 0 {
+        none_reasons.push("participant_name_missing");
+    }
+    if missing_tag_count > 0 {
+        none_reasons.push("participant_riot_tag_missing");
+    }
+    if participants.len() < 2 {
+        none_reasons.push("participants_less_than_2");
+    }
+    json!({
+        "source":"lcu-agent",
+        "gameflowPhase":phase,
+        "capturedAt":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string(),
+        "participants":participants,
+        "eog_none_reason": (!none_reasons.is_empty()).then(|| none_reasons.join(",")),
+        "eogStats":eog,
+        "gameflowSession":session
+    })
 }
 
 fn is_lcu_event(text: &str) -> bool {
@@ -545,6 +585,21 @@ fn participant_status(phase: &str, party: &Value) -> Value {
 }
 
 fn live_game_payload(value: &Value, events: Option<&Value>) -> Option<Value> {
+    live_game_payload_at(value, events, unix_now_ms())
+}
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn live_game_payload_at(
+    value: &Value,
+    events: Option<&Value>,
+    captured_at_ms: u64,
+) -> Option<Value> {
     let game_data = value.get("gameData")?.as_object()?;
     let players = value
         .get("allPlayers")
@@ -559,13 +614,17 @@ fn live_game_payload(value: &Value, events: Option<&Value>) -> Option<Value> {
         .take(10)
         .map(live_player_payload)
         .collect::<Vec<_>>();
+    let match_created_at_ms = game_data
+        .get("gameTime")
+        .and_then(Value::as_f64)
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| captured_at_ms.saturating_sub((seconds * 1000.0).round() as u64));
     Some(json!({
         "source": "lcu-agent",
+        "client_mode": live_client_mode(value.get("activePlayer")),
         "phase": "InProgress",
-        "captured_at_ms": SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis(),
+        "captured_at_ms": captured_at_ms,
+        "match_created_at_ms": match_created_at_ms,
         "game": {
             "id": game_data.get("gameId").cloned().unwrap_or(Value::Null),
             "game_id": game_data.get("gameId").cloned().unwrap_or(Value::Null),
@@ -583,6 +642,25 @@ fn live_game_payload(value: &Value, events: Option<&Value>) -> Option<Value> {
         "participants": participants,
         "events": live_events_payload(events),
     }))
+}
+
+fn live_client_mode(value: Option<&Value>) -> &'static str {
+    let Some(player) = value.and_then(Value::as_object) else {
+        return "spectator";
+    };
+    let has_identity = ["summonerName", "riotId", "riotIdGameName", "gameName"]
+        .iter()
+        .any(|key| {
+            player
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        });
+    if has_identity {
+        "player"
+    } else {
+        "spectator"
+    }
 }
 
 fn live_events_payload(value: Option<&Value>) -> Vec<Value> {
@@ -738,7 +816,7 @@ mod tests {
 
     #[test]
     fn live_game_payload_includes_participant_kda_and_items() {
-        let payload = live_game_payload(&json!({
+        let payload = live_game_payload_at(&json!({
             "gameData": {"gameId": 42, "gameMode": "CLASSIC", "gameTime": 120.5},
             "activePlayer": {"summonerName": "Me", "scores": {"kills": 2, "deaths": 1, "assists": 3}},
             "allPlayers": [{
@@ -748,9 +826,12 @@ mod tests {
                 "scores": {"kills": 2, "deaths": 1, "assists": 3, "creepScore": 80},
                 "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1, "slot": 0, "canUse": true}]
             }]
-        }), None)
+        }), None, 1_000_000)
         .unwrap();
+        assert_eq!(payload["client_mode"], "player");
         assert_eq!(payload["game"]["id"], 42);
+        assert_eq!(payload["captured_at_ms"], 1_000_000);
+        assert_eq!(payload["match_created_at_ms"], 879_500);
         assert_eq!(payload["participants"][0]["kills"], 2);
         assert_eq!(payload["participants"][0]["deaths"], 1);
         assert_eq!(payload["participants"][0]["assists"], 3);
@@ -794,6 +875,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(payload["client_mode"], "spectator");
         assert_eq!(payload["game"]["id"], 84);
         assert!(payload["active_player"].is_null());
         assert_eq!(payload["participants"].as_array().unwrap().len(), 2);
