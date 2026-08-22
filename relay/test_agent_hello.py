@@ -102,7 +102,7 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         manager.subscribe_live_game(42)
         self.assertTrue(
             await manager.forward_live_game_update(
-                42, {"participants": [{"kills": 3}] for _ in range(10)}
+                42, {"participants": [{"kills": 3} for _ in range(10)]}
             )
         )
         self.assertEqual(websocket.payload["type"], "live_game_update")
