@@ -9,6 +9,7 @@ import uvicorn
 
 from relay import config
 from relay.app import MAX_AGENT_MESSAGE_BYTES
+from relay.error_monitor import DiscordErrorHandler
 
 # endregion
 
@@ -18,6 +19,10 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
     )
+    error_handler = DiscordErrorHandler()
+    error_handler.setLevel(logging.ERROR)
+    error_handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s]: %(message)s"))
+    logging.getLogger().addHandler(error_handler)
     uvicorn.run(
         "relay.app:app",
         host=config.relay_host(),
