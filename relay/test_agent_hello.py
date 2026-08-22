@@ -101,14 +101,31 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await manager.forward_live_game_update(42, {"participants": []}))
         manager.subscribe_live_game(42)
         self.assertTrue(
-            await manager.forward_live_game_update(42, {"participants": [{"kills": 3}]})
+            await manager.forward_live_game_update(
+                42, {"participants": [{"kills": 3}] for _ in range(10)}
+            )
         )
         self.assertEqual(websocket.payload["type"], "live_game_update")
         self.assertEqual(websocket.payload["data"]["participants"][0]["kills"], 3)
 
+    async def test_partial_live_game_updates_are_not_cached_or_forwarded(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.register_bot_ws(websocket)
+        manager.subscribe_live_game(42)
+
+        self.assertFalse(
+            await manager.forward_live_game_update(42, {"participants": [{"kills": 3}]})
+        )
+        self.assertIsNone(manager.get_live_game(42))
+        self.assertEqual(websocket.payloads, [])
+
     async def test_live_game_update_is_cached_without_bot_subscription(self) -> None:
         manager = ConnectionManager()
-        payload = {"game": {"time_seconds": 42}, "participants": []}
+        payload = {
+            "game": {"time_seconds": 42},
+            "participants": [{"summoner_name": f"P{index}"} for index in range(10)],
+        }
 
         self.assertFalse(await manager.forward_live_game_update(42, payload))
         cached = manager.get_live_game(42)

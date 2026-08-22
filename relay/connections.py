@@ -14,6 +14,7 @@ logger = logging.getLogger("yummi_lcu.relay.connections")
 # endregion
 
 LIVE_GAME_CACHE_TTL_SEC = 15.0
+LIVE_GAME_PARTICIPANT_COUNT = 10
 
 
 class ConnectionManager:
@@ -493,6 +494,14 @@ class ConnectionManager:
         game_id = (data.get("game") or {}).get("id") if isinstance(data.get("game"), dict) else None
         participant_count = len(data.get("participants", [])) if isinstance(data.get("participants"), list) else 0
         event_count = len(data.get("events", [])) if isinstance(data.get("events"), list) else 0
+        if participant_count != LIVE_GAME_PARTICIPANT_COUNT:
+            logger.info(
+                "live_game_update 폐기: discord_id=%s game_id=%s participants=%s 사유=10명 미만 또는 초과",
+                did,
+                game_id,
+                participant_count,
+            )
+            return False
         async with self._lock:
             self.set_live_game(did, data)
             recruitment_id = self._live_game_recruitments.get(did)

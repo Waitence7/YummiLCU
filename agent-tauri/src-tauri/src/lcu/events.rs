@@ -27,6 +27,7 @@ const LIVE_GAME_EVENTS: &str = "/liveclientdata/eventdata";
 const LCU_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(1);
 const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const LIVE_GAME_PARTICIPANT_COUNT: usize = 10;
 const MAX_LCU_EVENT_MESSAGE_BYTES: usize = 1024 * 1024;
 
 #[derive(Default)]
@@ -605,15 +606,11 @@ fn live_game_payload_at(
         .get("allPlayers")
         .or_else(|| value.get("players"))
         .and_then(Value::as_array)?;
-    if players.is_empty() {
+    if players.len() != LIVE_GAME_PARTICIPANT_COUNT {
         return None;
     }
 
-    let participants = players
-        .iter()
-        .take(10)
-        .map(live_player_payload)
-        .collect::<Vec<_>>();
+    let participants = players.iter().map(live_player_payload).collect::<Vec<_>>();
     let match_created_at_ms = game_data
         .get("gameTime")
         .and_then(Value::as_f64)
@@ -825,7 +822,9 @@ mod tests {
                 "position": "MIDDLE", "respawnTimer": 0.0, "skinID": 123, "runes": {"keystone": {"id": 8112}},
                 "scores": {"kills": 2, "deaths": 1, "assists": 3, "creepScore": 80},
                 "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1, "slot": 0, "canUse": true}]
-            }]
+            },
+            {"summonerName":"P2"},{"summonerName":"P3"},{"summonerName":"P4"},{"summonerName":"P5"},
+            {"summonerName":"P6"},{"summonerName":"P7"},{"summonerName":"P8"},{"summonerName":"P9"},{"summonerName":"P10"}]
         }), None, 1_000_000)
         .unwrap();
         assert_eq!(payload["client_mode"], "player");
@@ -845,8 +844,12 @@ mod tests {
     fn live_game_payload_includes_kill_and_objective_events() {
         let payload = live_game_payload(
             &json!({
-                "gameData": {"gameId": 42, "gameTime": 120.5},
-                "allPlayers": [{"summonerName": "Me", "team": "ORDER"}]
+            "gameData": {"gameId": 42, "gameTime": 120.5},
+                "allPlayers": [
+                    {"summonerName": "Me", "team": "ORDER"},
+                    {"summonerName":"P2"},{"summonerName":"P3"},{"summonerName":"P4"},{"summonerName":"P5"},
+                    {"summonerName":"P6"},{"summonerName":"P7"},{"summonerName":"P8"},{"summonerName":"P9"},{"summonerName":"P10"}
+                ]
             }),
             Some(&json!({"Events": [
                 {"EventID": 1, "EventName": "ChampionKill", "EventTime": 61.2, "KillerName": "Me", "VictimName": "Enemy", "MultiKill": 2, "Assisters": ["Ally"]},
@@ -868,7 +871,9 @@ mod tests {
                 "gameData": {"gameId": 84, "gameMode": "CLASSIC", "gameTime": 300.0},
                 "allPlayers": [
                     {"summonerName": "Blue", "championName": "Ahri", "team": "ORDER"},
-                    {"summonerName": "Red", "championName": "Garen", "team": "CHAOS"}
+                    {"summonerName": "Red", "championName": "Garen", "team": "CHAOS"},
+                    {"summonerName":"P3"},{"summonerName":"P4"},{"summonerName":"P5"},{"summonerName":"P6"},
+                    {"summonerName":"P7"},{"summonerName":"P8"},{"summonerName":"P9"},{"summonerName":"P10"}
                 ]
             }),
             None,
@@ -878,7 +883,19 @@ mod tests {
         assert_eq!(payload["client_mode"], "spectator");
         assert_eq!(payload["game"]["id"], 84);
         assert!(payload["active_player"].is_null());
-        assert_eq!(payload["participants"].as_array().unwrap().len(), 2);
+        assert_eq!(payload["participants"].as_array().unwrap().len(), 10);
+    }
+
+    #[test]
+    fn live_game_payload_rejects_partial_participant_lists() {
+        assert!(live_game_payload(
+            &json!({
+                "gameData": {"gameId": 42, "gameTime": 1.0},
+                "allPlayers": [{"summonerName": "OnlyOne"}]
+            }),
+            None,
+        )
+        .is_none());
     }
 
     #[test]
