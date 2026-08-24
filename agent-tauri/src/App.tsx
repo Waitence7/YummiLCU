@@ -76,7 +76,10 @@ export function App() {
       </main>
 
       <footer className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-1.5 text-[10px] text-slate-500">
-        <span>v{state.app_version || '—'}</span>
+        <span>
+          v{state.release_label || state.app_version || '—'}
+          {state.build_id && state.build_id !== 'local' ? ` · build ${state.build_id}` : ''}
+        </span>
         <span>
           다운로드{' '}
           {state.downloaded_at

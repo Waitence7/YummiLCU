@@ -141,7 +141,19 @@ Tauri 개발 실행에는 Windows WebView2와 Rust MSVC 툴체인이 필요합�
 
 ## 빌드 및 릴리스 산출물
 
-Windows용 Agent 빌드는 GitHub Actions의 `build-tauri-agent.yml` 워크플로에서 수행합니다. 이 공개 저장소의 workflow는 Windows 설치 파일, 포터블 zip, 서명된 업데이트 manifest를 산출물로 만들며, 서버 배포는 포함하지 않습니다.
+Windows용 Agent 빌드는 GitHub Actions의 `build-tauri-agent.yml` 워크플로에서 수행합니다. 수동 릴리스는 Windows 설치 파일, 포터블 zip, 서명된 업데이트 manifest를 만들고 선택한 채널의 공개 배포 경로에 게시합니다.
+
+릴리스 식별자는 다음처럼 분리합니다.
+
+- `version`: updater 순서 비교용 숫자 버전(`major.minor.patch`)
+- `channel`: `stable`, `beta`, `dev`
+- `releaseLabel`: 표시용 식별자. stable은 `0.6.15`, beta는 `0.6.15-beta.<run>`, dev는 `0.6.15-dev.<run>` 형태
+- `buildId`: UTC 날짜 + GitHub Actions run number(`20260824.123`)
+- `commit`: 빌드한 Git commit의 짧은 SHA
+
+`releaseLabel`과 `buildId`는 같은 숫자 버전의 빌드를 구분하기 위한 메타데이터이며 updater의 버전 우선순위를 바꾸지 않습니다. 예를 들어 stable `0.6.14`에서 자동 업데이트 가능한 다음 beta를 배포하려면 숫자 `version`을 `0.6.15`로 올린 뒤 `channel=beta`로 빌드해야 합니다.
+
+stable manifest는 `/agent/version.json`, beta/dev manifest는 각각 `/agent/releases/tauri/beta/version.json`, `/agent/releases/tauri/dev/version.json`을 사용하므로 채널 배포가 서로 덮어쓰지 않습니다.
 
 ```powershell
 gh workflow run build-tauri-agent.yml -f channel=stable -f rollout_percent=100

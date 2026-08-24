@@ -26,6 +26,10 @@ export type AgentState = {
   oauth_pending: boolean;
   update_message?: string | null;
   app_version?: string | null;
+  release_label?: string | null;
+  release_channel?: 'stable' | 'beta' | 'dev' | string | null;
+  build_id?: string | null;
+  git_commit?: string | null;
   downloaded_at?: number | null;
   config: Config;
 };

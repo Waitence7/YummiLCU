@@ -25,6 +25,10 @@ pub(crate) struct UiState {
     oauth_pending: bool,
     update_message: Option<String>,
     app_version: String,
+    release_label: String,
+    release_channel: String,
+    build_id: String,
+    git_commit: String,
     downloaded_at: Option<u64>,
     config: Config,
 }
@@ -42,6 +46,16 @@ impl UiState {
             oauth_pending: false,
             update_message: None,
             app_version: env!("CARGO_PKG_VERSION").into(),
+            release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL")
+                .unwrap_or(env!("CARGO_PKG_VERSION"))
+                .into(),
+            release_channel: option_env!("YUMMI_AGENT_RELEASE_CHANNEL")
+                .unwrap_or("stable")
+                .into(),
+            build_id: option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local").into(),
+            git_commit: option_env!("YUMMI_AGENT_GIT_COMMIT")
+                .unwrap_or("unknown")
+                .into(),
             downloaded_at: installed_at(),
             config,
         }
@@ -238,6 +252,10 @@ fn build_diagnostic_bundle(ui: &UiState, flight: &[crate::diagnostics::FlightRec
     let _ = writeln!(out, "Yummi LCU Agent Diagnostics");
     let _ = writeln!(out, "generated_at_ms={}", diagnostic_now_ms());
     let _ = writeln!(out, "app_version={}", ui.app_version);
+    let _ = writeln!(out, "release_label={}", ui.release_label);
+    let _ = writeln!(out, "release_channel={}", ui.release_channel);
+    let _ = writeln!(out, "build_id={}", ui.build_id);
+    let _ = writeln!(out, "git_commit={}", ui.git_commit);
     let _ = writeln!(out, "relay_connected={}", ui.relay);
     let _ = writeln!(out, "lcu_connected={}", ui.lcu);
     let _ = writeln!(out, "discord_bound={}", ui.discord_id.is_some());

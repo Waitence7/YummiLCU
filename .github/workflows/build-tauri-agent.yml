@@ -30,6 +30,9 @@ jobs:
     runs-on: windows-latest
     outputs:
       version: ${{ steps.manifest.outputs.version }}
+      channel: ${{ steps.release_meta.outputs.channel }}
+      release_label: ${{ steps.release_meta.outputs.release_label }}
+      build_id: ${{ steps.release_meta.outputs.build_id }}
     defaults:
       run:
         shell: pwsh
@@ -40,6 +43,23 @@ jobs:
       CERT_THUMBPRINT_SECRET: ${{ secrets.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Configure release metadata
+        id: release_meta
+        run: |
+          $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
+          $channel = "${{ github.event.inputs.channel || 'stable' }}"
+          $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+          $buildId = "$date.$env:GITHUB_RUN_NUMBER"
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $releaseLabel = if ($channel -eq "stable") { $version } else { "$version-$channel.$env:GITHUB_RUN_NUMBER" }
+          "YUMMI_AGENT_RELEASE_CHANNEL=$channel" >> $env:GITHUB_ENV
+          "YUMMI_AGENT_RELEASE_LABEL=$releaseLabel" >> $env:GITHUB_ENV
+          "YUMMI_AGENT_BUILD_ID=$buildId" >> $env:GITHUB_ENV
+          "YUMMI_AGENT_GIT_COMMIT=$shortSha" >> $env:GITHUB_ENV
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+          "release_label=$releaseLabel" >> $env:GITHUB_OUTPUT
+          "build_id=$buildId" >> $env:GITHUB_OUTPUT
 
       - uses: actions/setup-node@v4
         with:
@@ -177,13 +197,16 @@ jobs:
           Copy-Item $nsisPath $setup -Force
           $zip = "tauri-$version.zip"
           Compress-Archive -Path $stageExe -DestinationPath $zip -Force
-          $notes = if ($env:RELEASE_NOTES) { $env:RELEASE_NOTES } else { "Tauri $version build $($env:GITHUB_SHA.Substring(0, 7))" }
+          $notes = if ($env:RELEASE_NOTES) { $env:RELEASE_NOTES } else { "Tauri $env:YUMMI_AGENT_RELEASE_LABEL build $env:YUMMI_AGENT_BUILD_ID ($env:YUMMI_AGENT_GIT_COMMIT)" }
           node scripts/sync-tauri-agent-version.mjs `
             --zip $zip `
             --exe $stageExe `
             --out agent-version.json `
             --notes $notes `
             --channel $env:CHANNEL `
+            --release-label $env:YUMMI_AGENT_RELEASE_LABEL `
+            --build-id $env:YUMMI_AGENT_BUILD_ID `
+            --commit $env:YUMMI_AGENT_GIT_COMMIT `
             --rollout-percent $env:ROLLOUT_PERCENT
           "version=$version" >> $env:GITHUB_OUTPUT
           "zip=$zip" >> $env:GITHUB_OUTPUT
@@ -240,6 +263,7 @@ jobs:
         env:
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
         run: |
           set -euo pipefail
           test -s "release/agent-version.json"
@@ -249,12 +273,13 @@ jobs:
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/json" \
             --data-binary "@release/agent-version.json" \
-            "https://yummi.duckdns.org/agent-deploy/manifest"
+            "https://yummi.duckdns.org/agent-deploy/manifest/${RELEASE_CHANNEL}"
 
       - name: Stage latest installer
         env:
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
         run: |
           set -euo pipefail
           installer="release/Yummi-LCU-Agent-${RELEASE_VERSION}-setup.exe"
@@ -265,12 +290,13 @@ jobs:
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@$installer" \
-            "https://yummi.duckdns.org/agent-deploy/installer/${RELEASE_VERSION}"
+            "https://yummi.duckdns.org/agent-deploy/installer/${RELEASE_CHANNEL}/${RELEASE_VERSION}"
 
       - name: Verify archive and publish update
         env:
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
         run: |
           set -euo pipefail
           archive="release/tauri-${RELEASE_VERSION}.zip"
@@ -281,16 +307,32 @@ jobs:
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/zip" \
             --data-binary "@$archive" \
-            "https://yummi.duckdns.org/agent-deploy/archive/${RELEASE_VERSION}"
+            "https://yummi.duckdns.org/agent-deploy/archive/${RELEASE_CHANNEL}/${RELEASE_VERSION}"
 
       - name: Verify public update files
         env:
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
+          RELEASE_LABEL: ${{ needs.build.outputs.release_label }}
+          BUILD_ID: ${{ needs.build.outputs.build_id }}
         run: |
           set -euo pipefail
-          manifest="$(curl --fail --silent --show-error --retry 3 https://yummi.duckdns.org/agent/version.json)"
-          jq -e --arg version "$RELEASE_VERSION" '.tauri.version == $version and .version == $version' <<<"$manifest" >/dev/null
+          if [ "$RELEASE_CHANNEL" = "stable" ]; then
+            manifest_url="https://yummi.duckdns.org/agent/version.json"
+            release_subdir=""
+          else
+            manifest_url="https://yummi.duckdns.org/agent/releases/tauri/${RELEASE_CHANNEL}/version.json"
+            release_subdir="/${RELEASE_CHANNEL}"
+          fi
+          manifest="$(curl --fail --silent --show-error --retry 3 "$manifest_url")"
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg channel "$RELEASE_CHANNEL" \
+            --arg release_label "$RELEASE_LABEL" \
+            --arg build_id "$BUILD_ID" \
+            '.tauri.version == $version and .version == $version and .tauri.channel == $channel and .tauri.releaseLabel == $release_label and .tauri.buildId == $build_id' \
+            <<<"$manifest" >/dev/null
           curl --fail --silent --show-error --retry 3 --head \
-            "https://yummi.duckdns.org/agent/releases/tauri/tauri-${RELEASE_VERSION}.zip" >/dev/null
+            "https://yummi.duckdns.org/agent/releases/tauri${release_subdir}/tauri-${RELEASE_VERSION}.zip" >/dev/null
           curl --fail --silent --show-error --retry 3 --head \
-            "https://yummi.duckdns.org/agent/releases/tauri/latest-setup.exe" >/dev/null
+            "https://yummi.duckdns.org/agent/releases/tauri${release_subdir}/latest-setup.exe" >/dev/null

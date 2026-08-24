@@ -38,6 +38,9 @@ struct UpdateTarget {
     executable: Option<String>,
     signature: Option<String>,
     channel: Option<String>,
+    release_label: Option<String>,
+    build_id: Option<String>,
+    commit: Option<String>,
     rollout_percent: Option<u8>,
     min_version: Option<String>,
     blocked_versions: Option<Vec<String>>,
@@ -780,6 +783,10 @@ mod tests {
             r#"{
               "tauri": {
                 "version": "0.6.8",
+                "channel": "beta",
+                "releaseLabel": "0.6.8-beta.1",
+                "buildId": "20260824.1",
+                "commit": "abcdef0",
                 "url": "https://example.test/agent.zip",
                 "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 "executable": "yummi-lcu-tauri.exe"
@@ -789,6 +796,10 @@ mod tests {
         .unwrap();
         let target = manifest.select_tauri().unwrap();
         assert_eq!(target.version, "0.6.8");
+        assert_eq!(target.channel.as_deref(), Some("beta"));
+        assert_eq!(target.release_label.as_deref(), Some("0.6.8-beta.1"));
+        assert_eq!(target.build_id.as_deref(), Some("20260824.1"));
+        assert_eq!(target.commit.as_deref(), Some("abcdef0"));
         assert_eq!(target.executable.as_deref(), Some("yummi-lcu-tauri.exe"));
     }
 
@@ -842,6 +853,9 @@ mod tests {
         let target = UpdateTarget {
             version: "0.7.0".into(),
             channel: Some("beta".into()),
+            release_label: Some("0.7.0-beta.1".into()),
+            build_id: Some("20260824.1".into()),
+            commit: Some("abcdef0".into()),
             rollout_percent: Some(0),
             min_version: Some("0.6.0".into()),
             blocked_versions: None,
@@ -886,6 +900,9 @@ mod tests {
         let target = UpdateTarget {
             version: "9.9.9".into(),
             channel: Some("stable".into()),
+            release_label: Some("9.9.9".into()),
+            build_id: Some("20260824.2".into()),
+            commit: Some("abcdef1".into()),
             rollout_percent: Some(100),
             min_version: None,
             blocked_versions: None,

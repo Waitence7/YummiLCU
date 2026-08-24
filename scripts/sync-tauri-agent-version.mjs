@@ -82,6 +82,12 @@ const notes = args.notes ?? process.env.AGENT_RELEASE_NOTES ?? `Tauri ${version}
 const channel = args.channel ?? "stable";
 const rolloutPercent = Number.parseInt(args["rollout-percent"] ?? "100", 10);
 const executable = args.executable ?? "yummi-lcu-tauri.exe";
+const buildId = args["build-id"] ?? process.env.YUMMI_AGENT_BUILD_ID ?? "local";
+const commit = args.commit ?? process.env.YUMMI_AGENT_GIT_COMMIT ?? process.env.GITHUB_SHA?.slice(0, 7) ?? "unknown";
+const releaseLabel =
+  args["release-label"] ??
+  process.env.YUMMI_AGENT_RELEASE_LABEL ??
+  (channel === "stable" ? version : `${version}-${channel}`);
 
 if (!fs.existsSync(zipPath)) throw new Error(`zip not found: ${zipPath}`);
 if (!fs.existsSync(exePath)) throw new Error(`exe not found: ${exePath}`);
@@ -101,11 +107,15 @@ if (configuredPublicKey && configuredPublicKey !== derivedPublicKey) {
 
 const zipSha256 = sha256File(zipPath);
 const exeSha256 = sha256File(exePath);
+const releaseSubdir = channel === "stable" ? "" : `/${channel}`;
 const tauri = {
   version,
   channel,
+  releaseLabel,
+  buildId,
+  commit,
   rolloutPercent,
-  url: `${publicUrl}/agent/releases/tauri/tauri-${version}.zip`,
+  url: `${publicUrl}/agent/releases/tauri${releaseSubdir}/tauri-${version}.zip`,
   sha256: zipSha256,
   executable,
   notes,
@@ -137,6 +147,10 @@ const manifest = readJsonIfExists(manifestPath);
 manifest.schemaVersion = 2;
 manifest.notes = notes;
 manifest.version = version;
+manifest.channel = channel;
+manifest.releaseLabel = releaseLabel;
+manifest.buildId = buildId;
+manifest.commit = commit;
 manifest.url = tauri.url;
 manifest.sha256 = zipSha256;
 manifest.tauri = tauri;

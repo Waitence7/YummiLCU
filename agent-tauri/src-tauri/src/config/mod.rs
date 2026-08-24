@@ -11,7 +11,25 @@ use uuid::Uuid;
 
 use crate::error::{AgentError, AgentResult};
 
-const PUBLIC_UPDATE_MANIFEST_URL: &str = "https://yummi.duckdns.org/agent/version.json";
+const STABLE_UPDATE_MANIFEST_URL: &str = "https://yummi.duckdns.org/agent/version.json";
+const BETA_UPDATE_MANIFEST_URL: &str = "https://yummi.duckdns.org/agent/releases/tauri/beta/version.json";
+const DEV_UPDATE_MANIFEST_URL: &str = "https://yummi.duckdns.org/agent/releases/tauri/dev/version.json";
+
+fn embedded_release_channel() -> &'static str {
+    match option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable") {
+        "beta" => "beta",
+        "dev" => "dev",
+        _ => "stable",
+    }
+}
+
+fn public_update_manifest_url(channel: &str) -> &'static str {
+    match channel.trim() {
+        "beta" => BETA_UPDATE_MANIFEST_URL,
+        "dev" => DEV_UPDATE_MANIFEST_URL,
+        _ => STABLE_UPDATE_MANIFEST_URL,
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
@@ -38,6 +56,7 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
+        let update_channel = embedded_release_channel();
         Self {
             relay_public_base_url: "https://yummi.duckdns.org".into(),
             auth_poll_interval_ms: 1500,
@@ -46,10 +65,10 @@ impl Default for Config {
             apply_default_status_on_connect: true,
             auto_accept_match: false,
             follow_league_client: true,
-            update_manifest_url: Some(PUBLIC_UPDATE_MANIFEST_URL.into()),
+            update_manifest_url: Some(public_update_manifest_url(update_channel).into()),
             check_updates_on_startup: true,
             auto_update_enabled: true,
-            update_channel: "stable".into(),
+            update_channel: update_channel.into(),
             saved_session_max_age_days: 14,
             // The agent is a tray/background process. It must be running after
             // Windows login even when its main window is not visible.
@@ -83,10 +102,14 @@ impl Config {
 
     pub(crate) fn normalize(&mut self) {
         self.relay_public_base_url = Self::secure_url(&self.relay_public_base_url);
+        self.update_channel = self.update_channel.trim().to_ascii_lowercase();
         self.update_manifest_url = self
             .update_manifest_url
             .as_ref()
             .map(|value| Self::secure_url(value));
+        if !cfg!(debug_assertions) && validate_update_channel(&self.update_channel).is_ok() {
+            self.update_manifest_url = Some(public_update_manifest_url(&self.update_channel).into());
+        }
     }
 
     pub(crate) fn load() -> Self {
@@ -119,6 +142,10 @@ impl Config {
         let defaults = Self::default();
         if validate_relay_base_url(&config.relay_public_base_url, cfg!(debug_assertions)).is_err() {
             config.relay_public_base_url = defaults.relay_public_base_url;
+        }
+        if validate_update_channel(&config.update_channel).is_err() {
+            config.update_channel = defaults.update_channel.clone();
+            config.update_manifest_url = defaults.update_manifest_url.clone();
         }
         if validate_update_url(
             config.update_manifest_url.as_deref(),
@@ -163,8 +190,15 @@ impl Config {
 
     pub(crate) fn validate(&self) -> AgentResult<()> {
         validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
-        validate_update_url(self.update_manifest_url.as_deref(), cfg!(debug_assertions))?;
         validate_update_channel(&self.update_channel)?;
+        validate_update_url(self.update_manifest_url.as_deref(), cfg!(debug_assertions))?;
+        if !cfg!(debug_assertions)
+            && self.update_manifest_url.as_deref() != Some(public_update_manifest_url(&self.update_channel))
+        {
+            return Err(AgentError::Config(
+                "업데이트 채널과 공식 manifest URL이 일치하지 않습니다.".into(),
+            ));
+        }
         if self
             .lockfile_path
             .as_deref()
@@ -256,7 +290,14 @@ fn validate_update_url(raw: Option<&str>, allow_custom: bool) -> AgentResult<()>
             "업데이트 URL은 인증 정보가 없는 HTTPS URL이어야 합니다.".into(),
         ));
     }
-    if !allow_custom && url.as_str() != PUBLIC_UPDATE_MANIFEST_URL {
+    if !allow_custom
+        && ![
+            STABLE_UPDATE_MANIFEST_URL,
+            BETA_UPDATE_MANIFEST_URL,
+            DEV_UPDATE_MANIFEST_URL,
+        ]
+        .contains(&url.as_str())
+    {
         return Err(AgentError::Config(
             "배포 빌드에서는 공식 업데이트 URL만 사용할 수 있습니다.".into(),
         ));
@@ -318,8 +359,14 @@ mod tests {
     }
 
     #[test]
-    fn production_update_url_is_fixed_to_the_public_manifest() {
-        assert!(validate_update_url(Some(PUBLIC_UPDATE_MANIFEST_URL), false).is_ok());
+    fn production_update_url_is_limited_to_official_channel_manifests() {
+        for url in [
+            STABLE_UPDATE_MANIFEST_URL,
+            BETA_UPDATE_MANIFEST_URL,
+            DEV_UPDATE_MANIFEST_URL,
+        ] {
+            assert!(validate_update_url(Some(url), false).is_ok());
+        }
         assert!(validate_update_url(Some("https://attacker.example/version.json"), false).is_err());
         assert!(validate_update_url(Some("https://attacker.example/version.json"), true).is_ok());
     }
