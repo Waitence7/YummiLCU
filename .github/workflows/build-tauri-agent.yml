@@ -273,7 +273,7 @@ jobs:
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/json" \
             --data-binary "@release/agent-version.json" \
-            "https://yummi.duckdns.org/agent-deploy/manifest/${RELEASE_CHANNEL}"
+            "https://yummi.duckdns.org/agent/deploy/manifest/${RELEASE_CHANNEL}"
 
       - name: Stage latest installer
         env:
@@ -290,7 +290,7 @@ jobs:
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@$installer" \
-            "https://yummi.duckdns.org/agent-deploy/installer/${RELEASE_CHANNEL}/${RELEASE_VERSION}"
+            "https://yummi.duckdns.org/agent/deploy/installer/${RELEASE_CHANNEL}/${RELEASE_VERSION}"
 
       - name: Verify archive and publish update
         env:
@@ -307,7 +307,7 @@ jobs:
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/zip" \
             --data-binary "@$archive" \
-            "https://yummi.duckdns.org/agent-deploy/archive/${RELEASE_CHANNEL}/${RELEASE_VERSION}"
+            "https://yummi.duckdns.org/agent/deploy/archive/${RELEASE_CHANNEL}/${RELEASE_VERSION}"
 
       - name: Verify public update files
         env:
