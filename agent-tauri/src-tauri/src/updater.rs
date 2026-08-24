@@ -10,7 +10,7 @@ use std::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::StreamExt;
-use reqwest::Client;
+use reqwest::{redirect::Policy, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -387,15 +387,27 @@ fn normalize_thumbprint(raw: &str) -> Option<String> {
     (normalized.len() == 40 || normalized.len() == 64).then_some(normalized)
 }
 
-fn expected_publisher_thumbprint(target: &UpdateTarget) -> Option<String> {
-    option_env!("YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT")
-        .and_then(normalize_thumbprint)
-        .or_else(|| {
-            target
-                .publisher_thumbprint
-                .as_deref()
-                .and_then(normalize_thumbprint)
-        })
+fn embedded_publisher_thumbprint() -> Option<String> {
+    option_env!("YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT").and_then(normalize_thumbprint)
+}
+
+fn expected_publisher_thumbprint(target: &UpdateTarget) -> AgentResult<Option<String>> {
+    let embedded = embedded_publisher_thumbprint();
+    if target.channel.as_deref().unwrap_or("stable") == "stable" {
+        return embedded.map(Some).ok_or_else(|| {
+            AgentError::Update(
+                "stable 업데이트용 Windows publisher thumbprint가 Agent에 고정되어 있지 않습니다."
+                    .into(),
+            )
+        });
+    }
+
+    Ok(embedded.or_else(|| {
+        target
+            .publisher_thumbprint
+            .as_deref()
+            .and_then(normalize_thumbprint)
+    }))
 }
 
 fn ps_single_quoted(path: &Path) -> String {
@@ -513,9 +525,10 @@ async fn apply_update(
     let (Some(url), Some(hash)) = (url, hash) else {
         return Ok(false);
     };
-    let parsed = url::Url::parse(&url)
+    let parsed = url::Url::parse(url)
         .map_err(|error| AgentError::Update(format!("업데이트 URL 오류: {error}")))?;
     validate_update_download_url(&parsed)?;
+    let expected_thumbprint = expected_publisher_thumbprint(&target_manifest)?;
 
     state
         .set_update_message(
@@ -528,11 +541,12 @@ async fn apply_update(
         .await;
     let client = Client::builder()
         .https_only(true)
+        .redirect(Policy::none())
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|_| AgentError::Update("업데이트 HTTP client 생성 실패".into()))?;
     let bytes = download_limited(&client, parsed, MAX_UPDATE_ARCHIVE_BYTES).await?;
-    validate_hash(&bytes, &hash)?;
+    validate_hash(&bytes, hash)?;
 
     let work_root = std::env::temp_dir().join("yummi-lcu-update");
     fs::create_dir_all(&work_root)?;
@@ -566,10 +580,7 @@ async fn apply_update(
         .parent()
         .ok_or_else(|| AgentError::Update("압축 해제 폴더를 찾지 못했습니다.".into()))?;
     let backup_dir = work.join("backup");
-    let signature_check = windows_signature_check_cmd(
-        &source,
-        expected_publisher_thumbprint(&target_manifest).as_deref(),
-    );
+    let signature_check = windows_signature_check_cmd(&source, expected_thumbprint.as_deref());
     let script_text = format!(
         "@echo off\r\n\
          setlocal\r\n\
@@ -680,6 +691,7 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
     }
     let Ok(client) = Client::builder()
         .https_only(true)
+        .redirect(Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
     else {
@@ -867,6 +879,29 @@ mod tests {
             &Url::parse("https://yummi.duckdns.org/other/tauri.zip").unwrap()
         )
         .is_err());
+    }
+
+    #[test]
+    fn stable_updates_require_an_embedded_publisher_pin() {
+        let target = UpdateTarget {
+            version: "9.9.9".into(),
+            channel: Some("stable".into()),
+            rollout_percent: Some(100),
+            min_version: None,
+            blocked_versions: None,
+            url: None,
+            patch_url: None,
+            patch_from: None,
+            sha256: None,
+            patch_sha256: None,
+            executable: None,
+            signature: None,
+            publisher_thumbprint: Some("aa".repeat(20)),
+            files: None,
+        };
+        if embedded_publisher_thumbprint().is_none() {
+            assert!(expected_publisher_thumbprint(&target).is_err());
+        }
     }
 
     #[test]

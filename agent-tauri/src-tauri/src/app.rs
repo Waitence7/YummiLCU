@@ -40,6 +40,8 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::agent::relogin,
             crate::commands::agent::submit_oauth_code,
             crate::commands::agent::get_agent_state,
+            crate::commands::diagnostics::get_diagnostic_bundle,
+            crate::commands::diagnostics::export_diagnostic_bundle,
             crate::commands::lcu::recent_match
         ])
         .setup(move |app| {

@@ -7,6 +7,9 @@ pub(crate) fn sync_windows_startup(enabled: bool) -> AgentResult<()> {
     use std::os::windows::process::CommandExt;
 
     let executable = std::env::current_exe()?.to_string_lossy().to_string();
+    // HKCU\...\Run is a command line, not an argv array. Quote the executable
+    // so an install path containing spaces cannot be reparsed as another binary.
+    let startup_command = format!("\"{}\"", executable.replace('"', ""));
     let mut command = std::process::Command::new("reg.exe");
     command.creation_flags(0x08000000);
     if enabled {
@@ -18,7 +21,7 @@ pub(crate) fn sync_windows_startup(enabled: bool) -> AgentResult<()> {
             "/t",
             "REG_SZ",
             "/d",
-            &executable,
+            &startup_command,
             "/f",
         ]);
     } else {

@@ -1,6 +1,7 @@
 mod app;
 mod commands;
 mod config;
+mod diagnostics;
 mod error;
 mod lcu;
 mod platform;

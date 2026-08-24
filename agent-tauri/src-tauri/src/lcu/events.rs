@@ -14,7 +14,7 @@ use tokio_tungstenite::{
 
 use crate::config::Config;
 
-use super::{lockfile_path, LcuClient};
+use super::{lockfile_path, LcuClient, LcuIdentity};
 
 const GAMEFLOW_PHASE: &str = "/lol-gameflow/v1/gameflow-phase";
 const READY_CHECK: &str = "/lol-matchmaking/v1/ready-check";
@@ -47,9 +47,46 @@ pub(crate) struct LcuEventPoller {
     lcu_available: Option<bool>,
     live_client_available: Option<bool>,
     live_game_id: Option<String>,
+    connection_identity: Option<LcuIdentity>,
+    connection_generation: u64,
 }
 
 impl LcuEventPoller {
+    fn reset_lcu_snapshot(&mut self) {
+        self.gameflow = None;
+        self.ready_check = None;
+        self.champ_select = None;
+        self.party = None;
+        self.participant = None;
+        self.eog_sent = false;
+        self.lcu_available = None;
+    }
+
+    fn observe_connection(&mut self, identity: LcuIdentity) {
+        if self.connection_identity == Some(identity) {
+            return;
+        }
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+        self.connection_identity = Some(identity);
+        self.reset_lcu_snapshot();
+        self.diagnostic(format!(
+            "LCU 연결 세대 #{} 시작: pid={}, port={}",
+            self.connection_generation, identity.process_id, identity.port
+        ));
+    }
+
+    fn observe_disconnected(&mut self) {
+        if self.connection_identity.take().is_none() {
+            return;
+        }
+        self.connection_generation = self.connection_generation.wrapping_add(1);
+        self.reset_lcu_snapshot();
+        self.diagnostic(format!(
+            "LCU 연결 세대 #{} 종료 — 다음 연결은 새 상태로 초기화",
+            self.connection_generation
+        ));
+    }
+
     pub(crate) fn set_live_game_polling(&mut self, enabled: bool) {
         if self.live_game_polling != Some(enabled) {
             self.live_game_polling = Some(enabled);
@@ -115,6 +152,8 @@ impl LcuEventPoller {
             };
             request.headers_mut().insert(AUTHORIZATION, header);
             let mut builder = native_tls::TlsConnector::builder();
+            // Riot's local LCU certificate is self-signed. Host and process identity
+            // are constrained separately before these credentials are used.
             builder.danger_accept_invalid_certs(true);
             let Ok(tls) = builder.build() else {
                 return;
@@ -164,6 +203,7 @@ impl LcuEventPoller {
             }
         }
     }
+
     pub(crate) async fn poll(&mut self, config: &Config) -> Vec<(&'static str, Value)> {
         let mut events = Vec::new();
 
@@ -193,21 +233,21 @@ impl LcuEventPoller {
                                 .unwrap_or_else(|| "unknown".into());
                             if self.live_game_id.as_deref() != Some(game_id.as_str()) {
                                 self.diagnostic(format!(
-                                "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건, active_player={}",
-                                payload
-                                    .get("participants")
-                                    .and_then(Value::as_array)
-                                    .map_or(0, Vec::len),
-                                payload
-                                    .get("events")
-                                    .and_then(Value::as_array)
-                                    .map_or(0, Vec::len),
-                                if payload.get("active_player").is_some_and(|v| !v.is_null()) {
-                                    "yes"
-                                } else {
-                                    "no (관전자)"
-                                }
-                            ));
+                                    "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건, active_player={}",
+                                    payload
+                                        .get("participants")
+                                        .and_then(Value::as_array)
+                                        .map_or(0, Vec::len),
+                                    payload
+                                        .get("events")
+                                        .and_then(Value::as_array)
+                                        .map_or(0, Vec::len),
+                                    if payload.get("active_player").is_some_and(|v| !v.is_null()) {
+                                        "yes"
+                                    } else {
+                                        "no (관전자)"
+                                    }
+                                ));
                                 self.live_game_id = Some(game_id);
                             }
                             push_changed(
@@ -237,6 +277,7 @@ impl LcuEventPoller {
             if self.lockfile_available != Some(false) {
                 self.diagnostic("LCU lockfile 없음 — 관전 API 독립 조회만 계속함");
             }
+            self.observe_disconnected();
             self.lockfile_available = Some(false);
             self.lcu_available = Some(false);
             return events;
@@ -247,11 +288,12 @@ impl LcuEventPoller {
         self.lockfile_available = Some(true);
         let Ok(client) = LcuClient::from_lockfile(&path) else {
             if self.lcu_available != Some(false) {
-                self.diagnostic("LCU lockfile 읽기 실패 — 관전 API 독립 조회는 계속함");
+                self.diagnostic("LCU lockfile/PID 검증 실패 — 관전 API 독립 조회는 계속함");
             }
             self.lcu_available = Some(false);
             return events;
         };
+        self.observe_connection(client.identity());
 
         let phase_value = match client.request(Method::GET, GAMEFLOW_PHASE, None).await {
             Ok(value) => value,
@@ -401,7 +443,12 @@ async fn eog_payload(client: &LcuClient, phase: &str) -> Value {
                 if tag.is_none() {
                     missing_tag_count += 1;
                 }
-                participants.push(json!({"gameName": name, "tagLine": tag, "teamId": player.get("teamId").cloned().unwrap_or(Value::Null), "won": player.get("win").cloned().or_else(|| winning.map(Value::Bool)).unwrap_or(Value::Null)}));
+                participants.push(json!({
+                    "gameName": name,
+                    "tagLine": tag,
+                    "teamId": player.get("teamId").cloned().unwrap_or(Value::Null),
+                    "won": player.get("win").cloned().or_else(|| winning.map(Value::Bool)).unwrap_or(Value::Null)
+                }));
             }
         }
     }
@@ -422,14 +469,43 @@ async fn eog_payload(client: &LcuClient, phase: &str) -> Value {
     if participants.len() < 2 {
         none_reasons.push("participants_less_than_2");
     }
+
+    // Only retain the EOG fields consumed by Yummi's match ingest. Do not forward
+    // Riot's complete eog-stats/gameflow-session objects: future schema additions
+    // must not silently become server-side telemetry.
+    let game_id = eog
+        .as_ref()
+        .and_then(|value| value.get("gameId").or_else(|| value.get("reportGameId")))
+        .cloned()
+        .or_else(|| {
+            session
+                .as_ref()
+                .and_then(|value| value.pointer("/gameData/gameId"))
+                .cloned()
+        })
+        .unwrap_or(Value::Null);
+    let end_of_game_timestamp = eog
+        .as_ref()
+        .and_then(|value| value.get("endOfGameTimestamp"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let captured_at = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .to_string();
+
     json!({
         "source":"lcu-agent",
-        "gameflowPhase":phase,
-        "capturedAt":SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs().to_string(),
-        "participants":participants,
+        "gameflowPhase": phase,
+        "capturedAt": captured_at,
+        "gameId": game_id,
+        "participants": participants,
         "eog_none_reason": (!none_reasons.is_empty()).then(|| none_reasons.join(",")),
-        "eogStats":eog,
-        "gameflowSession":session
+        "eogStats": {
+            "gameId": game_id,
+            "endOfGameTimestamp": end_of_game_timestamp
+        }
     })
 }
 
@@ -632,8 +708,7 @@ fn live_game_payload_at(
             "map_number": game_data.get("mapNumber").cloned().unwrap_or(Value::Null),
             "terrain": game_data.get("mapTerrain").cloned().unwrap_or(Value::Null),
             "time_seconds": game_data.get("gameTime").cloned().unwrap_or(Value::Null),
-            "game_time": game_data.get("gameTime").cloned().unwrap_or(Value::Null),
-            "raw": game_data.clone(),
+            "game_time": game_data.get("gameTime").cloned().unwrap_or(Value::Null)
         },
         "active_player": active_player_payload(value.get("activePlayer")),
         "participants": participants,
@@ -697,8 +772,7 @@ fn live_events_payload(value: Option<&Value>) -> Vec<Value> {
                 "dragon_type": event.get("DragonType").or_else(|| event.get("dragonType")).cloned().unwrap_or(Value::Null),
                 "turret_killed": event.get("TurretKilled").or_else(|| event.get("turretKilled")).cloned().unwrap_or(Value::Null),
                 "inhibitor_killed": event.get("InhibKilled").or_else(|| event.get("inhibKilled")).cloned().unwrap_or(Value::Null),
-                "monster_type": event.get("MonsterType").or_else(|| event.get("monsterType")).cloned().unwrap_or(Value::Null),
-                "raw": event.clone(),
+                "monster_type": event.get("MonsterType").or_else(|| event.get("monsterType")).cloned().unwrap_or(Value::Null)
             }))
         })
         .collect()
@@ -722,10 +796,7 @@ fn live_player_payload(player: &Value) -> Value {
                 "can_use": item.get("canUse").cloned().unwrap_or(Value::Null),
                 "consumable": item.get("consumable").cloned().unwrap_or(Value::Null),
                 "price": item.get("price").cloned().unwrap_or(Value::Null),
-                "raw_description": item.get("rawDescription").cloned().unwrap_or(Value::Null),
-                "raw_display_name": item.get("rawDisplayName").cloned().unwrap_or(Value::Null),
-                "slot": item.get("slot").cloned().unwrap_or(Value::Null),
-                "raw": item.clone(),
+                "slot": item.get("slot").cloned().unwrap_or(Value::Null)
             })
         })
         .collect::<Vec<_>>();
@@ -749,11 +820,9 @@ fn live_player_payload(player: &Value) -> Value {
         "assists": scores.and_then(|value| value.get("assists")).cloned().unwrap_or(Value::from(0)),
         "creep_score": scores.and_then(|value| value.get("creepScore")).cloned().unwrap_or(Value::from(0)),
         "ward_score": scores.and_then(|value| value.get("wardScore")).cloned().unwrap_or(Value::from(0)),
-        "scores": scores.cloned().unwrap_or(Value::Null),
         "runes": player.get("runes").cloned().unwrap_or(Value::Null),
         "items": items,
-        "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null),
-        "raw": player.clone(),
+        "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null)
     })
 }
 
@@ -774,19 +843,63 @@ fn active_player_payload(value: Option<&Value>) -> Value {
         "assists": scores.and_then(|value| value.get("assists")).cloned().unwrap_or(Value::from(0)),
         "creep_score": scores.and_then(|value| value.get("creepScore")).cloned().unwrap_or(Value::from(0)),
         "ward_score": scores.and_then(|value| value.get("wardScore")).cloned().unwrap_or(Value::from(0)),
-        "scores": scores.cloned().unwrap_or(Value::Null),
-        "abilities": player.get("abilities").cloned().unwrap_or(Value::Null),
-        "champion_stats": player.get("championStats").cloned().unwrap_or(Value::Null),
-        "full_runes": player.get("fullRunes").cloned().unwrap_or(Value::Null),
-        "runes": player.get("runes").cloned().unwrap_or(Value::Null),
-        "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null),
-        "raw": player.clone(),
+        "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null)
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_generation_resets_lcu_snapshots_on_identity_change() {
+        let mut poller = LcuEventPoller::default();
+        poller.gameflow = Some("Lobby".into());
+        poller.ready_check = Some("pending".into());
+        poller.eog_sent = true;
+
+        poller.observe_connection(LcuIdentity {
+            process_id: 10,
+            port: 5000,
+        });
+        assert_eq!(poller.connection_generation, 1);
+        assert!(poller.gameflow.is_none());
+        assert!(poller.ready_check.is_none());
+        assert!(!poller.eog_sent);
+
+        poller.gameflow = Some("ChampSelect".into());
+        poller.observe_connection(LcuIdentity {
+            process_id: 10,
+            port: 5000,
+        });
+        assert_eq!(poller.connection_generation, 1);
+        assert_eq!(poller.gameflow.as_deref(), Some("ChampSelect"));
+
+        poller.observe_connection(LcuIdentity {
+            process_id: 11,
+            port: 5001,
+        });
+        assert_eq!(poller.connection_generation, 2);
+        assert!(poller.gameflow.is_none());
+    }
+
+    #[test]
+    fn disconnect_forces_next_connection_to_get_a_fresh_generation() {
+        let mut poller = LcuEventPoller::default();
+        let identity = LcuIdentity {
+            process_id: 10,
+            port: 5000,
+        };
+        poller.observe_connection(identity);
+        poller.gameflow = Some("Lobby".into());
+        poller.observe_disconnected();
+        assert_eq!(poller.connection_generation, 2);
+        assert!(poller.connection_identity.is_none());
+        assert!(poller.gameflow.is_none());
+
+        poller.observe_connection(identity);
+        assert_eq!(poller.connection_generation, 3);
+    }
 
     #[test]
     fn ready_check_matches_legacy_active_rule() {
@@ -812,16 +925,17 @@ mod tests {
     }
 
     #[test]
-    fn live_game_payload_includes_participant_kda_and_items() {
+    fn live_game_payload_includes_participant_kda_and_items_without_raw_objects() {
         let payload = live_game_payload_at(&json!({
-            "gameData": {"gameId": 42, "gameMode": "CLASSIC", "gameTime": 120.5},
-            "activePlayer": {"summonerName": "Me", "scores": {"kills": 2, "deaths": 1, "assists": 3}},
+            "gameData": {"gameId": 42, "gameMode": "CLASSIC", "gameTime": 120.5, "futureSecret": "do-not-forward"},
+            "activePlayer": {"summonerName": "Me", "scores": {"kills": 2, "deaths": 1, "assists": 3}, "futureSecret": "do-not-forward"},
             "allPlayers": [{
                 "summonerName": "Me", "riotId": "Me#KR1", "riotIdGameName": "Me", "riotIdTagLine": "KR1",
                 "championName": "Ahri", "rawChampionName": "game_character_displayname_Ahri", "team": "ORDER",
                 "position": "MIDDLE", "respawnTimer": 0.0, "skinID": 123, "runes": {"keystone": {"id": 8112}},
                 "scores": {"kills": 2, "deaths": 1, "assists": 3, "creepScore": 80},
-                "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1, "slot": 0, "canUse": true}]
+                "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1, "slot": 0, "canUse": true, "futureSecret": "do-not-forward"}],
+                "futureSecret": "do-not-forward"
             },
             {"summonerName":"P2"},{"summonerName":"P3"},{"summonerName":"P4"},{"summonerName":"P5"},
             {"summonerName":"P6"},{"summonerName":"P7"},{"summonerName":"P8"},{"summonerName":"P9"},{"summonerName":"P10"}]
@@ -838,13 +952,17 @@ mod tests {
         assert_eq!(payload["participants"][0]["riot_id"], "Me#KR1");
         assert_eq!(payload["participants"][0]["position"], "MIDDLE");
         assert_eq!(payload["participants"][0]["items"][0]["slot"], 0);
+        assert!(payload["game"].get("raw").is_none());
+        assert!(payload["participants"][0].get("raw").is_none());
+        assert!(payload["participants"][0]["items"][0].get("raw").is_none());
+        assert!(payload["participants"][0].get("futureSecret").is_none());
     }
 
     #[test]
-    fn live_game_payload_includes_kill_and_objective_events() {
+    fn live_game_payload_includes_kill_and_objective_events_without_raw_event() {
         let payload = live_game_payload(
             &json!({
-            "gameData": {"gameId": 42, "gameTime": 120.5},
+                "gameData": {"gameId": 42, "gameTime": 120.5},
                 "allPlayers": [
                     {"summonerName": "Me", "team": "ORDER"},
                     {"summonerName":"P2"},{"summonerName":"P3"},{"summonerName":"P4"},{"summonerName":"P5"},
@@ -852,7 +970,7 @@ mod tests {
                 ]
             }),
             Some(&json!({"Events": [
-                {"EventID": 1, "EventName": "ChampionKill", "EventTime": 61.2, "KillerName": "Me", "VictimName": "Enemy", "MultiKill": 2, "Assisters": ["Ally"]},
+                {"EventID": 1, "EventName": "ChampionKill", "EventTime": 61.2, "KillerName": "Me", "VictimName": "Enemy", "MultiKill": 2, "Assisters": ["Ally"], "futureSecret": "do-not-forward"},
                 {"EventID": 2, "EventName": "DragonKill", "EventTime": 90.0, "DragonType": "EarthDragon"}
             ]})),
         )
@@ -860,7 +978,8 @@ mod tests {
         assert_eq!(payload["events"][0]["killer_name"], "Me");
         assert_eq!(payload["events"][0]["victim_name"], "Enemy");
         assert_eq!(payload["events"][0]["multi_kill"], 2);
-        assert_eq!(payload["events"][0]["raw"]["EventName"], "ChampionKill");
+        assert!(payload["events"][0].get("raw").is_none());
+        assert!(payload["events"][0].get("futureSecret").is_none());
         assert_eq!(payload["events"][1]["dragon_type"], "EarthDragon");
     }
 

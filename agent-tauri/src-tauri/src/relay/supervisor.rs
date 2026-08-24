@@ -24,9 +24,12 @@ use crate::{
     state::{AgentEvent, AppState},
 };
 
-use super::protocol::{
-    Action, AgentEventMessage, AgentHelloMessage, AuthMessage, CommandResult, IncomingMessage,
-    OAuthCodeMessage, PongMessage, MAX_RELAY_MESSAGE_BYTES,
+use super::{
+    command_auth,
+    protocol::{
+        Action, AgentEventMessage, AgentHelloMessage, AuthMessage, CommandResult, IncomingMessage,
+        OAuthCodeMessage, PongMessage, MAX_RELAY_MESSAGE_BYTES,
+    },
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -515,6 +518,7 @@ async fn connect_once(
                 let config = state.config.read().await.clone();
                 for (message_type, data) in lcu_events.poll(&config).await {
                     let event_log = event_summary(message_type, &data);
+                    state.record_flight("lcu_event", event_log.clone()).await;
                     let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
                         .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
                     let Some(message) = serialize_agent_event(message_type, data)? else {
@@ -530,6 +534,7 @@ async fn connect_once(
                     }
                 }
                 for diagnostic in lcu_events.take_diagnostics() {
+                    state.record_flight("lcu_diagnostic", diagnostic.clone()).await;
                     state.log(app, format!("LCU 진단: {diagnostic}")).await;
                 }
             }
@@ -537,6 +542,7 @@ async fn connect_once(
                 let config = state.config.read().await.clone();
                 for (message_type, data) in lcu_events.poll(&config).await {
                     let event_log = event_summary(message_type, &data);
+                    state.record_flight("lcu_event", event_log.clone()).await;
                     let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
                         .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
                     let Some(message) = serialize_agent_event(message_type, data)? else {
@@ -552,6 +558,7 @@ async fn connect_once(
                     }
                 }
                 for diagnostic in lcu_events.take_diagnostics() {
+                    state.record_flight("lcu_diagnostic", diagnostic.clone()).await;
                     state.log(app, format!("LCU 진단: {diagnostic}")).await;
                 }
             }
@@ -587,6 +594,28 @@ where
                 state.log(app, "인증 전 Relay 명령 차단").await;
                 return Ok(());
             }
+
+            let payload = match command_auth::verify_command(
+                &action,
+                &payload,
+                state.bound_discord_id().await,
+            )
+            .await
+            {
+                Ok(payload) => payload,
+                Err(error) => {
+                    let result = CommandResult::failure(request_id, "LCU 명령 인증 실패");
+                    websocket
+                        .send(Message::Text(serde_json::to_string(&result)?.into()))
+                        .await
+                        .map_err(|_| AgentError::Relay("Relay 응답 전송 실패".into()))?;
+                    state
+                        .log(app, format!("Relay LCU 명령 서명 차단: {error}"))
+                        .await;
+                    return Ok(());
+                }
+            };
+
             let parsed_action = Action::parse(&action);
             let action_label = parsed_action.map(Action::as_str).unwrap_or("unknown");
             let result = match parsed_action {
@@ -620,6 +649,15 @@ where
                     }
                 }
             };
+            state
+                .record_flight(
+                    "command",
+                    format!(
+                        "action={action_label} result={}",
+                        if result.is_ok() { "ok" } else { "error" }
+                    ),
+                )
+                .await;
             websocket
                 .send(Message::Text(serde_json::to_string(&result)?.into()))
                 .await
@@ -675,7 +713,7 @@ fn safe_avatar_url(value: Option<String>) -> Option<String> {
     let value = value?;
     let url = url::Url::parse(&value).ok()?;
     (url.scheme() == "https"
-        && url.host().is_some()
+        && url.host_str() == Some("cdn.discordapp.com")
         && url.username().is_empty()
         && url.password().is_none())
     .then_some(value)
@@ -833,12 +871,13 @@ mod tests {
     }
 
     #[test]
-    fn relay_avatar_is_limited_to_https_urls() {
+    fn relay_avatar_is_limited_to_discord_cdn() {
         assert!(safe_avatar_url(Some("file:///C:/secret.png".into())).is_none());
-        assert!(safe_avatar_url(Some("http://cdn.example/avatar.png".into())).is_none());
+        assert!(safe_avatar_url(Some("http://cdn.discordapp.com/avatar.png".into())).is_none());
+        assert!(safe_avatar_url(Some("https://cdn.example/avatar.png".into())).is_none());
         assert_eq!(
-            safe_avatar_url(Some("https://cdn.example/avatar.png".into())).as_deref(),
-            Some("https://cdn.example/avatar.png")
+            safe_avatar_url(Some("https://cdn.discordapp.com/avatar.png".into())).as_deref(),
+            Some("https://cdn.discordapp.com/avatar.png")
         );
     }
 

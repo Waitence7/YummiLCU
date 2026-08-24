@@ -15,6 +15,8 @@ from dotenv import load_dotenv
 _ROOT = Path(__file__).resolve().parents[1]
 load_dotenv(_ROOT / ".env", override=False)
 
+_MIN_INTERNAL_SECRET_BYTES = 32
+
 
 def _env(key: str, default: str = "") -> str:
     return (os.getenv(key) or default).strip()
@@ -79,7 +81,12 @@ def relay_public_base_url_must_be_https() -> None:
 
 
 def relay_internal_secret() -> str:
-    return _env("RELAY_INTERNAL_SECRET")
+    value = _env("RELAY_INTERNAL_SECRET")
+    if value and len(value.encode("utf-8")) < _MIN_INTERNAL_SECRET_BYTES:
+        raise RuntimeError(
+            f"RELAY_INTERNAL_SECRET must be at least {_MIN_INTERNAL_SECRET_BYTES} bytes"
+        )
+    return value
 
 
 def relay_session_ttl_sec() -> int:

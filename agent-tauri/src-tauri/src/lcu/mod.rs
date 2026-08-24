@@ -5,7 +5,7 @@ mod lockfile;
 mod party;
 mod rewards;
 
-pub(crate) use client::LcuClient;
+pub(crate) use client::{LcuClient, LcuIdentity};
 pub(crate) use events::LcuEventPoller;
 pub(crate) use lockfile::lockfile_path;
 

@@ -15,6 +15,7 @@ const MAX_LOCKFILE_BYTES: u64 = 4 * 1024;
 const MAX_LCU_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const LCU_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const LIVE_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
+const EXPECTED_LCU_PROCESS_NAME: &str = "LeagueClientUx.exe";
 
 struct SensitiveBuffer(Vec<u8>);
 
@@ -24,10 +25,27 @@ impl Drop for SensitiveBuffer {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LcuIdentity {
+    pub(crate) process_id: u32,
+    pub(crate) port: u16,
+}
+
 pub(crate) struct LcuClient {
+    process_id: u32,
     port: u16,
     password: String,
     http: Client,
+}
+
+impl std::fmt::Debug for LcuClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LcuClient")
+            .field("process_id", &self.process_id)
+            .field("port", &self.port)
+            .field("password", &"***")
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for LcuClient {
@@ -38,6 +56,13 @@ impl Drop for LcuClient {
 }
 
 impl LcuClient {
+    pub(crate) const fn identity(&self) -> LcuIdentity {
+        LcuIdentity {
+            process_id: self.process_id,
+            port: self.port,
+        }
+    }
+
     pub(crate) fn event_connection(&self) -> (u16, &str) {
         (self.port, &self.password)
     }
@@ -66,14 +91,15 @@ impl LcuClient {
         if parts.len() != 5 {
             return Err(AgentError::Lcu("lockfile 형식 오류".into()));
         }
-        if parts[0].is_empty() || parts[0].len() > 128 {
+        if !valid_lcu_process_label(parts[0]) {
             return Err(AgentError::Lcu("lockfile 프로세스 이름 오류".into()));
         }
-        let _process_id = parts[1]
+        let process_id = parts[1]
             .parse::<u32>()
             .ok()
             .filter(|value| *value > 0)
             .ok_or_else(|| AgentError::Lcu("LCU 프로세스 ID 오류".into()))?;
+        validate_lcu_process(path, process_id)?;
         let port = parts[2]
             .parse()
             .ok()
@@ -91,6 +117,7 @@ impl LcuClient {
             return Err(AgentError::Lcu("LCU 프로토콜 오류".into()));
         }
         Ok(Self {
+            process_id,
             port,
             password: parts[3].into(),
             http: Client::builder()
@@ -237,6 +264,83 @@ impl LcuClient {
     }
 }
 
+fn valid_lcu_process_label(value: &str) -> bool {
+    value.eq_ignore_ascii_case("LeagueClientUx")
+        || value.eq_ignore_ascii_case(EXPECTED_LCU_PROCESS_NAME)
+}
+
+#[cfg(windows)]
+fn validate_lcu_process(lockfile: &Path, process_id: u32) -> AgentResult<()> {
+    use windows::{
+        core::PWSTR,
+        Win32::{
+            Foundation::CloseHandle,
+            System::Threading::{
+                OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        },
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
+        .map_err(|_| AgentError::Lcu("LCU 프로세스를 확인할 수 없습니다.".into()))?;
+    let mut buffer = vec![0_u16; 32_768];
+    let mut length = buffer.len() as u32;
+    let query = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buffer.as_mut_ptr()),
+            &mut length,
+        )
+    };
+    let _ = unsafe { CloseHandle(handle) };
+    query.map_err(|_| AgentError::Lcu("LCU 프로세스 경로 확인 실패".into()))?;
+
+    let executable = String::from_utf16(&buffer[..length as usize])
+        .map_err(|_| AgentError::Lcu("LCU 프로세스 경로 오류".into()))?;
+    let executable = std::path::PathBuf::from(executable);
+    if !executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(EXPECTED_LCU_PROCESS_NAME))
+    {
+        return Err(AgentError::Lcu(
+            "lockfile PID가 League Client가 아닙니다.".into(),
+        ));
+    }
+
+    let process_dir = executable
+        .parent()
+        .and_then(|path| path.canonicalize().ok())
+        .ok_or_else(|| AgentError::Lcu("League Client 설치 경로 확인 실패".into()))?;
+    let lockfile_dir = lockfile
+        .parent()
+        .and_then(|path| path.canonicalize().ok())
+        .ok_or_else(|| AgentError::Lcu("lockfile 경로 확인 실패".into()))?;
+    let same_install_dir = process_dir == lockfile_dir
+        || lockfile_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case("Game"))
+            && lockfile_dir
+                .parent()
+                .is_some_and(|parent| parent == process_dir);
+    if !same_install_dir {
+        return Err(AgentError::Lcu(
+            "lockfile과 League Client 실행 경로가 일치하지 않습니다.".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn validate_lcu_process(_: &Path, _: u32) -> AgentResult<()> {
+    // Production Agent is Windows-only. Non-Windows builds are used for CI/tests,
+    // where Win32 process identity cannot be verified.
+    Ok(())
+}
+
 async fn read_json_response(request: RequestBuilder, service: &str) -> AgentResult<Value> {
     let response = request
         .send()
@@ -266,7 +370,25 @@ async fn read_json_response(request: RequestBuilder, service: &str) -> AgentResu
     if body.is_empty() {
         return Ok(Value::Null);
     }
-    serde_json::from_slice(&body).map_err(|_| AgentError::Lcu(format!("{service} 응답 형식 오류")))
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|_| AgentError::Lcu(format!("{service} 응답 형식 오류")))?;
+    if is_lcu_error_envelope(&value) {
+        return Err(AgentError::Lcu(format!(
+            "{service} 요청 실패 (LCU 오류 응답)"
+        )));
+    }
+    Ok(value)
+}
+
+fn is_lcu_error_envelope(value: &Value) -> bool {
+    let Some(object) = value.as_object() else {
+        return false;
+    };
+    object.get("errorCode").is_some()
+        || object
+            .get("httpStatus")
+            .and_then(Value::as_u64)
+            .is_some_and(|status| status >= 400)
 }
 
 fn lcu_url(port: u16, endpoint: &str) -> AgentResult<Url> {
@@ -312,10 +434,11 @@ mod tests {
     }
 
     #[test]
-    fn lockfile_rejects_invalid_port_and_protocol_without_leaking_password() {
+    fn lockfile_rejects_invalid_port_protocol_and_process_label_without_leaking_password() {
         for contents in [
             "LeagueClientUx:123:0:super-secret:https",
             "LeagueClientUx:123:2999:super-secret:http",
+            "FakeClient:123:2999:super-secret:https",
         ] {
             let path = std::env::temp_dir().join(format!("yummi-{}.lock", Uuid::new_v4()));
             fs::write(&path, contents).unwrap();
@@ -340,6 +463,32 @@ mod tests {
         assert_eq!(url.host_str(), Some("127.0.0.1"));
         assert!(lcu_url(2999, "https://example.test/steal").is_err());
         assert!(lcu_url(2999, "//example.test/steal").is_err());
+    }
+
+    #[test]
+    fn debug_output_redacts_lcu_password() {
+        let client = LcuClient {
+            process_id: 123,
+            port: 4567,
+            password: "super-secret".into(),
+            http: Client::new(),
+        };
+        let rendered = format!("{client:?}");
+        assert!(rendered.contains("123"));
+        assert!(rendered.contains("4567"));
+        assert!(!rendered.contains("super-secret"));
+        assert!(rendered.contains("***"));
+    }
+
+    #[test]
+    fn detects_lcu_error_envelopes_without_treating_normal_payloads_as_errors() {
+        assert!(is_lcu_error_envelope(
+            &json!({"errorCode":"RPC_ERROR", "message":"x"})
+        ));
+        assert!(is_lcu_error_envelope(&json!({"httpStatus":500})));
+        assert!(!is_lcu_error_envelope(&json!({"httpStatus":204})));
+        assert!(!is_lcu_error_envelope(&json!({"phase":"Lobby"})));
+        assert!(!is_lcu_error_envelope(&Value::Null));
     }
 
     #[test]

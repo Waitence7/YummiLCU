@@ -49,10 +49,28 @@ export function Header({
   );
 }
 
+function safeDiscordAvatar(value: string | null | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (
+      url.protocol !== 'https:' ||
+      url.hostname !== 'cdn.discordapp.com' ||
+      url.username !== '' ||
+      url.password !== ''
+    ) {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 function DiscordAccount({ state }: { state: AgentState }) {
   const connected = state.discord_id != null;
   const avatar =
-    state.discord_avatar ||
+    safeDiscordAvatar(state.discord_avatar) ||
     (connected
       ? `https://cdn.discordapp.com/embed/avatars/${Number(state.discord_id) % 6}.png`
       : null);
