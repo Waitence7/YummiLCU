@@ -20,6 +20,8 @@ export type AgentActions = {
   saveConfig(config: Config): Promise<boolean>;
   patchConfig(patch: Partial<Config>): Promise<boolean>;
   refreshRecent(): Promise<void>;
+  getDiagnostics(): Promise<string>;
+  exportDiagnostics(): Promise<string>;
 };
 
 export function useAgentState(): {
@@ -123,6 +125,8 @@ export function useAgentState(): {
       [saveConfig],
     ),
     refreshRecent,
+    getDiagnostics: api.getDiagnosticBundle,
+    exportDiagnostics: api.exportDiagnosticBundle,
   };
 
   return { state, recent, actions };

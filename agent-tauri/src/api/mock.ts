@@ -97,6 +97,21 @@ export async function mockInvoke<T>(
       });
       return undefined as T;
     }
+    case 'get_diagnostic_bundle': {
+      return [
+        'Yummi LCU Agent Diagnostics',
+        `app_version=${state.app_version ?? 'mock'}`,
+        `relay_connected=${state.relay}`,
+        `lcu_connected=${state.lcu}`,
+        `discord_bound=${state.discord_id != null}`,
+        '',
+        '--- UI Logs ---',
+        ...state.logs,
+      ].join('\n') as T;
+    }
+    case 'export_diagnostic_bundle': {
+      return 'Downloads/yummi-agent-diagnostics-preview.txt' as T;
+    }
     case 'recent_match': {
       if (!state.lcu) throw new Error('League Client가 연결되지 않았습니다.');
       const recent: RecentMatch = {

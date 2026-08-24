@@ -26,3 +26,6 @@ export const stopAgent = () => call<void>('stop_agent');
 export const relogin = () => call<void>('relogin');
 export const submitOAuthCode = (code: string) => call<void>('submit_oauth_code', { code });
 export const recentMatch = () => call<RecentMatch>('recent_match');
+
+export const getDiagnosticBundle = () => call<string>('get_diagnostic_bundle');
+export const exportDiagnosticBundle = () => call<string>('export_diagnostic_bundle');

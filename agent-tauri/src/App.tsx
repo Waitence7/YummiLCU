@@ -66,7 +66,13 @@ export function App() {
           <SettingsTab config={state.config} onPatchConfig={actions.patchConfig} />
         )}
         {tab === 'voice' && <VoiceTab />}
-        {tab === 'logs' && <LogsTab logs={state.logs} />}
+        {tab === 'logs' && (
+          <LogsTab
+            logs={state.logs}
+            onGetDiagnostics={actions.getDiagnostics}
+            onExportDiagnostics={actions.exportDiagnostics}
+          />
+        )}
       </main>
 
       <footer className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-1.5 text-[10px] text-slate-500">
