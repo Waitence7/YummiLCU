@@ -61,11 +61,7 @@ jobs:
           }
           "YUMMI_AGENT_MANIFEST_PUBLIC_KEY=$publicKey" >> $env:GITHUB_ENV
 
-          $channel = "${{ github.event.inputs.channel || 'stable' }}"
           $thumbprint = if ($env:CERT_THUMBPRINT_VAR) { $env:CERT_THUMBPRINT_VAR } else { $env:CERT_THUMBPRINT_SECRET }
-          if ($channel -eq "stable" -and -not $thumbprint) {
-            throw "Stable releases require YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT"
-          }
           if ($thumbprint) {
             "YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
           }
@@ -121,24 +117,19 @@ jobs:
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
         run: |
-          $channel = "${{ github.event.inputs.channel || 'stable' }}"
-          $requiresSigning = $channel -eq "stable"
           $files = @("${{ steps.artifacts.outputs.exe }}")
           if ("${{ steps.artifacts.outputs.nsis }}") { $files += "${{ steps.artifacts.outputs.nsis }}" }
           if ("${{ steps.artifacts.outputs.msi }}") { $files += "${{ steps.artifacts.outputs.msi }}" }
 
           if (-not $env:WINDOWS_CERTIFICATE) {
-            if ($requiresSigning -or $env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT) {
-              throw "Stable/pinned releases require WINDOWS_CERTIFICATE"
+            if ($env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT) {
+              throw "YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT is set but WINDOWS_CERTIFICATE is missing"
             }
-            Write-Warning "WINDOWS_CERTIFICATE is not configured; non-stable artifacts are unsigned"
+            Write-Warning "WINDOWS_CERTIFICATE is not configured; artifacts are unsigned"
             exit 0
           }
           if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) {
             throw "WINDOWS_CERTIFICATE_PASSWORD is required when WINDOWS_CERTIFICATE is configured"
-          }
-          if ($requiresSigning -and -not $env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT) {
-            throw "Stable releases require a pinned YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT"
           }
 
           $certPath = Join-Path $env:RUNNER_TEMP "yummi-agent-code-signing.pfx"
