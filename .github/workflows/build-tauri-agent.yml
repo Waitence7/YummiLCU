@@ -268,12 +268,14 @@ jobs:
           set -euo pipefail
           test -s "release/agent-version.json"
           test -n "$AGENT_DEPLOY_TOKEN"
+          route_channel=""
+          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
           curl --fail-with-body --silent --show-error --retry 3 \
             -X PUT \
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/json" \
             --data-binary "@release/agent-version.json" \
-            "https://yummi.duckdns.org/agent/deploy/manifest/${RELEASE_CHANNEL}"
+            "https://yummi.duckdns.org/agent-deploy/manifest${route_channel}"
 
       - name: Stage latest installer
         env:
@@ -285,12 +287,14 @@ jobs:
           installer="release/Yummi-LCU-Agent-${RELEASE_VERSION}-setup.exe"
           test -s "$installer"
           test -n "$AGENT_DEPLOY_TOKEN"
+          route_channel=""
+          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
           curl --fail-with-body --silent --show-error --retry 3 \
             -X PUT \
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@$installer" \
-            "https://yummi.duckdns.org/agent/deploy/installer/${RELEASE_CHANNEL}/${RELEASE_VERSION}"
+            "https://yummi.duckdns.org/agent-deploy/installer${route_channel}/${RELEASE_VERSION}"
 
       - name: Verify archive and publish update
         env:
@@ -302,12 +306,14 @@ jobs:
           archive="release/tauri-${RELEASE_VERSION}.zip"
           test -s "$archive"
           test -n "$AGENT_DEPLOY_TOKEN"
+          route_channel=""
+          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
           curl --fail-with-body --silent --show-error --retry 3 \
             -X PUT \
             -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
             -H "Content-Type: application/zip" \
             --data-binary "@$archive" \
-            "https://yummi.duckdns.org/agent/deploy/archive/${RELEASE_CHANNEL}/${RELEASE_VERSION}"
+            "https://yummi.duckdns.org/agent-deploy/archive${route_channel}/${RELEASE_VERSION}"
 
       - name: Verify public update files
         env:
