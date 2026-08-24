@@ -323,7 +323,7 @@ mod tests {
         assert!(!config.prevent_queue_after_dodge);
         assert_eq!(config.auth_poll_interval_ms, 1500);
         assert!(config.follow_league_client);
-        assert_eq!(config.update_channel, "stable");
+        assert_eq!(config.update_channel, embedded_release_channel());
         assert_eq!(config.saved_session_max_age_days, 14);
     }
 
