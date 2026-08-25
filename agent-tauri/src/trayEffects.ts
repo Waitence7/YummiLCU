@@ -15,7 +15,7 @@ export const TRAY_HIDE_EFFECT_OPTIONS: ReadonlyArray<{
   { value: 'suction', label: '액체 빨림', description: '화면이 액체처럼 늘어나며 오른쪽 아래 한 점으로 흡수됩니다.' },
   { value: 'page-curl', label: '종이 말림', description: '오른쪽 모서리가 종이처럼 말린 뒤 트레이 방향으로 접혀 들어갑니다.' },
   { value: 'book-return', label: '유미의 책 · 귀환', description: 'GUI가 페이지처럼 넘어간 뒤 적갈색 표지와 금빛 장식, 푸른 보석의 유미 책이 되어 트레이로 돌아갑니다.' },
-  { value: 'book-return-v2', label: '유미의 책 · 귀환 V2', description: '변경 전의 한쪽 페이지 접힘 동작을 유지한 비교·디버깅용 유미 책 효과입니다.' },
+  { value: 'book-return-v2', label: '유미의 책 · 귀환 V2', description: '처음부터 표지와 책등을 가진 입체 책으로 창이 접히고, 두꺼운 페이지 단면을 보이며 트레이로 떨어집니다.' },
   { value: 'curtain', label: '천막 걷힘', description: '세로 주름이 잡히며 천막처럼 오른쪽 아래로 걷혀 들어갑니다.' },
   { value: 'shards', label: 'GPU 파편', description: '화면 텍스처를 GPU 조각으로 분리해 흩뜨린 뒤 트레이로 모읍니다.' },
   { value: 'fade', label: '부드럽게 사라짐', description: '빠르게 축소되며 투명해집니다.' },
