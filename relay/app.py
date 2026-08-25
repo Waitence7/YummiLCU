@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from relay import auth, config
-from relay.actions import ALLOWED_ACTIONS, is_allowed_action
+from relay.actions import ALLOWED_ACTIONS, action_policy
 from relay.connections import ConnectionManager
 from relay.lcu_linked import is_lcu_linked, lcu_linked_map, mark_lcu_linked
 
@@ -43,6 +43,20 @@ OAUTH_LINK_CODE_TTL_SEC = 600
 WS_AUTH_TIMEOUT_SEC = 15.0
 MAX_WS_AUTH_MESSAGE_BYTES = 4 * 1024
 MAX_AGENT_MESSAGE_BYTES = 256 * 1024
+_SERVER_PROTOCOL_VERSION = 1
+_SERVER_CAPABILITIES = frozenset({
+    "command_result_v2",
+    "heartbeat",
+    "relay_reconnect",
+    "event_ack",
+    "durable_event_replay",
+    "gameflow_events",
+    "ready_check_events",
+    "champ_select_events",
+    "party_events",
+    "eog_events",
+    "live_game_events",
+})
 
 _INTERNAL_AUTH_MAX_FAILS = 20
 _INTERNAL_AUTH_WINDOW_SEC = 60.0
@@ -52,10 +66,6 @@ _INTERNAL_AUTH_REDIS_KEY = "relay:internal_auth_fail:{ip}"
 OAUTH_LINK_MAX_ATTEMPTS = 5
 _OAUTH_LINK_ATTEMPT_REDIS_KEY = "relay:oauth_link_attempt:{session_id}"
 
-_LONG_COMMAND_ACTIONS = frozenset({"launch_client", "play_ranked_solo", "play_normal_draft"})
-_COMMAND_TIMEOUT_DEFAULT_SEC = 30.0
-_COMMAND_TIMEOUT_LONG_SEC = 300.0
-_MAX_PARTY_INVITE_RIOT_IDS = 20
 _LIVE_GAME_WEB_INGEST_MIN_INTERVAL_SEC = 10.0
 _live_game_web_ingest_at: dict[int, float] = {}
 
@@ -467,12 +477,13 @@ async def _forward_guild_match_eog(
     http: aiohttp.ClientSession,
     discord_id: int,
     payload: dict[str, Any],
-) -> None:
+    event_id: str | None = None,
+) -> bool:
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
     if not token:
         logger.warning("TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — 내전 LCU 전송 생략")
-        return
+        return False
 
     url = f"{api_base}/api/bot/guild-match/lcu-ingest"
     headers = {
@@ -480,7 +491,7 @@ async def _forward_guild_match_eog(
         "x-internal-bot-token": token,
         "x-actor-discord-user-id": str(discord_id),
     }
-    body = {"rawData": payload}
+    body = {"rawData": payload, "eventId": event_id}
     try:
         async with http.post(url, headers=headers, json=body) as res:
             if res.status >= 400:
@@ -489,16 +500,19 @@ async def _forward_guild_match_eog(
                     discord_id,
                     res.status,
                 )
-                return
+                return False
             logger.info("내전 LCU ingest OK discord_id=%s", discord_id)
+            return True
     except Exception:
         logger.exception("내전 LCU ingest 요청 실패 discord_id=%s", discord_id)
+        return False
 
 
 async def _forward_guild_match_live(
     http: aiohttp.ClientSession,
     discord_id: int,
     payload: dict[str, Any],
+    event_id: str | None = None,
 ) -> None:
     """관전자 Agent의 라이브 스냅샷도 웹 공개 경기 화면에서 사용할 수 있게 저장한다."""
     now = time.monotonic()
@@ -518,7 +532,9 @@ async def _forward_guild_match_live(
         "x-actor-discord-user-id": str(discord_id),
     }
     try:
-        async with http.post(url, headers=headers, json={"rawData": payload}) as res:
+        async with http.post(
+            url, headers=headers, json={"rawData": payload, "eventId": event_id}
+        ) as res:
             if res.status >= 400:
                 logger.warning(
                     "내전 라이브 LCU ingest 실패 discord_id=%s status=%s",
@@ -535,12 +551,13 @@ async def _forward_match_eog(
     http: aiohttp.ClientSession,
     discord_id: int,
     payload: dict[str, Any],
-) -> None:
+    event_id: str | None = None,
+) -> bool:
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
     if not token:
         logger.warning("TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — LCU 종료 매치 저장 생략")
-        return
+        return False
 
     url = f"{api_base}/api/bot/lcu/matches/eog-ingest"
     headers = {
@@ -548,7 +565,7 @@ async def _forward_match_eog(
         "x-internal-bot-token": token,
         "x-actor-discord-user-id": str(discord_id),
     }
-    body = {"rawData": payload}
+    body = {"rawData": payload, "eventId": event_id}
     try:
         async with http.post(url, headers=headers, json=body) as res:
             if res.status >= 400:
@@ -557,10 +574,12 @@ async def _forward_match_eog(
                     discord_id,
                     res.status,
                 )
-                return
+                return False
             logger.info("LCU 종료 매치 저장 OK discord_id=%s", discord_id)
+            return True
     except Exception:
         logger.exception("LCU 종료 매치 저장 요청 실패 discord_id=%s", discord_id)
+        return False
 
 
 def _agent_hello_info(data: dict[str, Any]) -> dict[str, Any]:
@@ -608,6 +627,42 @@ def _agent_hello_info(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _server_hello(info: dict[str, Any]) -> dict[str, Any]:
+    agent_protocol = info.get("protocol_version", 0)
+    protocol_version = min(
+        _SERVER_PROTOCOL_VERSION,
+        agent_protocol if isinstance(agent_protocol, int) and agent_protocol >= 0 else 0,
+    )
+    advertised = info.get("capabilities")
+    if not isinstance(advertised, dict):
+        advertised = {}
+    negotiated = {
+        name: True
+        for name in sorted(_SERVER_CAPABILITIES)
+        if advertised.get(name) is True
+    }
+    return {
+        "type": "server_hello",
+        "protocol_version": protocol_version,
+        "capabilities": negotiated,
+    }
+
+
+async def _ack_agent_event(websocket: WebSocket, event_id: str | None) -> None:
+    if event_id is not None:
+        await websocket.send_json({"type": "event_ack", "event_id": event_id})
+
+
+def _relay_event_id(data: dict[str, Any]) -> str | None:
+    raw = data.get("event_id")
+    if not isinstance(raw, str) or len(raw) > 64:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except ValueError:
+        return None
+
+
 async def _handle_agent_message(
     websocket: WebSocket,
     conn: ConnectionManager,
@@ -644,9 +699,12 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             logger.warning("guild_match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return
+        event_id = _relay_event_id(data)
         http: aiohttp.ClientSession = websocket.app.state.http
         await conn.forward_guild_match_eog(discord_id, payload)
-        await _forward_guild_match_eog(http, discord_id, payload)
+        forwarded = await _forward_guild_match_eog(http, discord_id, payload, event_id)
+        if forwarded:
+            await _ack_agent_event(websocket, event_id)
         return
 
     if msg_type == "match_eog":
@@ -655,12 +713,16 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             logger.warning("match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return
+        event_id = _relay_event_id(data)
         http: aiohttp.ClientSession = websocket.app.state.http
-        await _forward_match_eog(http, discord_id, payload)
+        forwarded = await _forward_match_eog(http, discord_id, payload, event_id)
+        if forwarded:
+            await _ack_agent_event(websocket, event_id)
         return
 
     if msg_type == "agent_hello":
         info = _agent_hello_info(data)
+        await websocket.send_json(_server_hello(info))
         discord_id = await conn.set_agent_info_for_ws(websocket, info)
         if discord_id is None:
             return
@@ -715,8 +777,9 @@ async def _handle_agent_message(
         payload = data.get("data")
         if discord_id is None or not isinstance(payload, dict):
             return
+        event_id = _relay_event_id(data)
         await conn.forward_live_game_update(discord_id, payload)
-        await _forward_guild_match_live(websocket.app.state.http, discord_id, payload)
+        await _forward_guild_match_live(websocket.app.state.http, discord_id, payload, event_id)
         return
 
     if msg_type == "participant_status_update":
@@ -976,13 +1039,13 @@ async def internal_command(
 ) -> JSONResponse:
     """누른 유저 discord_id의 에이전트로만 action 전달."""
     await _verify_internal_secret(request, x_relay_internal_secret)
-    if not is_allowed_action(body.action):
+    policy = action_policy(body.action)
+    if policy is None:
         raise HTTPException(400, f"action not allowed: {body.action}")
-    if body.action in ("invite_party_members", "check_party_members"):
-        for key in ("riot_ids", "check_riot_ids"):
-            ids = body.payload.get(key)
-            if isinstance(ids, list) and len(ids) > _MAX_PARTY_INVITE_RIOT_IDS:
-                raise HTTPException(400, f"{key} max {_MAX_PARTY_INVITE_RIOT_IDS}")
+    for key, max_items in policy.list_limits:
+        ids = body.payload.get(key)
+        if isinstance(ids, list) and len(ids) > max_items:
+            raise HTTPException(400, f"{key} max {max_items}")
     conn: ConnectionManager = request.app.state.connections
     if not conn.is_online(body.discord_id):
         raise HTTPException(404, "agent not connected")
@@ -1001,11 +1064,7 @@ async def internal_command(
         conn.cancel_pending_result(body.discord_id, req_id)
         raise HTTPException(502, "failed to send to agent")
 
-    timeout_sec = (
-        _COMMAND_TIMEOUT_LONG_SEC
-        if body.action in _LONG_COMMAND_ACTIONS
-        else _COMMAND_TIMEOUT_DEFAULT_SEC
-    )
+    timeout_sec = policy.timeout_sec
     try:
         result = await asyncio.wait_for(pending, timeout=timeout_sec)
     except asyncio.TimeoutError:

@@ -1,4 +1,5 @@
 use std::{
+    collections::VecDeque,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -9,7 +10,7 @@ use tauri::AppHandle;
 use tokio::{
     sync::{mpsc, watch, Mutex},
     task::JoinHandle,
-    time::{interval, sleep, timeout, Instant, MissedTickBehavior},
+    time::{interval, interval_at, sleep, timeout, Instant, MissedTickBehavior},
 };
 use tokio_tungstenite::{
     connect_async_with_config,
@@ -38,6 +39,49 @@ const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
 const LCU_EVENT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
+const MAX_DURABLE_REPLAY_EVENTS: usize = 64;
+const DURABLE_REPLAY_INTERVAL: Duration = Duration::from_secs(30);
+
+#[derive(Clone)]
+struct SerializedAgentEvent {
+    event_id: String,
+    text: String,
+}
+
+#[derive(Default)]
+struct DurableReplayBuffer {
+    pending: VecDeque<SerializedAgentEvent>,
+}
+
+impl DurableReplayBuffer {
+    fn track(&mut self, event: SerializedAgentEvent) -> bool {
+        if self
+            .pending
+            .iter()
+            .any(|pending| pending.event_id == event.event_id)
+        {
+            return false;
+        }
+        let dropped = if self.pending.len() >= MAX_DURABLE_REPLAY_EVENTS {
+            self.pending.pop_front();
+            true
+        } else {
+            false
+        };
+        self.pending.push_back(event);
+        dropped
+    }
+
+    fn ack(&mut self, event_id: &str) -> bool {
+        let before = self.pending.len();
+        self.pending.retain(|event| event.event_id != event_id);
+        self.pending.len() != before
+    }
+
+    fn snapshot(&self) -> Vec<SerializedAgentEvent> {
+        self.pending.iter().cloned().collect()
+    }
+}
 
 struct LcuSocketWatch {
     stop: watch::Sender<bool>,
@@ -253,8 +297,9 @@ async fn run_supervisor(
     let config = state.config.read().await.clone();
     let saved_session = session::load(&config);
     let mut needs_login = saved_session.is_none();
-    let session = saved_session.unwrap_or_else(|| session::create(&config));
+    let mut session = saved_session.unwrap_or_else(|| session::create(&config));
     let mut attempt = 0_u32;
+    let mut durable_replay = DurableReplayBuffer::default();
 
     loop {
         if *stop_rx.borrow() {
@@ -270,9 +315,10 @@ async fn run_supervisor(
             &state,
             generation,
             &config,
-            &session,
+            &mut session,
             &mut stop_rx,
             &mut needs_login,
+            &mut durable_replay,
         )
         .await
         {
@@ -318,9 +364,10 @@ async fn connect_once(
     state: &Arc<AppState>,
     generation: u64,
     config: &crate::config::Config,
-    session: &session::Session,
+    session: &mut session::Session,
     stop_rx: &mut watch::Receiver<bool>,
     needs_login: &mut bool,
+    durable_replay: &mut DurableReplayBuffer,
 ) -> AgentResult<ConnectionEnd> {
     let url = config.ws_url(&session.session_id)?;
     let connection = tokio::select! {
@@ -405,6 +452,11 @@ async fn connect_once(
     let mut watchdog = interval(Duration::from_secs(1));
     watchdog.set_missed_tick_behavior(MissedTickBehavior::Skip);
     watchdog.tick().await;
+    let mut durable_replay_tick = interval_at(
+        Instant::now() + DURABLE_REPLAY_INTERVAL,
+        DURABLE_REPLAY_INTERVAL,
+    );
+    durable_replay_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut awaiting_pong: Option<Instant> = None;
     let mut lcu_events = LcuEventPoller::default();
     let mut live_game_announced = false;
@@ -412,6 +464,7 @@ async fn connect_once(
     lcu_event_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
     lcu_event_poll.tick().await;
     let mut session_bound = false;
+    let mut durable_replay_enabled = false;
     let (lcu_event_tx, mut lcu_event_rx) = mpsc::channel(8);
     let mut lcu_socket_watch: Option<LcuSocketWatch> = None;
 
@@ -444,12 +497,64 @@ async fn connect_once(
                     Some(Ok(Message::Text(text))) => {
                         let incoming = IncomingMessage::parse(text.as_str())
                             .map_err(|message| AgentError::Relay(message.into()))?;
-                        match incoming {
+                        match &incoming {
                             IncomingMessage::Pong => awaiting_pong = None,
-                            IncomingMessage::SessionBound { .. } => {
+                            IncomingMessage::EventAck { event_id } => {
+                                if durable_replay.ack(event_id) {
+                                    state.record_flight("relay_ack", format!("event_id={event_id}")).await;
+                                }
+                            }
+                            IncomingMessage::ServerHello { protocol_version, capabilities } => {
+                                durable_replay_enabled = *protocol_version >= 1
+                                    && capabilities.get("event_ack") == Some(&true)
+                                    && capabilities.get("durable_event_replay") == Some(&true);
+                                state
+                                    .record_flight(
+                                        "protocol",
+                                        format!(
+                                            "server_protocol={} durable_replay={}",
+                                            protocol_version, durable_replay_enabled
+                                        ),
+                                    )
+                                    .await;
+                                if durable_replay_enabled && session_bound {
+                                    let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
+                                    if replayed > 0 {
+                                        state.log(app, format!("미확인 EOG 이벤트 {replayed}건 재전송")).await;
+                                    }
+                                }
+                            }
+                            IncomingMessage::SessionBound { discord_id, .. } => {
+                                let Some(discord_id) = *discord_id else {
+                                    return Err(AgentError::Relay(
+                                        "Relay session_bound에 Discord ID가 없습니다.".into(),
+                                    ));
+                                };
+                                if let Err(error) = session::pin_discord_id(session, discord_id) {
+                                    let _ = session::remove();
+                                    *needs_login = true;
+                                    state
+                                        .set_oauth_pending(
+                                            app,
+                                            true,
+                                            "저장된 Discord 계정과 다른 계정이 감지되어 연결을 차단했습니다. 다시 로그인하세요.",
+                                        )
+                                        .await;
+                                    state
+                                        .record_flight("security", "discord_binding_mismatch")
+                                        .await;
+                                    state.log(app, format!("Discord 바인딩 pin 차단: {error}")).await;
+                                    return Ok(ConnectionEnd::Stopped);
+                                }
                                 *needs_login = false;
                                 handle_incoming(app, state, &mut websocket, incoming, false, &mut lcu_events).await?;
                                 session_bound = true;
+                                if durable_replay_enabled {
+                                    let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
+                                    if replayed > 0 {
+                                        state.log(app, format!("미확인 EOG 이벤트 {replayed}건 재전송")).await;
+                                    }
+                                }
                                 state.log(app, "Relay 세션 인증 완료 — LCU 이벤트 감시 시작").await;
                                 state.relay.set_oauth_sender(generation, None).await;
                                 if lcu_socket_watch.is_none() {
@@ -494,6 +599,12 @@ async fn connect_once(
                     }
                 }
             }
+            _ = durable_replay_tick.tick(), if session_bound && durable_replay_enabled => {
+                let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
+                if replayed > 0 {
+                    state.log(app, format!("ACK 대기 EOG 이벤트 {replayed}건 재전송")).await;
+                }
+            }
             _ = heartbeat.tick() => {
                 if awaiting_pong.is_none() {
                     websocket.send(Message::Text("ping".into())).await
@@ -521,11 +632,16 @@ async fn connect_once(
                     state.record_flight("lcu_event", event_log.clone()).await;
                     let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
                         .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
-                    let Some(message) = serialize_agent_event(message_type, data)? else {
+                    let Some(event) = serialize_agent_event(message_type, data)? else {
                         state.log(app, "LCU 이벤트가 Relay 크기 제한을 초과해 생략됨").await;
                         continue;
                     };
-                    websocket.send(Message::Text(message.into())).await
+                    if durable_replay_enabled && is_durable_event(message_type) {
+                        if durable_replay.track(event.clone()) {
+                            state.log(app, "EOG replay buffer가 가득 차 가장 오래된 이벤트를 제거함").await;
+                        }
+                    }
+                    websocket.send(Message::Text(event.text.into())).await
                         .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
                     state.log(app, format!("Relay 이벤트 전송: {event_log}")).await;
                     if let Some(count) = live_participant_count {
@@ -545,11 +661,16 @@ async fn connect_once(
                     state.record_flight("lcu_event", event_log.clone()).await;
                     let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
                         .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
-                    let Some(message) = serialize_agent_event(message_type, data)? else {
+                    let Some(event) = serialize_agent_event(message_type, data)? else {
                         state.log(app, "LCU 이벤트가 Relay 크기 제한을 초과해 생략됨").await;
                         continue;
                     };
-                    websocket.send(Message::Text(message.into())).await
+                    if durable_replay_enabled && is_durable_event(message_type) {
+                        if durable_replay.track(event.clone()) {
+                            state.log(app, "EOG replay buffer가 가득 차 가장 오래된 이벤트를 제거함").await;
+                        }
+                    }
+                    websocket.send(Message::Text(event.text.into())).await
                         .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
                     state.log(app, format!("Relay 이벤트 전송: {event_log}")).await;
                     if let Some(count) = live_participant_count {
@@ -700,7 +821,10 @@ where
                     .await;
             }
         }
-        IncomingMessage::Pong | IncomingMessage::Unknown => {}
+        IncomingMessage::Pong
+        | IncomingMessage::ServerHello { .. }
+        | IncomingMessage::EventAck { .. }
+        | IncomingMessage::Unknown => {}
     }
     Ok(())
 }
@@ -719,9 +843,36 @@ fn safe_avatar_url(value: Option<String>) -> Option<String> {
     .then_some(value)
 }
 
-fn serialize_agent_event(message_type: &'static str, data: Value) -> AgentResult<Option<String>> {
-    let message = serde_json::to_string(&AgentEventMessage::new(message_type, data))?;
-    Ok((message.len() <= MAX_RELAY_MESSAGE_BYTES).then_some(message))
+fn serialize_agent_event(
+    message_type: &'static str,
+    data: Value,
+) -> AgentResult<Option<SerializedAgentEvent>> {
+    let message = AgentEventMessage::new(message_type, data);
+    let event_id = message.event_id().to_owned();
+    let text = serde_json::to_string(&message)?;
+    Ok((text.len() <= MAX_RELAY_MESSAGE_BYTES).then_some(SerializedAgentEvent { event_id, text }))
+}
+
+fn is_durable_event(message_type: &str) -> bool {
+    matches!(message_type, "match_eog" | "guild_match_eog")
+}
+
+async fn replay_durable_events<S>(
+    websocket: &mut S,
+    replay: &DurableReplayBuffer,
+) -> AgentResult<usize>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let events = replay.snapshot();
+    for event in &events {
+        websocket
+            .send(Message::Text(event.text.clone().into()))
+            .await
+            .map_err(|_| AgentError::Relay("Relay EOG 이벤트 재전송 실패".into()))?;
+    }
+    Ok(events.len())
 }
 
 fn relay_state_label(state: RelayConnectionState) -> &'static str {
@@ -879,6 +1030,20 @@ mod tests {
             safe_avatar_url(Some("https://cdn.discordapp.com/avatar.png".into())).as_deref(),
             Some("https://cdn.discordapp.com/avatar.png")
         );
+    }
+
+    #[test]
+    fn durable_replay_buffer_deduplicates_and_acks() {
+        let mut replay = DurableReplayBuffer::default();
+        let event = SerializedAgentEvent {
+            event_id: "event-1".into(),
+            text: "payload".into(),
+        };
+        assert!(!replay.track(event.clone()));
+        assert!(!replay.track(event));
+        assert_eq!(replay.snapshot().len(), 1);
+        assert!(replay.ack("event-1"));
+        assert!(replay.snapshot().is_empty());
     }
 
     #[test]

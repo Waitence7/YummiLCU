@@ -13,6 +13,7 @@ tauri-build = { version = "2.2", features = [] }
 [dependencies]
 base64 = "0.22"
 dirs = "6"
+discord-presence = "3.2"
 ed25519-dalek = "2.1"
 futures-util = "0.3"
 native-tls = "0.2"

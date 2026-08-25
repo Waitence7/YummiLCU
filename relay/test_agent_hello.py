@@ -1,13 +1,17 @@
+import json
 import os
 import unittest
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 from relay import config
 from relay.app import (
     MAX_WS_AUTH_MESSAGE_BYTES,
     _agent_hello_info,
+    _handle_agent_message,
     _read_ws_auth_payload,
     _safe_compare_digest,
+    _server_hello,
 )
 from relay.connections import ConnectionManager
 
@@ -24,6 +28,24 @@ class AgentHelloTests(unittest.TestCase):
         self.assertEqual(info["protocol_version"], 0)
         self.assertEqual(info["capabilities"], {})
         self.assertTrue(info["lcu_ready"])
+
+    def test_server_hello_negotiates_only_mutual_capabilities(self) -> None:
+        hello = _server_hello(
+            {
+                "protocol_version": 2,
+                "capabilities": {
+                    "event_ack": True,
+                    "durable_event_replay": True,
+                    "unknown_future_feature": True,
+                    "heartbeat": False,
+                },
+            }
+        )
+        self.assertEqual(hello["protocol_version"], 1)
+        self.assertEqual(
+            hello["capabilities"],
+            {"durable_event_replay": True, "event_ack": True},
+        )
 
     def test_invalid_capabilities_and_fields_are_safely_normalized(self) -> None:
         info = _agent_hello_info(
@@ -48,6 +70,7 @@ class _WebSocketStub:
         self.payload: dict[str, object] | None = None
         self.payloads: list[dict[str, object]] = []
         self.closed = False
+        self.app = SimpleNamespace(state=SimpleNamespace(http=object(), redis=object()))
 
     async def send_json(self, payload: dict[str, object]) -> None:
         self.payload = payload
@@ -68,6 +91,62 @@ class _AuthWebSocketStub:
 class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
     async def test_oversized_auth_message_is_rejected(self) -> None:
         self.assertIsNone(await _read_ws_auth_payload(_AuthWebSocketStub()))
+
+    async def test_agent_hello_handler_returns_negotiated_server_hello(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+
+        await _handle_agent_message(
+            websocket,
+            manager,
+            json.dumps({
+                "type": "agent_hello",
+                "version": "0.6.14",
+                "os": "windows",
+                "lcu_ready": True,
+                "protocol_version": 1,
+                "capabilities": {"event_ack": True, "durable_event_replay": True},
+            }),
+        )
+
+        self.assertEqual(websocket.payloads[-1]["type"], "server_hello")
+        self.assertTrue(websocket.payloads[-1]["capabilities"]["event_ack"])
+
+    async def test_durable_eog_is_acked_only_after_forward_succeeds(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        event_id = "123e4567-e89b-42d3-a456-426614174000"
+
+        with patch("relay.app._forward_match_eog", new=AsyncMock(return_value=True)):
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "match_eog",
+                    "event_id": event_id,
+                    "data": {"participants": []},
+                }),
+            )
+        self.assertEqual(
+            websocket.payloads[-1],
+            {"type": "event_ack", "event_id": event_id},
+        )
+
+        before = len(websocket.payloads)
+        with patch("relay.app._forward_match_eog", new=AsyncMock(return_value=False)):
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "match_eog",
+                    "event_id": "123e4567-e89b-42d3-a456-426614174001",
+                    "data": {"participants": []},
+                }),
+            )
+        self.assertEqual(len(websocket.payloads), before)
 
     async def test_hello_before_oauth_binding_is_preserved(self) -> None:
         manager = ConnectionManager()

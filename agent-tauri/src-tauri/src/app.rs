@@ -6,6 +6,7 @@ use tokio::time::sleep;
 use crate::{
     commands::agent::start_agent_inner,
     config::Config,
+    discord_presence::watch_discord_presence,
     lcu::{lockfile_path, LcuClient, LcuConnectionState},
     platform::sync_windows_startup,
     state::{AgentEvent, AppState},
@@ -20,6 +21,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
     let update_state = state.clone();
     let connect_state = state.clone();
     let lcu_state = state.clone();
+    let presence_state = state.clone();
 
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
@@ -52,6 +54,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(auto_update_on_startup(handle.clone(), update_state));
             tauri::async_runtime::spawn(watch_lcu(handle.clone(), lcu_state));
+            tauri::async_runtime::spawn(watch_discord_presence(presence_state));
             tauri::async_runtime::spawn(async move {
                 let _ = start_agent_inner(handle, connect_state).await;
             });

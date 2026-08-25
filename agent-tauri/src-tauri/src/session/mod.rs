@@ -21,6 +21,8 @@ use crate::{
 pub(crate) struct Session {
     pub(crate) session_id: String,
     pub(crate) ws_token: String,
+    #[serde(default)]
+    pub(crate) bound_discord_id: Option<u64>,
     saved_at_utc: u64,
     relay_base_url: String,
 }
@@ -45,6 +47,7 @@ pub(crate) fn create(config: &Config) -> Session {
     Session {
         session_id: Uuid::new_v4().to_string(),
         ws_token: B64.encode(Uuid::new_v4().as_bytes()),
+        bound_discord_id: None,
         saved_at_utc: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -145,8 +148,29 @@ fn session_shape_valid(session: &Session) -> bool {
             .ws_token
             .chars()
             .all(|character| character.is_ascii_graphic())
+        && session
+            .bound_discord_id
+            .is_none_or(|discord_id| discord_id > 0)
         && !session.relay_base_url.is_empty()
         && session.relay_base_url.len() <= 2_048
+}
+
+pub(crate) fn pin_discord_id(session: &mut Session, discord_id: u64) -> AgentResult<()> {
+    if discord_id == 0 {
+        return Err(AgentError::Session(
+            "Discord 계정 바인딩 값이 올바르지 않습니다.".into(),
+        ));
+    }
+    if let Some(expected) = session.bound_discord_id {
+        if expected != discord_id {
+            return Err(AgentError::Session(
+                "저장된 Discord 계정과 Relay 바인딩 계정이 일치하지 않습니다.".into(),
+            ));
+        }
+        return Ok(());
+    }
+    session.bound_discord_id = Some(discord_id);
+    save(session)
 }
 
 pub(crate) fn remove() -> AgentResult<()> {
@@ -166,14 +190,28 @@ mod tests {
         let session = Session {
             session_id: Uuid::new_v4().to_string(),
             ws_token: "0123456789abcdef".into(),
+            bound_discord_id: Some(42),
             saved_at_utc: 1,
             relay_base_url: "https://relay.example".into(),
         };
         let value = serde_json::to_value(session).unwrap();
         assert!(value.get("session_id").is_some());
         assert!(value.get("ws_token").is_some());
+        assert_eq!(
+            value.get("bound_discord_id").and_then(Value::as_u64),
+            Some(42)
+        );
         assert!(value.get("saved_at_utc").is_some());
         assert!(value.get("relay_base_url").is_some());
+    }
+
+    #[test]
+    fn discord_binding_pin_rejects_account_switch() {
+        let config = Config::default();
+        let mut session = create(&config);
+        session.bound_discord_id = Some(42);
+        assert!(pin_discord_id(&mut session, 42).is_ok());
+        assert!(pin_discord_id(&mut session, 43).is_err());
     }
 
     #[test]
@@ -181,6 +219,7 @@ mod tests {
         let session = Session {
             session_id: "not-a-uuid".into(),
             ws_token: "short".into(),
+            bound_discord_id: None,
             saved_at_utc: 1,
             relay_base_url: "https://relay.example".into(),
         };

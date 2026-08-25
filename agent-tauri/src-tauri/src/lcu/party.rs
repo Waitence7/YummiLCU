@@ -14,6 +14,13 @@ const INVITE_DELAY: Duration = Duration::from_millis(250);
 const LOBBY_ENDPOINT: &str = "/lol-lobby/v2/lobby";
 const INVITATIONS_ENDPOINT: &str = "/lol-lobby/v2/lobby/invitations";
 const FRIENDS_ENDPOINT: &str = "/lol-chat/v1/friends";
+const PLAYER_PARTY_ENDPOINT: &str = "/lol-lobby/v1/parties/player";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DiscordPartyInfo {
+    pub(crate) id: String,
+    pub(crate) size: Option<(u32, u32)>,
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RiotId {
@@ -46,6 +53,73 @@ impl RiotId {
 }
 
 impl LcuClient {
+    pub(crate) async fn discord_party_info(&self) -> AgentResult<Option<DiscordPartyInfo>> {
+        let lobby = self.request(Method::GET, LOBBY_ENDPOINT, None).await?;
+        if !lobby_is_open(&lobby) {
+            return Ok(None);
+        }
+
+        let party_id = first_string(&lobby, &["partyId", "id"])
+            .map(str::to_owned)
+            .or_else(|| {
+                lobby
+                    .get("localMember")
+                    .and_then(|member| first_string(member, &["partyId"]))
+                    .map(str::to_owned)
+            });
+        let party_id = if let Some(id) = party_id.filter(|id| valid_party_id(id)) {
+            Some(id)
+        } else {
+            self.request(Method::GET, PLAYER_PARTY_ENDPOINT, None)
+                .await
+                .ok()
+                .and_then(|party| first_string(&party, &["partyId", "id"]).map(str::to_owned))
+                .filter(|id| valid_party_id(id))
+        };
+        let Some(id) = party_id else {
+            return Ok(None);
+        };
+
+        let current = lobby
+            .get("members")
+            .and_then(Value::as_array)
+            .map(|members| members.len() as u32)
+            .unwrap_or(1)
+            .max(1);
+        let maximum = lobby
+            .pointer("/gameConfig/maxLobbySize")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                lobby
+                    .pointer("/gameConfig/maxPartySize")
+                    .and_then(Value::as_u64)
+            })
+            .or_else(|| lobby.get("maxLobbySize").and_then(Value::as_u64))
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value >= current);
+
+        Ok(Some(DiscordPartyInfo {
+            id,
+            size: maximum.map(|maximum| (current, maximum)),
+        }))
+    }
+
+    pub(crate) async fn join_discord_party(&self, party_id: &str) -> AgentResult<()> {
+        if !valid_party_id(party_id) {
+            return Err(crate::error::AgentError::Lcu(
+                "Discord 참가 정보가 올바르지 않습니다.".into(),
+            ));
+        }
+        let encoded = encode_component(party_id);
+        self.request(
+            Method::POST,
+            &format!("/lol-lobby/v2/party/{encoded}/join"),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub(super) async fn invite_party_members(&self, payload: &Value) -> AgentResult<ActionOutcome> {
         let lobby = self.request(Method::GET, LOBBY_ENDPOINT, None).await;
         if !lobby.as_ref().is_ok_and(lobby_is_open) {
@@ -294,6 +368,15 @@ impl LcuClient {
             .ok()
             .and_then(|value| value.get("summonerId").and_then(Value::as_i64)))
     }
+}
+
+fn valid_party_id(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 128
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
 }
 
 fn lobby_is_open(value: &Value) -> bool {

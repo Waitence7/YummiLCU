@@ -1,7 +1,10 @@
 use futures_util::SinkExt;
 use reqwest::Method;
 use serde_json::{json, Value};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use tokio::sync::{mpsc, watch};
 use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::{
@@ -49,6 +52,7 @@ pub(crate) struct LcuEventPoller {
     live_game_id: Option<String>,
     connection_identity: Option<LcuIdentity>,
     connection_generation: u64,
+    schema_warnings: HashSet<&'static str>,
 }
 
 impl LcuEventPoller {
@@ -60,6 +64,7 @@ impl LcuEventPoller {
         self.participant = None;
         self.eog_sent = false;
         self.lcu_available = None;
+        self.schema_warnings.clear();
     }
 
     fn observe_connection(&mut self, identity: LcuIdentity) {
@@ -102,6 +107,16 @@ impl LcuEventPoller {
         self.diagnostics.push(message.into());
         if self.diagnostics.len() > 64 {
             self.diagnostics.remove(0);
+        }
+    }
+
+    fn observe_schema(&mut self, endpoint: &'static str, healthy: bool) {
+        if healthy {
+            if self.schema_warnings.remove(endpoint) {
+                self.diagnostic(format!("LCU schema canary 복구: {endpoint}"));
+            }
+        } else if self.schema_warnings.insert(endpoint) {
+            self.diagnostic(format!("LCU schema canary 변경 감지: {endpoint}"));
         }
     }
 
@@ -218,6 +233,11 @@ impl LcuEventPoller {
                 self.last_live_game_poll = Some(Instant::now());
                 match LcuClient::live_game_request(LIVE_GAME_DATA).await {
                     Ok(value) => {
+                        self.observe_schema(
+                            "live_client_data",
+                            value.get("gameData").is_some_and(Value::is_object)
+                                && value.get("allPlayers").is_some_and(Value::is_array),
+                        );
                         if self.live_client_available != Some(true) {
                             self.diagnostic("Live Client Data API 연결됨 (127.0.0.1:2999)");
                         }
@@ -305,6 +325,7 @@ impl LcuEventPoller {
                 return events;
             }
         };
+        self.observe_schema("gameflow_phase", phase_value.is_string());
         let Some(phase) = phase_value.as_str().map(str::to_owned) else {
             if self.lcu_available != Some(false) {
                 self.diagnostic("LCU gameflow API 응답 형식 오류");
@@ -351,6 +372,12 @@ impl LcuEventPoller {
         }
 
         if let Ok(value) = client.request(Method::GET, READY_CHECK, None).await {
+            self.observe_schema(
+                "ready_check",
+                value.is_object()
+                    && value.get("state").is_some_and(Value::is_string)
+                    && value.get("playerResponse").is_some_and(Value::is_string),
+            );
             let payload = ready_check_payload(&value);
             push_changed(
                 &mut self.ready_check,
@@ -361,16 +388,26 @@ impl LcuEventPoller {
             );
         }
         if let Ok(value) = client.request(Method::GET, CHAMP_SELECT, None).await {
+            self.observe_schema(
+                "champ_select",
+                value.is_object()
+                    && value.get("timer").is_some_and(Value::is_object)
+                    && value.get("actions").is_some_and(Value::is_array),
+            );
             let payload = champ_select_payload(&value);
             push_changed(
                 &mut self.champ_select,
-                fingerprint(&payload),
+                champ_select_fingerprint(&payload),
                 "champ_select_update",
                 payload,
                 &mut events,
             );
         }
         if let Ok(value) = client.request(Method::GET, LOBBY, None).await {
+            self.observe_schema(
+                "lobby",
+                value.is_object() && value.get("members").is_some_and(Value::is_array),
+            );
             let payload = party_payload(&value);
             push_changed(
                 &mut self.party,
@@ -542,6 +579,25 @@ fn fingerprint(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
+fn champ_select_fingerprint(value: &Value) -> String {
+    let mut stable = value.clone();
+    if let Some(object) = stable.as_object_mut() {
+        object.remove("timer_ms");
+        if let Some(timer) = object.get_mut("timer").and_then(Value::as_object_mut) {
+            timer.remove("remaining_ms");
+            timer.remove("captured_at_ms");
+        }
+    }
+    fingerprint(&stable)
+}
+
+fn wall_clock_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
 fn live_game_fingerprint(value: &Value) -> String {
     let mut stable = value.clone();
     if let Some(object) = stable.as_object_mut() {
@@ -597,10 +653,39 @@ fn champ_select_payload(value: &Value) -> Value {
                 .is_none_or(|cell| cell < 0 || cell == local_cell_id)
     });
     let timer = session.get("timer");
+    let remaining_ms = timer
+        .and_then(|timer| timer.get("adjustedTimeLeftInPhase"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let total_ms = timer
+        .and_then(|timer| timer.get("totalTimeInPhase"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    let captured_at_ms = wall_clock_ms();
+    let phase_end_at_ms = timer
+        .and_then(|timer| timer.get("phaseEndTimeInEpochMs"))
+        .and_then(Value::as_u64)
+        .filter(|value| *value > 0)
+        .or_else(|| {
+            timer
+                .and_then(|timer| timer.get("internalNowInEpochMs"))
+                .and_then(Value::as_u64)
+                .filter(|value| *value > 0)
+                .map(|now| now.saturating_add(remaining_ms as u64))
+        });
     json!({
         "active": true,
         "phase": timer.and_then(|timer| timer.get("phase")).and_then(Value::as_str).unwrap_or(""),
-        "timer_ms": timer.and_then(|timer| timer.get("adjustedTimeLeftInPhase")).and_then(Value::as_i64).unwrap_or(0),
+        "timer_ms": remaining_ms,
+        "timer": {
+            "remaining_ms": remaining_ms,
+            "total_ms": total_ms,
+            "captured_at_ms": captured_at_ms,
+            "phase_end_at_ms": phase_end_at_ms,
+            "authoritative_epoch": phase_end_at_ms.is_some(),
+        },
         "local_cell_id": local_cell_id,
         "my_team": team_payload(session.get("myTeam")),
         "their_team": team_payload(session.get("theirTeam")),
@@ -902,6 +987,18 @@ mod tests {
     }
 
     #[test]
+    fn schema_canary_reports_drift_once_and_recovery_once() {
+        let mut poller = LcuEventPoller::default();
+        poller.observe_schema("champ_select", false);
+        poller.observe_schema("champ_select", false);
+        assert_eq!(poller.take_diagnostics().len(), 1);
+        poller.observe_schema("champ_select", true);
+        let recovered = poller.take_diagnostics();
+        assert_eq!(recovered.len(), 1);
+        assert!(recovered[0].contains("복구"));
+    }
+
+    #[test]
     fn ready_check_matches_legacy_active_rule() {
         assert_eq!(
             ready_check_payload(&json!({"state":"InProgress","playerResponse":"Pending"}))
@@ -922,6 +1019,23 @@ mod tests {
         assert_eq!(payload["active"], true);
         assert_eq!(payload["actions"][0]["champion_id"], 10);
         assert_eq!(payload["current_action"]["id"], 7);
+        assert_eq!(payload["timer"]["remaining_ms"], 12000);
+        assert!(payload["timer"]["captured_at_ms"].as_u64().is_some());
+    }
+
+    #[test]
+    fn champ_select_timer_uses_lcu_epoch_when_available() {
+        let payload = champ_select_payload(&json!({
+            "localPlayerCellId": 1,
+            "timer": {
+                "phase": "BAN_PICK",
+                "adjustedTimeLeftInPhase": 5000,
+                "internalNowInEpochMs": 100000
+            },
+            "actions": []
+        }));
+        assert_eq!(payload["timer"]["phase_end_at_ms"], 105000);
+        assert_eq!(payload["timer"]["authoritative_epoch"], true);
     }
 
     #[test]

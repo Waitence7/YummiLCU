@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
+use uuid::Uuid;
 
 fn empty_object() -> Value {
     json!({})
@@ -29,6 +31,14 @@ pub(crate) enum IncomingMessage {
     Pong,
     #[serde(rename = "live_game_polling")]
     LiveGamePolling { enabled: bool },
+    #[serde(rename = "server_hello")]
+    ServerHello {
+        protocol_version: u32,
+        #[serde(default)]
+        capabilities: BTreeMap<String, bool>,
+    },
+    #[serde(rename = "event_ack")]
+    EventAck { event_id: String },
     #[serde(other)]
     Unknown,
 }
@@ -51,6 +61,17 @@ impl IncomingMessage {
                 || !payload.is_object() =>
             {
                 Err("invalid Relay command")
+            }
+            Self::EventAck { event_id } if Uuid::parse_str(event_id).is_err() => {
+                Err("invalid Relay event ack")
+            }
+            Self::ServerHello { capabilities, .. }
+                if capabilities.len() > 64
+                    || capabilities
+                        .keys()
+                        .any(|key| key.is_empty() || key.len() > 64) =>
+            {
+                Err("invalid Relay server hello")
             }
             Self::SessionBound {
                 discord_id,
@@ -237,6 +258,8 @@ pub(crate) struct AgentCapabilities {
     command_result_v2: bool,
     heartbeat: bool,
     relay_reconnect: bool,
+    event_ack: bool,
+    durable_event_replay: bool,
     runes: bool,
     rewards: bool,
     party_invite: bool,
@@ -259,6 +282,8 @@ impl AgentCapabilities {
             command_result_v2: true,
             heartbeat: true,
             relay_reconnect: true,
+            event_ack: true,
+            durable_event_replay: true,
             runes: true,
             rewards: true,
             party_invite: true,
@@ -305,12 +330,21 @@ impl AgentHelloMessage {
 pub(crate) struct AgentEventMessage {
     #[serde(rename = "type")]
     message_type: &'static str,
+    event_id: String,
     data: Value,
 }
 
 impl AgentEventMessage {
     pub(crate) fn new(message_type: &'static str, data: Value) -> Self {
-        Self { message_type, data }
+        Self {
+            message_type,
+            event_id: Uuid::new_v4().to_string(),
+            data,
+        }
+    }
+
+    pub(crate) fn event_id(&self) -> &str {
+        &self.event_id
     }
 }
 
@@ -391,6 +425,29 @@ mod tests {
     }
 
     #[test]
+    fn server_hello_and_event_ack_deserialize() {
+        let hello = IncomingMessage::parse(
+            r#"{"type":"server_hello","protocol_version":1,"capabilities":{"event_ack":true,"durable_event_replay":true}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            hello,
+            IncomingMessage::ServerHello {
+                protocol_version: 1,
+                ..
+            }
+        ));
+        let event_id = Uuid::new_v4().to_string();
+        assert_eq!(
+            IncomingMessage::parse(&format!(
+                r#"{{"type":"event_ack","event_id":"{event_id}"}}"#
+            ))
+            .unwrap(),
+            IncomingMessage::EventAck { event_id }
+        );
+    }
+
+    #[test]
     fn live_game_polling_control_deserializes() {
         assert_eq!(
             IncomingMessage::parse(r#"{"type":"live_game_polling","enabled":false}"#).unwrap(),
@@ -431,6 +488,24 @@ mod tests {
     }
 
     #[test]
+    fn agent_event_has_unique_relay_event_id() {
+        let first = serde_json::to_value(AgentEventMessage::new(
+            "gameflow_update",
+            json!({"phase": "Lobby"}),
+        ))
+        .unwrap();
+        let second = serde_json::to_value(AgentEventMessage::new(
+            "gameflow_update",
+            json!({"phase": "Lobby"}),
+        ))
+        .unwrap();
+        let first_id = first["event_id"].as_str().unwrap();
+        let second_id = second["event_id"].as_str().unwrap();
+        assert!(Uuid::parse_str(first_id).is_ok());
+        assert_ne!(first_id, second_id);
+    }
+
+    #[test]
     fn agent_hello_serializes_current_capabilities() {
         let value = serde_json::to_value(AgentHelloMessage::new(true)).unwrap();
 
@@ -440,6 +515,8 @@ mod tests {
         assert_eq!(value["lcu_ready"], true);
         assert_eq!(value["protocol_version"], 1);
         assert_eq!(value["capabilities"]["command_result_v2"], true);
+        assert_eq!(value["capabilities"]["event_ack"], true);
+        assert_eq!(value["capabilities"]["durable_event_replay"], true);
         assert_eq!(value["capabilities"]["runes"], true);
         assert_eq!(value["capabilities"]["gameflow_events"], true);
         assert_eq!(value["capabilities"]["party_events"], true);

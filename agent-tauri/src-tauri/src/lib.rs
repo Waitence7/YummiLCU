@@ -2,6 +2,7 @@ mod app;
 mod commands;
 mod config;
 mod diagnostics;
+mod discord_presence;
 mod error;
 mod lcu;
 mod platform;
