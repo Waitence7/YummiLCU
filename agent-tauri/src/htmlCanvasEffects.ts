@@ -8,7 +8,8 @@ export type HtmlCanvasTrayEffect =
   | 'page-curl'
   | 'curtain'
   | 'shards'
-  | 'book-return';
+  | 'book-return'
+  | 'book-return-v2';
 
 type HtmlCanvasTexElementImage2D = {
   // Current HTML-in-Canvas syntax (Chromium M145+).
@@ -50,6 +51,7 @@ const EFFECTS: Record<HtmlCanvasTrayEffect, EffectSpec> = {
   curtain: { mode: 5, duration: 790, grid: [28, 28] },
   shards: { mode: 6, duration: 800, grid: [6, 4] },
   'book-return': { mode: 7, duration: 1040, grid: [32, 26] },
+  'book-return-v2': { mode: 8, duration: 1040, grid: [32, 26] },
 };
 
 const VERTEX_SHADER = `#version 300 es
@@ -170,16 +172,27 @@ void main() {
     p.y += spineBend * (0.25 + 0.75 * sin(a_uv.y * PI));
     p.x += sin(a_uv.y * PI * 1.6) * 0.018 * wake * (1.0 - closeBook);
 
-    // Phase 2: both page blocks close continuously around the spine. Keeping the
-    // center seam shared prevents the former jagged, torn-paper silhouette.
-    float pageSide = a_uv.x < 0.5 ? -1.0 : 1.0;
-    float pageDistance = abs(a_uv.x - 0.5) * 2.0;
-    float pageClose = turn * (1.0 - closeBook * 0.18);
-    float inward = pow(pageDistance, 1.18) * 0.24 * pageClose;
-    p.x -= pageSide * inward;
-    float pageArch = sin(pageDistance * PI) * sin(PI * turn);
-    p.y += pageArch * 0.048 * (0.35 + 0.65 * (1.0 - a_uv.y));
-    v_shade += pageSide * pageArch * 0.075;
+    if (u_mode < 7.5) {
+      // Current version: both page blocks close continuously around the spine.
+      float pageSide = a_uv.x < 0.5 ? -1.0 : 1.0;
+      float pageDistance = abs(a_uv.x - 0.5) * 2.0;
+      float pageClose = turn * (1.0 - closeBook * 0.18);
+      float inward = pow(pageDistance, 1.18) * 0.24 * pageClose;
+      p.x -= pageSide * inward;
+      float pageArch = sin(pageDistance * PI) * sin(PI * turn);
+      p.y += pageArch * 0.048 * (0.35 + 0.65 * (1.0 - a_uv.y));
+      v_shade += pageSide * pageArch * 0.075;
+    } else {
+      // V2 preserves the original one-sided page curl for comparison/debugging.
+      float rightPage = smoothstep(0.48, 0.54, a_uv.x);
+      float curlFront = 1.10 - turn * 1.32;
+      float curl = rightPage * smoothstep(curlFront - 0.22, curlFront + 0.05, a_uv.x);
+      float theta = curl * PI * 1.32;
+      p.x -= curl * (0.20 + 0.42 * turn);
+      p.y += sin(theta) * 0.105 * (0.30 + 0.70 * (1.0 - a_uv.y));
+      p.x += (1.0 - cos(theta)) * 0.082;
+      v_shade += curl * sin(theta) * 0.48;
+    }
 
     // Phase 3: settle into a compact front-cover shape instead of collapsing to a thin strip.
     // This leaves enough visible area for the burgundy cover, gold trim and blue gem.

@@ -16,6 +16,7 @@ export type TrayHideEffect =
   | 'suction'
   | 'page-curl'
   | 'book-return'
+  | 'book-return-v2'
   | 'curtain'
   | 'shards'
   | 'fade'
