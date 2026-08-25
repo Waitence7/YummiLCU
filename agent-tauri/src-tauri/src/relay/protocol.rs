@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 fn empty_object() -> Value {
@@ -274,6 +275,7 @@ pub(crate) struct AgentCapabilities {
     party_events: bool,
     eog_events: bool,
     live_game_events: bool,
+    unexpected_error_reports: bool,
 }
 
 impl AgentCapabilities {
@@ -298,6 +300,46 @@ impl AgentCapabilities {
             party_events: true,
             eog_events: true,
             live_game_events: true,
+            unexpected_error_reports: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct UnexpectedErrorReport {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    report_id: String,
+    occurred_at_ms: u64,
+    component: &'static str,
+    code: &'static str,
+    summary: String,
+    app_version: &'static str,
+    release_label: &'static str,
+    release_channel: &'static str,
+    build_id: &'static str,
+    git_commit: &'static str,
+}
+
+impl UnexpectedErrorReport {
+    pub(crate) fn new(component: &'static str, code: &'static str, summary: String) -> Self {
+        let occurred_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self {
+            message_type: "agent_error_report",
+            report_id: Uuid::new_v4().to_string(),
+            occurred_at_ms,
+            component,
+            code,
+            summary,
+            app_version: env!("CARGO_PKG_VERSION"),
+            release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL")
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
+            release_channel: option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable"),
+            build_id: option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
+            git_commit: option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
         }
     }
 }
@@ -521,6 +563,25 @@ mod tests {
         assert_eq!(value["capabilities"]["gameflow_events"], true);
         assert_eq!(value["capabilities"]["party_events"], true);
         assert_eq!(value["capabilities"]["live_game_events"], true);
+        assert_eq!(value["capabilities"]["unexpected_error_reports"], true);
+    }
+
+    #[test]
+    fn unexpected_error_report_contains_only_bounded_metadata() {
+        let value = serde_json::to_value(UnexpectedErrorReport::new(
+            "updater",
+            "apply_failed",
+            "update failed".into(),
+        ))
+        .unwrap();
+
+        assert_eq!(value["type"], "agent_error_report");
+        assert_eq!(value["component"], "updater");
+        assert_eq!(value["code"], "apply_failed");
+        assert_eq!(value["summary"], "update failed");
+        assert!(Uuid::parse_str(value["report_id"].as_str().unwrap()).is_ok());
+        assert!(value.get("logs").is_none());
+        assert!(value.get("discord_id").is_none());
     }
 
     #[test]

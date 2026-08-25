@@ -10,18 +10,20 @@ import uvicorn
 from relay import config
 from relay.app import MAX_AGENT_MESSAGE_BYTES
 from relay.error_monitor import DiscordErrorHandler
+from relay.logging_safety import RedactingFormatter
 
 # endregion
 
 
 def main() -> None:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(
+        RedactingFormatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
     )
+    logging.basicConfig(level=logging.INFO, handlers=[stream_handler])
     error_handler = DiscordErrorHandler()
     error_handler.setLevel(logging.ERROR)
-    error_handler.setFormatter(logging.Formatter("%(levelname)s [%(name)s]: %(message)s"))
+    error_handler.setFormatter(RedactingFormatter("%(levelname)s [%(name)s]: %(message)s"))
     logging.getLogger().addHandler(error_handler)
     uvicorn.run(
         "relay.app:app",

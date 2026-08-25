@@ -1,6 +1,7 @@
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
-use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
+use futures_util::FutureExt;
+use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
 use tokio::time::sleep;
 
 use crate::{
@@ -14,9 +15,15 @@ use crate::{
     updater::auto_update_on_startup,
 };
 
+const INSTALLER_SHUTDOWN_ARG: &str = "--shutdown-for-install";
+const BACKGROUND_START_ARG: &str = "--background";
+
 pub(crate) fn run() -> Result<(), tauri::Error> {
     let config = Config::load();
     let _ = sync_windows_startup(config.run_at_windows_startup);
+    let args = std::env::args().collect::<Vec<_>>();
+    let shutdown_on_start = installer_shutdown_requested(&args);
+    let start_hidden = background_start_requested(&args);
     let state = Arc::new(AppState::new(config));
     let update_state = state.clone();
     let connect_state = state.clone();
@@ -26,8 +33,12 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            tray::request_main_window(app);
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if installer_shutdown_requested(&args) {
+                tray::request_exit(app);
+            } else {
+                tray::request_main_window(app);
+            }
         }));
     }
 
@@ -44,19 +55,53 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::agent::get_agent_state,
             crate::commands::diagnostics::get_diagnostic_bundle,
             crate::commands::diagnostics::export_diagnostic_bundle,
-            crate::commands::lcu::recent_match
+            crate::commands::diagnostics::report_unexpected_error,
+            crate::commands::lcu::recent_match,
+            crate::commands::window::hide_main_window
         ])
         .setup(move |app| {
+            // The installer only launches this argument when it observed an
+            // older Agent process. If that process exits during the race
+            // between the check and launch, this process becomes primary and
+            // must terminate without creating another tray icon.
+            if shutdown_on_start {
+                app.handle().exit(0);
+                return Ok(());
+            }
             tray::setup(app)?;
-            // Login startup is intentionally headless: keep the relay and LCU
-            // watchers alive while exposing only the tray icon.
-            tray::hide_main_window(app.handle());
+            if start_hidden {
+                // Login and automatic-update startup stay headless while the
+                // installer finish action and normal launches show the UI.
+                tray::hide_main_window(app.handle());
+            } else {
+                tray::request_main_window(app.handle());
+            }
             let handle = app.handle().clone();
-            tauri::async_runtime::spawn(auto_update_on_startup(handle.clone(), update_state));
-            tauri::async_runtime::spawn(watch_lcu(handle.clone(), lcu_state));
-            tauri::async_runtime::spawn(watch_discord_presence(presence_state));
-            tauri::async_runtime::spawn(async move {
-                let _ = start_agent_inner(handle, connect_state).await;
+            spawn_monitored(
+                update_state.clone(),
+                "updater",
+                "task_panicked",
+                auto_update_on_startup(handle.clone(), update_state),
+            );
+            spawn_monitored(
+                lcu_state.clone(),
+                "lcu_watcher",
+                "task_panicked",
+                watch_lcu(handle.clone(), lcu_state),
+            );
+            spawn_monitored(
+                presence_state.clone(),
+                "discord_presence",
+                "task_panicked",
+                watch_discord_presence(presence_state),
+            );
+            let start_report_state = connect_state.clone();
+            spawn_monitored(connect_state, "relay", "task_panicked", async move {
+                if let Err(error) = start_agent_inner(handle, start_report_state.clone()).await {
+                    start_report_state
+                        .report_unexpected_error("relay", "startup_failed", error)
+                        .await;
+                }
             });
             Ok(())
         })
@@ -68,10 +113,23 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             event: WindowEvent::CloseRequested { api, .. },
             ..
         } if label == "main" => {
-            // Closing the window means minimize-to-tray, not stopping the
-            // relay. The explicit tray menu remains the only exit path.
+            // Closing the window means minimize-to-tray, not stopping the relay.
+            // Give the web UI a short window to animate before hiding natively.
+            // A native fallback still hides the window if the UI is unavailable.
             api.prevent_close();
-            tray::hide_main_window(app);
+            let request_id = tray::begin_hide_request();
+            let emitted = app
+                .get_webview_window("main")
+                .is_some_and(|window| window.emit("yummi://tray-hide-requested", ()).is_ok());
+            if emitted {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    sleep(Duration::from_millis(900)).await;
+                    tray::hide_main_window_if_pending(&app, request_id);
+                });
+            } else {
+                tray::hide_main_window_if_pending(app, request_id);
+            }
         }
         RunEvent::ExitRequested { code, api, .. } => {
             if should_keep_running(code) {
@@ -85,8 +143,35 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
     Ok(())
 }
 
+fn spawn_monitored<F>(state: Arc<AppState>, component: &'static str, code: &'static str, future: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        if let Err(payload) = AssertUnwindSafe(future).catch_unwind().await {
+            let summary = payload
+                .downcast_ref::<&str>()
+                .map(|value| (*value).to_owned())
+                .or_else(|| payload.downcast_ref::<String>().cloned())
+                .unwrap_or_else(|| "background task panicked".into());
+            state
+                .report_unexpected_error(component, code, summary)
+                .await;
+        }
+    });
+}
+
 fn should_keep_running(exit_code: Option<i32>) -> bool {
     exit_code.is_none()
+}
+
+fn installer_shutdown_requested(args: &[String]) -> bool {
+    args.iter()
+        .any(|argument| argument == INSTALLER_SHUTDOWN_ARG)
+}
+
+fn background_start_requested(args: &[String]) -> bool {
+    args.iter().any(|argument| argument == BACKGROUND_START_ARG)
 }
 
 async fn watch_lcu(app: AppHandle, state: Arc<AppState>) {
@@ -110,13 +195,40 @@ async fn watch_lcu(app: AppHandle, state: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::should_keep_running;
+    use super::{background_start_requested, installer_shutdown_requested, should_keep_running};
 
     #[test]
     fn user_window_close_keeps_background_services_running() {
         assert!(should_keep_running(None));
         assert!(!should_keep_running(Some(0)));
         assert!(!should_keep_running(Some(1)));
+    }
+
+    #[test]
+    fn installer_shutdown_requires_the_exact_argument() {
+        assert!(installer_shutdown_requested(&[
+            "yummi-lcu-tauri.exe".into(),
+            "--shutdown-for-install".into(),
+        ]));
+        assert!(!installer_shutdown_requested(&[
+            "yummi-lcu-tauri.exe".into(),
+            "--shutdown-for-installer".into(),
+        ]));
+    }
+
+    #[test]
+    fn only_background_launches_start_hidden() {
+        assert!(background_start_requested(&[
+            "yummi-lcu-tauri.exe".into(),
+            "--background".into(),
+        ]));
+        assert!(!background_start_requested(
+            &["yummi-lcu-tauri.exe".into(),]
+        ));
+        assert!(!background_start_requested(&[
+            "yummi-lcu-tauri.exe".into(),
+            "--shutdown-for-install".into(),
+        ]));
     }
 }
 

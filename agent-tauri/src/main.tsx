@@ -1,12 +1,23 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
-import { useMockBridge } from './api/commands';
+import { reportUnexpectedError, useMockBridge } from './api/commands';
 import { App } from './App';
 import './styles.css';
 
 const root = document.getElementById('root');
 if (!root) throw new Error('Missing #root');
+
+if (!useMockBridge) {
+  window.addEventListener('error', (event) => {
+    const summary = event.error instanceof Error ? event.error.message : event.message;
+    void reportUnexpectedError('uncaught_error', summary || 'unknown UI error').catch(() => undefined);
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    const summary = event.reason instanceof Error ? event.reason.message : String(event.reason);
+    void reportUnexpectedError('unhandled_rejection', summary).catch(() => undefined);
+  });
+}
 
 // 목 모드(브라우저 프리뷰)에서는 실제 앱 창 크기(640×620) 프레임 안에 렌더링한다.
 const app = useMockBridge ? (

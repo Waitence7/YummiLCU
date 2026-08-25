@@ -51,6 +51,7 @@ pub struct Config {
     pub update_channel: String,
     pub saved_session_max_age_days: u64,
     pub run_at_windows_startup: bool,
+    pub tray_hide_effect: String,
     pub ui_test_mode: bool,
 }
 
@@ -73,6 +74,7 @@ impl Default for Config {
             // The agent is a tray/background process. It must be running after
             // Windows login even when its main window is not visible.
             run_at_windows_startup: true,
+            tray_hide_effect: "fold".into(),
             ui_test_mode: false,
         }
     }
@@ -103,6 +105,7 @@ impl Config {
     pub(crate) fn normalize(&mut self) {
         self.relay_public_base_url = Self::secure_url(&self.relay_public_base_url);
         self.update_channel = self.update_channel.trim().to_ascii_lowercase();
+        self.tray_hide_effect = self.tray_hide_effect.trim().to_ascii_lowercase();
         self.update_manifest_url = self
             .update_manifest_url
             .as_ref()
@@ -142,6 +145,9 @@ impl Config {
         let defaults = Self::default();
         if validate_relay_base_url(&config.relay_public_base_url, cfg!(debug_assertions)).is_err() {
             config.relay_public_base_url = defaults.relay_public_base_url;
+        }
+        if validate_tray_hide_effect(&config.tray_hide_effect).is_err() {
+            config.tray_hide_effect = defaults.tray_hide_effect.clone();
         }
         if validate_update_channel(&config.update_channel).is_err() {
             config.update_channel = defaults.update_channel.clone();
@@ -191,6 +197,7 @@ impl Config {
     pub(crate) fn validate(&self) -> AgentResult<()> {
         validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
         validate_update_channel(&self.update_channel)?;
+        validate_tray_hide_effect(&self.tray_hide_effect)?;
         validate_update_url(self.update_manifest_url.as_deref(), cfg!(debug_assertions))?;
         if !cfg!(debug_assertions)
             && self.update_manifest_url.as_deref() != Some(public_update_manifest_url(&self.update_channel))
@@ -228,6 +235,15 @@ impl Config {
         url.set_query(None);
         url.query_pairs_mut().append_pair("session_id", session_id);
         Ok(url.into())
+    }
+}
+
+pub(crate) fn validate_tray_hide_effect(raw: &str) -> AgentResult<()> {
+    match raw.trim() {
+        "fold" | "jelly" | "pixels" | "cat" | "glass" | "fade" | "none" => Ok(()),
+        _ => Err(AgentError::Config(
+            "트레이 전환 효과가 올바르지 않습니다.".into(),
+        )),
     }
 }
 
@@ -325,6 +341,7 @@ mod tests {
         assert!(config.follow_league_client);
         assert_eq!(config.update_channel, embedded_release_channel());
         assert_eq!(config.saved_session_max_age_days, 14);
+        assert_eq!(config.tray_hide_effect, "fold");
     }
 
     #[test]
@@ -381,6 +398,14 @@ mod tests {
         config.normalize();
 
         assert!(!config.auto_update_enabled);
+    }
+
+    #[test]
+    fn tray_hide_effect_is_limited_to_known_effects() {
+        for effect in ["fold", "jelly", "pixels", "cat", "glass", "fade", "none"] {
+            assert!(validate_tray_hide_effect(effect).is_ok());
+        }
+        assert!(validate_tray_hide_effect("shader-experiment").is_err());
     }
 
     #[test]

@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 
+import { hideMainWindow, useMockBridge } from './api/commands';
 import { Banners } from './components/Banners';
 import { Header } from './components/Header';
 import { useAgentState } from './hooks/useAgentState';
@@ -7,6 +8,7 @@ import { GuildMatchTab } from './tabs/GuildMatchTab';
 import { LogsTab } from './tabs/LogsTab';
 import { SettingsTab } from './tabs/SettingsTab';
 import { VoiceTab } from './tabs/VoiceTab';
+import { playTrayHideEffect } from './trayEffects';
 
 type TabId = 'guild' | 'settings' | 'voice' | 'logs';
 
@@ -21,8 +23,33 @@ export function App() {
   const { state, recent, actions } = useAgentState();
   const [tab, setTab] = useState<TabId>('guild');
 
+  useEffect(() => {
+    if (useMockBridge) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen('yummi://tray-hide-requested', () => {
+          void playTrayHideEffect(state.config.TrayHideEffect, hideMainWindow).catch(() =>
+            hideMainWindow().catch(() => undefined),
+          );
+        }),
+      )
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [state.config.TrayHideEffect]);
+
   return (
-    <div className="flex h-full flex-col bg-white text-slate-800">
+    <div data-yummi-app-surface className="flex h-full flex-col bg-white text-slate-800">
       <Header
         state={state}
         onStart={() => void actions.start()}

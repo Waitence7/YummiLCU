@@ -31,7 +31,8 @@
     "targets": ["nsis", "msi"],
     "windows": {
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "installerHooks": "./windows/installer-hooks.nsh"
       }
     },
     "icon": ["icons/yummibot-desktop.png", "icons/icon.ico"]

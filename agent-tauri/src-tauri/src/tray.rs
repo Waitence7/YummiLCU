@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 
@@ -17,6 +17,7 @@ const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
 static OPENING_MAIN_WINDOW: AtomicBool = AtomicBool::new(false);
 static EXITING: AtomicBool = AtomicBool::new(false);
+static HIDE_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, OPEN_MENU_ID, "열기", true, None::<&str>)?;
@@ -50,6 +51,7 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
 }
 
 pub(crate) fn request_main_window(app: &AppHandle) {
+    cancel_pending_hide();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.unminimize();
         let _ = window.set_skip_taskbar(false);
@@ -68,6 +70,15 @@ pub(crate) fn request_main_window(app: &AppHandle) {
         OPENING_MAIN_WINDOW.store(false, Ordering::Release);
         if let Err(error) = result {
             eprintln!("main window creation failed: {error}");
+            if let Some(state) = app.try_state::<Arc<AppState>>() {
+                let state = state.inner().clone();
+                let summary = error.to_string();
+                tauri::async_runtime::spawn(async move {
+                    state
+                        .report_unexpected_error("ui", "window_creation_failed", summary)
+                        .await;
+                });
+            }
         }
     });
 }
@@ -77,10 +88,25 @@ pub(crate) fn remove(app: &AppHandle) {
 }
 
 pub(crate) fn hide_main_window(app: &AppHandle) {
+    cancel_pending_hide();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         let _ = window.set_skip_taskbar(true);
         let _ = window.hide();
     }
+}
+
+pub(crate) fn begin_hide_request() -> u64 {
+    HIDE_REQUEST_ID.fetch_add(1, Ordering::AcqRel) + 1
+}
+
+pub(crate) fn hide_main_window_if_pending(app: &AppHandle, request_id: u64) {
+    if HIDE_REQUEST_ID.load(Ordering::Acquire) == request_id {
+        hide_main_window(app);
+    }
+}
+
+fn cancel_pending_hide() {
+    HIDE_REQUEST_ID.fetch_add(1, Ordering::AcqRel);
 }
 
 fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
@@ -114,7 +140,7 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-fn request_exit(app: &AppHandle) {
+pub(crate) fn request_exit(app: &AppHandle) {
     if EXITING.swap(true, Ordering::AcqRel) {
         return;
     }

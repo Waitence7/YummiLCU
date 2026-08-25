@@ -5,11 +5,13 @@ use std::{
 
 use crate::config::Config;
 
+use super::client::LcuClient;
+
 pub(crate) fn lockfile_path(config: &Config) -> Option<PathBuf> {
     if let Some(raw) = &config.lockfile_path {
-        let path = expand_environment(raw);
-        if Path::new(&path).exists() {
-            return Some(PathBuf::from(path));
+        let path = PathBuf::from(expand_environment(raw));
+        if valid_lcu_lockfile(&path) {
+            return Some(path);
         }
     }
 
@@ -29,10 +31,6 @@ pub(crate) fn lockfile_path(config: &Config) -> Option<PathBuf> {
         }
     }
 
-    candidates.push(PathBuf::from(expand_environment(
-        r"%LOCALAPPDATA%\Riot Games\Riot Client\Config\lockfile",
-    )));
-
     for drive in b'C'..=b'Z' {
         let drive = drive as char;
         candidates.extend([
@@ -47,7 +45,11 @@ pub(crate) fn lockfile_path(config: &Config) -> Option<PathBuf> {
         ]);
     }
 
-    candidates.into_iter().find(|path| path.exists())
+    candidates.into_iter().find(|path| valid_lcu_lockfile(path))
+}
+
+fn valid_lcu_lockfile(path: &Path) -> bool {
+    path.is_file() && LcuClient::from_lockfile(path).is_ok()
 }
 
 fn product_install_path(contents: &str) -> Option<PathBuf> {

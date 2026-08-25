@@ -97,6 +97,9 @@ export async function mockInvoke<T>(
       });
       return undefined as T;
     }
+    case 'hide_main_window': {
+      return undefined as T;
+    }
     case 'get_diagnostic_bundle': {
       return [
         'Yummi LCU Agent Diagnostics',

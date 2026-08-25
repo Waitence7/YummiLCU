@@ -8,6 +8,9 @@ from relay import config
 from relay.app import (
     MAX_WS_AUTH_MESSAGE_BYTES,
     _agent_hello_info,
+    _agent_error_report,
+    _agent_error_last_by_discord,
+    _agent_error_recent,
     _handle_agent_message,
     _read_ws_auth_payload,
     _safe_compare_digest,
@@ -17,6 +20,10 @@ from relay.connections import ConnectionManager
 
 
 class AgentHelloTests(unittest.TestCase):
+    def tearDown(self) -> None:
+        _agent_error_last_by_discord.clear()
+        _agent_error_recent.clear()
+
     def test_non_ascii_secret_comparison_fails_closed(self) -> None:
         self.assertFalse(_safe_compare_digest("１２３４５６", "１２３４５６"))
 
@@ -36,6 +43,7 @@ class AgentHelloTests(unittest.TestCase):
                 "capabilities": {
                     "event_ack": True,
                     "durable_event_replay": True,
+                    "unexpected_error_reports": True,
                     "unknown_future_feature": True,
                     "heartbeat": False,
                 },
@@ -44,7 +52,11 @@ class AgentHelloTests(unittest.TestCase):
         self.assertEqual(hello["protocol_version"], 1)
         self.assertEqual(
             hello["capabilities"],
-            {"durable_event_replay": True, "event_ack": True},
+            {
+                "durable_event_replay": True,
+                "event_ack": True,
+                "unexpected_error_reports": True,
+            },
         )
 
     def test_invalid_capabilities_and_fields_are_safely_normalized(self) -> None:
@@ -63,6 +75,32 @@ class AgentHelloTests(unittest.TestCase):
         self.assertFalse(info["lcu_ready"])
         self.assertEqual(info["protocol_version"], 0)
         self.assertEqual(info["capabilities"], {"runes": True})
+
+    def test_agent_error_report_is_strictly_bounded_and_redacted(self) -> None:
+        report = _agent_error_report({
+            "type": "agent_error_report",
+            "report_id": "123e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 1,
+            "component": "updater",
+            "code": "apply_failed",
+            "summary": "failed\ntoken=secret keep=yes",
+            "app_version": "0.6.14",
+            "release_label": "0.6.14-beta",
+            "release_channel": "beta",
+            "build_id": "build-1",
+            "git_commit": "abc123",
+        })
+
+        self.assertIsNotNone(report)
+        self.assertNotIn("secret", report["summary"])
+        self.assertNotIn("\n", report["summary"])
+        self.assertIsNone(_agent_error_report({
+            "report_id": "not-a-uuid",
+            "occurred_at_ms": 1,
+            "component": "updater",
+            "code": "apply_failed",
+            "summary": "x",
+        }))
 
 
 class _WebSocketStub:
@@ -89,6 +127,10 @@ class _AuthWebSocketStub:
 
 
 class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
+    def tearDown(self) -> None:
+        _agent_error_last_by_discord.clear()
+        _agent_error_recent.clear()
+
     async def test_oversized_auth_message_is_rejected(self) -> None:
         self.assertIsNone(await _read_ws_auth_payload(_AuthWebSocketStub()))
 
@@ -106,12 +148,47 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
                 "os": "windows",
                 "lcu_ready": True,
                 "protocol_version": 1,
-                "capabilities": {"event_ack": True, "durable_event_replay": True},
+                "capabilities": {
+                    "event_ack": True,
+                    "durable_event_replay": True,
+                    "unexpected_error_reports": True,
+                },
             }),
         )
 
         self.assertEqual(websocket.payloads[-1]["type"], "server_hello")
         self.assertTrue(websocket.payloads[-1]["capabilities"]["event_ack"])
+        self.assertTrue(
+            websocket.payloads[-1]["capabilities"]["unexpected_error_reports"]
+        )
+
+    async def test_bound_agent_can_report_only_minimal_unexpected_error(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+
+        with self.assertLogs("yummi_lcu.relay", level="ERROR") as logs:
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "agent_error_report",
+                    "report_id": "123e4567-e89b-42d3-a456-426614174000",
+                    "occurred_at_ms": 1,
+                    "component": "ui",
+                    "code": "uncaught_error",
+                    "summary": "render failed",
+                    "app_version": "0.6.14",
+                    "release_label": "0.6.14-beta",
+                    "release_channel": "beta",
+                    "build_id": "build-1",
+                    "git_commit": "abc123",
+                }),
+            )
+
+        self.assertIn("component=ui", logs.output[0])
+        self.assertNotIn("discord_id", logs.output[0])
 
     async def test_durable_eog_is_acked_only_after_forward_succeeds(self) -> None:
         manager = ConnectionManager()

@@ -1,3 +1,5 @@
+export type TrayHideEffect = 'fold' | 'jelly' | 'pixels' | 'cat' | 'glass' | 'fade' | 'none';
+
 export type Config = {
   RelayPublicBaseUrl: string;
   AuthPollIntervalMs: number;
@@ -12,6 +14,7 @@ export type Config = {
   UpdateChannel: 'stable' | 'beta' | 'dev';
   SavedSessionMaxAgeDays: number;
   RunAtWindowsStartup: boolean;
+  TrayHideEffect: TrayHideEffect;
   UiTestMode: boolean;
 };
 
@@ -68,6 +71,7 @@ export const initialState: AgentState = {
     UpdateChannel: 'stable',
     SavedSessionMaxAgeDays: 14,
     RunAtWindowsStartup: true,
+    TrayHideEffect: 'fold',
     UiTestMode: false,
   },
 };

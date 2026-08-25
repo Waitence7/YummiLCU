@@ -9,6 +9,8 @@ import time
 
 import aiohttp
 
+from relay.logging_safety import redact_log_text
+
 _WEBHOOK_URL = os.getenv("DISCORD_ERROR_WEBHOOK_URL", "").strip()
 _COOLDOWN_SEC = float(os.getenv("DISCORD_ERROR_MONITOR_COOLDOWN_SEC", "300"))
 _recent: dict[str, float] = {}
@@ -34,6 +36,8 @@ async def notify_error(context: str, error: BaseException | str) -> None:
         message = str(error) or type(error).__name__
     else:
         message = str(error)
+    message = redact_log_text(message)
+    context = redact_log_text(context)
     if not _should_notify(f"{context}|{message[:200]}"):
         return
 

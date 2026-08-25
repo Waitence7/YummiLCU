@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 use tokio::{
-    sync::{mpsc, watch, Mutex},
+    sync::{broadcast, mpsc, watch, Mutex},
     task::JoinHandle,
     time::{interval, interval_at, sleep, timeout, Instant, MissedTickBehavior},
 };
@@ -29,7 +29,7 @@ use super::{
     command_auth,
     protocol::{
         Action, AgentEventMessage, AgentHelloMessage, AuthMessage, CommandResult, IncomingMessage,
-        OAuthCodeMessage, PongMessage, MAX_RELAY_MESSAGE_BYTES,
+        OAuthCodeMessage, PongMessage, UnexpectedErrorReport, MAX_RELAY_MESSAGE_BYTES,
     },
 };
 
@@ -168,8 +168,16 @@ impl RelaySupervisor {
 
         let task_state = state.clone();
         let task_app = app.clone();
+        let error_reports = state.unexpected_error_receiver();
         let task = tokio::spawn(async move {
-            run_supervisor(task_app.clone(), task_state.clone(), generation, stop_rx).await;
+            run_supervisor(
+                task_app.clone(),
+                task_state.clone(),
+                generation,
+                stop_rx,
+                error_reports,
+            )
+            .await;
             task_state
                 .relay
                 .finish(&task_app, &task_state, generation)
@@ -293,6 +301,7 @@ async fn run_supervisor(
     state: Arc<AppState>,
     generation: u64,
     mut stop_rx: watch::Receiver<bool>,
+    mut error_reports: broadcast::Receiver<UnexpectedErrorReport>,
 ) {
     let config = state.config.read().await.clone();
     let saved_session = session::load(&config);
@@ -319,6 +328,7 @@ async fn run_supervisor(
             &mut stop_rx,
             &mut needs_login,
             &mut durable_replay,
+            &mut error_reports,
         )
         .await
         {
@@ -368,6 +378,7 @@ async fn connect_once(
     stop_rx: &mut watch::Receiver<bool>,
     needs_login: &mut bool,
     durable_replay: &mut DurableReplayBuffer,
+    error_reports: &mut broadcast::Receiver<UnexpectedErrorReport>,
 ) -> AgentResult<ConnectionEnd> {
     let url = config.ws_url(&session.session_id)?;
     let connection = tokio::select! {
@@ -465,6 +476,7 @@ async fn connect_once(
     lcu_event_poll.tick().await;
     let mut session_bound = false;
     let mut durable_replay_enabled = false;
+    let mut unexpected_error_reports_enabled = false;
     let (lcu_event_tx, mut lcu_event_rx) = mpsc::channel(8);
     let mut lcu_socket_watch: Option<LcuSocketWatch> = None;
 
@@ -508,12 +520,16 @@ async fn connect_once(
                                 durable_replay_enabled = *protocol_version >= 1
                                     && capabilities.get("event_ack") == Some(&true)
                                     && capabilities.get("durable_event_replay") == Some(&true);
+                                unexpected_error_reports_enabled = *protocol_version >= 1
+                                    && capabilities.get("unexpected_error_reports") == Some(&true);
                                 state
                                     .record_flight(
                                         "protocol",
                                         format!(
-                                            "server_protocol={} durable_replay={}",
-                                            protocol_version, durable_replay_enabled
+                                            "server_protocol={} durable_replay={} error_reports={}",
+                                            protocol_version,
+                                            durable_replay_enabled,
+                                            unexpected_error_reports_enabled,
                                         ),
                                     )
                                     .await;
@@ -603,6 +619,25 @@ async fn connect_once(
                 let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
                 if replayed > 0 {
                     state.log(app, format!("ACK 대기 EOG 이벤트 {replayed}건 재전송")).await;
+                }
+            }
+            report = error_reports.recv(), if session_bound && unexpected_error_reports_enabled => {
+                match report {
+                    Ok(report) => {
+                        let message = serde_json::to_string(&report)?;
+                        websocket.send(Message::Text(message.into())).await
+                            .map_err(|_| AgentError::Relay("예상치 못한 오류 보고 전송 실패".into()))?;
+                        state.record_flight("error_report", "unexpected_error_sent").await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        state.record_flight(
+                            "error_report",
+                            format!("queue_lagged skipped={skipped}"),
+                        ).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(AgentError::Relay("오류 보고 큐가 종료되었습니다.".into()));
+                    }
                 }
             }
             _ = heartbeat.tick() => {

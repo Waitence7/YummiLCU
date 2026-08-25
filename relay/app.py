@@ -28,6 +28,7 @@ from relay import auth, config
 from relay.actions import ALLOWED_ACTIONS, action_policy
 from relay.connections import ConnectionManager
 from relay.lcu_linked import is_lcu_linked, lcu_linked_map, mark_lcu_linked
+from relay.logging_safety import redact_log_text
 
 logger = logging.getLogger("yummi_lcu.relay")
 # endregion
@@ -56,7 +57,29 @@ _SERVER_CAPABILITIES = frozenset({
     "party_events",
     "eog_events",
     "live_game_events",
+    "unexpected_error_reports",
 })
+
+_AGENT_ERROR_COMPONENTS = frozenset({
+    "updater",
+    "lcu_watcher",
+    "discord_presence",
+    "relay",
+    "ui",
+})
+_AGENT_ERROR_CODES = frozenset({
+    "task_panicked",
+    "startup_failed",
+    "manifest_verification_failed",
+    "apply_failed",
+    "window_creation_failed",
+    "uncaught_error",
+    "unhandled_rejection",
+})
+_AGENT_ERROR_MIN_INTERVAL_SEC = 30.0
+_AGENT_ERROR_DUPLICATE_COOLDOWN_SEC = 5 * 60.0
+_agent_error_last_by_discord: dict[int, float] = {}
+_agent_error_recent: dict[str, float] = {}
 
 _INTERNAL_AUTH_MAX_FAILS = 20
 _INTERNAL_AUTH_WINDOW_SEC = 60.0
@@ -663,6 +686,82 @@ def _relay_event_id(data: dict[str, Any]) -> str | None:
         return None
 
 
+def _agent_error_report(data: dict[str, Any]) -> dict[str, Any] | None:
+    report_id = data.get("report_id")
+    occurred_at_ms = data.get("occurred_at_ms")
+    component = data.get("component")
+    code = data.get("code")
+    summary = data.get("summary")
+    metadata_limits = {
+        "app_version": 64,
+        "release_label": 128,
+        "release_channel": 32,
+        "build_id": 128,
+        "git_commit": 128,
+    }
+    if (
+        not isinstance(report_id, str)
+        or not isinstance(occurred_at_ms, int)
+        or isinstance(occurred_at_ms, bool)
+        or occurred_at_ms <= 0
+        or component not in _AGENT_ERROR_COMPONENTS
+        or code not in _AGENT_ERROR_CODES
+        or not isinstance(summary, str)
+        or not summary.strip()
+        or len(summary) > 512
+    ):
+        return None
+    try:
+        report_id = str(uuid.UUID(report_id))
+    except ValueError:
+        return None
+
+    metadata: dict[str, str] = {}
+    for field, limit in metadata_limits.items():
+        value = data.get(field)
+        if (
+            not isinstance(value, str)
+            or not value
+            or len(value) > limit
+            or not value.isascii()
+            or not all(character.isalnum() or character in ".+-_" for character in value)
+        ):
+            return None
+        metadata[field] = value
+
+    return {
+        "report_id": report_id,
+        "occurred_at_ms": occurred_at_ms,
+        "component": component,
+        "code": code,
+        "summary": redact_log_text(" ".join(summary.split())),
+        **metadata,
+    }
+
+
+def _should_accept_agent_error(discord_id: int, report: dict[str, Any]) -> bool:
+    now = time.monotonic()
+    fingerprint = "|".join((
+        report["component"],
+        report["code"],
+        report["summary"],
+        report["release_label"],
+    ))
+    recent_cutoff = now - _AGENT_ERROR_DUPLICATE_COOLDOWN_SEC
+    for key, seen_at in list(_agent_error_recent.items()):
+        if seen_at < recent_cutoff:
+            _agent_error_recent.pop(key, None)
+    seen_at = _agent_error_recent.get(fingerprint)
+    if seen_at is not None and seen_at >= recent_cutoff:
+        return False
+    last_by_user = _agent_error_last_by_discord.get(discord_id)
+    if last_by_user is not None and now - last_by_user < _AGENT_ERROR_MIN_INTERVAL_SEC:
+        return False
+    _agent_error_last_by_discord[discord_id] = now
+    _agent_error_recent[fingerprint] = now
+    return True
+
+
 async def _handle_agent_message(
     websocket: WebSocket,
     conn: ConnectionManager,
@@ -676,6 +775,29 @@ async def _handle_agent_message(
         return
 
     msg_type = data.get("type")
+    if msg_type == "agent_error_report":
+        discord_id = conn.discord_id_for_ws(websocket)
+        report = _agent_error_report(data)
+        if discord_id is None or report is None:
+            return
+        if not _should_accept_agent_error(discord_id, report):
+            return
+        logger.error(
+            "Agent unexpected error component=%s code=%s version=%s release=%s "
+            "channel=%s build=%s commit=%s report_id=%s occurred_at_ms=%s summary=%s",
+            report["component"],
+            report["code"],
+            report["app_version"],
+            report["release_label"],
+            report["release_channel"],
+            report["build_id"],
+            report["git_commit"],
+            report["report_id"],
+            report["occurred_at_ms"],
+            report["summary"],
+        )
+        return
+
     if msg_type == "complete_oauth_link":
         code = data.get("code")
         if (

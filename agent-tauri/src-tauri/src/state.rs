@@ -1,16 +1,26 @@
-use std::{collections::VecDeque, sync::Arc, time::UNIX_EPOCH};
+use std::{
+    collections::{HashMap, VecDeque},
+    sync::Arc,
+    time::{Duration, Instant, UNIX_EPOCH},
+};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 const MAX_UI_LOGS: usize = 2_000;
+const ERROR_REPORT_QUEUE_CAPACITY: usize = 32;
+const ERROR_REPORT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const MAX_ERROR_SUMMARY_CHARS: usize = 512;
 
 use crate::{
     config::Config,
     diagnostics::FlightRecorder,
     lcu::LcuConnectionState,
-    relay::supervisor::{RelayConnectionState, RelaySupervisor},
+    relay::{
+        protocol::UnexpectedErrorReport,
+        supervisor::{RelayConnectionState, RelaySupervisor},
+    },
 };
 
 #[derive(Clone, Serialize)]
@@ -52,7 +62,9 @@ impl UiState {
             release_channel: option_env!("YUMMI_AGENT_RELEASE_CHANNEL")
                 .unwrap_or("stable")
                 .into(),
-            build_id: option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local").into(),
+            build_id: option_env!("YUMMI_AGENT_BUILD_ID")
+                .unwrap_or("local")
+                .into(),
             git_commit: option_env!("YUMMI_AGENT_GIT_COMMIT")
                 .unwrap_or("unknown")
                 .into(),
@@ -92,11 +104,14 @@ pub(crate) struct AppState {
     flight: Mutex<FlightRecorder>,
     lcu_state: RwLock<LcuConnectionState>,
     shutdown: watch::Sender<bool>,
+    unexpected_errors: broadcast::Sender<UnexpectedErrorReport>,
+    recent_unexpected_errors: Mutex<HashMap<String, Instant>>,
 }
 
 impl AppState {
     pub(crate) fn new(config: Config) -> Self {
         let (shutdown, _) = watch::channel(false);
+        let (unexpected_errors, _) = broadcast::channel(ERROR_REPORT_QUEUE_CAPACITY);
         Self {
             config: RwLock::new(config.clone()),
             ui: Mutex::new(UiState::new(config)),
@@ -105,6 +120,8 @@ impl AppState {
             flight: Mutex::new(FlightRecorder::default()),
             lcu_state: RwLock::new(LcuConnectionState::ClientStopped),
             shutdown,
+            unexpected_errors,
+            recent_unexpected_errors: Mutex::new(HashMap::new()),
         }
     }
 
@@ -232,6 +249,31 @@ impl AppState {
         self.shutdown.send_replace(true);
     }
 
+    pub(crate) fn unexpected_error_receiver(&self) -> broadcast::Receiver<UnexpectedErrorReport> {
+        self.unexpected_errors.subscribe()
+    }
+
+    pub(crate) async fn report_unexpected_error(
+        &self,
+        component: &'static str,
+        code: &'static str,
+        summary: impl AsRef<str>,
+    ) {
+        let summary = sanitize_error_summary(summary.as_ref());
+        let fingerprint = format!("{component}|{code}|{summary}");
+        let now = Instant::now();
+        let mut recent = self.recent_unexpected_errors.lock().await;
+        recent.retain(|_, seen_at| now.duration_since(*seen_at) < ERROR_REPORT_COOLDOWN);
+        if recent.contains_key(&fingerprint) {
+            return;
+        }
+        recent.insert(fingerprint, now);
+        drop(recent);
+        let _ = self
+            .unexpected_errors
+            .send(UnexpectedErrorReport::new(component, code, summary));
+    }
+
     pub(crate) async fn mark_stopped(&self, app: &AppHandle) {
         {
             let mut ui = self.ui.lock().await;
@@ -306,6 +348,21 @@ fn sanitize_diagnostic_line(value: &str) -> String {
         output = redact_key_value(&output, key);
     }
     output
+}
+
+fn sanitize_error_summary(value: &str) -> String {
+    let sanitized = sanitize_diagnostic_line(value);
+    let normalized = sanitized
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>();
+    normalized.chars().take(MAX_ERROR_SUMMARY_CHARS).collect()
 }
 
 fn redact_key_value(input: &str, key: &str) -> String {
@@ -384,7 +441,10 @@ fn lcu_state_label(state: LcuConnectionState) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_diagnostic_bundle, sanitize_diagnostic_line, UiState, MAX_UI_LOGS};
+    use super::{
+        build_diagnostic_bundle, sanitize_diagnostic_line, sanitize_error_summary, UiState,
+        MAX_ERROR_SUMMARY_CHARS, MAX_UI_LOGS,
+    };
     use crate::config::Config;
 
     #[test]
@@ -424,5 +484,32 @@ mod tests {
         assert!(!bundle.contains("SensitiveName"));
         assert!(!bundle.contains("super-secret"));
         assert!(bundle.contains("normal=ok"));
+    }
+
+    #[test]
+    fn remote_error_summary_is_single_line_redacted_and_bounded() {
+        let input = format!("failed\ntoken=super-secret {}", "x".repeat(1_000));
+        let summary = sanitize_error_summary(&input);
+        assert!(!summary.contains('\n'));
+        assert!(!summary.contains("super-secret"));
+        assert!(summary.chars().count() <= MAX_ERROR_SUMMARY_CHARS);
+    }
+
+    #[tokio::test]
+    async fn duplicate_remote_error_is_suppressed_during_cooldown() {
+        let state = super::AppState::new(Config::default());
+        let mut reports = state.unexpected_error_receiver();
+        state
+            .report_unexpected_error("ui", "uncaught_error", "render failed")
+            .await;
+        state
+            .report_unexpected_error("ui", "uncaught_error", "render failed")
+            .await;
+
+        assert!(reports.try_recv().is_ok());
+        assert!(matches!(
+            reports.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
     }
 }

@@ -599,7 +599,7 @@ async fn apply_update(
          if errorlevel 8 goto restore\r\n\
          if not exist \"{}\" goto restore\r\n\
          del /Q \"{}\" >nul 2>&1\r\n\
-         start \"\" \"{}\"\r\n\
+         start \"\" \"{}\" --background\r\n\
          rmdir /S /Q \"{}\" >nul 2>&1\r\n\
          del \"%~f0\"\r\n",
         legacy_update_lock.display(),
@@ -621,7 +621,7 @@ async fn apply_update(
          :restore\r\n\
          robocopy \"{}\" \"{}\" /E /XF agent.json .yummi-update.lock >nul\r\n\
          if exist \"{}\" del /Q \"{}\" >nul 2>&1\r\n\
-         start \"\" \"{}\"\r\n\
+         start \"\" \"{}\" --background\r\n\
          exit /b 1\r\n\
          :fail\r\n\
          if exist \"{}\" del /Q \"{}\" >nul 2>&1\r\n\
@@ -709,6 +709,17 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
             state
                 .log(app, format!("자동 업데이트 manifest 검증 실패: {error}"))
                 .await;
+            // Local developer builds intentionally omit the production signing key.
+            // In signed builds, however, verification failure is actionable.
+            if option_env!("YUMMI_AGENT_MANIFEST_PUBLIC_KEY").is_some() {
+                state
+                    .report_unexpected_error(
+                        "updater",
+                        "manifest_verification_failed",
+                        error.to_string(),
+                    )
+                    .await;
+            }
             return;
         }
     };
@@ -723,6 +734,9 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
         Ok(false) => {}
         Err(error) => {
             state.log(app, format!("자동 업데이트 실패: {error}")).await;
+            state
+                .report_unexpected_error("updater", "apply_failed", error.to_string())
+                .await;
             state
                 .set_update_message(
                     app,

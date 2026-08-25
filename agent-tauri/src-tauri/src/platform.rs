@@ -9,7 +9,7 @@ pub(crate) fn sync_windows_startup(enabled: bool) -> AgentResult<()> {
     let executable = std::env::current_exe()?.to_string_lossy().to_string();
     // HKCU\...\Run is a command line, not an argv array. Quote the executable
     // so an install path containing spaces cannot be reparsed as another binary.
-    let startup_command = format!("\"{}\"", executable.replace('"', ""));
+    let startup_command = windows_startup_command(&executable);
     let mut command = std::process::Command::new("reg.exe");
     command.creation_flags(0x08000000);
     if enabled {
@@ -37,6 +37,11 @@ pub(crate) fn sync_windows_startup(enabled: bool) -> AgentResult<()> {
         return Err(AgentError::Config("Windows 시작 프로그램 등록 실패".into()));
     }
     Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn windows_startup_command(executable: &str) -> String {
+    format!("\"{}\" --background", executable.replace('"', ""))
 }
 
 #[cfg(not(windows))]
@@ -99,4 +104,17 @@ pub(crate) fn launch_league_client() -> (bool, String) {
 #[cfg(not(windows))]
 pub(crate) fn launch_league_client() -> (bool, String) {
     (false, "Riot Client 실행은 Windows에서만 지원됩니다.".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::windows_startup_command;
+
+    #[test]
+    fn windows_login_startup_is_quoted_and_backgrounded() {
+        assert_eq!(
+            windows_startup_command(r#"C:\Program Files\Yummi\yummi-lcu-tauri.exe"#),
+            r#""C:\Program Files\Yummi\yummi-lcu-tauri.exe" --background"#
+        );
+    }
 }

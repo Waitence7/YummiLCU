@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 
 import { Button, Card, TextInput, Toggle } from '../components/ui';
-import type { Config } from '../state/types';
+import type { Config, TrayHideEffect } from '../state/types';
+import { playTrayHideEffect, TRAY_HIDE_EFFECT_OPTIONS } from '../trayEffects';
 
 export function SettingsTab({
   config,
@@ -35,8 +36,60 @@ export function SettingsTab({
         </div>
       </Card>
 
+      <TrayEffectCard config={config} onPatchConfig={onPatchConfig} />
+
       <AdvancedCard config={config} onPatchConfig={onPatchConfig} />
     </div>
+  );
+}
+
+
+function TrayEffectCard({
+  config,
+  onPatchConfig,
+}: {
+  config: Config;
+  onPatchConfig(patch: Partial<Config>): Promise<boolean>;
+}) {
+  const selected =
+    TRAY_HIDE_EFFECT_OPTIONS.find((option) => option.value === config.TrayHideEffect) ??
+    TRAY_HIDE_EFFECT_OPTIONS[0];
+
+  return (
+    <Card
+      title="트레이 전환 효과"
+      action={
+        <Button variant="ghost" onClick={() => void playTrayHideEffect(config.TrayHideEffect)}>
+          미리보기
+        </Button>
+      }
+    >
+      <div className="space-y-2.5">
+        <select
+          className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-[12px] text-slate-800 focus:border-indigo-400/70 focus:outline-none"
+          value={config.TrayHideEffect}
+          onChange={(event) =>
+            void onPatchConfig({ TrayHideEffect: event.target.value as TrayHideEffect })
+          }
+        >
+          {TRAY_HIDE_EFFECT_OPTIONS.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+        <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2">
+          <p className="text-[11px] font-medium text-indigo-800">{selected.label}</p>
+          <p className="mt-0.5 text-[11px] leading-snug text-indigo-700/80">
+            {selected.description}
+          </p>
+        </div>
+        <p className="text-[10px] leading-relaxed text-slate-500">
+          X 버튼으로 창을 닫아 트레이로 보낼 때 적용됩니다. Windows의 동작 줄이기 설정이 켜져
+          있으면 안전하게 짧은 페이드 효과로 전환됩니다.
+        </p>
+      </div>
+    </Card>
   );
 }
 
