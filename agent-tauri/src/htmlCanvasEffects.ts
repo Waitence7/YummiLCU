@@ -5,7 +5,8 @@ export type HtmlCanvasTrayEffect =
   | 'suction'
   | 'page-curl'
   | 'curtain'
-  | 'shards';
+  | 'shards'
+  | 'book-return';
 
 type HtmlCanvasWebGlContext = WebGLRenderingContext & {
   texElementImage2D?: (
@@ -33,6 +34,7 @@ const EFFECTS: Record<HtmlCanvasTrayEffect, EffectSpec> = {
   'page-curl': { mode: 4, duration: 830, grid: [30, 24] },
   curtain: { mode: 5, duration: 790, grid: [28, 28] },
   shards: { mode: 6, duration: 800, grid: [6, 4] },
+  'book-return': { mode: 7, duration: 1040, grid: [32, 26] },
 };
 
 const VERTEX_SHADER = `
@@ -124,7 +126,7 @@ void main() {
     p.x += pleat * (1.0 - gather * 0.45);
     p.y += abs(pleat) * 0.24 * sin(PI * t);
     v_shade = pleat * 3.2;
-  } else {
+  } else if (u_mode < 6.5) {
     // GPU shards: each independent quad gets its own rotation/scatter, no DOM cloning.
     vec2 center = vec2(a_cell.x * 2.0 - 1.0, 1.0 - a_cell.y * 2.0);
     vec2 local = p - center;
@@ -138,6 +140,56 @@ void main() {
     vec2 movedCenter = mix(center + scatter, anchor, pow(gatherT, 1.26));
     p = movedCenter + local * (1.0 - 0.91 * pow(gatherT, 1.12));
     v_shade = (seed - 0.5) * 0.22 * sin(PI * t);
+  } else {
+    // Yummi book return: the current UI becomes a page, folds into Yuumi's
+    // recognizable book cover, then rides a curved path back toward the tray corner.
+    float wake = smoothstep(0.00, 0.18, t);
+    float turn = smoothstep(0.12, 0.56, t);
+    float closeBook = smoothstep(0.46, 0.72, t);
+    float returnHome = smoothstep(0.80, 1.00, t);
+
+    // Phase 1: a soft central spine appears and the outer page edges breathe.
+    float spineDistance = abs(a_uv.x - 0.5);
+    float spineBend = exp(-spineDistance * 11.0) * 0.055 * sin(PI * wake) * (1.0 - closeBook);
+    p.y += spineBend * (0.25 + 0.75 * sin(a_uv.y * PI));
+    p.x += sin(a_uv.y * PI * 1.6) * 0.018 * wake * (1.0 - closeBook);
+
+    // Phase 2: the right page curls across the spine like a real page turn.
+    float rightPage = smoothstep(0.48, 0.54, a_uv.x);
+    float curlFront = 1.10 - turn * 1.32;
+    float curl = rightPage * smoothstep(curlFront - 0.22, curlFront + 0.05, a_uv.x);
+    float theta = curl * PI * 1.32;
+    p.x -= curl * (0.20 + 0.42 * turn);
+    p.y += sin(theta) * 0.105 * (0.30 + 0.70 * (1.0 - a_uv.y));
+    p.x += (1.0 - cos(theta)) * 0.082;
+    v_shade += curl * sin(theta) * 0.48;
+
+    // Phase 3: settle into a compact front-cover shape instead of collapsing to a thin strip.
+    // This leaves enough visible area for the burgundy cover, gold trim and blue gem.
+    vec2 bookCenter = vec2(0.02, -0.02);
+    vec2 d = p - bookCenter;
+    float side = a_uv.x < 0.5 ? -1.0 : 1.0;
+    float coverDepth = sin(PI * clamp(closeBook, 0.0, 1.0));
+    d.x *= 1.0 - 0.40 * closeBook;
+    d.y *= 1.0 - 0.28 * closeBook;
+    d.x += side * 0.020 * coverDepth;
+    d.y += (0.5 - a_uv.y) * 0.026 * coverDepth;
+    p = bookCenter + d;
+
+    // Mild perspective gives the closed form the chunky, angled feel of Yuumi's book.
+    p.x += (0.5 - a_uv.y) * 0.075 * closeBook;
+    p.y += (a_uv.x - 0.5) * 0.035 * closeBook;
+    p = bookCenter + rotate2d(p - bookCenter, -0.095 * closeBook);
+    v_shade += (0.5 - spineDistance) * 0.12 * closeBook;
+
+    // Phase 4: hold the recognizable cover briefly, then return it to the tray on a soft arc.
+    vec2 returnAnchor = vec2(1.03, -1.03);
+    vec2 closed = p;
+    float shrink = 1.0 - 0.94 * pow(returnHome, 1.18);
+    p = mix(closed, returnAnchor + (closed - returnAnchor) * shrink, returnHome);
+    float trail = sin(PI * returnHome);
+    p.x += 0.070 * trail * (1.0 - returnHome);
+    p.y += 0.038 * sin(returnHome * PI * 2.0) * trail;
   }
 
   gl_Position = vec4(p, 0.0, 1.0);
@@ -179,13 +231,86 @@ void main() {
       texture2D(u_texture, vec2(clamp(uv.x - split, 0.0, 1.0), uv.y)).b,
       center.a
     );
-  } else {
+  } else if (u_mode < 6.5) {
     color = texture2D(u_texture, uv);
+  } else {
+    // Book return: keep the live GUI while the page turns, then reveal a stylized
+    // Yuumi book cover: burgundy leather, thick gold trim and a blue center gem.
+    vec4 page = texture2D(u_texture, uv);
+    float wake = smoothstep(0.00, 0.18, t);
+    float closeBook = smoothstep(0.46, 0.72, t);
+    float coverMix = smoothstep(0.56, 0.74, t);
+    float returnHome = smoothstep(0.80, 1.00, t);
+    float edgeDistance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+    float spine = exp(-abs(uv.x - 0.5) * 34.0);
+
+    // Warm the page very slightly before it closes.
+    vec3 pageColor = page.rgb * vec3(1.025, 1.012, 0.985);
+    pageColor -= spine * 0.065 * (1.0 - closeBook);
+
+    // Deep reddish-brown leather with a subtle uneven sheen.
+    vec3 burgundyDark = vec3(0.145, 0.043, 0.032);
+    vec3 burgundy = vec3(0.315, 0.095, 0.067);
+    float leather = 0.5 + 0.5 * sin(uv.x * 18.0 + sin(uv.y * 13.0) * 0.8);
+    float vignette = 1.0 - smoothstep(0.18, 0.72, length(uv - vec2(0.5)));
+    vec3 cover = mix(burgundyDark, burgundy, 0.54 + leather * 0.10 + vignette * 0.12);
+
+    // Heavy gold frame and an inner ornamental rail.
+    vec3 goldDark = vec3(0.40, 0.275, 0.055);
+    vec3 gold = vec3(0.82, 0.645, 0.185);
+    vec3 goldHighlight = vec3(1.00, 0.825, 0.34);
+    float outerFrame = 1.0 - smoothstep(0.025, 0.062, edgeDistance);
+    float innerRail = 1.0 - smoothstep(0.010, 0.025, abs(edgeDistance - 0.105));
+    float frameLight = clamp(0.62 + (1.0 - uv.y) * 0.30 + uv.x * 0.10, 0.0, 1.0);
+    vec3 frameColor = mix(goldDark, goldHighlight, frameLight);
+    cover = mix(cover, frameColor, clamp(max(outerFrame, innerRail * 0.92), 0.0, 1.0));
+
+    // Curving gold ornament around the central gem. It stays stylized so it reads at tray size.
+    vec2 ornamentP = (uv - vec2(0.50, 0.49)) * vec2(1.0, 1.18);
+    float ornamentR = length(ornamentP);
+    float ornamentAngle = atan(ornamentP.y, ornamentP.x);
+    float ornamentTarget = 0.275 + sin(ornamentAngle * 2.0 + 0.65) * 0.022;
+    float ornament = 1.0 - smoothstep(0.010, 0.026, abs(ornamentR - ornamentTarget));
+    ornament *= smoothstep(0.16, 0.22, ornamentR) * (1.0 - smoothstep(0.35, 0.39, ornamentR));
+    cover = mix(cover, gold, ornament * 0.88);
+
+    // Gold bezel and saturated blue magical gem.
+    vec2 gemP = (uv - vec2(0.50, 0.49)) * vec2(1.45, 1.0);
+    float gemR = length(gemP);
+    float bezelOuter = 1.0 - smoothstep(0.152, 0.175, gemR);
+    float gemMask = 1.0 - smoothstep(0.112, 0.142, gemR);
+    float bezelRing = clamp(bezelOuter - gemMask, 0.0, 1.0);
+    cover = mix(cover, mix(goldDark, goldHighlight, 0.68 + 0.28 * (1.0 - uv.y)), bezelRing);
+
+    vec3 gemDeep = vec3(0.018, 0.105, 0.46);
+    vec3 gemBlue = vec3(0.025, 0.31, 0.94);
+    vec3 gemCyan = vec3(0.22, 0.72, 1.00);
+    float gemDepth = clamp(1.0 - gemR / 0.145, 0.0, 1.0);
+    vec3 gemColor = mix(gemDeep, gemBlue, gemDepth);
+    float gemHighlight = exp(-length((uv - vec2(0.465, 0.445)) * vec2(2.0, 2.8)) * 34.0);
+    gemColor = mix(gemColor, gemCyan, gemHighlight * 0.92);
+    cover = mix(cover, gemColor, gemMask);
+
+    // The gem flashes after the cover has formed, then leads the book out.
+    float gemPulse = sin(PI * smoothstep(0.66, 0.88, t)) * (1.0 - returnHome);
+    cover += vec3(0.05, 0.22, 0.82) * gemMask * gemPulse * 0.42;
+    float halo = exp(-gemR * 9.0) * gemPulse;
+    cover += vec3(0.04, 0.12, 0.42) * halo * 0.28;
+
+    // Pale lower strip hints at the thick page block visible on the reference book.
+    float pageBlock = smoothstep(0.84, 0.90, uv.y) * (1.0 - smoothstep(0.94, 0.985, uv.y));
+    pageBlock *= smoothstep(0.08, 0.14, uv.x) * (1.0 - smoothstep(0.86, 0.92, uv.x));
+    cover = mix(cover, vec3(0.70, 0.60, 0.33), pageBlock * 0.72);
+
+    color = vec4(mix(pageColor, cover, coverMix), page.a);
+    color.rgb += vec3(0.10, 0.07, 0.025) * outerFrame * coverMix * 0.12;
+    color.rgb += vec3(0.12, 0.20, 0.55) * gemMask * gemPulse * 0.18;
   }
 
   color.rgb = clamp(color.rgb + v_shade, 0.0, 1.0);
   float alpha = 1.0 - smoothstep(0.76, 1.0, t);
-  if (u_mode > 5.5) alpha = 1.0 - smoothstep(0.70, 1.0, t);
+  if (u_mode > 5.5 && u_mode < 6.5) alpha = 1.0 - smoothstep(0.70, 1.0, t);
+  if (u_mode > 6.5) alpha = 1.0 - smoothstep(0.90, 1.0, t);
   gl_FragColor = vec4(color.rgb, color.a * alpha);
 }
 `;

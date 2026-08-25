@@ -245,7 +245,7 @@ impl Config {
 pub(crate) fn validate_tray_hide_effect(raw: &str) -> AgentResult<()> {
     match raw.trim() {
         "fold" | "jelly" | "pixels" | "cat" | "glass" | "swirl" | "suction" | "page-curl"
-        | "curtain" | "shards" | "fade" | "none" => Ok(()),
+        | "book-return" | "curtain" | "shards" | "fade" | "none" => Ok(()),
         _ => Err(AgentError::Config(
             "트레이 전환 효과가 올바르지 않습니다.".into(),
         )),
@@ -416,6 +416,7 @@ mod tests {
             "swirl",
             "suction",
             "page-curl",
+            "book-return",
             "curtain",
             "shards",
             "fade",
