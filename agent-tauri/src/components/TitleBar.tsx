@@ -4,12 +4,18 @@ import appIcon from '../../src-tauri/icons/icon.ico';
 export function TitleBar() {
   return (
     <div
-      data-tauri-drag-region
-      className="flex h-10 shrink-0 items-center border-b border-white/10 bg-[#2b2b2b] text-slate-100"
+      className="flex h-10 shrink-0 cursor-move items-center border-b border-white/10 bg-[#2b2b2b] text-slate-100"
+      onMouseDown={(event) => {
+        if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
+        event.preventDefault();
+        void api.startMainWindowDrag().catch((error) => {
+          console.warn('[window] 창 드래그를 시작하지 못했습니다.', error);
+        });
+      }}
     >
-      <div data-tauri-drag-region className="flex min-w-0 flex-1 items-center gap-2.5 px-3">
+      <div className="flex min-w-0 flex-1 items-center gap-2.5 px-3">
         <img src={appIcon} alt="" className="size-5 shrink-0" draggable={false} />
-        <span data-tauri-drag-region className="truncate text-[13px] font-medium tracking-[0.01em]">
+        <span className="truncate text-[13px] font-medium tracking-[0.01em]">
           Yummi LCU Agent
         </span>
       </div>

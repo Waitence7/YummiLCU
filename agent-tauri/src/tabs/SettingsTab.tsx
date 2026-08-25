@@ -157,7 +157,14 @@ function TrayEffectCard({
     <Card
       title="트레이 전환 효과"
       action={
-        <Button variant="ghost" onClick={() => void playTrayHideEffect(config.TrayHideEffect)}>
+        <Button
+          variant="ghost"
+          onClick={() =>
+            void playTrayHideEffect(config.TrayHideEffect, undefined, {
+              playbackRate: config.TrayEffectPlaybackRate,
+            })
+          }
+        >
           미리보기
         </Button>
       }
@@ -182,9 +189,33 @@ function TrayEffectCard({
             {selected.description}
           </p>
         </div>
+        <label className="block rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+          <span className="flex items-center justify-between text-[11px] font-medium text-slate-700">
+            효과 속도
+            <output className="rounded bg-white px-2 py-0.5 font-mono text-indigo-700 shadow-sm">
+              {config.TrayEffectPlaybackRate.toFixed(1)}×
+            </output>
+          </span>
+          <input
+            className="mt-2 block w-full accent-indigo-600"
+            type="range"
+            min="0.1"
+            max="4"
+            step="0.1"
+            value={config.TrayEffectPlaybackRate}
+            onChange={(event) =>
+              void onPatchConfig({ TrayEffectPlaybackRate: Number(event.target.value) })
+            }
+          />
+          <span className="mt-1 flex justify-between text-[9px] text-slate-500">
+            <span>0.1× 느리게 관찰</span>
+            <span>1× 기본</span>
+            <span>4× 빠르게</span>
+          </span>
+        </label>
         <p className="text-[10px] leading-relaxed text-slate-500">
-          X 버튼으로 창을 닫아 트레이로 보낼 때 적용됩니다. Windows의 동작 줄이기 설정이 켜져
-          있으면 안전하게 짧은 페이드 효과로 전환됩니다.
+          속도는 미리보기와 X 버튼으로 창을 트레이에 보낼 때 모두 적용됩니다. Windows의 동작
+          줄이기 설정이 켜져 있으면 안전하게 짧은 페이드 효과로 전환됩니다.
         </p>
       </div>
     </Card>

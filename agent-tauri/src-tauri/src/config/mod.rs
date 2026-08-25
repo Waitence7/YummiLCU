@@ -54,6 +54,7 @@ pub struct Config {
     pub saved_session_max_age_days: u64,
     pub run_at_windows_startup: bool,
     pub tray_hide_effect: String,
+    pub tray_effect_playback_rate: f64,
     pub ui_test_mode: bool,
 }
 
@@ -77,6 +78,7 @@ impl Default for Config {
             // Windows login even when its main window is not visible.
             run_at_windows_startup: true,
             tray_hide_effect: "fold".into(),
+            tray_effect_playback_rate: 1.0,
             ui_test_mode: false,
         }
     }
@@ -152,6 +154,9 @@ impl Config {
         if validate_tray_hide_effect(&config.tray_hide_effect).is_err() {
             config.tray_hide_effect = defaults.tray_hide_effect.clone();
         }
+        if validate_tray_effect_playback_rate(config.tray_effect_playback_rate).is_err() {
+            config.tray_effect_playback_rate = defaults.tray_effect_playback_rate;
+        }
         if validate_update_channel(&config.update_channel).is_err() {
             config.update_channel = defaults.update_channel.clone();
             config.update_manifest_url = defaults.update_manifest_url.clone();
@@ -201,6 +206,7 @@ impl Config {
         validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
         validate_update_channel(&self.update_channel)?;
         validate_tray_hide_effect(&self.tray_hide_effect)?;
+        validate_tray_effect_playback_rate(self.tray_effect_playback_rate)?;
         validate_update_url(self.update_manifest_url.as_deref(), cfg!(debug_assertions))?;
         if !cfg!(debug_assertions)
             && self.update_manifest_url.as_deref()
@@ -249,6 +255,16 @@ pub(crate) fn validate_tray_hide_effect(raw: &str) -> AgentResult<()> {
         _ => Err(AgentError::Config(
             "트레이 전환 효과가 올바르지 않습니다.".into(),
         )),
+    }
+}
+
+pub(crate) fn validate_tray_effect_playback_rate(rate: f64) -> AgentResult<()> {
+    if rate.is_finite() && (0.1..=4.0).contains(&rate) {
+        Ok(())
+    } else {
+        Err(AgentError::Config(
+            "트레이 전환 효과 속도는 0.1배에서 4배 사이여야 합니다.".into(),
+        ))
     }
 }
 
@@ -347,6 +363,7 @@ mod tests {
         assert_eq!(config.update_channel, embedded_release_channel());
         assert_eq!(config.saved_session_max_age_days, 14);
         assert_eq!(config.tray_hide_effect, "fold");
+        assert_eq!(config.tray_effect_playback_rate, 1.0);
     }
 
     #[test]
@@ -425,6 +442,16 @@ mod tests {
             assert!(validate_tray_hide_effect(effect).is_ok());
         }
         assert!(validate_tray_hide_effect("shader-experiment").is_err());
+    }
+
+    #[test]
+    fn tray_effect_playback_rate_is_bounded() {
+        assert!(validate_tray_effect_playback_rate(0.1).is_ok());
+        assert!(validate_tray_effect_playback_rate(1.0).is_ok());
+        assert!(validate_tray_effect_playback_rate(4.0).is_ok());
+        assert!(validate_tray_effect_playback_rate(0.09).is_err());
+        assert!(validate_tray_effect_playback_rate(4.01).is_err());
+        assert!(validate_tray_effect_playback_rate(f64::NAN).is_err());
     }
 
     #[test]

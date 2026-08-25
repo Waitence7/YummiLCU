@@ -170,15 +170,16 @@ void main() {
     p.y += spineBend * (0.25 + 0.75 * sin(a_uv.y * PI));
     p.x += sin(a_uv.y * PI * 1.6) * 0.018 * wake * (1.0 - closeBook);
 
-    // Phase 2: the right page curls across the spine like a real page turn.
-    float rightPage = smoothstep(0.48, 0.54, a_uv.x);
-    float curlFront = 1.10 - turn * 1.32;
-    float curl = rightPage * smoothstep(curlFront - 0.22, curlFront + 0.05, a_uv.x);
-    float theta = curl * PI * 1.32;
-    p.x -= curl * (0.20 + 0.42 * turn);
-    p.y += sin(theta) * 0.105 * (0.30 + 0.70 * (1.0 - a_uv.y));
-    p.x += (1.0 - cos(theta)) * 0.082;
-    v_shade += curl * sin(theta) * 0.48;
+    // Phase 2: both page blocks close continuously around the spine. Keeping the
+    // center seam shared prevents the former jagged, torn-paper silhouette.
+    float pageSide = a_uv.x < 0.5 ? -1.0 : 1.0;
+    float pageDistance = abs(a_uv.x - 0.5) * 2.0;
+    float pageClose = turn * (1.0 - closeBook * 0.18);
+    float inward = pow(pageDistance, 1.18) * 0.24 * pageClose;
+    p.x -= pageSide * inward;
+    float pageArch = sin(pageDistance * PI) * sin(PI * turn);
+    p.y += pageArch * 0.048 * (0.35 + 0.65 * (1.0 - a_uv.y));
+    v_shade += pageSide * pageArch * 0.075;
 
     // Phase 3: settle into a compact front-cover shape instead of collapsing to a thin strip.
     // This leaves enough visible area for the burgundy cover, gold trim and blue gem.
@@ -583,6 +584,7 @@ export async function playHtmlCanvasTrayEffect(
   surface: HTMLElement,
   effect: HtmlCanvasTrayEffect,
   cleanup: HTMLElement[],
+  playbackRate = 1,
 ): Promise<boolean> {
   const spec = EFFECTS[effect];
   const prepared = prepareCanvas(surface);
@@ -669,11 +671,12 @@ export async function playHtmlCanvasTrayEffect(
   const startedAt = performance.now();
   reportDiagnostic(
     'ready',
-    `effect=${effect}; WebGL2; texElementImage2D.length=${gl.texElementImage2D.length}`,
+    `effect=${effect}; rate=${playbackRate.toFixed(2)}; WebGL2; texElementImage2D.length=${gl.texElementImage2D.length}`,
   );
   await new Promise<void>((resolve) => {
     const render = (now: number) => {
-      const raw = Math.min(1, Math.max(0, (now - startedAt) / spec.duration));
+      const duration = spec.duration / Math.min(4, Math.max(0.1, playbackRate));
+      const raw = Math.min(1, Math.max(0, (now - startedAt) / duration));
       gl.clearColor(0, 0, 0, 0);
       gl.clear(gl.COLOR_BUFFER_BIT);
       gl.uniform1f(progress, raw);

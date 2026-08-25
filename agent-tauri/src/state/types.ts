@@ -36,6 +36,7 @@ export type Config = {
   SavedSessionMaxAgeDays: number;
   RunAtWindowsStartup: boolean;
   TrayHideEffect: TrayHideEffect;
+  TrayEffectPlaybackRate: number;
   UiTestMode: boolean;
 };
 
@@ -93,6 +94,7 @@ export const initialState: AgentState = {
     SavedSessionMaxAgeDays: 14,
     RunAtWindowsStartup: true,
     TrayHideEffect: 'fold',
+    TrayEffectPlaybackRate: 1,
     UiTestMode: false,
   },
 };

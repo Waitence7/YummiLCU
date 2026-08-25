@@ -32,9 +32,9 @@ export function App() {
     void import('@tauri-apps/api/event')
       .then(({ listen }) =>
         listen('yummi://tray-hide-requested', () => {
-          void playTrayHideEffect(state.config.TrayHideEffect, completeTrayHide).catch(() =>
-            completeTrayHide().catch(() => undefined),
-          );
+          void playTrayHideEffect(state.config.TrayHideEffect, completeTrayHide, {
+            playbackRate: state.config.TrayEffectPlaybackRate,
+          }).catch(() => completeTrayHide().catch(() => undefined));
         }),
       )
       .then((dispose) => {
@@ -47,7 +47,7 @@ export function App() {
       disposed = true;
       unlisten?.();
     };
-  }, [state.config.TrayHideEffect]);
+  }, [state.config.TrayHideEffect, state.config.TrayEffectPlaybackRate]);
 
   return (
     <div data-yummi-app-surface className="yummi-window-surface flex h-full flex-col overflow-hidden bg-white text-slate-800">

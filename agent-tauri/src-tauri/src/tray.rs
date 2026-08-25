@@ -99,18 +99,36 @@ pub(crate) fn hide_main_window(app: &AppHandle) {
 
 pub(crate) fn request_animated_hide(app: &AppHandle) {
     let request_id = HIDE_REQUEST_ID.fetch_add(1, Ordering::AcqRel) + 1;
+    let playback_rate = app
+        .try_state::<Arc<AppState>>()
+        .and_then(|state| {
+            state
+                .config
+                .try_read()
+                .ok()
+                .map(|config| config.tray_effect_playback_rate)
+        })
+        .unwrap_or(1.0);
+    let watchdog_ms = tray_hide_watchdog_ms(playback_rate);
     let emitted = app
         .get_webview_window(MAIN_WINDOW_LABEL)
         .is_some_and(|window| window.emit("yummi://tray-hide-requested", ()).is_ok());
     if emitted {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(watchdog_ms)).await;
             destroy_main_window_if_pending(&app, request_id);
         });
     } else {
         destroy_main_window_if_pending(app, request_id);
     }
+}
+
+fn tray_hide_watchdog_ms(playback_rate: f64) -> u64 {
+    let rate = playback_rate.clamp(0.1, 4.0);
+    // book-return is currently the longest effect at 1040 ms. Keep extra time
+    // for snapshot acquisition, the post-effect pause and slower machines.
+    ((1_200.0 / rate).ceil() as u64 + 400).clamp(1_500, 12_500)
 }
 
 pub(crate) fn destroy_main_window(app: &AppHandle) {
@@ -209,6 +227,7 @@ pub(crate) fn request_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::html_canvas_experiment_enabled_for_channel;
+    use super::tray_hide_watchdog_ms;
 
     #[test]
     fn html_canvas_browser_flag_is_limited_to_prerelease_channels() {
@@ -216,5 +235,12 @@ mod tests {
         assert!(html_canvas_experiment_enabled_for_channel("dev"));
         assert!(!html_canvas_experiment_enabled_for_channel("stable"));
         assert!(!html_canvas_experiment_enabled_for_channel("nightly"));
+    }
+
+    #[test]
+    fn tray_hide_watchdog_tracks_debug_playback_rate() {
+        assert_eq!(tray_hide_watchdog_ms(1.0), 1_600);
+        assert_eq!(tray_hide_watchdog_ms(4.0), 1_500);
+        assert_eq!(tray_hide_watchdog_ms(0.1), 12_400);
     }
 }

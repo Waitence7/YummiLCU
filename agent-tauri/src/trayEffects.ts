@@ -23,9 +23,15 @@ export const TRAY_HIDE_EFFECT_OPTIONS: ReadonlyArray<{
 
 const SURFACE_SELECTOR = '[data-yummi-app-surface]';
 let running = false;
+let activePlaybackRate = 1;
+
+function normalizePlaybackRate(rate: number | undefined) {
+  if (!Number.isFinite(rate)) return 1;
+  return Math.min(4, Math.max(0.1, rate ?? 1));
+}
 
 function wait(ms: number) {
-  return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
+  return new Promise<void>((resolve) => window.setTimeout(resolve, ms / activePlaybackRate));
 }
 
 function animate(
@@ -34,7 +40,11 @@ function animate(
   options: KeyframeAnimationOptions,
 ): Promise<void> {
   if (!('animate' in element)) return Promise.resolve();
-  const animation = element.animate(frames, options);
+  const timing = { ...options };
+  if (typeof timing.duration === 'number') timing.duration /= activePlaybackRate;
+  if (typeof timing.delay === 'number') timing.delay /= activePlaybackRate;
+  if (typeof timing.endDelay === 'number') timing.endDelay /= activePlaybackRate;
+  const animation = element.animate(frames, timing);
   return animation.finished.then(() => undefined).catch(() => undefined);
 }
 
@@ -246,6 +256,7 @@ async function fade(surface: HTMLElement) {
 export async function playTrayHideEffect(
   requested: TrayHideEffect,
   onHidden?: () => Promise<unknown> | unknown,
+  options: { playbackRate?: number } = {},
 ): Promise<void> {
   if (running) return;
   const surface = document.querySelector<HTMLElement>(SURFACE_SELECTOR);
@@ -255,6 +266,8 @@ export async function playTrayHideEffect(
   }
 
   running = true;
+  const previousPlaybackRate = activePlaybackRate;
+  activePlaybackRate = normalizePlaybackRate(options.playbackRate);
   const previous = snapshotInlineStyle(surface);
   const cleanup: HTMLElement[] = [];
   const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
@@ -263,7 +276,7 @@ export async function playTrayHideEffect(
   try {
     switch (effect) {
       case 'fold':
-        if (!(await playHtmlCanvasTrayEffect(surface, 'fold', cleanup))) await fold(surface);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'fold', cleanup, activePlaybackRate))) await fold(surface);
         break;
       case 'jelly':
         await jelly(surface);
@@ -275,27 +288,27 @@ export async function playTrayHideEffect(
         await cat(surface, cleanup);
         break;
       case 'glass':
-        if (!(await playHtmlCanvasTrayEffect(surface, 'glass', cleanup))) await glass(surface, cleanup);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'glass', cleanup, activePlaybackRate))) await glass(surface, cleanup);
         break;
       case 'swirl':
-        if (!(await playHtmlCanvasTrayEffect(surface, 'swirl', cleanup))) await fold(surface);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'swirl', cleanup, activePlaybackRate))) await fold(surface);
         break;
       case 'suction':
-        if (!(await playHtmlCanvasTrayEffect(surface, 'suction', cleanup))) await fold(surface);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'suction', cleanup, activePlaybackRate))) await fold(surface);
         break;
       case 'page-curl':
-        if (!(await playHtmlCanvasTrayEffect(surface, 'page-curl', cleanup))) await fold(surface);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'page-curl', cleanup, activePlaybackRate))) await fold(surface);
         break;
       case 'book-return':
-        if (!(await playHtmlCanvasTrayEffect(surface, 'book-return', cleanup))) {
-          if (!(await playHtmlCanvasTrayEffect(surface, 'page-curl', cleanup))) await fold(surface);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'book-return', cleanup, activePlaybackRate))) {
+          if (!(await playHtmlCanvasTrayEffect(surface, 'page-curl', cleanup, activePlaybackRate))) await fold(surface);
         }
         break;
       case 'curtain':
-        if (!(await playHtmlCanvasTrayEffect(surface, 'curtain', cleanup))) await fold(surface);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'curtain', cleanup, activePlaybackRate))) await fold(surface);
         break;
       case 'shards':
-        if (!(await playHtmlCanvasTrayEffect(surface, 'shards', cleanup))) await pixels(surface, cleanup);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'shards', cleanup, activePlaybackRate))) await pixels(surface, cleanup);
         break;
       case 'fade':
         await fade(surface);
@@ -310,6 +323,7 @@ export async function playTrayHideEffect(
   } finally {
     cleanup.forEach((element) => element.remove());
     restoreInlineStyle(surface, previous);
+    activePlaybackRate = previousPlaybackRate;
     running = false;
   }
 }
