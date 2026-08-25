@@ -13,7 +13,7 @@ body,
 
 body {
   margin: 0;
-  background: #f8fafc;
+  background: transparent;
   color: #1e293b;
   overflow: hidden;
   user-select: none;
@@ -30,4 +30,13 @@ body {
 }
 ::-webkit-scrollbar-thumb:hover {
   background: rgb(100 116 139 / 0.42);
+}
+
+
+.yummi-window-surface {
+  border: 1px solid rgb(148 163 184 / 0.5);
+  border-radius: 10px;
+  box-shadow: 0 18px 48px rgb(15 23 42 / 0.2);
+  transform: translateZ(0);
+  backface-visibility: hidden;
 }

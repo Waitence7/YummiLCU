@@ -62,11 +62,25 @@ struct UpdateManifest {
     tauri: Option<UpdateTarget>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BetaReleaseInfo {
+    pub(crate) version: String,
+    pub(crate) release_label: String,
+    pub(crate) build_id: String,
+    pub(crate) commit: String,
+    pub(crate) installer_url: String,
+}
+
 const MAX_UPDATE_MANIFEST_BYTES: usize = 256 * 1024;
 const MAX_UPDATE_ARCHIVE_BYTES: usize = 256 * 1024 * 1024;
 const MAX_EXTRACTED_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES: usize = 4_096;
 const OFFICIAL_UPDATE_HOST: &str = "yummi.duckdns.org";
+const BETA_UPDATE_MANIFEST_URL: &str =
+    "https://yummi.duckdns.org/agent/releases/tauri/beta/version.json";
+const BETA_INSTALLER_URL: &str =
+    "https://yummi.duckdns.org/agent/releases/tauri/beta/latest-setup.exe";
 const AUTO_UPDATE_INITIAL_DELAY: Duration = Duration::from_secs(2);
 const AUTO_UPDATE_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
@@ -214,13 +228,6 @@ fn version_tuple(value: &str) -> Option<(u64, u64, u64)> {
     ))
 }
 
-fn is_newer(remote: &str, current: &str) -> bool {
-    match (version_tuple(remote), version_tuple(current)) {
-        (Some(remote), Some(current)) => remote > current,
-        _ => false,
-    }
-}
-
 fn is_older(left: &str, right: &str) -> bool {
     match (version_tuple(left), version_tuple(right)) {
         (Some(left), Some(right)) => left < right,
@@ -230,6 +237,65 @@ fn is_older(left: &str, right: &str) -> bool {
 
 fn update_channel_matches(target: &UpdateTarget, configured_channel: &str) -> bool {
     target.channel.as_deref().unwrap_or("stable") == configured_channel.trim()
+}
+
+fn numeric_identifier(value: &str) -> Option<Vec<u64>> {
+    let value = value.trim();
+    if value.is_empty() || value.len() > 64 {
+        return None;
+    }
+    let parts = value.split('.').collect::<Vec<_>>();
+    if parts.len() > 4 || parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+    parts.into_iter().map(|part| part.parse().ok()).collect()
+}
+
+fn release_sequence(label: &str, version: &str, channel: &str) -> Option<Vec<u64>> {
+    let prefix = format!("{version}-{channel}.");
+    numeric_identifier(label.trim().strip_prefix(&prefix)?)
+}
+
+fn is_newer_target(
+    target: &UpdateTarget,
+    current_version: &str,
+    current_release_label: &str,
+    current_build_id: &str,
+    configured_channel: &str,
+) -> bool {
+    let Some(remote_version) = version_tuple(&target.version) else {
+        return false;
+    };
+    let Some(local_version) = version_tuple(current_version) else {
+        return false;
+    };
+    if remote_version != local_version {
+        return remote_version > local_version;
+    }
+
+    let channel = configured_channel.trim();
+    if channel == "stable" {
+        return false;
+    }
+
+    if let (Some(remote), Some(local)) = (
+        target.build_id.as_deref().and_then(numeric_identifier),
+        numeric_identifier(current_build_id),
+    ) {
+        return remote > local;
+    }
+
+    if let (Some(remote), Some(local)) = (
+        target
+            .release_label
+            .as_deref()
+            .and_then(|label| release_sequence(label, &target.version, channel)),
+        release_sequence(current_release_label, current_version, channel),
+    ) {
+        return remote > local;
+    }
+
+    false
 }
 
 fn rollout_bucket(seed: &str, version: &str) -> u8 {
@@ -249,11 +315,23 @@ fn rollout_seed() -> String {
         .unwrap_or_else(|| "yummi-lcu-tauri".into())
 }
 
-fn should_apply_target(target: &UpdateTarget, current_version: &str, config_channel: &str) -> bool {
-    if !is_newer(&target.version, current_version) {
+fn should_apply_target(
+    target: &UpdateTarget,
+    current_version: &str,
+    current_release_label: &str,
+    current_build_id: &str,
+    config_channel: &str,
+) -> bool {
+    if !update_channel_matches(target, config_channel) {
         return false;
     }
-    if !update_channel_matches(target, config_channel) {
+    if !is_newer_target(
+        target,
+        current_version,
+        current_release_label,
+        current_build_id,
+        config_channel,
+    ) {
         return false;
     }
     if target
@@ -291,6 +369,41 @@ fn validate_hash(bytes: &[u8], expected: &str) -> AgentResult<()> {
     } else {
         Err(AgentError::Update("자동 업데이트 SHA-256 검증 실패".into()))
     }
+}
+
+pub(crate) async fn beta_release_info() -> AgentResult<BetaReleaseInfo> {
+    let manifest_url = Url::parse(BETA_UPDATE_MANIFEST_URL)
+        .map_err(|_| AgentError::Update("beta manifest URL이 올바르지 않습니다.".into()))?;
+    let client = Client::builder()
+        .https_only(true)
+        .redirect(Policy::none())
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|_| AgentError::Update("beta manifest 클라이언트 생성 실패".into()))?;
+    let bytes = download_limited(&client, manifest_url, MAX_UPDATE_MANIFEST_BYTES).await?;
+    let target = parse_signed_manifest(&bytes)?
+        .select_tauri()
+        .ok_or_else(|| AgentError::Update("beta manifest에 Tauri 배포 정보가 없습니다.".into()))?;
+    if target.channel.as_deref() != Some("beta") {
+        return Err(AgentError::Update(
+            "beta manifest 채널이 올바르지 않습니다.".into(),
+        ));
+    }
+    let installer_url = Url::parse(BETA_INSTALLER_URL)
+        .map_err(|_| AgentError::Update("beta 설치 파일 URL이 올바르지 않습니다.".into()))?;
+    validate_update_download_url(&installer_url)?;
+
+    Ok(BetaReleaseInfo {
+        version: target.version,
+        release_label: target.release_label.unwrap_or_else(|| "beta".into()),
+        build_id: target.build_id.unwrap_or_else(|| "unknown".into()),
+        commit: target.commit.unwrap_or_else(|| "unknown".into()),
+        installer_url: installer_url.to_string(),
+    })
+}
+
+pub(crate) fn beta_installer_url() -> &'static str {
+    BETA_INSTALLER_URL
 }
 
 fn validate_update_download_url(url: &Url) -> AgentResult<()> {
@@ -473,7 +586,15 @@ async fn apply_update(
         return Ok(false);
     };
     let current_version = env!("CARGO_PKG_VERSION");
-    if !should_apply_target(&target_manifest, current_version, &config.update_channel) {
+    let current_release_label = option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(current_version);
+    let current_build_id = option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local");
+    if !should_apply_target(
+        &target_manifest,
+        current_version,
+        current_release_label,
+        current_build_id,
+        &config.update_channel,
+    ) {
         return Ok(false);
     }
     if update_blocked_by_game(config).await {
@@ -883,14 +1004,115 @@ mod tests {
             publisher_thumbprint: None,
             files: None,
         };
-        assert!(!should_apply_target(&target, "0.6.8", "stable"));
-        assert!(!should_apply_target(&target, "0.6.8", "beta"));
+        assert!(!should_apply_target(
+            &target,
+            "0.6.8",
+            "0.6.8",
+            "20260824.0",
+            "stable",
+        ));
+        assert!(!should_apply_target(
+            &target,
+            "0.6.8",
+            "0.6.8-beta.0",
+            "20260824.0",
+            "beta",
+        ));
 
         let blocked = UpdateTarget {
             blocked_versions: Some(vec!["0.6.8".into()]),
             ..target
         };
-        assert!(should_apply_target(&blocked, "0.6.8", "beta"));
+        assert!(should_apply_target(
+            &blocked,
+            "0.6.8",
+            "0.6.8-beta.0",
+            "20260824.0",
+            "beta",
+        ));
+    }
+
+    #[test]
+    fn beta_updates_can_advance_within_the_same_semver() {
+        let target = UpdateTarget {
+            version: "0.7.0".into(),
+            channel: Some("beta".into()),
+            release_label: Some("0.7.0-beta.33".into()),
+            build_id: Some("20260825.33".into()),
+            commit: Some("abcdef1".into()),
+            rollout_percent: Some(100),
+            min_version: None,
+            blocked_versions: None,
+            url: None,
+            patch_url: None,
+            patch_from: None,
+            sha256: None,
+            patch_sha256: None,
+            executable: None,
+            signature: None,
+            publisher_thumbprint: None,
+            files: None,
+        };
+
+        assert!(should_apply_target(
+            &target,
+            "0.7.0",
+            "0.7.0-beta.31",
+            "20260825.31",
+            "beta",
+        ));
+        assert!(!should_apply_target(
+            &target,
+            "0.7.0",
+            "0.7.0-beta.33",
+            "20260825.33",
+            "beta",
+        ));
+        assert!(!should_apply_target(
+            &target,
+            "0.7.0",
+            "0.7.0-beta.34",
+            "20260825.34",
+            "beta",
+        ));
+        assert!(!should_apply_target(
+            &target,
+            "0.7.0",
+            "0.7.0",
+            "20260825.31",
+            "stable",
+        ));
+    }
+
+    #[test]
+    fn beta_same_version_falls_back_to_release_label_when_build_ids_are_unavailable() {
+        let target = UpdateTarget {
+            version: "0.7.0".into(),
+            channel: Some("beta".into()),
+            release_label: Some("0.7.0-beta.33".into()),
+            build_id: None,
+            commit: None,
+            rollout_percent: Some(100),
+            min_version: None,
+            blocked_versions: None,
+            url: None,
+            patch_url: None,
+            patch_from: None,
+            sha256: None,
+            patch_sha256: None,
+            executable: None,
+            signature: None,
+            publisher_thumbprint: None,
+            files: None,
+        };
+
+        assert!(should_apply_target(
+            &target,
+            "0.7.0",
+            "0.7.0-beta.31",
+            "local",
+            "beta",
+        ));
     }
 
     #[test]

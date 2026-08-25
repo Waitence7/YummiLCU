@@ -1,4 +1,4 @@
-import type { AgentState, Config, RecentMatch } from '../state/types';
+import type { AgentState, BetaReleaseInfo, Config, RecentMatch } from '../state/types';
 
 /**
  * 브라우저(비 Tauri) 환경에서는 목 브리지로 대체해 UI를 확인할 수 있게 한다.
@@ -27,6 +27,11 @@ export const relogin = () => call<void>('relogin');
 export const submitOAuthCode = (code: string) => call<void>('submit_oauth_code', { code });
 export const recentMatch = () => call<RecentMatch>('recent_match');
 export const hideMainWindow = () => call<void>('hide_main_window');
+export const completeTrayHide = () => call<void>('complete_tray_hide');
+export const minimizeMainWindow = () => call<void>('minimize_main_window');
+export const requestTrayHide = () => call<void>('request_tray_hide');
+export const getBetaReleaseInfo = () => call<BetaReleaseInfo>('get_beta_release_info');
+export const openBetaDownload = () => call<void>('open_beta_download');
 
 export const getDiagnosticBundle = () => call<string>('get_diagnostic_bundle');
 export const exportDiagnosticBundle = () => call<string>('export_diagnostic_bundle');

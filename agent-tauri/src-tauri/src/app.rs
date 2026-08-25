@@ -1,7 +1,7 @@
 use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
 use futures_util::FutureExt;
-use tauri::{AppHandle, Emitter, Manager, RunEvent, WindowEvent};
+use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use tokio::time::sleep;
 
 use crate::{
@@ -57,7 +57,12 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::diagnostics::export_diagnostic_bundle,
             crate::commands::diagnostics::report_unexpected_error,
             crate::commands::lcu::recent_match,
-            crate::commands::window::hide_main_window
+            crate::commands::update::get_beta_release_info,
+            crate::commands::update::open_beta_download,
+            crate::commands::window::hide_main_window,
+            crate::commands::window::complete_tray_hide,
+            crate::commands::window::minimize_main_window,
+            crate::commands::window::request_tray_hide
         ])
         .setup(move |app| {
             // The installer only launches this argument when it observed an
@@ -114,22 +119,10 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             ..
         } if label == "main" => {
             // Closing the window means minimize-to-tray, not stopping the relay.
-            // Give the web UI a short window to animate before hiding natively.
-            // A native fallback still hides the window if the UI is unavailable.
+            // The UI window is destroyed after its animation so the next tray open
+            // always starts from a clean WebView state. Background workers stay alive.
             api.prevent_close();
-            let request_id = tray::begin_hide_request();
-            let emitted = app
-                .get_webview_window("main")
-                .is_some_and(|window| window.emit("yummi://tray-hide-requested", ()).is_ok());
-            if emitted {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    sleep(Duration::from_millis(900)).await;
-                    tray::hide_main_window_if_pending(&app, request_id);
-                });
-            } else {
-                tray::hide_main_window_if_pending(app, request_id);
-            }
+            tray::request_animated_hide(app);
         }
         RunEvent::ExitRequested { code, api, .. } => {
             if should_keep_running(code) {

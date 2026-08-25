@@ -1,14 +1,21 @@
 import { useEffect, useState } from 'react';
 
+import * as api from '../api/commands';
 import { Button, Card, TextInput, Toggle } from '../components/ui';
-import type { Config, TrayHideEffect } from '../state/types';
+import type { BetaReleaseInfo, Config, TrayHideEffect } from '../state/types';
 import { playTrayHideEffect, TRAY_HIDE_EFFECT_OPTIONS } from '../trayEffects';
 
 export function SettingsTab({
   config,
+  currentReleaseLabel,
+  currentBuildId,
+  currentReleaseChannel,
   onPatchConfig,
 }: {
   config: Config;
+  currentReleaseLabel: string;
+  currentBuildId: string;
+  currentReleaseChannel: string;
   onPatchConfig(patch: Partial<Config>): Promise<boolean>;
 }) {
   return (
@@ -38,11 +45,102 @@ export function SettingsTab({
 
       <TrayEffectCard config={config} onPatchConfig={onPatchConfig} />
 
+      <BetaDownloadCard
+        currentReleaseLabel={currentReleaseLabel}
+        currentBuildId={currentBuildId}
+        currentReleaseChannel={currentReleaseChannel}
+      />
+
       <AdvancedCard config={config} onPatchConfig={onPatchConfig} />
     </div>
   );
 }
 
+
+function BetaDownloadCard({
+  currentReleaseLabel,
+  currentBuildId,
+  currentReleaseChannel,
+}: {
+  currentReleaseLabel: string;
+  currentBuildId: string;
+  currentReleaseChannel: string;
+}) {
+  const [release, setRelease] = useState<BetaReleaseInfo | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      setRelease(await api.getBetaReleaseInfo());
+    } catch {
+      setRelease(null);
+      setError('최신 beta 정보를 불러오지 못했습니다.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  const download = async () => {
+    setOpening(true);
+    setError(null);
+    try {
+      await api.openBetaDownload();
+    } catch {
+      setError('beta 설치 파일을 열지 못했습니다.');
+    } finally {
+      setOpening(false);
+    }
+  };
+
+  return (
+    <Card
+      title="베타 다운로드"
+      action={
+        <Button variant="ghost" disabled={loading} onClick={() => void refresh()}>
+          새로고침
+        </Button>
+      }
+    >
+      <div className="space-y-2.5">
+        <div className="grid grid-cols-2 gap-2 text-[11px]">
+          <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <span className="block text-slate-500">현재 설치</span>
+            <strong className="mt-0.5 block truncate text-slate-800">{currentReleaseLabel}</strong>
+            <span className="text-[10px] text-slate-500">
+              {currentReleaseChannel} · build {currentBuildId}
+            </span>
+          </div>
+          <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2">
+            <span className="block text-indigo-600">최신 beta</span>
+            <strong className="mt-0.5 block truncate text-indigo-900">
+              {loading ? '확인 중…' : release?.releaseLabel ?? '확인 실패'}
+            </strong>
+            <span className="text-[10px] text-indigo-700/80">
+              {release ? `build ${release.buildId}` : '서명된 manifest 기준'}
+            </span>
+          </div>
+        </div>
+        <div className="flex items-center gap-2">
+          <Button variant="primary" disabled={opening} onClick={() => void download()}>
+            {opening ? '여는 중…' : '베타 설치 파일 다운로드'}
+          </Button>
+          <span className="text-[10px] leading-snug text-slate-500">
+            업데이트 채널 설정은 바꾸지 않습니다. 설치 후 beta를 계속 받으려면 채널을 beta로 설정하세요.
+          </span>
+        </div>
+        {error && <p className="text-[10px] text-rose-600">{error}</p>}
+      </div>
+    </Card>
+  );
+}
 
 function TrayEffectCard({
   config,

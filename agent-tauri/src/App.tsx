@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 
-import { hideMainWindow, useMockBridge } from './api/commands';
+import { completeTrayHide, useMockBridge } from './api/commands';
 import { Banners } from './components/Banners';
 import { Header } from './components/Header';
+import { TitleBar } from './components/TitleBar';
 import { useAgentState } from './hooks/useAgentState';
 import { GuildMatchTab } from './tabs/GuildMatchTab';
 import { LogsTab } from './tabs/LogsTab';
@@ -31,8 +32,8 @@ export function App() {
     void import('@tauri-apps/api/event')
       .then(({ listen }) =>
         listen('yummi://tray-hide-requested', () => {
-          void playTrayHideEffect(state.config.TrayHideEffect, hideMainWindow).catch(() =>
-            hideMainWindow().catch(() => undefined),
+          void playTrayHideEffect(state.config.TrayHideEffect, completeTrayHide).catch(() =>
+            completeTrayHide().catch(() => undefined),
           );
         }),
       )
@@ -49,7 +50,8 @@ export function App() {
   }, [state.config.TrayHideEffect]);
 
   return (
-    <div data-yummi-app-surface className="flex h-full flex-col bg-white text-slate-800">
+    <div data-yummi-app-surface className="yummi-window-surface flex h-full flex-col overflow-hidden bg-white text-slate-800">
+      <TitleBar />
       <Header
         state={state}
         onStart={() => void actions.start()}
@@ -90,7 +92,13 @@ export function App() {
           />
         )}
         {tab === 'settings' && (
-          <SettingsTab config={state.config} onPatchConfig={actions.patchConfig} />
+          <SettingsTab
+            config={state.config}
+            currentReleaseLabel={state.release_label ?? state.app_version ?? '—'}
+            currentBuildId={state.build_id ?? '—'}
+            currentReleaseChannel={state.release_channel ?? state.config.UpdateChannel}
+            onPatchConfig={actions.patchConfig}
+          />
         )}
         {tab === 'voice' && <VoiceTab />}
         {tab === 'logs' && (

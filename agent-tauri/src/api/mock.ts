@@ -97,7 +97,24 @@ export async function mockInvoke<T>(
       });
       return undefined as T;
     }
-    case 'hide_main_window': {
+    case 'hide_main_window':
+    case 'complete_tray_hide':
+    case 'minimize_main_window':
+    case 'request_tray_hide': {
+      return undefined as T;
+    }
+    case 'get_beta_release_info': {
+      return {
+        version: '0.6.15',
+        releaseLabel: '0.6.15-beta.1',
+        buildId: '20260825.32',
+        commit: 'preview',
+        installerUrl: 'https://yummi.duckdns.org/agent/releases/tauri/beta/latest-setup.exe',
+      } as T;
+    }
+    case 'open_beta_download': {
+      log('beta 설치 파일 다운로드 열기');
+      emit();
       return undefined as T;
     }
     case 'get_diagnostic_bundle': {

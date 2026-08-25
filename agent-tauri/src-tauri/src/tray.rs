@@ -6,7 +6,7 @@ use std::sync::{
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder,
 };
 
 use crate::{relay::supervisor::RelaySupervisor, state::AppState};
@@ -95,13 +95,32 @@ pub(crate) fn hide_main_window(app: &AppHandle) {
     }
 }
 
-pub(crate) fn begin_hide_request() -> u64 {
-    HIDE_REQUEST_ID.fetch_add(1, Ordering::AcqRel) + 1
+pub(crate) fn request_animated_hide(app: &AppHandle) {
+    let request_id = HIDE_REQUEST_ID.fetch_add(1, Ordering::AcqRel) + 1;
+    let emitted = app
+        .get_webview_window(MAIN_WINDOW_LABEL)
+        .is_some_and(|window| window.emit("yummi://tray-hide-requested", ()).is_ok());
+    if emitted {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+            destroy_main_window_if_pending(&app, request_id);
+        });
+    } else {
+        destroy_main_window_if_pending(app, request_id);
+    }
 }
 
-pub(crate) fn hide_main_window_if_pending(app: &AppHandle, request_id: u64) {
+pub(crate) fn destroy_main_window(app: &AppHandle) {
+    cancel_pending_hide();
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        let _ = window.destroy();
+    }
+}
+
+fn destroy_main_window_if_pending(app: &AppHandle, request_id: u64) {
     if HIDE_REQUEST_ID.load(Ordering::Acquire) == request_id {
-        hide_main_window(app);
+        destroy_main_window(app);
     }
 }
 
@@ -131,6 +150,9 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
             .title("Yummi LCU Agent")
             .inner_size(640.0, 620.0)
             .resizable(false)
+            .decorations(false)
+            .transparent(true)
+            .shadow(false)
             .build()?
     };
     window.set_skip_taskbar(false)?;

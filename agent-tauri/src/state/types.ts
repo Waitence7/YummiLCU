@@ -1,3 +1,11 @@
+export type BetaReleaseInfo = {
+  version: string;
+  releaseLabel: string;
+  buildId: string;
+  commit: string;
+  installerUrl: string;
+};
+
 export type TrayHideEffect = 'fold' | 'jelly' | 'pixels' | 'cat' | 'glass' | 'fade' | 'none';
 
 export type Config = {

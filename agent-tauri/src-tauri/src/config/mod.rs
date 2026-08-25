@@ -12,8 +12,10 @@ use uuid::Uuid;
 use crate::error::{AgentError, AgentResult};
 
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://yummi.duckdns.org/agent/version.json";
-const BETA_UPDATE_MANIFEST_URL: &str = "https://yummi.duckdns.org/agent/releases/tauri/beta/version.json";
-const DEV_UPDATE_MANIFEST_URL: &str = "https://yummi.duckdns.org/agent/releases/tauri/dev/version.json";
+const BETA_UPDATE_MANIFEST_URL: &str =
+    "https://yummi.duckdns.org/agent/releases/tauri/beta/version.json";
+const DEV_UPDATE_MANIFEST_URL: &str =
+    "https://yummi.duckdns.org/agent/releases/tauri/dev/version.json";
 
 fn embedded_release_channel() -> &'static str {
     match option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable") {
@@ -111,7 +113,8 @@ impl Config {
             .as_ref()
             .map(|value| Self::secure_url(value));
         if !cfg!(debug_assertions) && validate_update_channel(&self.update_channel).is_ok() {
-            self.update_manifest_url = Some(public_update_manifest_url(&self.update_channel).into());
+            self.update_manifest_url =
+                Some(public_update_manifest_url(&self.update_channel).into());
         }
     }
 
@@ -200,7 +203,8 @@ impl Config {
         validate_tray_hide_effect(&self.tray_hide_effect)?;
         validate_update_url(self.update_manifest_url.as_deref(), cfg!(debug_assertions))?;
         if !cfg!(debug_assertions)
-            && self.update_manifest_url.as_deref() != Some(public_update_manifest_url(&self.update_channel))
+            && self.update_manifest_url.as_deref()
+                != Some(public_update_manifest_url(&self.update_channel))
         {
             return Err(AgentError::Config(
                 "업데이트 채널과 공식 manifest URL이 일치하지 않습니다.".into(),
