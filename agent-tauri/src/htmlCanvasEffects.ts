@@ -293,6 +293,14 @@ async function waitForElementSnapshot(
     painted = upload() || painted;
   };
   canvas.addEventListener('paint', onPaint);
+  const requestPaint = (canvas as HTMLCanvasElement & { requestPaint?: () => void }).requestPaint;
+  if (typeof requestPaint === 'function') {
+    try {
+      requestPaint.call(canvas);
+    } catch {
+      // Early implementations can expose requestPaint before it is fully wired.
+    }
+  }
 
   await nextFrame();
   await nextFrame();
