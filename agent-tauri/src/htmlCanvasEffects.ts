@@ -8,16 +8,28 @@ export type HtmlCanvasTrayEffect =
   | 'shards'
   | 'book-return';
 
-type HtmlCanvasWebGlContext = WebGLRenderingContext & {
-  texElementImage2D?: (
+type HtmlCanvasTexElementImage2D = {
+  // Current HTML-in-Canvas syntax (Chromium M145+).
+  (target: number, internalFormat: number, source: Element): void;
+  // Legacy developer-trial syntax, kept as a fallback for older WebView2 runtimes.
+  (
     target: number,
     level: number,
     internalFormat: number,
     format: number,
     type: number,
     source: Element,
-  ) => void;
+  ): void;
 };
+
+type HtmlCanvasWebGlContext = WebGL2RenderingContext & {
+  texElementImage2D?: HtmlCanvasTexElementImage2D;
+};
+
+// RGBA8 is the required sized internal format for the current API. WebGL1 does
+// not expose gl.RGBA8 as a property, but Chromium's HTML-in-Canvas method accepts
+// the GLenum value directly.
+const GL_RGBA8 = 0x8058;
 
 type EffectSpec = {
   mode: number;
@@ -38,13 +50,14 @@ const EFFECTS: Record<HtmlCanvasTrayEffect, EffectSpec> = {
 };
 
 const VERTEX_SHADER = `
-attribute vec2 a_position;
-attribute vec2 a_uv;
-attribute vec2 a_cell;
+#version 300 es
+in vec2 a_position;
+in vec2 a_uv;
+in vec2 a_cell;
 uniform float u_progress;
 uniform float u_mode;
-varying vec2 v_uv;
-varying float v_shade;
+out vec2 v_uv;
+out float v_shade;
 
 const float PI = 3.141592653589793;
 
@@ -198,12 +211,14 @@ void main() {
 `;
 
 const FRAGMENT_SHADER = `
+#version 300 es
 precision mediump float;
 uniform sampler2D u_texture;
 uniform float u_progress;
 uniform float u_mode;
-varying vec2 v_uv;
-varying float v_shade;
+in vec2 v_uv;
+in float v_shade;
+out vec4 fragColor;
 
 const float PI = 3.141592653589793;
 
@@ -214,29 +229,29 @@ void main() {
 
   if (u_mode < 0.5) {
     float ripple = sin((uv.y * 5.0 + t * 1.6) * PI) * 0.0045 * sin(PI * t);
-    color = texture2D(u_texture, vec2(clamp(uv.x + ripple, 0.0, 1.0), uv.y));
+    color = texture(u_texture, vec2(clamp(uv.x + ripple, 0.0, 1.0), uv.y));
   } else if (u_mode < 1.5) {
     float split = 0.0045 * sin(PI * t);
-    vec4 center = texture2D(u_texture, uv);
-    float red = texture2D(u_texture, vec2(clamp(uv.x + split, 0.0, 1.0), uv.y)).r;
-    float blue = texture2D(u_texture, vec2(clamp(uv.x - split, 0.0, 1.0), uv.y)).b;
+    vec4 center = texture(u_texture, uv);
+    float red = texture(u_texture, vec2(clamp(uv.x + split, 0.0, 1.0), uv.y)).r;
+    float blue = texture(u_texture, vec2(clamp(uv.x - split, 0.0, 1.0), uv.y)).b;
     float sheen = sin((uv.y * 8.0 + t * 2.0) * PI) * 0.018 * sin(PI * t);
     color = vec4(red + sheen, center.g + sheen, blue + sheen, center.a);
   } else if (u_mode < 2.5) {
     float split = 0.0032 * sin(PI * t);
-    vec4 center = texture2D(u_texture, uv);
+    vec4 center = texture(u_texture, uv);
     color = vec4(
-      texture2D(u_texture, vec2(clamp(uv.x + split, 0.0, 1.0), uv.y)).r,
+      texture(u_texture, vec2(clamp(uv.x + split, 0.0, 1.0), uv.y)).r,
       center.g,
-      texture2D(u_texture, vec2(clamp(uv.x - split, 0.0, 1.0), uv.y)).b,
+      texture(u_texture, vec2(clamp(uv.x - split, 0.0, 1.0), uv.y)).b,
       center.a
     );
   } else if (u_mode < 6.5) {
-    color = texture2D(u_texture, uv);
+    color = texture(u_texture, uv);
   } else {
     // Book return: keep the live GUI while the page turns, then reveal a stylized
     // Yuumi book cover: burgundy leather, thick gold trim and a blue center gem.
-    vec4 page = texture2D(u_texture, uv);
+    vec4 page = texture(u_texture, uv);
     float wake = smoothstep(0.00, 0.18, t);
     float closeBook = smoothstep(0.46, 0.72, t);
     float coverMix = smoothstep(0.56, 0.74, t);
@@ -311,7 +326,7 @@ void main() {
   float alpha = 1.0 - smoothstep(0.76, 1.0, t);
   if (u_mode > 5.5 && u_mode < 6.5) alpha = 1.0 - smoothstep(0.70, 1.0, t);
   if (u_mode > 6.5) alpha = 1.0 - smoothstep(0.90, 1.0, t);
-  gl_FragColor = vec4(color.rgb, color.a * alpha);
+  fragColor = vec4(color.rgb, color.a * alpha);
 }
 `;
 
@@ -403,10 +418,39 @@ async function waitForElementSnapshot(
   texture: WebGLTexture,
 ): Promise<boolean> {
   const upload = () => {
-    if (typeof gl.texElementImage2D !== 'function') return false;
+    const texElementImage2D = gl.texElementImage2D as ((...args: unknown[]) => void) | undefined;
+    if (typeof texElementImage2D !== 'function') return false;
+
+    gl.bindTexture(gl.TEXTURE_2D, texture);
+    // Clear stale GL errors so a previous unrelated WebGL call cannot make a
+    // successful HTML snapshot look like a failure.
+    while (gl.getError() !== gl.NO_ERROR) {
+      // Drain the error queue.
+    }
+
+    // Chromium changed texElementImage2D during the developer trial. Newer
+    // WebView2 runtimes use (target, internalFormat, element). Try that first.
     try {
-      gl.bindTexture(gl.TEXTURE_2D, texture);
-      gl.texElementImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, source);
+      texElementImage2D.call(gl, gl.TEXTURE_2D, GL_RGBA8, source);
+      if (gl.getError() === gl.NO_ERROR) return true;
+    } catch {
+      // Fall through to the legacy signature below.
+    }
+
+    // Older WebView2 runtimes still expose the original WebGL-style signature.
+    try {
+      while (gl.getError() !== gl.NO_ERROR) {
+        // Drain any error raised by the unsupported new signature.
+      }
+      texElementImage2D.call(
+        gl,
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        source,
+      );
       return gl.getError() === gl.NO_ERROR;
     } catch {
       return false;
@@ -491,7 +535,7 @@ export async function playHtmlCanvasTrayEffect(
   if (!prepared) return false;
   const { canvas, clone } = prepared;
 
-  const gl = canvas.getContext('webgl', {
+  const gl = canvas.getContext('webgl2', {
     alpha: true,
     antialias: true,
     premultipliedAlpha: true,
