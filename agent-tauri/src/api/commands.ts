@@ -37,3 +37,5 @@ export const getDiagnosticBundle = () => call<string>('get_diagnostic_bundle');
 export const exportDiagnosticBundle = () => call<string>('export_diagnostic_bundle');
 export const reportUnexpectedError = (code: 'uncaught_error' | 'unhandled_rejection', summary: string) =>
   call<void>('report_unexpected_error', { code, summary });
+export const reportTrayEffectDiagnostic = (code: string, detail: string) =>
+  call<void>('report_tray_effect_diagnostic', { code, detail });

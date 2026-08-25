@@ -1,3 +1,5 @@
+import { reportTrayEffectDiagnostic } from './api/commands';
+
 export type HtmlCanvasTrayEffect =
   | 'fold'
   | 'glass'
@@ -38,6 +40,7 @@ type EffectSpec = {
 };
 
 const SNAPSHOT_TIMEOUT_MS = 220;
+const REPORTED_DIAGNOSTICS = new Set<string>();
 const EFFECTS: Record<HtmlCanvasTrayEffect, EffectSpec> = {
   fold: { mode: 0, duration: 620, grid: [24, 24] },
   glass: { mode: 1, duration: 760, grid: [24, 24] },
@@ -49,8 +52,8 @@ const EFFECTS: Record<HtmlCanvasTrayEffect, EffectSpec> = {
   'book-return': { mode: 7, duration: 1040, grid: [32, 26] },
 };
 
-const VERTEX_SHADER = `
-#version 300 es
+const VERTEX_SHADER = `#version 300 es
+precision highp float;
 in vec2 a_position;
 in vec2 a_uv;
 in vec2 a_cell;
@@ -210,9 +213,8 @@ void main() {
 }
 `;
 
-const FRAGMENT_SHADER = `
-#version 300 es
-precision mediump float;
+const FRAGMENT_SHADER = `#version 300 es
+precision highp float;
 uniform sampler2D u_texture;
 uniform float u_progress;
 uniform float u_mode;
@@ -330,12 +332,52 @@ void main() {
 }
 `;
 
-function compileShader(gl: WebGLRenderingContext, type: number, source: string): WebGLShader | null {
+type HtmlCanvasDiagnosticCode =
+  | 'surface_invalid'
+  | 'webgl2_unavailable'
+  | 'api_unavailable'
+  | 'shader_compile_failed'
+  | 'program_link_failed'
+  | 'mesh_failed'
+  | 'texture_failed'
+  | 'snapshot_failed'
+  | 'shader_bindings_missing'
+  | 'ready';
+
+function errorDetail(error: unknown) {
+  return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+}
+
+function reportDiagnostic(code: HtmlCanvasDiagnosticCode, detail: string) {
+  const normalized = detail.replace(/\s+/g, ' ').trim().slice(0, 400) || 'detail unavailable';
+  const key = code;
+  if (REPORTED_DIAGNOSTICS.has(key)) return;
+  REPORTED_DIAGNOSTICS.add(key);
+  const method = code === 'ready' ? console.info : console.warn;
+  method(`[HTML-in-Canvas] ${code}: ${normalized}`);
+  void reportTrayEffectDiagnostic(code, normalized).catch((error) => {
+    console.warn('[HTML-in-Canvas] failed to persist diagnostic', error);
+  });
+}
+
+function compileShader(
+  gl: WebGLRenderingContext,
+  type: number,
+  source: string,
+  label: 'vertex' | 'fragment',
+): WebGLShader | null {
   const shader = gl.createShader(type);
-  if (!shader) return null;
+  if (!shader) {
+    reportDiagnostic('shader_compile_failed', `${label}: createShader returned null`);
+    return null;
+  }
   gl.shaderSource(shader, source);
   gl.compileShader(shader);
   if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+    reportDiagnostic(
+      'shader_compile_failed',
+      `${label}: ${gl.getShaderInfoLog(shader) || 'unknown compiler error'}`,
+    );
     gl.deleteShader(shader);
     return null;
   }
@@ -343,8 +385,8 @@ function compileShader(gl: WebGLRenderingContext, type: number, source: string):
 }
 
 function createProgram(gl: WebGLRenderingContext): WebGLProgram | null {
-  const vertex = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER);
-  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER);
+  const vertex = compileShader(gl, gl.VERTEX_SHADER, VERTEX_SHADER, 'vertex');
+  const fragment = compileShader(gl, gl.FRAGMENT_SHADER, FRAGMENT_SHADER, 'fragment');
   if (!vertex || !fragment) {
     if (vertex) gl.deleteShader(vertex);
     if (fragment) gl.deleteShader(fragment);
@@ -363,6 +405,7 @@ function createProgram(gl: WebGLRenderingContext): WebGLProgram | null {
   gl.deleteShader(vertex);
   gl.deleteShader(fragment);
   if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+    reportDiagnostic('program_link_failed', gl.getProgramInfoLog(program) || 'unknown linker error');
     gl.deleteProgram(program);
     return null;
   }
@@ -417,6 +460,7 @@ async function waitForElementSnapshot(
   source: HTMLElement,
   texture: WebGLTexture,
 ): Promise<boolean> {
+  let lastFailure = '';
   const upload = () => {
     const texElementImage2D = gl.texElementImage2D as ((...args: unknown[]) => void) | undefined;
     if (typeof texElementImage2D !== 'function') return false;
@@ -432,8 +476,11 @@ async function waitForElementSnapshot(
     // WebView2 runtimes use (target, internalFormat, element). Try that first.
     try {
       texElementImage2D.call(gl, gl.TEXTURE_2D, GL_RGBA8, source);
-      if (gl.getError() === gl.NO_ERROR) return true;
-    } catch {
+      const glError = gl.getError();
+      if (glError === gl.NO_ERROR) return true;
+      lastFailure = `3-argument API returned WebGL error 0x${glError.toString(16)}`;
+    } catch (error) {
+      lastFailure = `3-argument API threw ${errorDetail(error)}`;
       // Fall through to the legacy signature below.
     }
 
@@ -451,8 +498,12 @@ async function waitForElementSnapshot(
         gl.UNSIGNED_BYTE,
         source,
       );
-      return gl.getError() === gl.NO_ERROR;
-    } catch {
+      const glError = gl.getError();
+      if (glError === gl.NO_ERROR) return true;
+      lastFailure = `legacy API returned WebGL error 0x${glError.toString(16)}`;
+      return false;
+    } catch (error) {
+      lastFailure = `legacy API threw ${errorDetail(error)}`;
       return false;
     }
   };
@@ -484,6 +535,9 @@ async function waitForElementSnapshot(
   }
 
   canvas.removeEventListener('paint', onPaint);
+  if (!painted) {
+    reportDiagnostic('snapshot_failed', lastFailure || 'no paint event or usable element snapshot');
+  }
   return painted;
 }
 
@@ -532,7 +586,10 @@ export async function playHtmlCanvasTrayEffect(
 ): Promise<boolean> {
   const spec = EFFECTS[effect];
   const prepared = prepareCanvas(surface);
-  if (!prepared) return false;
+  if (!prepared) {
+    reportDiagnostic('surface_invalid', 'app surface has no drawable dimensions');
+    return false;
+  }
   const { canvas, clone } = prepared;
 
   const gl = canvas.getContext('webgl2', {
@@ -541,18 +598,34 @@ export async function playHtmlCanvasTrayEffect(
     premultipliedAlpha: true,
     preserveDrawingBuffer: false,
   }) as HtmlCanvasWebGlContext | null;
-  if (!gl || typeof gl.texElementImage2D !== 'function') return false;
+  if (!gl) {
+    reportDiagnostic('webgl2_unavailable', 'canvas.getContext(webgl2) returned null');
+    return false;
+  }
+  if (typeof gl.texElementImage2D !== 'function') {
+    reportDiagnostic('api_unavailable', 'WebGL2RenderingContext.texElementImage2D is not exposed');
+    return false;
+  }
 
   const program = createProgram(gl);
   const mesh = createMesh(gl, spec.grid[0], spec.grid[1]);
   const texture = gl.createTexture();
-  if (!program || !mesh || !texture) return false;
+  if (!program) return false;
+  if (!mesh) {
+    reportDiagnostic('mesh_failed', `could not allocate ${spec.grid[0]}x${spec.grid[1]} mesh`);
+    return false;
+  }
+  if (!texture) {
+    reportDiagnostic('texture_failed', 'createTexture returned null');
+    return false;
+  }
 
   gl.bindTexture(gl.TEXTURE_2D, texture);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
   document.body.appendChild(canvas);
   const snapshotReady = await waitForElementSnapshot(canvas, gl, clone, texture);
@@ -568,6 +641,7 @@ export async function playHtmlCanvasTrayEffect(
   const modeUniform = gl.getUniformLocation(program, 'u_mode');
   const textureUniform = gl.getUniformLocation(program, 'u_texture');
   if (position < 0 || uv < 0 || cell < 0 || !progress || !modeUniform || !textureUniform) {
+    reportDiagnostic('shader_bindings_missing', 'required attribute or uniform was optimized out');
     canvas.remove();
     return false;
   }
@@ -593,6 +667,10 @@ export async function playHtmlCanvasTrayEffect(
   gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
   const startedAt = performance.now();
+  reportDiagnostic(
+    'ready',
+    `effect=${effect}; WebGL2; texElementImage2D.length=${gl.texElementImage2D.length}`,
+  );
   await new Promise<void>((resolve) => {
     const render = (now: number) => {
       const raw = Math.min(1, Math.max(0, (now - startedAt) / spec.duration));

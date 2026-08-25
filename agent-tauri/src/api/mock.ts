@@ -132,6 +132,17 @@ export async function mockInvoke<T>(
     case 'export_diagnostic_bundle': {
       return 'Downloads/yummi-agent-diagnostics-preview.txt' as T;
     }
+    case 'report_tray_effect_diagnostic': {
+      const code = String(args?.code ?? 'unknown');
+      const detail = String(args?.detail ?? 'detail unavailable');
+      log(
+        code === 'ready'
+          ? `HTML-in-Canvas 활성화: ${detail}`
+          : `HTML-in-Canvas fallback (${code}): ${detail}`,
+      );
+      emit();
+      return undefined as T;
+    }
     case 'recent_match': {
       if (!state.lcu) throw new Error('League Client가 연결되지 않았습니다.');
       const recent: RecentMatch = {

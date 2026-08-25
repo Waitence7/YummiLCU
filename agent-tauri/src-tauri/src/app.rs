@@ -56,6 +56,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::diagnostics::get_diagnostic_bundle,
             crate::commands::diagnostics::export_diagnostic_bundle,
             crate::commands::diagnostics::report_unexpected_error,
+            crate::commands::diagnostics::report_tray_effect_diagnostic,
             crate::commands::lcu::recent_match,
             crate::commands::update::get_beta_release_info,
             crate::commands::update::open_beta_download,
