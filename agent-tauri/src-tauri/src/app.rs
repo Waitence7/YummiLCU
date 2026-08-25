@@ -74,11 +74,11 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 return Ok(());
             }
             tray::setup(app)?;
-            if start_hidden {
-                // Login and automatic-update startup stay headless while the
-                // installer finish action and normal launches show the UI.
-                tray::hide_main_window(app.handle());
-            } else {
+            // Tauri creates the configured main window before setup. Recreate it through
+            // our builder so beta/dev builds can opt into HTML-in-Canvas WebView2 flags,
+            // and background startup does not keep an unused WebView alive.
+            tray::destroy_main_window(app.handle());
+            if !start_hidden {
                 tray::request_main_window(app.handle());
             }
             let handle = app.handle().clone();

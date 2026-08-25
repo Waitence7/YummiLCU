@@ -1,3 +1,4 @@
+import { playHtmlCanvasTrayEffect } from './htmlCanvasEffects';
 import type { TrayHideEffect } from './state/types';
 
 export const TRAY_HIDE_EFFECT_OPTIONS: ReadonlyArray<{
@@ -10,6 +11,11 @@ export const TRAY_HIDE_EFFECT_OPTIONS: ReadonlyArray<{
   { value: 'pixels', label: '픽셀 분해', description: '화면이 작은 조각으로 갈라져 트레이 방향으로 흩어집니다.' },
   { value: 'cat', label: '고양이 꼬리', description: '창이 눌리며 Yummi 색상의 꼬리가 휙 지나갑니다.' },
   { value: 'glass', label: '유리 물결', description: '화면이 유리 조각처럼 물결치며 흐려집니다.' },
+  { value: 'swirl', label: '소용돌이 흡수', description: 'GUI 전체가 회전하며 트레이 방향으로 빨려 들어갑니다.' },
+  { value: 'suction', label: '액체 빨림', description: '화면이 액체처럼 늘어나며 오른쪽 아래 한 점으로 흡수됩니다.' },
+  { value: 'page-curl', label: '종이 말림', description: '오른쪽 모서리가 종이처럼 말린 뒤 트레이 방향으로 접혀 들어갑니다.' },
+  { value: 'curtain', label: '천막 걷힘', description: '세로 주름이 잡히며 천막처럼 오른쪽 아래로 걷혀 들어갑니다.' },
+  { value: 'shards', label: 'GPU 파편', description: '화면 텍스처를 GPU 조각으로 분리해 흩뜨린 뒤 트레이로 모읍니다.' },
   { value: 'fade', label: '부드럽게 사라짐', description: '빠르게 축소되며 투명해집니다.' },
   { value: 'none', label: '효과 없음', description: '애니메이션 없이 바로 트레이로 이동합니다.' },
 ];
@@ -55,10 +61,11 @@ async function fold(surface: HTMLElement) {
     [
       { transform: 'perspective(900px) rotateX(0deg) rotateY(0deg) skew(0deg) scale(1)', opacity: 1, filter: 'blur(0px)' },
       { offset: 0.28, transform: 'perspective(900px) rotateX(-3deg) rotateY(5deg) skewX(-1.5deg) scale(1.01, .985)', opacity: 1 },
-      { offset: 0.58, transform: 'perspective(900px) rotateX(8deg) rotateY(-14deg) skewX(5deg) scale(.82, .7)', opacity: .9, filter: 'blur(.3px)' },
+      { offset: 0.52, transform: 'perspective(900px) rotateX(8deg) rotateY(-14deg) skewX(5deg) scale(.82, .7)', opacity: .92, filter: 'blur(.3px)' },
+      { offset: 0.82, transform: 'perspective(900px) translate(25%, 22%) rotateX(14deg) rotateY(-23deg) skewX(8deg) scale(.34, .22)', opacity: .52, filter: 'blur(1.4px)' },
       { transform: 'perspective(900px) translate(42%, 36%) rotateX(18deg) rotateY(-28deg) skewX(11deg) scale(.06, .025)', opacity: 0, filter: 'blur(3px)' },
     ],
-    { duration: 310, easing: 'cubic-bezier(.3,.8,.2,1)', fill: 'forwards' },
+    { duration: 560, easing: 'cubic-bezier(.22,.66,.16,1)', fill: 'forwards' },
   );
 }
 
@@ -75,7 +82,7 @@ async function jelly(surface: HTMLElement) {
       { offset: 0.72, transform: 'scale(.72,.82) translate(18%, 13%)', opacity: .92 },
       { transform: 'scale(.025,.06) translate(1350%, 760%) rotate(4deg)', opacity: 0, filter: 'blur(2px)' },
     ],
-    { duration: 340, easing: 'cubic-bezier(.25,.75,.2,1)', fill: 'forwards' },
+    { duration: 620, easing: 'cubic-bezier(.2,.68,.16,1)', fill: 'forwards' },
   );
 }
 
@@ -119,9 +126,9 @@ async function pixels(surface: HTMLElement, cleanup: HTMLElement[]) {
             { transform: `translate(${driftX}vw, ${driftY}vh) rotate(${rotate}deg) scale(.12)`, opacity: 0, filter: 'blur(2px)' },
           ],
           {
-            duration: 310 + index * 5,
-            delay: index * 4,
-            easing: 'cubic-bezier(.32,.72,.25,1)',
+            duration: 520 + index * 7,
+            delay: index * 6,
+            easing: 'cubic-bezier(.24,.64,.18,1)',
             fill: 'forwards',
           },
         ),
@@ -167,7 +174,7 @@ async function cat(surface: HTMLElement, cleanup: HTMLElement[]) {
         { offset: 0.7, transform: 'translate(24%, 25%) scale(.58,.28) skewX(-9deg)', opacity: .72 },
         { transform: 'translate(46%, 43%) scale(.04,.025) skewX(18deg)', opacity: 0, filter: 'blur(2px)' },
       ],
-      { duration: 370, easing: 'cubic-bezier(.28,.78,.22,1)', fill: 'forwards' },
+      { duration: 650, easing: 'cubic-bezier(.22,.66,.16,1)', fill: 'forwards' },
     ),
     animate(
       tail,
@@ -177,7 +184,7 @@ async function cat(surface: HTMLElement, cleanup: HTMLElement[]) {
         { offset: 0.55, transform: 'translateX(-18px) rotate(19deg) scaleX(1)', opacity: 1 },
         { transform: 'translateX(72px) rotate(-35deg) scaleX(.22)', opacity: 0 },
       ],
-      { duration: 410, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'forwards' },
+      { duration: 720, easing: 'cubic-bezier(.18,.7,.16,1)', fill: 'forwards' },
     ),
   ]);
 }
@@ -214,7 +221,7 @@ async function glass(surface: HTMLElement, cleanup: HTMLElement[]) {
           { offset: 0.66, transform: `translate(${direction * (11 + index * 2)}px, ${index * 2}px) skewX(${direction * 4}deg) scale(.82)`, opacity: .68, filter: 'blur(1.1px) saturate(1.3)' },
           { transform: `translate(${20 + index * 3}vw, ${18 + index * 2}vh) skewX(${direction * 10}deg) scale(.08)`, opacity: 0, filter: 'blur(5px) saturate(1.45)' },
         ],
-        { duration: 360 + index * 8, delay: index * 7, easing: 'cubic-bezier(.3,.72,.18,1)', fill: 'forwards' },
+        { duration: 620 + index * 10, delay: index * 10, easing: 'cubic-bezier(.22,.62,.16,1)', fill: 'forwards' },
       ),
     );
   }
@@ -228,9 +235,10 @@ async function fade(surface: HTMLElement) {
     surface,
     [
       { transform: 'translate(0,0) scale(1)', opacity: 1 },
+      { offset: 0.72, transform: 'translate(4%, 4%) scale(.94)', opacity: .42 },
       { transform: 'translate(7%, 7%) scale(.88)', opacity: 0 },
     ],
-    { duration: 160, easing: 'ease-in', fill: 'forwards' },
+    { duration: 260, easing: 'cubic-bezier(.3,.55,.2,1)', fill: 'forwards' },
   );
 }
 
@@ -254,7 +262,7 @@ export async function playTrayHideEffect(
   try {
     switch (effect) {
       case 'fold':
-        await fold(surface);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'fold', cleanup))) await fold(surface);
         break;
       case 'jelly':
         await jelly(surface);
@@ -266,7 +274,22 @@ export async function playTrayHideEffect(
         await cat(surface, cleanup);
         break;
       case 'glass':
-        await glass(surface, cleanup);
+        if (!(await playHtmlCanvasTrayEffect(surface, 'glass', cleanup))) await glass(surface, cleanup);
+        break;
+      case 'swirl':
+        if (!(await playHtmlCanvasTrayEffect(surface, 'swirl', cleanup))) await fold(surface);
+        break;
+      case 'suction':
+        if (!(await playHtmlCanvasTrayEffect(surface, 'suction', cleanup))) await fold(surface);
+        break;
+      case 'page-curl':
+        if (!(await playHtmlCanvasTrayEffect(surface, 'page-curl', cleanup))) await fold(surface);
+        break;
+      case 'curtain':
+        if (!(await playHtmlCanvasTrayEffect(surface, 'curtain', cleanup))) await fold(surface);
+        break;
+      case 'shards':
+        if (!(await playHtmlCanvasTrayEffect(surface, 'shards', cleanup))) await pixels(surface, cleanup);
         break;
       case 'fade':
         await fade(surface);

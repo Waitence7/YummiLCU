@@ -244,7 +244,8 @@ impl Config {
 
 pub(crate) fn validate_tray_hide_effect(raw: &str) -> AgentResult<()> {
     match raw.trim() {
-        "fold" | "jelly" | "pixels" | "cat" | "glass" | "fade" | "none" => Ok(()),
+        "fold" | "jelly" | "pixels" | "cat" | "glass" | "swirl" | "suction" | "page-curl"
+        | "curtain" | "shards" | "fade" | "none" => Ok(()),
         _ => Err(AgentError::Config(
             "트레이 전환 효과가 올바르지 않습니다.".into(),
         )),
@@ -406,7 +407,20 @@ mod tests {
 
     #[test]
     fn tray_hide_effect_is_limited_to_known_effects() {
-        for effect in ["fold", "jelly", "pixels", "cat", "glass", "fade", "none"] {
+        for effect in [
+            "fold",
+            "jelly",
+            "pixels",
+            "cat",
+            "glass",
+            "swirl",
+            "suction",
+            "page-curl",
+            "curtain",
+            "shards",
+            "fade",
+            "none",
+        ] {
             assert!(validate_tray_hide_effect(effect).is_ok());
         }
         assert!(validate_tray_hide_effect("shader-experiment").is_err());

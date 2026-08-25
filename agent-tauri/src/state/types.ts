@@ -6,7 +6,19 @@ export type BetaReleaseInfo = {
   installerUrl: string;
 };
 
-export type TrayHideEffect = 'fold' | 'jelly' | 'pixels' | 'cat' | 'glass' | 'fade' | 'none';
+export type TrayHideEffect =
+  | 'fold'
+  | 'jelly'
+  | 'pixels'
+  | 'cat'
+  | 'glass'
+  | 'swirl'
+  | 'suction'
+  | 'page-curl'
+  | 'curtain'
+  | 'shards'
+  | 'fade'
+  | 'none';
 
 export type Config = {
   RelayPublicBaseUrl: string;

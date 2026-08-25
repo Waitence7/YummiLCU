@@ -12,6 +12,8 @@ use tauri::{
 use crate::{relay::supervisor::RelaySupervisor, state::AppState};
 
 const MAIN_WINDOW_LABEL: &str = "main";
+#[cfg(windows)]
+const HTML_CANVAS_BROWSER_ARGS: &str = "--enable-features=CanvasDrawElement --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
 const TRAY_ID: &str = "yummi-agent-tray";
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
@@ -103,7 +105,7 @@ pub(crate) fn request_animated_hide(app: &AppHandle) {
     if emitted {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1_500)).await;
             destroy_main_window_if_pending(&app, request_id);
         });
     } else {
@@ -144,22 +146,48 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
         .iter()
         .find(|config| config.label == MAIN_WINDOW_LABEL)
     {
-        WebviewWindowBuilder::from_config(app, config)?.build()?
+        let builder = WebviewWindowBuilder::from_config(app, config)?;
+        #[cfg(windows)]
+        let builder = if html_canvas_experiment_enabled() {
+            builder.additional_browser_args(HTML_CANVAS_BROWSER_ARGS)
+        } else {
+            builder
+        };
+        builder.build()?
     } else {
-        WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
-            .title("Yummi LCU Agent")
-            .inner_size(640.0, 620.0)
-            .resizable(false)
-            .decorations(false)
-            .transparent(true)
-            .shadow(false)
-            .build()?
+        let builder =
+            WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
+                .title("Yummi LCU Agent")
+                .inner_size(640.0, 620.0)
+                .resizable(false)
+                .decorations(false)
+                .transparent(true)
+                .shadow(false);
+        #[cfg(windows)]
+        let builder = if html_canvas_experiment_enabled() {
+            builder.additional_browser_args(HTML_CANVAS_BROWSER_ARGS)
+        } else {
+            builder
+        };
+        builder.build()?
     };
     window.set_skip_taskbar(false)?;
     window.show()?;
     window.unminimize()?;
     window.set_focus()?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn html_canvas_experiment_enabled() -> bool {
+    html_canvas_experiment_enabled_for_channel(
+        option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable"),
+    )
+}
+
+#[cfg(any(windows, test))]
+fn html_canvas_experiment_enabled_for_channel(channel: &str) -> bool {
+    matches!(channel.trim(), "beta" | "dev")
 }
 
 pub(crate) fn request_exit(app: &AppHandle) {
@@ -176,4 +204,17 @@ pub(crate) fn request_exit(app: &AppHandle) {
         }
         app.exit(0);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::html_canvas_experiment_enabled_for_channel;
+
+    #[test]
+    fn html_canvas_browser_flag_is_limited_to_prerelease_channels() {
+        assert!(html_canvas_experiment_enabled_for_channel("beta"));
+        assert!(html_canvas_experiment_enabled_for_channel("dev"));
+        assert!(!html_canvas_experiment_enabled_for_channel("stable"));
+        assert!(!html_canvas_experiment_enabled_for_channel("nightly"));
+    }
 }
