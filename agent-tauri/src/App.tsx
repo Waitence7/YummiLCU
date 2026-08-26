@@ -11,6 +11,7 @@ import { PatchNotesTab } from './tabs/PatchNotesTab';
 import { SettingsTab } from './tabs/SettingsTab';
 import { VoiceTab } from './tabs/VoiceTab';
 import { playTrayHideEffect } from './trayEffects';
+import { waitForCloseSound } from './closeSound';
 
 type TabId = 'guild' | 'settings' | 'voice' | 'logs' | 'patchNotes';
 
@@ -34,7 +35,10 @@ export function App() {
     void import('@tauri-apps/api/event')
       .then(({ listen }) =>
         listen('yummi://tray-hide-requested', () => {
-          void playTrayHideEffect(state.config.TrayHideEffect, completeTrayHide, {
+          void playTrayHideEffect(state.config.TrayHideEffect, async () => {
+            await waitForCloseSound();
+            await completeTrayHide();
+          }, {
             playbackRate: state.config.TrayEffectPlaybackRate,
           }).catch(() => completeTrayHide().catch(() => undefined));
         }),
