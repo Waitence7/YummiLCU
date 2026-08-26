@@ -63,7 +63,16 @@ jobs:
 
       - name: Rust tests
         working-directory: agent-tauri/src-tauri
-        run: cargo test --locked
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP "cargo-test.log"
+          cargo test --locked 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            $tail = (Get-Content $log -Tail 80) -join "`n"
+            $escaped = $tail.Replace('%','%25').Replace("`r",'%0D').Replace("`n",'%0A')
+            Write-Output "::error title=Rust tests failed::$escaped"
+            exit $code
+          }
 
       - name: Build Tauri bundles
         working-directory: agent-tauri
