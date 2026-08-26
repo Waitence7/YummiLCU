@@ -17,7 +17,7 @@ use tokio_tungstenite::{
 
 use crate::config::Config;
 
-use super::{lockfile_path, LcuClient, LcuIdentity};
+use super::{discover_lockfile, LcuClient, LcuIdentity};
 
 const GAMEFLOW_PHASE: &str = "/lol-gameflow/v1/gameflow-phase";
 const READY_CHECK: &str = "/lol-matchmaking/v1/ready-check";
@@ -139,7 +139,7 @@ impl LcuEventPoller {
                 }
                 continue;
             };
-            let Ok(client) = LcuClient::from_lockfile(&path) else {
+            let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
                 if !wait_for_socket_retry(&mut stop).await {
                     return;
                 }
@@ -293,7 +293,13 @@ impl LcuEventPoller {
             }
         }
 
-        let Some(path) = lockfile_path(config) else {
+        let discovery = discover_lockfile(config);
+        if self.lockfile_available != Some(true) {
+            for message in &discovery.diagnostics {
+                self.diagnostic(message.clone());
+            }
+        }
+        let Some(path) = discovery.path else {
             if self.lockfile_available != Some(false) {
                 self.diagnostic("LCU lockfile 없음 — 관전 API 독립 조회만 계속함");
             }
@@ -302,11 +308,14 @@ impl LcuEventPoller {
             self.lcu_available = Some(false);
             return events;
         };
+        if discovery.legacy_fallback && self.lockfile_available != Some(true) {
+            self.diagnostic("LCU lockfile 엄격 검증 실패 — 과거 파일 탐색 방식으로 fallback");
+        }
         if self.lockfile_available != Some(true) {
             self.diagnostic(format!("LCU lockfile 발견: {}", path.display()));
         }
         self.lockfile_available = Some(true);
-        let Ok(client) = LcuClient::from_lockfile(&path) else {
+        let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
             if self.lcu_available != Some(false) {
                 self.diagnostic("LCU lockfile/PID 검증 실패 — 관전 API 독립 조회는 계속함");
             }

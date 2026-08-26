@@ -12,7 +12,7 @@ use crate::{
 pub(crate) async fn recent_match(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let config = state.config.read().await.clone();
     let path = lockfile_path(&config).ok_or("League Client가 실행 중이 아닙니다.")?;
-    let client = LcuClient::from_lockfile(&path).map_err(|error| error.to_string())?;
+    let client = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)).map_err(|error| error.to_string())?;
     client
         .recent_match()
         .await

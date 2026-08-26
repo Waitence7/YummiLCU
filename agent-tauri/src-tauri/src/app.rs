@@ -257,7 +257,7 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
             .await;
     }
 
-    let Ok(client) = LcuClient::from_lockfile(&path) else {
+    let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
         return LcuConnectionState::Error;
     };
     if current != LcuConnectionState::LoggedIn {

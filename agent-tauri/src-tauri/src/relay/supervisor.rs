@@ -785,7 +785,7 @@ where
                     let config = state.config.read().await.clone();
                     if let Some(path) = lockfile_path(&config) {
                         let _guard = state.command_lock.lock().await;
-                        match LcuClient::from_lockfile(&path) {
+                        match LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) {
                             Ok(client) => match client
                                 .execute_action(action, &payload, &config)
                                 .await

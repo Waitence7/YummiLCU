@@ -68,6 +68,18 @@ impl LcuClient {
     }
 
     pub(crate) fn from_lockfile(path: &Path) -> AgentResult<Self> {
+        Self::from_lockfile_inner(path, true)
+    }
+
+    /// Compatibility path for installations where the lockfile is valid but
+    /// Windows process/path identity checks cannot be completed. File shape,
+    /// process label, PID/port, credentials and HTTPS protocol are still
+    /// validated before any local LCU request is made.
+    pub(crate) fn from_lockfile_legacy(path: &Path) -> AgentResult<Self> {
+        Self::from_lockfile_inner(path, false)
+    }
+
+    fn from_lockfile_inner(path: &Path, validate_process_identity: bool) -> AgentResult<Self> {
         let metadata =
             fs::symlink_metadata(path).map_err(|_| AgentError::Lcu("lockfile 읽기 실패".into()))?;
         if !metadata.is_file()
@@ -99,7 +111,9 @@ impl LcuClient {
             .ok()
             .filter(|value| *value > 0)
             .ok_or_else(|| AgentError::Lcu("LCU 프로세스 ID 오류".into()))?;
-        validate_lcu_process(path, process_id)?;
+        if validate_process_identity {
+            validate_lcu_process(path, process_id)?;
+        }
         let port = parts[2]
             .parse()
             .ok()

@@ -234,7 +234,7 @@ async fn handle_join_secret(state: &AppState, secret: &str) {
     let Some(path) = lockfile_path(&config) else {
         return;
     };
-    let Ok(client) = LcuClient::from_lockfile(&path) else {
+    let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
         return;
     };
     let _ = client.join_discord_party(party_id).await;
@@ -242,7 +242,7 @@ async fn handle_join_secret(state: &AppState, secret: &str) {
 
 async fn detect_presence(config: &Config) -> Option<PresenceSnapshot> {
     if let Some(path) = lockfile_path(config) {
-        if let Ok(client) = LcuClient::from_lockfile(&path) {
+        if let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) {
             if let Ok(phase) = client.gameflow_phase().await {
                 if phase == "InProgress" {
                     if let Ok(live_game) = LcuClient::live_game_request(LIVE_GAME_ENDPOINT).await {

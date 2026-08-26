@@ -878,7 +878,7 @@ async fn update_blocked_by_game(config: &Config) -> bool {
     let Some(path) = lockfile_path(config) else {
         return false;
     };
-    let Ok(client) = LcuClient::from_lockfile(&path) else {
+    let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
         return false;
     };
     client

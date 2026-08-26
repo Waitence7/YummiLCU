@@ -7,11 +7,22 @@ use crate::config::Config;
 
 use super::client::LcuClient;
 
+#[derive(Debug)]
+pub(crate) struct LockfileDiscovery {
+    pub path: Option<PathBuf>,
+    pub diagnostics: Vec<String>,
+    pub legacy_fallback: bool,
+}
+
 pub(crate) fn lockfile_path(config: &Config) -> Option<PathBuf> {
+    discover_lockfile(config).path
+}
+
+pub(crate) fn discover_lockfile(config: &Config) -> LockfileDiscovery {
     if let Some(raw) = &config.lockfile_path {
         let path = PathBuf::from(expand_environment(raw));
         if valid_lcu_lockfile(&path) {
-            return Some(path);
+            return LockfileDiscovery { path: Some(path), diagnostics: Vec::new(), legacy_fallback: false };
         }
     }
 
@@ -31,6 +42,16 @@ pub(crate) fn lockfile_path(config: &Config) -> Option<PathBuf> {
         }
     }
 
+    // Legacy discovery used Riot Client's local lockfile as an additional
+    // candidate. Keep it only as a fallback so the stricter League paths win.
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local_app_data)
+            .join("Riot Games")
+            .join("Riot Client")
+            .join("Config")
+            .join("lockfile"));
+    }
+
     for drive in b'C'..=b'Z' {
         let drive = drive as char;
         candidates.extend([
@@ -45,7 +66,32 @@ pub(crate) fn lockfile_path(config: &Config) -> Option<PathBuf> {
         ]);
     }
 
-    candidates.into_iter().find(|path| valid_lcu_lockfile(path))
+    let mut diagnostics = Vec::new();
+    let mut legacy_candidate = None;
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        match LcuClient::from_lockfile(&path) {
+            Ok(_) => return LockfileDiscovery { path: Some(path), diagnostics, legacy_fallback: false },
+            Err(error) => {
+                diagnostics.push(format!("LCU lockfile 후보 검증 실패: {} ({error})", path.display()));
+                // Preserve the pre-hardening behavior as a final fallback: if a
+                // real lockfile file exists, return it and let the normal LCU
+                // client path report/handle the validation failure explicitly.
+                if legacy_candidate.is_none() && LcuClient::from_lockfile_legacy(&path).is_ok() {
+                    legacy_candidate = Some(path);
+                }
+            }
+        }
+    }
+
+    if let Some(path) = legacy_candidate {
+        diagnostics.push(format!("LCU lockfile 과거 방식 fallback 사용: {}", path.display()));
+        return LockfileDiscovery { path: Some(path), diagnostics, legacy_fallback: true };
+    }
+
+    LockfileDiscovery { path: None, diagnostics, legacy_fallback: false }
 }
 
 fn valid_lcu_lockfile(path: &Path) -> bool {
