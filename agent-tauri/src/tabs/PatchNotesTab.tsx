@@ -6,6 +6,17 @@ type NoteGroup = {
   items: string[];
 };
 
+const V072_NOTES: NoteGroup[] = [
+  {
+    title: '0.7.2 자동 업데이트 복구',
+    tone: 'ok',
+    items: [
+      '코드서명 인증서가 설정되지 않은 stable 빌드에서도 Ed25519로 서명된 업데이트 manifest와 SHA-256 파일 검증을 이용해 자동 업데이트를 계속할 수 있도록 수정했습니다.',
+      'Windows publisher thumbprint는 더 이상 stable 업데이트의 필수 조건이 아니며, 설정된 경우에만 Authenticode 추가 검증으로 사용합니다.',
+    ],
+  },
+];
+
 const V071_NOTES: NoteGroup[] = [
   {
     title: '0.7.1 핫픽스',
@@ -65,7 +76,7 @@ export function PatchNotesTab() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900">Yummi LCU Agent 0.7.1</h2>
+              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900">Yummi LCU Agent 0.7.2</h2>
               <Badge tone="ok">정식 릴리스</Badge>
             </div>
             <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
@@ -73,15 +84,15 @@ export function PatchNotesTab() {
             </p>
           </div>
           <span className="shrink-0 rounded-lg bg-white/80 px-2.5 py-1 text-[10px] font-medium text-slate-500 shadow-sm ring-1 ring-slate-200/70">
-            0.7.1
+            0.7.2
           </span>
         </div>
         <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50/70 px-3 py-2 text-[10px] leading-relaxed text-emerald-700">
-          0.7.1 stable 핫픽스와 0.7.0 정식 릴리스 변경사항입니다.
+          0.7.2 자동 업데이트 복구, 0.7.1 핫픽스와 0.7.0 정식 릴리스 변경사항입니다.
         </div>
       </Card>
 
-      {[...V071_NOTES, ...V070_NOTES].map((group) => (
+      {[...V072_NOTES, ...V071_NOTES, ...V070_NOTES].map((group) => (
         <Card
           key={group.title}
           title={

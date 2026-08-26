@@ -508,17 +508,11 @@ fn embedded_publisher_thumbprint() -> Option<String> {
 }
 
 fn expected_publisher_thumbprint(target: &UpdateTarget) -> AgentResult<Option<String>> {
-    let embedded = embedded_publisher_thumbprint();
-    if target.channel.as_deref().unwrap_or("stable") == "stable" {
-        return embedded.map(Some).ok_or_else(|| {
-            AgentError::Update(
-                "stable 업데이트용 Windows publisher thumbprint가 Agent에 고정되어 있지 않습니다."
-                    .into(),
-            )
-        });
-    }
-
-    Ok(embedded.or_else(|| {
+    // The signed update manifest is the trust root for every release channel.
+    // Authenticode publisher pinning is an additional check when a publisher
+    // thumbprint is embedded in the Agent (or carried by the signed manifest),
+    // but unsigned deployments must not make the stable updater unusable.
+    Ok(embedded_publisher_thumbprint().or_else(|| {
         target
             .publisher_thumbprint
             .as_deref()
@@ -1132,7 +1126,33 @@ mod tests {
     }
 
     #[test]
-    fn stable_updates_require_an_embedded_publisher_pin() {
+    fn stable_updates_allow_manifest_hash_verification_without_publisher_pin() {
+        let target = UpdateTarget {
+            version: "9.9.9".into(),
+            channel: Some("stable".into()),
+            release_label: Some("9.9.9".into()),
+            build_id: Some("20260824.2".into()),
+            commit: Some("abcdef1".into()),
+            rollout_percent: Some(100),
+            min_version: None,
+            blocked_versions: None,
+            url: None,
+            patch_url: None,
+            patch_from: None,
+            sha256: None,
+            patch_sha256: None,
+            executable: None,
+            signature: None,
+            publisher_thumbprint: None,
+            files: None,
+        };
+        if embedded_publisher_thumbprint().is_none() {
+            assert_eq!(expected_publisher_thumbprint(&target).unwrap(), None);
+        }
+    }
+
+    #[test]
+    fn signed_manifest_publisher_pin_is_used_when_no_pin_is_embedded() {
         let target = UpdateTarget {
             version: "9.9.9".into(),
             channel: Some("stable".into()),
@@ -1153,7 +1173,10 @@ mod tests {
             files: None,
         };
         if embedded_publisher_thumbprint().is_none() {
-            assert!(expected_publisher_thumbprint(&target).is_err());
+            assert_eq!(
+                expected_publisher_thumbprint(&target).unwrap(),
+                Some("aa".repeat(20))
+            );
         }
     }
 

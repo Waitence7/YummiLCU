@@ -1,4 +1,4 @@
-name: Release Yummi LCU Agent 0.7.1 Direct
+name: Release Yummi LCU Agent Direct Stable
 
 on:
   workflow_dispatch:
@@ -18,12 +18,12 @@ jobs:
       - name: Configure release metadata
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
-          if ($version -ne "0.7.1") { throw "expected 0.7.1, got $version" }
           $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
           $buildId = "$date.$env:GITHUB_RUN_NUMBER"
           $shortSha = $env:GITHUB_SHA.Substring(0, 7)
           "YUMMI_AGENT_RELEASE_CHANNEL=stable" >> $env:GITHUB_ENV
-          "YUMMI_AGENT_RELEASE_LABEL=0.7.1" >> $env:GITHUB_ENV
+          "YUMMI_AGENT_RELEASE_LABEL=$version" >> $env:GITHUB_ENV
+          "YUMMI_AGENT_RELEASE_VERSION=$version" >> $env:GITHUB_ENV
           "YUMMI_AGENT_BUILD_ID=$buildId" >> $env:GITHUB_ENV
           "YUMMI_AGENT_GIT_COMMIT=$shortSha" >> $env:GITHUB_ENV
 
@@ -119,7 +119,7 @@ jobs:
         env:
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
         run: |
-          $version = "0.7.1"
+          $version = $env:YUMMI_AGENT_RELEASE_VERSION
           $stage = Join-Path $env:RUNNER_TEMP "tauri-portable"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           $stageExe = Join-Path $stage "yummi-lcu-tauri.exe"
@@ -132,9 +132,9 @@ jobs:
             --zip $zip `
             --exe $stageExe `
             --out agent-version.json `
-            --notes "Yummi LCU Agent 0.7.1 stable: HTML-in-Canvas CanvasDrawElement Blink/runtime/experimental flags enabled." `
+            --notes "Yummi LCU Agent $version stable: automatic updater trust policy repaired; signed manifest and SHA-256 remain mandatory, Authenticode pinning is optional when configured." `
             --channel stable `
-            --release-label 0.7.1 `
+            --release-label $version `
             --build-id $env:YUMMI_AGENT_BUILD_ID `
             --commit $env:YUMMI_AGENT_GIT_COMMIT `
             --rollout-percent 100
@@ -144,19 +144,21 @@ jobs:
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
         run: |
           if (-not $env:AGENT_DEPLOY_TOKEN) { throw "YUMMI_AGENT_DEPLOY_TOKEN is required" }
+          $version = $env:YUMMI_AGENT_RELEASE_VERSION
           $headers = @{ Authorization = "Bearer $env:AGENT_DEPLOY_TOKEN" }
           Invoke-WebRequest -UseBasicParsing -Method Put -Uri "https://yummi.duckdns.org/agent-deploy/manifest" -Headers $headers -ContentType "application/json" -InFile "agent-version.json" | Out-Null
-          Invoke-WebRequest -UseBasicParsing -Method Put -Uri "https://yummi.duckdns.org/agent-deploy/installer/0.7.1" -Headers $headers -ContentType "application/octet-stream" -InFile "Yummi-LCU-Agent-0.7.1-setup.exe" | Out-Null
-          Invoke-WebRequest -UseBasicParsing -Method Put -Uri "https://yummi.duckdns.org/agent-deploy/archive/0.7.1" -Headers $headers -ContentType "application/zip" -InFile "tauri-0.7.1.zip" | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Method Put -Uri "https://yummi.duckdns.org/agent-deploy/installer/$version" -Headers $headers -ContentType "application/octet-stream" -InFile "Yummi-LCU-Agent-$version-setup.exe" | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Method Put -Uri "https://yummi.duckdns.org/agent-deploy/archive/$version" -Headers $headers -ContentType "application/zip" -InFile "tauri-$version.zip" | Out-Null
 
       - name: Verify public stable release
         run: |
+          $version = $env:YUMMI_AGENT_RELEASE_VERSION
           $manifest = Invoke-RestMethod -Uri "https://yummi.duckdns.org/agent/version.json"
-          if ($manifest.version -ne "0.7.1") { throw "public version mismatch: $($manifest.version)" }
-          if ($manifest.tauri.version -ne "0.7.1") { throw "public tauri version mismatch" }
+          if ($manifest.version -ne $version) { throw "public version mismatch: $($manifest.version)" }
+          if ($manifest.tauri.version -ne $version) { throw "public tauri version mismatch" }
           if ($manifest.tauri.channel -ne "stable") { throw "public channel mismatch" }
-          if ($manifest.tauri.releaseLabel -ne "0.7.1") { throw "public release label mismatch" }
+          if ($manifest.tauri.releaseLabel -ne $version) { throw "public release label mismatch" }
           if ($manifest.tauri.buildId -ne $env:YUMMI_AGENT_BUILD_ID) { throw "public build id mismatch" }
-          Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://yummi.duckdns.org/agent/releases/tauri/tauri-0.7.1.zip" | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://yummi.duckdns.org/agent/releases/tauri/tauri-$version.zip" | Out-Null
           Invoke-WebRequest -UseBasicParsing -Method Head -Uri "https://yummi.duckdns.org/agent/releases/tauri/latest-setup.exe" | Out-Null
-          Write-Host "0.7.1 stable release verified: build $env:YUMMI_AGENT_BUILD_ID commit $env:YUMMI_AGENT_GIT_COMMIT"
+          Write-Host "$version stable release verified: build $env:YUMMI_AGENT_BUILD_ID commit $env:YUMMI_AGENT_GIT_COMMIT"
