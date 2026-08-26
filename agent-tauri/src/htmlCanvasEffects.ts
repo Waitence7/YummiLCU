@@ -51,7 +51,7 @@ const EFFECTS: Record<HtmlCanvasTrayEffect, EffectSpec> = {
   curtain: { mode: 5, duration: 790, grid: [28, 28] },
   shards: { mode: 6, duration: 800, grid: [6, 4] },
   'book-return': { mode: 7, duration: 1040, grid: [32, 26] },
-  'book-return-v2': { mode: 8, duration: 980, grid: [32, 26] },
+  'book-return-v2': { mode: 8, duration: 900, grid: [32, 26] },
 };
 
 const VERTEX_SHADER = `#version 300 es
@@ -454,22 +454,23 @@ void main() {
   // Begin as a shallow solid instead of a mathematically flat sheet. A tiny
   // inset and camera pose expose the cover edge immediately while keeping the
   // captured WebView aligned closely enough to hide the hand-off.
-  float formBook = mix(0.06, 1.0, smoothstep(0.04, 0.34, t));
-  float solidReveal = mix(0.45, 1.0, smoothstep(0.02, 0.42, t));
-  float pose3d = mix(0.10, 1.0, smoothstep(0.00, 0.34, t));
-  float entryLeanPhase = smoothstep(0.00, 0.30, t);
+  float formBook = mix(0.06, 1.0, smoothstep(0.02, 0.26, t));
+  float solidReveal = mix(0.45, 1.0, smoothstep(0.01, 0.30, t));
+  float pose3d = mix(0.10, 1.0, smoothstep(0.00, 0.26, t));
+  float entryLeanPhase = smoothstep(0.00, 0.22, t);
   float entryLean = sin(PI * entryLeanPhase);
-  float wake = smoothstep(0.08, 0.24, t);
-  float turn = smoothstep(0.16, 0.60, t);
-  float closeBook = smoothstep(0.48, 0.74, t);
-  // Start the return while the cover is finishing its close. A separate pause
-  // with a large, face-on cover made the late phase feel like a second shot.
-  float fall = smoothstep(0.54, 0.91, t);
+  float wake = smoothstep(0.03, 0.16, t);
+  // Close quickly, but release the book almost immediately. Folding, upward
+  // momentum and tumbling now overlap as one gesture instead of playing as a
+  // close animation followed by a separate drop animation.
+  float turn = smoothstep(0.02, 0.32, t);
+  float closeBook = smoothstep(0.05, 0.35, t);
+  float fall = smoothstep(0.00, 0.80, t);
   float gravity = fall * fall;
-  float impact = smoothstep(0.82, 0.91, t);
+  float impact = smoothstep(0.71, 0.80, t);
   float rebound = sin(PI * impact) * 0.055;
   float impactCompression = sin(PI * impact);
-  float vanish = smoothstep(0.84, 0.91, t);
+  float vanish = smoothstep(0.74, 0.80, t);
   // Keep perspective shrinkage moving throughout the fall. Finishing the
   // shrink halfway through the flight made the book appear to hit an
   // invisible depth plane before it landed.
@@ -507,7 +508,7 @@ void main() {
   if (a_book_face > 0.5 && a_book_face < 1.5 && rightHalf > 0.5) {
     // Let the physical cover overlap the page block by a small lip once shut.
     // This removes the artificial white seam without recoloring the page.
-    float coverSeal = smoothstep(0.52, 0.72, t);
+    float coverSeal = smoothstep(0.28, 0.42, t);
     p.x = mix(p.x, -0.43 + (p.x + 0.43) * 1.055, coverSeal);
     p.y *= mix(1.0, 1.020, coverSeal);
     p.z -= 0.010 * coverSeal;
@@ -658,7 +659,7 @@ void main() {
   // depth creates triangular z-fighting during a dynamic tumble.
   bool foldedInteriorFace = (v_book_face > 1.5 && v_book_face < 2.5)
     || (v_book_face > 3.5 && v_book_face < 5.5);
-  if (foldedInteriorFace && t > 0.60) discard;
+  if (foldedInteriorFace && t > 0.38) discard;
 
   if (v_book_face < 0.5) {
     // The captured WebView remains a page for its entire lifetime. It never
@@ -667,7 +668,7 @@ void main() {
     color = page.rgb;
     // Once the physical cover has swept over the page, only the page-block
     // side faces remain visible. This is occlusion, not a page-to-cover tint.
-    faceAlpha = page.a * (1.0 - smoothstep(0.42, 0.56, t));
+    faceAlpha = page.a * (1.0 - smoothstep(0.22, 0.36, t));
     // A zero-alpha page must not keep writing depth in front of the cover.
     // Discarding it also prevents a pale texture flash during the final shrink.
     if (faceAlpha < 0.012) discard;
@@ -685,7 +686,7 @@ void main() {
     float spineRail = 0.5 + 0.5 * cos(uv.y * PI * 8.0);
     vec3 pageEdge = mix(vec3(0.49, 0.34, 0.105), vec3(0.82, 0.68, 0.31), spineRail);
     vec3 closedSpine = mix(vec3(0.16, 0.040, 0.028), vec3(0.58, 0.37, 0.09), spineRail * 0.38);
-    color = mix(pageEdge, closedSpine, smoothstep(0.48, 0.68, t));
+    color = mix(pageEdge, closedSpine, smoothstep(0.26, 0.42, t));
   } else {
     // Right, top and bottom are its recessed solid page block.
     float lineAxis = v_book_face < 3.5 ? uv.y : uv.x;
@@ -704,7 +705,7 @@ void main() {
   // End while the object is still a readable solid book. Very low-alpha
   // fragments can be un-premultiplied by WebView capture/composition and flash
   // pale for one frame, while also making the ending feel unnecessarily long.
-  if (t > 0.91) discard;
+  if (t > 0.80) discard;
   fragColor = vec4(clamp(color, 0.0, 1.0), faceAlpha);
 }
 `;
