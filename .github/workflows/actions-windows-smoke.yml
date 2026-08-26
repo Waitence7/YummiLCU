@@ -1,0 +1,11 @@
+name: Actions Windows Smoke Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    steps:
+      - shell: pwsh
+        run: Write-Host "windows runner started"
