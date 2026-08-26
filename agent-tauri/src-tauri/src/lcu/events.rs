@@ -380,8 +380,9 @@ impl LcuEventPoller {
             self.eog_sent = false;
         }
 
-        if let Ok(value) = client.request(Method::GET, READY_CHECK, None).await {
-            self.observe_schema(
+        match client.request(Method::GET, READY_CHECK, None).await {
+            Ok(value) => {
+                self.observe_schema(
                 "ready_check",
                 value.is_object()
                     && value.get("state").is_some_and(Value::is_string)
@@ -395,9 +396,12 @@ impl LcuEventPoller {
                 payload,
                 &mut events,
             );
+            }
+            Err(error) => self.diagnostic(format!("LCU ready_check API 응답 실패: {error}")),
         }
-        if let Ok(value) = client.request(Method::GET, CHAMP_SELECT, None).await {
-            self.observe_schema(
+        match client.request(Method::GET, CHAMP_SELECT, None).await {
+            Ok(value) => {
+                self.observe_schema(
                 "champ_select",
                 value.is_object()
                     && value.get("timer").is_some_and(Value::is_object)
@@ -411,9 +415,12 @@ impl LcuEventPoller {
                 payload,
                 &mut events,
             );
+            }
+            Err(error) => self.diagnostic(format!("LCU champ_select API 응답 실패: {error}")),
         }
-        if let Ok(value) = client.request(Method::GET, LOBBY, None).await {
-            self.observe_schema(
+        match client.request(Method::GET, LOBBY, None).await {
+            Ok(value) => {
+                self.observe_schema(
                 "lobby",
                 value.is_object() && value.get("members").is_some_and(Value::is_array),
             );
@@ -433,6 +440,8 @@ impl LcuEventPoller {
                 status,
                 &mut events,
             );
+            }
+            Err(error) => self.diagnostic(format!("LCU lobby API 응답 실패: {error}")),
         }
         events
     }

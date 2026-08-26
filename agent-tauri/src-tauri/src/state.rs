@@ -332,15 +332,22 @@ fn sanitize_diagnostic_line(value: &str) -> String {
     // Diagnostics must stay useful while never echoing credential-like values.
     // Known secrets are never intentionally logged, and this is a final defense for
     // accidental key=value / JSON-like entries that may reach the UI log.
-    const KEYS: [&str; 8] = [
+    const KEYS: [&str; 15] = [
         "password",
         "token",
         "authorization",
+        "cookie",
+        "set-cookie",
+        "secret",
+        "api_key",
+        "apikey",
+        "private_key",
         "oauth_code",
         "oauthcode",
         "ws_token",
         "session_token",
         "remoting-auth-token",
+        "access_token",
     ];
 
     let mut output = value.to_owned();
