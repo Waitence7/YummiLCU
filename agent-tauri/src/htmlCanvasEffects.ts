@@ -454,7 +454,10 @@ float coverRidge(float value, float center, float width) {
 void main() {
   // Front-load the motion so the close button receives an immediate visual
   // response, while retaining a little more time for the airborne silhouette.
-  float t = pow(smoothstep(0.0, 1.0, u_progress), 0.82);
+  // The authored V2 motion phases intentionally end at t=0.80. Scale the
+  // normalized progress into that range so the animation uses its full
+  // configured duration instead of finishing early and leaving a blank tail.
+  float t = 0.80 * pow(smoothstep(0.0, 1.0, u_progress), 0.82);
   // Begin as a shallow solid instead of a mathematically flat sheet. A tiny
   // inset and camera pose expose the cover edge immediately while keeping the
   // captured WebView aligned closely enough to hide the hand-off.
@@ -704,7 +707,9 @@ vec3 bookCover(vec2 uv) {
 }
 
 void main() {
-  float t = pow(smoothstep(0.0, 1.0, u_progress), 0.82);
+  // Keep fragment timing aligned with the vertex shader so the solid book
+  // remains visible throughout the flight instead of disappearing around 80%.
+  float t = 0.80 * pow(smoothstep(0.0, 1.0, u_progress), 0.82);
   vec2 uv = v_book_uv;
   float edgeDistance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
   vec3 color;
@@ -731,7 +736,11 @@ void main() {
   } else if (v_book_face < 1.5) {
     // The real cover lives underneath the page from the beginning. The right
     // half's underside becomes the front cover as the one solid book closes.
-    vec2 coverUv = vec2(clamp((uv.x - 0.5) * 2.0, 0.0, 1.0), uv.y);
+    // Each physical half is a complete cover. Mapping the whole 0..1 UV
+    // range with only the right-half formula collapses the left back cover to
+    // a single vertical texel once it becomes visible during the tumble.
+    float coverU = uv.x < 0.5 ? uv.x * 2.0 : (uv.x - 0.5) * 2.0;
+    vec2 coverUv = vec2(clamp(coverU, 0.0, 1.0), uv.y);
     color = bookCover(coverUv);
   } else if (v_book_face < 2.5) {
     // Four raised antique-gold bands and darker hinge plates make the spine
@@ -770,7 +779,7 @@ void main() {
   // End while the object is still a readable solid book. Very low-alpha
   // fragments can be un-premultiplied by WebView capture/composition and flash
   // pale for one frame, while also making the ending feel unnecessarily long.
-  if (t > 0.80) discard;
+  if (t > 0.795) discard;
   fragColor = vec4(clamp(color, 0.0, 1.0), faceAlpha);
 }
 `;
@@ -1272,7 +1281,7 @@ export async function playHtmlCanvasTrayEffect(
     return false;
   }
   if (effect === 'book-return-v2' && (!bookProgram || !bookMesh)) {
-    reportDiagnostic('mesh_failed', 'could not allocate the dedicated 24-vertex solid book mesh');
+    reportDiagnostic('mesh_failed', 'could not allocate the dedicated solid book mesh');
     return false;
   }
   if (!texture) {

@@ -77,7 +77,7 @@ impl Default for Config {
             // The agent is a tray/background process. It must be running after
             // Windows login even when its main window is not visible.
             run_at_windows_startup: true,
-            tray_hide_effect: "fold".into(),
+            tray_hide_effect: "book-return-v2".into(),
             tray_effect_playback_rate: 1.0,
             ui_test_mode: false,
         }
@@ -362,7 +362,7 @@ mod tests {
         assert!(config.follow_league_client);
         assert_eq!(config.update_channel, embedded_release_channel());
         assert_eq!(config.saved_session_max_age_days, 14);
-        assert_eq!(config.tray_hide_effect, "fold");
+        assert_eq!(config.tray_hide_effect, "book-return-v2");
         assert_eq!(config.tray_effect_playback_rate, 1.0);
     }
 

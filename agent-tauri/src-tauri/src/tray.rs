@@ -13,7 +13,7 @@ use crate::{relay::supervisor::RelaySupervisor, state::AppState};
 
 const MAIN_WINDOW_LABEL: &str = "main";
 #[cfg(windows)]
-const HTML_CANVAS_BROWSER_ARGS: &str = "--enable-features=CanvasDrawElement --disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection";
+const HTML_CANVAS_BROWSER_ARGS: &str = "--enable-features=CanvasDrawElement";
 const TRAY_ID: &str = "yummi-agent-tray";
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
@@ -205,7 +205,11 @@ fn html_canvas_experiment_enabled() -> bool {
 
 #[cfg(any(windows, test))]
 fn html_canvas_experiment_enabled_for_channel(channel: &str) -> bool {
-    matches!(channel.trim(), "beta" | "dev")
+    // HTML-in-Canvas is now part of the normal tray effect path. Enable the
+    // Chromium feature for every supported release channel, including stable.
+    // Runtime capability is still checked in the frontend; unsupported
+    // WebView2 versions fall back to page-curl/fold without blocking hiding.
+    matches!(channel.trim(), "stable" | "beta" | "dev")
 }
 
 pub(crate) fn request_exit(app: &AppHandle) {
@@ -230,10 +234,10 @@ mod tests {
     use super::tray_hide_watchdog_ms;
 
     #[test]
-    fn html_canvas_browser_flag_is_limited_to_prerelease_channels() {
+    fn html_canvas_browser_flag_is_enabled_for_supported_release_channels() {
+        assert!(html_canvas_experiment_enabled_for_channel("stable"));
         assert!(html_canvas_experiment_enabled_for_channel("beta"));
         assert!(html_canvas_experiment_enabled_for_channel("dev"));
-        assert!(!html_canvas_experiment_enabled_for_channel("stable"));
         assert!(!html_canvas_experiment_enabled_for_channel("nightly"));
     }
 

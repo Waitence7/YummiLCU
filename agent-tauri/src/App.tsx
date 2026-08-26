@@ -7,17 +7,19 @@ import { TitleBar } from './components/TitleBar';
 import { useAgentState } from './hooks/useAgentState';
 import { GuildMatchTab } from './tabs/GuildMatchTab';
 import { LogsTab } from './tabs/LogsTab';
+import { PatchNotesTab } from './tabs/PatchNotesTab';
 import { SettingsTab } from './tabs/SettingsTab';
 import { VoiceTab } from './tabs/VoiceTab';
 import { playTrayHideEffect } from './trayEffects';
 
-type TabId = 'guild' | 'settings' | 'voice' | 'logs';
+type TabId = 'guild' | 'settings' | 'voice' | 'logs' | 'patchNotes';
 
 const TABS: { id: TabId; label: string; badge?: string }[] = [
   { id: 'guild', label: '내전' },
   { id: 'settings', label: '편의기능' },
   { id: 'voice', label: '음성', badge: '예정' },
   { id: 'logs', label: '로그' },
+  { id: 'patchNotes', label: '패치노트', badge: '0.7.0' },
 ];
 
 export function App() {
@@ -108,6 +110,7 @@ export function App() {
             onExportDiagnostics={actions.exportDiagnostics}
           />
         )}
+        {tab === 'patchNotes' && <PatchNotesTab />}
       </main>
 
       <footer className="flex items-center justify-between border-t border-slate-200 bg-white px-4 py-1.5 text-[10px] text-slate-500">

@@ -1,4 +1,5 @@
 import * as api from '../api/commands';
+import { startCloseSound } from '../closeSound';
 import appIcon from '../../src-tauri/icons/icon.ico';
 
 export function TitleBar() {
@@ -34,7 +35,10 @@ export function TitleBar() {
           aria-label="트레이로 보내기"
           title="트레이로 보내기"
           className="grid h-full w-11 place-items-center text-slate-300 transition-colors hover:bg-[#c42b1c] hover:text-white"
-          onClick={() => void api.requestTrayHide()}
+          onClick={() => {
+            void startCloseSound();
+            void api.requestTrayHide();
+          }}
         >
           <span className="relative block size-3.5 before:absolute before:top-1.5 before:left-[-1px] before:h-px before:w-4 before:rotate-45 before:bg-current after:absolute after:top-1.5 after:left-[-1px] after:h-px after:w-4 after:-rotate-45 after:bg-current" />
         </button>

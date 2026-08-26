@@ -94,7 +94,7 @@ export const initialState: AgentState = {
     UpdateChannel: 'stable',
     SavedSessionMaxAgeDays: 14,
     RunAtWindowsStartup: true,
-    TrayHideEffect: 'fold',
+    TrayHideEffect: 'book-return-v2',
     TrayEffectPlaybackRate: 1,
     UiTestMode: false,
   },
