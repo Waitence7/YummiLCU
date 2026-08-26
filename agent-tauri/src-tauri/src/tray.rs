@@ -12,8 +12,8 @@ use tauri::{
 use crate::{relay::supervisor::RelaySupervisor, state::AppState};
 
 const MAIN_WINDOW_LABEL: &str = "main";
-#[cfg(windows)]
-const HTML_CANVAS_BROWSER_ARGS: &str = "--enable-features=CanvasDrawElement";
+#[cfg(any(windows, test))]
+const HTML_CANVAS_BROWSER_ARGS: &str = "--enable-blink-features=CanvasDrawElement --enable-experimental-web-platform-features --enable-features=CanvasDrawElement";
 const TRAY_ID: &str = "yummi-agent-tray";
 const OPEN_MENU_ID: &str = "open";
 const QUIT_MENU_ID: &str = "quit";
@@ -239,6 +239,13 @@ mod tests {
         assert!(html_canvas_experiment_enabled_for_channel("beta"));
         assert!(html_canvas_experiment_enabled_for_channel("dev"));
         assert!(!html_canvas_experiment_enabled_for_channel("nightly"));
+    }
+
+    #[test]
+    fn html_canvas_browser_args_enable_blink_runtime_feature_directly() {
+        assert!(HTML_CANVAS_BROWSER_ARGS.contains("--enable-blink-features=CanvasDrawElement"));
+        assert!(HTML_CANVAS_BROWSER_ARGS.contains("--enable-experimental-web-platform-features"));
+        assert!(HTML_CANVAS_BROWSER_ARGS.contains("--enable-features=CanvasDrawElement"));
     }
 
     #[test]

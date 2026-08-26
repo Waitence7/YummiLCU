@@ -1262,7 +1262,16 @@ export async function playHtmlCanvasTrayEffect(
     return false;
   }
   if (typeof gl.texElementImage2D !== 'function') {
-    reportDiagnostic('api_unavailable', 'WebGL2RenderingContext.texElementImage2D is not exposed');
+    const drawElementImage =
+      typeof CanvasRenderingContext2D !== 'undefined'
+        ? typeof (CanvasRenderingContext2D.prototype as CanvasRenderingContext2D & {
+            drawElementImage?: unknown;
+          }).drawElementImage
+        : 'unavailable';
+    reportDiagnostic(
+      'api_unavailable',
+      `texElementImage2D=${typeof gl.texElementImage2D}; drawElementImage=${drawElementImage}; ua=${navigator.userAgent}`,
+    );
     return false;
   }
 

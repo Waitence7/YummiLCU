@@ -6,6 +6,17 @@ type NoteGroup = {
   items: string[];
 };
 
+const V071_NOTES: NoteGroup[] = [
+  {
+    title: '0.7.1 핫픽스',
+    tone: 'warn',
+    items: [
+      'WebView2에서 HTML-in-Canvas 실험 기능이 노출되지 않던 문제를 수정하기 위해 CanvasDrawElement를 Blink runtime feature로 직접 활성화하도록 변경했습니다.',
+      'HTML-in-Canvas 진단에 texElementImage2D, drawElementImage 노출 여부와 WebView 사용자 에이전트를 함께 기록해 런타임 호환성 원인을 더 정확히 확인할 수 있게 했습니다.',
+    ],
+  },
+];
+
 const V070_NOTES: NoteGroup[] = [
   {
     title: '새 기능',
@@ -54,7 +65,7 @@ export function PatchNotesTab() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900">Yummi LCU Agent 0.7.0</h2>
+              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900">Yummi LCU Agent 0.7.1</h2>
               <Badge tone="ok">정식 릴리스</Badge>
             </div>
             <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
@@ -62,15 +73,15 @@ export function PatchNotesTab() {
             </p>
           </div>
           <span className="shrink-0 rounded-lg bg-white/80 px-2.5 py-1 text-[10px] font-medium text-slate-500 shadow-sm ring-1 ring-slate-200/70">
-            0.7.0
+            0.7.1
           </span>
         </div>
         <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50/70 px-3 py-2 text-[10px] leading-relaxed text-emerald-700">
-          0.7.0 stable 정식 릴리스에 포함된 변경사항입니다.
+          0.7.1 stable 핫픽스와 0.7.0 정식 릴리스 변경사항입니다.
         </div>
       </Card>
 
-      {V070_NOTES.map((group) => (
+      {[...V071_NOTES, ...V070_NOTES].map((group) => (
         <Card
           key={group.title}
           title={
