@@ -447,6 +447,10 @@ vec3 rotateAxis3d(vec3 value, vec3 axis, float angle) {
   return value * c + cross(axis, value) * s + axis * dot(axis, value) * (1.0 - c);
 }
 
+float coverRidge(float value, float center, float width) {
+  return 1.0 - smoothstep(width, width * 1.85, abs(value - center));
+}
+
 void main() {
   // Front-load the motion so the close button receives an immediate visual
   // response, while retaining a little more time for the airborne silhouette.
@@ -498,6 +502,28 @@ void main() {
   // physically beneath the page becomes the visible outer face; the captured
   // page itself never changes material.
   float rightHalf = step(0.0001, p.x);
+  if (a_book_face > 0.5 && a_book_face < 1.5 && rightHalf > 0.5) {
+    // Match the Blender asset's physical relief without introducing a second
+    // object: the real cover mesh carries raised rails, medallion and gem dome.
+    vec2 coverUv = vec2(clamp((a_book_uv.x - 0.5) * 2.0, 0.0, 1.0), a_book_uv.y);
+    float coverEdge = min(min(coverUv.x, 1.0 - coverUv.x), min(coverUv.y, 1.0 - coverUv.y));
+    float frameRelief = max(
+      coverRidge(coverEdge, 0.048, 0.012),
+      coverRidge(coverEdge, 0.108, 0.009)
+    );
+    vec2 medallionP = (coverUv - vec2(0.50, 0.49)) * vec2(1.0, 1.18);
+    float medallionR = length(medallionP);
+    float medallionRelief = coverRidge(medallionR, 0.275, 0.018);
+    vec2 gemP = (coverUv - vec2(0.50, 0.49)) * vec2(1.45, 1.0);
+    float gemDome = 1.0 - smoothstep(0.075, 0.145, length(gemP));
+    float insetPanel = smoothstep(0.13, 0.18, coverEdge);
+    p.z += solidReveal * (
+      frameRelief * 0.020
+      + medallionRelief * 0.026
+      + gemDome * 0.060
+      - insetPanel * 0.008
+    );
+  }
   float hingeAngle = -turn * PI;
   vec3 folded = p;
   folded.x = p.x * cos(hingeAngle) - p.z * sin(hingeAngle);
@@ -573,24 +599,41 @@ float leafShape(vec2 p, vec2 center, vec2 radius, float angle) {
   return 1.0 - smoothstep(0.80, 1.0, body);
 }
 
+float reliefRidge(float value, float center, float width) {
+  return 1.0 - smoothstep(width, width * 1.85, abs(value - center));
+}
+
 vec3 bookCover(vec2 uv) {
   float edgeDistance = min(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
-  float leather = 0.5 + 0.5 * sin(uv.x * 18.0 + sin(uv.y * 13.0) * 0.8);
+  float leather = 0.5 + 0.5 * sin(uv.x * 23.0 + sin(uv.y * 17.0) * 1.15);
+  leather += 0.22 * sin((uv.x - uv.y) * 71.0 + sin(uv.x * 19.0));
   vec3 cover = mix(
-    vec3(0.145, 0.043, 0.032),
-    vec3(0.315, 0.095, 0.067),
-    0.56 + leather * 0.10
+    vec3(0.095, 0.018, 0.016),
+    vec3(0.34, 0.070, 0.055),
+    0.54 + leather * 0.075
   );
-  float outerFrame = 1.0 - smoothstep(0.025, 0.070, edgeDistance);
-  float innerRail = 1.0 - smoothstep(0.010, 0.026, abs(edgeDistance - 0.105));
+  // The central leather panel is physically recessed in the Blender model.
+  // A dark bevel beside the rails makes that depth readable while tumbling.
+  float insetPanel = smoothstep(0.13, 0.18, edgeDistance);
+  cover *= 1.0 - insetPanel * 0.16;
+  float panelBevel = reliefRidge(edgeDistance, 0.145, 0.015);
+  cover += vec3(0.055, 0.012, 0.004) * panelBevel;
+
+  float outerFrame = reliefRidge(edgeDistance, 0.048, 0.014);
+  float innerRail = reliefRidge(edgeDistance, 0.108, 0.010);
+  float coverLip = 1.0 - smoothstep(0.014, 0.031, edgeDistance);
   vec3 gold = mix(
-    vec3(0.34, 0.205, 0.040),
-    vec3(0.86, 0.665, 0.20),
+    vec3(0.26, 0.105, 0.014),
+    vec3(0.98, 0.69, 0.16),
     0.55 + uv.x * 0.18 + (1.0 - uv.y) * 0.20
   );
-  float metalGrain = 0.94 + 0.06 * sin((uv.x + uv.y) * 52.0);
+  float metalGrain = 0.90 + 0.10 * sin((uv.x + uv.y) * 67.0);
   gold *= metalGrain;
-  cover = mix(cover, gold, clamp(max(outerFrame, innerRail * 0.92), 0.0, 1.0));
+  float railMask = clamp(max(max(outerFrame, innerRail), coverLip * 0.68), 0.0, 1.0);
+  float railHighlight = reliefRidge(edgeDistance, 0.043, 0.004)
+    + reliefRidge(edgeDistance, 0.103, 0.003);
+  cover = mix(cover, gold, railMask);
+  cover += vec3(0.22, 0.13, 0.025) * clamp(railHighlight, 0.0, 1.0);
 
   // Subtle pressed leather scrollwork, visible mainly while the cover is
   // close. It adds material detail without competing with the centre jewel.
@@ -600,9 +643,8 @@ vec3 bookCover(vec2 uv) {
   ) * smoothstep(0.12, 0.20, edgeDistance);
   cover += vec3(0.040, 0.012, 0.006) * leatherScroll;
 
-  // Mirrored, connected filigree along the outer rails. Only the rims of the
-  // leaves are gilded so the ornament feels engraved into the cover instead
-  // of looking like flat pieces pasted on top.
+  // Mirrored forged leaves follow the same filled gold-vine language as the
+  // Blender model, with a bright rim and a darker pressed centre vein.
   vec2 sideUv = vec2(min(uv.x, 1.0 - uv.x), uv.y);
   float leafOuter = 0.0;
   float leafInner = 0.0;
@@ -619,10 +661,17 @@ vec3 bookCover(vec2 uv) {
   float stem = 1.0 - smoothstep(0.004, 0.010, abs(sideUv.x - stemX));
   stem *= smoothstep(0.19, 0.27, sideUv.y) * (1.0 - smoothstep(0.73, 0.81, sideUv.y));
   vec3 antiqueGold = mix(cover, gold, 0.66);
-  cover = mix(cover, antiqueGold, clamp(leafRim * 0.82 + stem * 0.58, 0.0, 1.0));
+  cover = mix(cover, antiqueGold, clamp(leafOuter * 0.72 + stem * 0.78, 0.0, 1.0));
+  cover = mix(cover, gold * 1.08, leafRim * 0.72);
+  cover *= 1.0 - leafInner * 0.10;
 
   vec2 cornerUv = vec2(min(uv.x, 1.0 - uv.x), min(uv.y, 1.0 - uv.y));
+  float cornerPlate = 1.0 - smoothstep(0.030, 0.048, max(
+    abs(cornerUv.x - 0.052),
+    abs(cornerUv.y - 0.052)
+  ));
   float cornerStud = 1.0 - smoothstep(0.010, 0.022, length(cornerUv - vec2(0.047)));
+  cover = mix(cover, gold, cornerPlate * 0.92);
   cover = mix(cover, antiqueGold, cornerStud * 0.62);
 
   vec2 ornamentP = (uv - vec2(0.50, 0.49)) * vec2(1.0, 1.18);
@@ -630,20 +679,27 @@ vec3 bookCover(vec2 uv) {
   float ornamentAngle = atan(ornamentP.y, ornamentP.x);
   float ornamentTarget = 0.275 + sin(ornamentAngle * 2.0 + 0.65) * 0.022;
   float ornament = 1.0 - smoothstep(0.010, 0.026, abs(ornamentR - ornamentTarget));
-  cover = mix(cover, vec3(0.82, 0.645, 0.185), ornament * 0.86);
+  float innerMedallion = reliefRidge(ornamentR, 0.215, 0.010);
+  float medallionShadow = 1.0 - smoothstep(0.245, 0.305, ornamentR);
+  cover = mix(cover, vec3(0.055, 0.010, 0.009), medallionShadow * 0.42);
+  cover = mix(cover, vec3(0.94, 0.66, 0.16), max(ornament * 0.94, innerMedallion * 0.72));
 
   vec2 gemP = (uv - vec2(0.50, 0.49)) * vec2(1.45, 1.0);
   float gemR = length(gemP);
-  float bezel = 1.0 - smoothstep(0.142, 0.175, gemR);
-  float gem = 1.0 - smoothstep(0.112, 0.142, gemR);
+  float bezel = 1.0 - smoothstep(0.140, 0.178, gemR);
+  float darkBezel = reliefRidge(gemR, 0.137, 0.010);
+  float gem = 1.0 - smoothstep(0.105, 0.140, gemR);
   cover = mix(cover, gold, bezel);
+  cover = mix(cover, vec3(0.20, 0.055, 0.010), darkBezel * 0.65);
   vec3 gemColor = mix(
-    vec3(0.018, 0.105, 0.46),
-    vec3(0.025, 0.31, 0.94),
+    vec3(0.004, 0.035, 0.32),
+    vec3(0.015, 0.36, 1.00),
     clamp(1.0 - gemR / 0.145, 0.0, 1.0)
   );
+  float gemFacet = 0.5 + 0.5 * cos(atan(gemP.y, gemP.x) * 8.0 + gemR * 42.0);
+  gemColor *= 0.88 + gemFacet * 0.16;
   float gemHighlight = exp(-length((uv - vec2(0.465, 0.445)) * vec2(2.0, 2.8)) * 34.0);
-  gemColor = mix(gemColor, vec3(0.22, 0.72, 1.00), gemHighlight * 0.92);
+  gemColor = mix(gemColor, vec3(0.42, 0.88, 1.00), gemHighlight * 0.96);
   return mix(cover, gemColor, gem);
 }
 
@@ -678,22 +734,31 @@ void main() {
     vec2 coverUv = vec2(clamp((uv.x - 0.5) * 2.0, 0.0, 1.0), uv.y);
     color = bookCover(coverUv);
   } else if (v_book_face < 2.5) {
-    // The left side is the structural spine of the same object.
-    float spineRail = 0.5 + 0.5 * cos(uv.y * PI * 8.0);
-    color = mix(vec3(0.16, 0.040, 0.028), vec3(0.50, 0.31, 0.075), spineRail * 0.34);
+    // Four raised antique-gold bands and darker hinge plates make the spine
+    // read like the Blender model when the book turns edge-on.
+    float spineBand = pow(0.5 + 0.5 * cos((uv.y * 4.0 - 0.50) * PI * 2.0), 18.0);
+    float spineGroove = pow(0.5 + 0.5 * cos(uv.y * PI * 16.0), 10.0);
+    vec3 spineLeather = mix(vec3(0.085, 0.012, 0.010), vec3(0.29, 0.055, 0.035), uv.x);
+    color = mix(spineLeather, vec3(0.86, 0.55, 0.10), spineBand * 0.82);
+    color *= 0.92 + spineGroove * 0.08;
   } else if (v_book_face < 3.5) {
     // The folded right edge becomes the closed book's outer spine.
-    float spineRail = 0.5 + 0.5 * cos(uv.y * PI * 8.0);
-    vec3 pageEdge = mix(vec3(0.49, 0.34, 0.105), vec3(0.82, 0.68, 0.31), spineRail);
-    vec3 closedSpine = mix(vec3(0.16, 0.040, 0.028), vec3(0.58, 0.37, 0.09), spineRail * 0.38);
+    float spineBand = pow(0.5 + 0.5 * cos((uv.y * 4.0 - 0.50) * PI * 2.0), 18.0);
+    float pageGroove = pow(0.5 + 0.5 * sin(uv.y * PI * 104.0), 12.0);
+    vec3 pageEdge = mix(vec3(0.42, 0.25, 0.060), vec3(0.84, 0.66, 0.25), 0.42 + pageGroove * 0.20);
+    vec3 closedSpine = mix(vec3(0.11, 0.016, 0.012), vec3(0.88, 0.56, 0.11), spineBand * 0.84);
     color = mix(pageEdge, closedSpine, smoothstep(0.26, 0.42, t));
   } else {
     // Right, top and bottom are its recessed solid page block.
     float lineAxis = v_book_face < 3.5 ? uv.y : uv.x;
-    float pageLine = 0.5 + 0.5 * sin(lineAxis * PI * 96.0);
-    vec3 parchment = mix(vec3(0.49, 0.34, 0.105), vec3(0.82, 0.68, 0.31), 0.34 + pageLine * 0.18);
-    float coverLip = 1.0 - smoothstep(0.035, 0.105, min(uv.y, 1.0 - uv.y));
-    color = mix(parchment, vec3(0.74, 0.54, 0.12), coverLip);
+    float pageLine = pow(0.5 + 0.5 * sin(lineAxis * PI * 104.0 + sin(uv.y * 19.0) * 0.55), 10.0);
+    vec3 parchment = mix(vec3(0.43, 0.27, 0.070), vec3(0.85, 0.68, 0.29), 0.46 + pageLine * 0.17);
+    parchment *= 1.0 - pageLine * 0.10;
+    float coverLip = 1.0 - smoothstep(0.025, 0.085, min(
+      min(uv.x, 1.0 - uv.x),
+      min(uv.y, 1.0 - uv.y)
+    ));
+    color = mix(parchment, vec3(0.78, 0.50, 0.085), coverLip * 0.86);
   }
 
   if (v_book_face > 0.5) {
