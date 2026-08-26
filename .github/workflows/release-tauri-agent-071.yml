@@ -1,0 +1,328 @@
+name: Release Tauri Agent 0.7.1 (Stable)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-tauri-agent-071.yml
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    outputs:
+      version: ${{ steps.manifest.outputs.version }}
+      channel: ${{ steps.release_meta.outputs.channel }}
+      release_label: ${{ steps.release_meta.outputs.release_label }}
+      build_id: ${{ steps.release_meta.outputs.build_id }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      PUBLIC_KEY_VAR: ${{ vars.YUMMI_AGENT_MANIFEST_PUBLIC_KEY }}
+      PUBLIC_KEY_SECRET: ${{ secrets.YUMMI_AGENT_MANIFEST_PUBLIC_KEY }}
+      CERT_THUMBPRINT_VAR: ${{ vars.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
+      CERT_THUMBPRINT_SECRET: ${{ secrets.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure release metadata
+        id: release_meta
+        run: |
+          $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
+          $channel = "stable"
+          $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
+          $buildId = "$date.$env:GITHUB_RUN_NUMBER"
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $releaseLabel = if ($channel -eq "stable") { $version } else { "$version-$channel.$env:GITHUB_RUN_NUMBER" }
+          "YUMMI_AGENT_RELEASE_CHANNEL=$channel" >> $env:GITHUB_ENV
+          "YUMMI_AGENT_RELEASE_LABEL=$releaseLabel" >> $env:GITHUB_ENV
+          "YUMMI_AGENT_BUILD_ID=$buildId" >> $env:GITHUB_ENV
+          "YUMMI_AGENT_GIT_COMMIT=$shortSha" >> $env:GITHUB_ENV
+          "channel=$channel" >> $env:GITHUB_OUTPUT
+          "release_label=$releaseLabel" >> $env:GITHUB_OUTPUT
+          "build_id=$buildId" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: agent-tauri/package-lock.json
+
+      - name: Configure update verification keys
+        if: github.event_name != 'pull_request'
+        env:
+          MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+        run: |
+          if (-not $env:MANIFEST_SIGNING_KEY) {
+            throw "YUMMI_AGENT_MANIFEST_SIGNING_KEY secret is required"
+          }
+          $publicKey = if ($env:PUBLIC_KEY_VAR) { $env:PUBLIC_KEY_VAR } else { $env:PUBLIC_KEY_SECRET }
+          if (-not $publicKey) {
+            throw "YUMMI_AGENT_MANIFEST_PUBLIC_KEY variable or secret is required"
+          }
+          "YUMMI_AGENT_MANIFEST_PUBLIC_KEY=$publicKey" >> $env:GITHUB_ENV
+
+          $thumbprint = if ($env:CERT_THUMBPRINT_VAR) { $env:CERT_THUMBPRINT_VAR } else { $env:CERT_THUMBPRINT_SECRET }
+          if ($thumbprint) {
+            "YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT=$thumbprint" >> $env:GITHUB_ENV
+          }
+
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-tauri/src-tauri
+
+      - name: Install frontend dependencies
+        working-directory: agent-tauri
+        run: npm ci
+
+      - name: Typecheck and build frontend
+        working-directory: agent-tauri
+        run: npm run build
+
+      - name: Rust tests
+        working-directory: agent-tauri/src-tauri
+        run: cargo test --locked
+
+      - name: Build Tauri bundles
+        working-directory: agent-tauri
+        run: npm run tauri -- build --target x86_64-pc-windows-msvc
+
+      - name: Locate Tauri artifacts
+        id: artifacts
+        run: |
+          $releaseRoot = "agent-tauri/src-tauri/target/x86_64-pc-windows-msvc/release"
+          if (-not (Test-Path $releaseRoot)) {
+            $releaseRoot = "agent-tauri/src-tauri/target/release"
+          }
+          $exe = Join-Path $releaseRoot "yummi-lcu-tauri.exe"
+          if (-not (Test-Path $exe)) { throw "Tauri exe not found: $exe" }
+          $nsis = Get-ChildItem "$releaseRoot/bundle/nsis" -Filter "*.exe" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          $msi = Get-ChildItem "$releaseRoot/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+          "exe=$exe" >> $env:GITHUB_OUTPUT
+          if ($nsis) { "nsis=$($nsis.FullName)" >> $env:GITHUB_OUTPUT }
+          if ($msi) { "msi=$($msi.FullName)" >> $env:GITHUB_OUTPUT }
+
+      - name: Code sign Windows artifacts
+        if: github.event_name != 'pull_request'
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $files = @("${{ steps.artifacts.outputs.exe }}")
+          if ("${{ steps.artifacts.outputs.nsis }}") { $files += "${{ steps.artifacts.outputs.nsis }}" }
+          if ("${{ steps.artifacts.outputs.msi }}") { $files += "${{ steps.artifacts.outputs.msi }}" }
+
+          if (-not $env:WINDOWS_CERTIFICATE) {
+            if ($env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT) {
+              throw "YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT is set but WINDOWS_CERTIFICATE is missing"
+            }
+            Write-Warning "WINDOWS_CERTIFICATE is not configured; artifacts are unsigned"
+            exit 0
+          }
+          if (-not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            throw "WINDOWS_CERTIFICATE_PASSWORD is required when WINDOWS_CERTIFICATE is configured"
+          }
+
+          $certPath = Join-Path $env:RUNNER_TEMP "yummi-agent-code-signing.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $cert) { throw "failed to import code signing certificate" }
+          if ($env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT -and
+              ($cert.Thumbprint.ToLowerInvariant() -ne $env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT.ToLowerInvariant())) {
+            throw "imported certificate thumbprint does not match YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT"
+          }
+
+          foreach ($file in $files) {
+            Set-AuthenticodeSignature `
+              -FilePath $file `
+              -Certificate $cert `
+              -TimestampServer "http://timestamp.digicert.com" `
+              -HashAlgorithm SHA256 | Format-List
+            $sig = Get-AuthenticodeSignature -FilePath $file
+            if ($sig.Status -ne "Valid") {
+              throw "code signing validation failed for ${file}: $($sig.Status)"
+            }
+          }
+
+          Remove-Item $certPath -Force -ErrorAction SilentlyContinue
+          Remove-Item "Cert:\CurrentUser\My\$($cert.Thumbprint)" -Force -ErrorAction SilentlyContinue
+
+      - name: Build portable zip and signed manifest
+        if: github.event_name != 'pull_request'
+        id: manifest
+        env:
+          YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+          RELEASE_NOTES: "Yummi LCU Agent 0.7.1 stable: HTML-in-Canvas CanvasDrawElement Blink/runtime/experimental 플래그 활성화 및 진단 개선."
+          CHANNEL: stable
+          ROLLOUT_PERCENT: 100
+        run: |
+          $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
+          $stage = Join-Path $env:RUNNER_TEMP "tauri-portable"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $stageExe = Join-Path $stage "yummi-lcu-tauri.exe"
+          Copy-Item "${{ steps.artifacts.outputs.exe }}" $stageExe -Force
+          $nsisPath = "${{ steps.artifacts.outputs.nsis }}"
+          if (-not $nsisPath -or -not (Test-Path $nsisPath)) { throw "NSIS installer not found" }
+          $setup = "Yummi-LCU-Agent-$version-setup.exe"
+          Copy-Item $nsisPath $setup -Force
+          $zip = "tauri-$version.zip"
+          Compress-Archive -Path $stageExe -DestinationPath $zip -Force
+          $notes = if ($env:RELEASE_NOTES) { $env:RELEASE_NOTES } else { "Tauri $env:YUMMI_AGENT_RELEASE_LABEL build $env:YUMMI_AGENT_BUILD_ID ($env:YUMMI_AGENT_GIT_COMMIT)" }
+          node scripts/sync-tauri-agent-version.mjs `
+            --zip $zip `
+            --exe $stageExe `
+            --out agent-version.json `
+            --notes $notes `
+            --channel $env:CHANNEL `
+            --release-label $env:YUMMI_AGENT_RELEASE_LABEL `
+            --build-id $env:YUMMI_AGENT_BUILD_ID `
+            --commit $env:YUMMI_AGENT_GIT_COMMIT `
+            --rollout-percent $env:ROLLOUT_PERCENT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+          "setup=$setup" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: YummiLcuTauri-win-x64-portable
+          path: ${{ steps.manifest.outputs.zip }}
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: YummiLcuTauri-Installers
+          path: |
+            ${{ steps.artifacts.outputs.nsis }}
+            ${{ steps.artifacts.outputs.msi }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        if: github.event_name != 'pull_request'
+        with:
+          name: agent-version-json
+          path: agent-version.json
+          retention-days: 7
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: agent-release
+          path: |
+            ${{ steps.manifest.outputs.zip }}
+            agent-version.json
+            ${{ steps.manifest.outputs.setup }}
+          retention-days: 7
+
+  deploy:
+    name: Deploy agent update files
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-release
+          path: release
+
+      - name: Stage update manifest
+        env:
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
+        run: |
+          set -euo pipefail
+          test -s "release/agent-version.json"
+          test -n "$AGENT_DEPLOY_TOKEN"
+          route_channel=""
+          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -X PUT \
+            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data-binary "@release/agent-version.json" \
+            "https://yummi.duckdns.org/agent-deploy/manifest${route_channel}"
+
+      - name: Stage latest installer
+        env:
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
+        run: |
+          set -euo pipefail
+          installer="release/Yummi-LCU-Agent-${RELEASE_VERSION}-setup.exe"
+          test -s "$installer"
+          test -n "$AGENT_DEPLOY_TOKEN"
+          route_channel=""
+          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -X PUT \
+            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@$installer" \
+            "https://yummi.duckdns.org/agent-deploy/installer${route_channel}/${RELEASE_VERSION}"
+
+      - name: Verify archive and publish update
+        env:
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
+        run: |
+          set -euo pipefail
+          archive="release/tauri-${RELEASE_VERSION}.zip"
+          test -s "$archive"
+          test -n "$AGENT_DEPLOY_TOKEN"
+          route_channel=""
+          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
+          curl --fail-with-body --silent --show-error --retry 3 \
+            -X PUT \
+            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@$archive" \
+            "https://yummi.duckdns.org/agent-deploy/archive${route_channel}/${RELEASE_VERSION}"
+
+      - name: Verify public update files
+        env:
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
+          RELEASE_LABEL: ${{ needs.build.outputs.release_label }}
+          BUILD_ID: ${{ needs.build.outputs.build_id }}
+        run: |
+          set -euo pipefail
+          if [ "$RELEASE_CHANNEL" = "stable" ]; then
+            manifest_url="https://yummi.duckdns.org/agent/version.json"
+            release_subdir=""
+          else
+            manifest_url="https://yummi.duckdns.org/agent/releases/tauri/${RELEASE_CHANNEL}/version.json"
+            release_subdir="/${RELEASE_CHANNEL}"
+          fi
+          manifest="$(curl --fail --silent --show-error --retry 3 "$manifest_url")"
+          jq -e \
+            --arg version "$RELEASE_VERSION" \
+            --arg channel "$RELEASE_CHANNEL" \
+            --arg release_label "$RELEASE_LABEL" \
+            --arg build_id "$BUILD_ID" \
+            '.tauri.version == $version and .version == $version and .tauri.channel == $channel and .tauri.releaseLabel == $release_label and .tauri.buildId == $build_id' \
+            <<<"$manifest" >/dev/null
+          curl --fail --silent --show-error --retry 3 --head \
+            "https://yummi.duckdns.org/agent/releases/tauri${release_subdir}/tauri-${RELEASE_VERSION}.zip" >/dev/null
+          curl --fail --silent --show-error --retry 3 --head \
+            "https://yummi.duckdns.org/agent/releases/tauri${release_subdir}/latest-setup.exe" >/dev/null
