@@ -17,7 +17,7 @@ use tokio_tungstenite::{
 
 use crate::config::Config;
 
-use super::{discover_lockfile, LcuClient, LcuIdentity};
+use super::{discover_lockfile, lockfile_path, LcuClient, LcuIdentity};
 
 const GAMEFLOW_PHASE: &str = "/lol-gameflow/v1/gameflow-phase";
 const READY_CHECK: &str = "/lol-matchmaking/v1/ready-check";
