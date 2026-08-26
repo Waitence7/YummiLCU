@@ -29,7 +29,7 @@ const LIVE_GAME_DATA: &str = "/liveclientdata/allgamedata";
 const LIVE_GAME_EVENTS: &str = "/liveclientdata/eventdata";
 const LCU_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(1);
-const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const LIVE_GAME_PARTICIPANT_COUNT: usize = 10;
 const MAX_LCU_EVENT_MESSAGE_BYTES: usize = 1024 * 1024;
 
