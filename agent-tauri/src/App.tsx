@@ -20,7 +20,7 @@ const TABS: { id: TabId; label: string; badge?: string }[] = [
   { id: 'settings', label: '편의기능' },
   { id: 'voice', label: '음성', badge: '예정' },
   { id: 'logs', label: '로그' },
-  { id: 'patchNotes', label: '패치노트', badge: '0.7.2' },
+  { id: 'patchNotes', label: '패치노트', badge: '0.7.3' },
 ];
 
 export function App() {

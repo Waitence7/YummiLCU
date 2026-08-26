@@ -6,6 +6,18 @@ type NoteGroup = {
   items: string[];
 };
 
+const V073_NOTES: NoteGroup[] = [
+  {
+    title: '0.7.3 LCU 안정성 · 진단 개선',
+    tone: 'ok',
+    items: [
+      '강화된 LCU lockfile 검증이 정상 클라이언트를 놓치는 경우 과거 탐색·파싱 방식으로 자동 fallback하도록 개선했습니다.',
+      'lockfile 후보와 LCU API 실패 원인을 더 자세히 기록하고, 토큰·비밀번호·쿠키·키 등 민감정보는 진단 출력에서 마스킹합니다.',
+      '트레이 닫기 효과음이 WebView 종료 때문에 중간에 끊기지 않도록 재생 완료를 보장하고 볼륨을 60%로 조정했습니다.',
+    ],
+  },
+];
+
 const V072_NOTES: NoteGroup[] = [
   {
     title: '0.7.2 자동 업데이트 복구',
@@ -76,7 +88,7 @@ export function PatchNotesTab() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900">Yummi LCU Agent 0.7.2</h2>
+              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900">Yummi LCU Agent 0.7.3</h2>
               <Badge tone="ok">정식 릴리스</Badge>
             </div>
             <p className="mt-1 text-[11px] leading-relaxed text-slate-500">
@@ -84,15 +96,15 @@ export function PatchNotesTab() {
             </p>
           </div>
           <span className="shrink-0 rounded-lg bg-white/80 px-2.5 py-1 text-[10px] font-medium text-slate-500 shadow-sm ring-1 ring-slate-200/70">
-            0.7.2
+            0.7.3
           </span>
         </div>
         <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50/70 px-3 py-2 text-[10px] leading-relaxed text-emerald-700">
-          0.7.2 자동 업데이트 복구, 0.7.1 핫픽스와 0.7.0 정식 릴리스 변경사항입니다.
+          0.7.3 LCU 안정성·진단 개선과 이전 정식 릴리스 변경사항입니다.
         </div>
       </Card>
 
-      {[...V072_NOTES, ...V071_NOTES, ...V070_NOTES].map((group) => (
+      {[...V073_NOTES, ...V072_NOTES, ...V071_NOTES, ...V070_NOTES].map((group) => (
         <Card
           key={group.title}
           title={

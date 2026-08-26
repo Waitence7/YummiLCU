@@ -132,7 +132,7 @@ jobs:
             --zip $zip `
             --exe $stageExe `
             --out agent-version.json `
-            --notes "Yummi LCU Agent $version stable: automatic updater trust policy repaired; signed manifest and SHA-256 remain mandatory, Authenticode pinning is optional when configured." `
+            --notes "Yummi LCU Agent $version stable: LCU lockfile fallback and sanitized diagnostics improved; close sound playback reliability improved." `
             --channel stable `
             --release-label $version `
             --build-id $env:YUMMI_AGENT_BUILD_ID `
