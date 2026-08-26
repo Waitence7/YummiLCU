@@ -2,6 +2,7 @@
 name: Release Tauri Agent 0.7.1 (Stable)
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
