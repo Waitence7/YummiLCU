@@ -9,6 +9,7 @@ export function startCloseSound(): Promise<void> {
 
   const audio = new Audio(closeSoundUrl);
   audio.preload = 'auto';
+  audio.volume = 0.75;
   activeAudio = audio;
 
   activePlayback = new Promise<void>((resolve) => {
