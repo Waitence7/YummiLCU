@@ -407,7 +407,26 @@ impl LcuEventPoller {
                     && value.get("timer").is_some_and(Value::is_object)
                     && value.get("actions").is_some_and(Value::is_array),
             );
-            let payload = champ_select_payload(&value);
+            let mut payload = champ_select_payload(&value);
+            if payload
+                .get("is_spectating")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                let champ_select_picks = spectator_champ_select_picks(&value);
+                let gameflow_picks = match client
+                    .request(Method::GET, GAMEFLOW_SESSION, None)
+                    .await
+                {
+                    Ok(gameflow_session) => spectator_gameflow_picks(&gameflow_session),
+                    Err(_) => None,
+                };
+                if let Some(observer_picks) =
+                    prefer_more_complete_picks(champ_select_picks, gameflow_picks)
+                {
+                    payload["observer_picks"] = observer_picks;
+                }
+            }
             push_changed(
                 &mut self.champ_select,
                 champ_select_fingerprint(&payload),
@@ -705,11 +724,199 @@ fn champ_select_payload(value: &Value) -> Value {
             "authoritative_epoch": phase_end_at_ms.is_some(),
         },
         "local_cell_id": local_cell_id,
+        "is_spectating": session.get("isSpectating").and_then(Value::as_bool).unwrap_or(false),
         "my_team": team_payload(session.get("myTeam")),
         "their_team": team_payload(session.get("theirTeam")),
         "actions": actions,
         "current_action": current_action.cloned().unwrap_or(Value::Null),
     })
+}
+
+
+fn spectator_member_side(member: &Value) -> Option<&'static str> {
+    match member.get("team").and_then(Value::as_i64) {
+        Some(1 | 100) => Some("blue"),
+        Some(2 | 200) => Some("red"),
+        _ => None,
+    }
+}
+
+fn push_unique_pick(picks: &mut Vec<Value>, champion_id: u64) {
+    if champion_id == 0
+        || picks
+            .iter()
+            .any(|value| value.as_u64() == Some(champion_id))
+    {
+        return;
+    }
+    picks.push(Value::from(champion_id));
+}
+
+fn spectator_champ_select_picks(session: &Value) -> Option<Value> {
+    let mut blue = Vec::new();
+    let mut red = Vec::new();
+    let mut cell_sides: Vec<(i64, &'static str)> = Vec::new();
+    for team_key in ["myTeam", "theirTeam"] {
+        for member in session
+            .get(team_key)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(side) = spectator_member_side(member) else {
+                continue;
+            };
+            if let Some(cell_id) = member.get("cellId").and_then(Value::as_i64) {
+                cell_sides.push((cell_id, side));
+            }
+            if let Some(champion_id) = positive_champion_id(member) {
+                push_unique_pick(if side == "blue" { &mut blue } else { &mut red }, champion_id);
+            }
+        }
+    }
+    for action in session
+        .get("actions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_array)
+        .flatten()
+    {
+        if action.get("completed").and_then(Value::as_bool) != Some(true)
+            || action.get("type").and_then(Value::as_str) != Some("pick")
+        {
+            continue;
+        }
+        let Some(champion_id) = positive_champion_id(action) else {
+            continue;
+        };
+        let Some(actor_cell_id) = action.get("actorCellId").and_then(Value::as_i64) else {
+            continue;
+        };
+        let Some((_, side)) = cell_sides
+            .iter()
+            .find(|(cell_id, _)| *cell_id == actor_cell_id)
+        else {
+            continue;
+        };
+        push_unique_pick(if *side == "blue" { &mut blue } else { &mut red }, champion_id);
+    }
+    if blue.is_empty() && red.is_empty() {
+        return None;
+    }
+    Some(json!({"blue": blue, "red": red}))
+}
+
+fn prefer_more_complete_picks(primary: Option<Value>, fallback: Option<Value>) -> Option<Value> {
+    if primary.is_none() {
+        return fallback;
+    }
+    if fallback.is_none() {
+        return primary;
+    }
+    let primary = primary.unwrap_or_default();
+    let fallback = fallback.unwrap_or_default();
+    let choose = |side: &str| {
+        let first = primary
+            .get(side)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let second = fallback
+            .get(side)
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if second.len() > first.len() { second } else { first }
+    };
+    let blue = choose("blue");
+    let red = choose("red");
+    if blue.is_empty() && red.is_empty() {
+        None
+    } else {
+        Some(json!({"blue": blue, "red": red}))
+    }
+}
+
+fn spectator_identity_keys(value: &Value) -> Vec<String> {
+    let mut keys = Vec::new();
+    for field in [
+        "summonerInternalName",
+        "puuid",
+        "summonerId",
+        "summonerName",
+        "riotId",
+        "riotIdGameName",
+    ] {
+        let Some(raw) = value.get(field) else {
+            continue;
+        };
+        let text = match raw {
+            Value::String(value) => value.trim().to_ascii_lowercase(),
+            Value::Number(value) => value.to_string(),
+            _ => String::new(),
+        };
+        if !text.is_empty() && !keys.contains(&text) {
+            keys.push(text);
+        }
+    }
+    keys
+}
+
+fn positive_champion_id(value: &Value) -> Option<u64> {
+    value
+        .get("championId")
+        .and_then(Value::as_u64)
+        .filter(|champion_id| *champion_id > 0)
+}
+
+fn spectator_team_picks(team: Option<&Value>, selections: &[Value]) -> Vec<Value> {
+    let mut picks = Vec::new();
+    for member in team
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let champion_id = positive_champion_id(member).or_else(|| {
+            let member_keys = spectator_identity_keys(member);
+            if member_keys.is_empty() {
+                return None;
+            }
+            selections.iter().find_map(|selection| {
+                let selection_keys = spectator_identity_keys(selection);
+                if member_keys
+                    .iter()
+                    .any(|member_key| selection_keys.contains(member_key))
+                {
+                    positive_champion_id(selection)
+                } else {
+                    None
+                }
+            })
+        });
+        if let Some(champion_id) = champion_id {
+            picks.push(Value::from(champion_id));
+        }
+    }
+    picks
+}
+
+fn spectator_gameflow_picks(session: &Value) -> Option<Value> {
+    let game_data = session.get("gameData")?;
+    let selections = game_data
+        .get("playerChampionSelections")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let blue = spectator_team_picks(game_data.get("teamOne"), &selections);
+    let red = spectator_team_picks(game_data.get("teamTwo"), &selections);
+    if blue.is_empty() && red.is_empty() {
+        return None;
+    }
+    Some(json!({
+        "blue": blue,
+        "red": red,
+    }))
 }
 
 fn team_payload(value: Option<&Value>) -> Vec<Value> {
@@ -723,6 +930,7 @@ fn team_payload(value: Option<&Value>) -> Vec<Value> {
             "assigned_position": member.get("assignedPosition").cloned().unwrap_or(Value::String(String::new())),
             "champion_id": member.get("championId").cloned().unwrap_or(Value::from(0)),
             "champion_pick_intent": member.get("championPickIntent").cloned().unwrap_or(Value::from(0)),
+            "team": member.get("team").cloned().unwrap_or(Value::Null),
         }))
         .collect()
 }
@@ -1035,10 +1243,63 @@ mod tests {
             &json!({"localPlayerCellId": 1, "timer":{"phase":"BAN_PICK","adjustedTimeLeftInPhase":12000}, "actions":[[{"id":7,"type":"pick","championId":10,"isAllyAction":true,"isInProgress":true,"actorCellId":1}]]}),
         );
         assert_eq!(payload["active"], true);
+        assert_eq!(payload["is_spectating"], false);
         assert_eq!(payload["actions"][0]["champion_id"], 10);
         assert_eq!(payload["current_action"]["id"], 7);
         assert_eq!(payload["timer"]["remaining_ms"], 12000);
         assert!(payload["timer"]["captured_at_ms"].as_u64().is_some());
+    }
+
+    #[test]
+    fn spectator_champ_select_picks_uses_member_team_and_actions() {
+        let picks = spectator_champ_select_picks(&json!({
+            "myTeam": [
+                {"cellId": 1, "team": 1, "championId": 103},
+                {"cellId": 2, "team": 1, "championId": 0}
+            ],
+            "theirTeam": [
+                {"cellId": 6, "team": 2, "championId": 86}
+            ],
+            "actions": [[
+                {"actorCellId": 2, "type": "pick", "completed": true, "championId": 22}
+            ]]
+        }))
+        .unwrap();
+        assert_eq!(picks["blue"], json!([103, 22]));
+        assert_eq!(picks["red"], json!([86]));
+    }
+
+    #[test]
+    fn spectator_gameflow_picks_maps_both_teams() {
+        let picks = spectator_gameflow_picks(&json!({
+            "gameData": {
+                "teamOne": [
+                    {"summonerInternalName": "blue-1"},
+                    {"summonerInternalName": "blue-2", "championId": 22}
+                ],
+                "teamTwo": [
+                    {"summonerInternalName": "red-1"}
+                ],
+                "playerChampionSelections": [
+                    {"summonerInternalName": "blue-1", "championId": 103},
+                    {"summonerInternalName": "red-1", "championId": 86}
+                ]
+            }
+        }))
+        .unwrap();
+        assert_eq!(picks["blue"], json!([103, 22]));
+        assert_eq!(picks["red"], json!([86]));
+    }
+
+    #[test]
+    fn spectator_pick_fallback_prefers_more_complete_side() {
+        let picks = prefer_more_complete_picks(
+            Some(json!({"blue": [103], "red": [86, 51]})),
+            Some(json!({"blue": [103, 22, 13], "red": [86]})),
+        )
+        .unwrap();
+        assert_eq!(picks["blue"], json!([103, 22, 13]));
+        assert_eq!(picks["red"], json!([86, 51]));
     }
 
     #[test]
