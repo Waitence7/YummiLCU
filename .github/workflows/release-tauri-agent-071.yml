@@ -1,3 +1,4 @@
+# one-shot 0.7.1 stable release trigger
 name: Release Tauri Agent 0.7.1 (Stable)
 
 on:
