@@ -1,0 +1,10 @@
+name: Actions Smoke Test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "actions runner started"
