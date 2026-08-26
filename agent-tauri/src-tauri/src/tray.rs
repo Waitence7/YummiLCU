@@ -230,8 +230,10 @@ pub(crate) fn request_exit(app: &AppHandle) {
 
 #[cfg(test)]
 mod tests {
-    use super::html_canvas_experiment_enabled_for_channel;
-    use super::tray_hide_watchdog_ms;
+    use super::{
+        html_canvas_experiment_enabled_for_channel, tray_hide_watchdog_ms,
+        HTML_CANVAS_BROWSER_ARGS,
+    };
 
     #[test]
     fn html_canvas_browser_flag_is_enabled_for_supported_release_channels() {
