@@ -76,6 +76,16 @@ Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
 
+; Yummi custom installer UI handles.
+Var YummiInstallDialog
+Var YummiNativeProgress
+Var YummiProgress
+Var YummiTitle
+Var YummiStatus
+Var YummiHint
+Var YummiTitleFont
+Var YummiStatusFont
+
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
 OutFile "${OUTFILE}"
@@ -400,32 +410,40 @@ Var AppStartMenuFolder
 !insertmacro MUI_PAGE_STARTMENU Application $AppStartMenuFolder
 
 ; 7. Installation page
-; Yummi replaces the stock InstFiles presentation with a minimal progress-only UI.
+; NSIS still owns the installation engine, but every visible control on this
+; page is created by Yummi. The stock controls are hidden and used only for
+; native install progress bookkeeping.
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW YummiInstallPageShow
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE YummiInstallPageLeave
 !insertmacro MUI_PAGE_INSTFILES
 
 Function YummiInstallPageShow
-  ; Inner InstFiles controls.
-  FindWindow $0 "#32770" "" $HWNDPARENT
-  GetDlgItem $1 $0 1006 ; status text
-  GetDlgItem $2 $0 1004 ; progress bar
-  GetDlgItem $3 $0 1027 ; "Show details" button
-  GetDlgItem $4 $0 1016 ; details/log list
+  FindWindow $YummiInstallDialog "#32770" "" $HWNDPARENT
+  GetDlgItem $YummiNativeProgress $YummiInstallDialog 1004
 
-  ; Outer MUI chrome.
-  GetDlgItem $5 $HWNDPARENT 1037 ; header title
-  GetDlgItem $6 $HWNDPARENT 1038 ; header subtitle
-  GetDlgItem $7 $HWNDPARENT 1034 ; header background
-  GetDlgItem $8 $HWNDPARENT 1039 ; header image
-  GetDlgItem $9 $HWNDPARENT 1028 ; branding background
-  GetDlgItem $R0 $HWNDPARENT 1256 ; branding text
-  GetDlgItem $R1 $HWNDPARENT 1035 ; separator
-  GetDlgItem $R2 $HWNDPARENT 1045 ; full-window separator
-  GetDlgItem $R3 $HWNDPARENT 1 ; Next
-  GetDlgItem $R4 $HWNDPARENT 2 ; Cancel
-  GetDlgItem $R5 $HWNDPARENT 3 ; Back
+  ; Hide every stock InstFiles/MUI control.
+  GetDlgItem $0 $YummiInstallDialog 1006
+  GetDlgItem $1 $YummiInstallDialog 1027
+  GetDlgItem $2 $YummiInstallDialog 1016
+  ShowWindow $0 0
+  ShowWindow $YummiNativeProgress 0
+  ShowWindow $1 0
+  ShowWindow $2 0
 
-  ; Only the status line and progress bar remain visible.
+  GetDlgItem $0 $HWNDPARENT 1037
+  GetDlgItem $1 $HWNDPARENT 1038
+  GetDlgItem $2 $HWNDPARENT 1034
+  GetDlgItem $3 $HWNDPARENT 1039
+  GetDlgItem $4 $HWNDPARENT 1028
+  GetDlgItem $5 $HWNDPARENT 1256
+  GetDlgItem $6 $HWNDPARENT 1035
+  GetDlgItem $7 $HWNDPARENT 1045
+  GetDlgItem $8 $HWNDPARENT 1
+  GetDlgItem $9 $HWNDPARENT 2
+  GetDlgItem $R0 $HWNDPARENT 3
+  ShowWindow $0 0
+  ShowWindow $1 0
+  ShowWindow $2 0
   ShowWindow $3 0
   ShowWindow $4 0
   ShowWindow $5 0
@@ -434,26 +452,53 @@ Function YummiInstallPageShow
   ShowWindow $8 0
   ShowWindow $9 0
   ShowWindow $R0 0
-  ShowWindow $R1 0
-  ShowWindow $R2 0
-  ShowWindow $R3 0
-  ShowWindow $R4 0
-  ShowWindow $R5 0
 
-  ; Keep the install surface intentionally minimal and prevent NSIS detail
-  ; messages from replacing this single status line while sections run.
+  ; Compact shell and clean background.
+  System::Call 'user32::SetWindowPos(p $HWNDPARENT, p 0, i 0, i 0, i 430, i 190, i 0x0016)'
+  SetCtlColors $YummiInstallDialog "20242B" "FFFFFF"
+
+  ; Yummi-owned controls only.
+  System::Call 'user32::CreateWindowExW(i 0, w "STATIC", w "Yummi LCU Agent", i 0x50000001, i 40, i 28, i 350, i 28, p $YummiInstallDialog, p 0, p 0, p 0) p .r0'
+  StrCpy $YummiTitle $0
+  System::Call 'user32::CreateWindowExW(i 0, w "STATIC", w "설치 중...", i 0x50000001, i 40, i 65, i 350, i 22, p $YummiInstallDialog, p 0, p 0, p 0) p .r0'
+  StrCpy $YummiStatus $0
+  System::Call 'user32::CreateWindowExW(i 0, w "STATIC", w "잠시만 기다려 주세요.", i 0x50000001, i 40, i 91, i 350, i 18, p $YummiInstallDialog, p 0, p 0, p 0) p .r0'
+  StrCpy $YummiHint $0
+  System::Call 'user32::CreateWindowExW(i 0, w "msctls_progress32", w "", i 0x50000001, i 40, i 124, i 350, i 12, p $YummiInstallDialog, p 0, p 0, p 0) p .r0'
+  StrCpy $YummiProgress $0
+  SendMessage $YummiProgress 0x0401 0 0x00640000
+
+  CreateFont $YummiTitleFont "Segoe UI" 16 700
+  CreateFont $YummiStatusFont "Segoe UI" 10 600
+  SendMessage $YummiTitle 0x0030 $YummiTitleFont 1
+  SendMessage $YummiStatus 0x0030 $YummiStatusFont 1
+  SendMessage $YummiHint 0x0030 $YummiStatusFont 1
+  SetCtlColors $YummiTitle "20242B" "FFFFFF"
+  SetCtlColors $YummiStatus "20242B" "FFFFFF"
+  SetCtlColors $YummiHint "6B7280" "FFFFFF"
+
   SetDetailsView hide
   SetDetailsPrint none
-  SendMessage $1 0x000C 0 "STR:Yummi LCU Agent 설치 중..."
-  SetCtlColors $1 "" "F0F0F0"
+  BringToFront
 
-  ; Center the two visible controls in the existing installer client area.
-  System::Call 'user32::SetWindowPos(p r1, p 0, i 38, i 64, i 340, i 18, i 0x0004)'
-  System::Call 'user32::SetWindowPos(p r2, p 0, i 38, i 92, i 340, i 14, i 0x0004)'
+  System::Call 'user32::GetSystemMenu(p $HWNDPARENT, i 0) p .r0'
+  System::Call 'user32::EnableMenuItem(p r0, i 0xF060, i 0x00000001)'
+  nsDialogs::CreateTimer YummiInstallProgressTick 40
+FunctionEnd
 
-  ; Prevent accidental closure while files are being replaced.
-  System::Call 'user32::GetSystemMenu(p $HWNDPARENT, i 0) p .r6'
-  System::Call 'user32::EnableMenuItem(p r6, i 0xF060, i 0x00000001)'
+Function YummiInstallProgressTick
+  ${If} $YummiNativeProgress != 0
+  ${AndIf} $YummiProgress != 0
+    SendMessage $YummiNativeProgress 0x0408 0 0 $0
+    SendMessage $YummiProgress 0x0402 $0 0
+  ${EndIf}
+FunctionEnd
+
+Function YummiInstallPageLeave
+  nsDialogs::KillTimer YummiInstallProgressTick
+  ${If} $YummiProgress != 0
+    SendMessage $YummiProgress 0x0402 100 0
+  ${EndIf}
 FunctionEnd
 
 ; 8. Finish page
