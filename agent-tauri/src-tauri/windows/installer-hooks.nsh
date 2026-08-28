@@ -32,6 +32,17 @@
   !insertmacro YUMMI_STOP_RUNNING_AGENT
 !macroend
 
+; Interactive installs should not require a separate Finish -> Run click.
+; Silent/update installs keep their existing unattended behaviour and never
+; launch a foreground Agent window unexpectedly.
+!macro NSIS_HOOK_POSTINSTALL
+  IfSilent yummi_postinstall_done 0
+  DetailPrint "Starting ${PRODUCTNAME}..."
+  nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
+  SetAutoClose true
+  yummi_postinstall_done:
+!macroend
+
 !macro NSIS_HOOK_PREUNINSTALL
   !insertmacro YUMMI_STOP_RUNNING_AGENT
 !macroend
