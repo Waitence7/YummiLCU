@@ -25,7 +25,7 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, OPEN_MENU_ID, "열기", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT_MENU_ID, "종료", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
-    let icon = tauri::include_image!("icons/yummibot-desktop.png");
+    let icon = tauri::include_image!("icons/yummibot-tray.png");
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
         .menu(&menu)
