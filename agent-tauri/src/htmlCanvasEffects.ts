@@ -505,11 +505,24 @@ void main() {
   vec3 p = a_book_position;
   p.xy *= mix(vec2(1.0), vec2(0.86, 0.72), formBook);
   p.z *= solidReveal;
-  // Every vertex on the right half participates in the same hinge, including
-  // the page, cover and thickness faces. At 180 degrees the cover that was
-  // physically beneath the page becomes the visible outer face; the captured
-  // page itself never changes material.
+  // Every vertex on the right half participates in the same hinge. Right-side
+  // thickness primitives include seam vertices at x=0; classifying only by X
+  // left those seam vertices behind and sheared each quad into visible triangles.
+  // Treat the complete right spine/top/bottom primitives as one rigid half.
   float rightHalf = step(0.0001, p.x);
+  if ((a_book_face > 2.5 && a_book_face < 3.5) || a_book_face > 5.5) {
+    rightHalf = 1.0;
+  }
+
+  // The captured WebView is a page inside the book, not the page-block edge.
+  // Once folding begins, inset it slightly from the solid cover so it cannot
+  // protrude as a full-size white sheet when the book is viewed edge-on.
+  if (a_book_face < 0.5) {
+    float uiPageInset = smoothstep(0.08, 0.25, t);
+    p.x *= mix(1.0, 0.945, uiPageInset);
+    p.y *= mix(1.0, 0.930, uiPageInset);
+    p.z += 0.020 * uiPageInset;
+  }
   if (a_book_face > 0.5 && a_book_face < 1.5 && rightHalf > 0.5) {
     // Match the Blender asset's physical relief without introducing a second
     // object: the real cover mesh carries raised rails, medallion and gem dome.
@@ -737,15 +750,21 @@ void main() {
   if (foldedInteriorFace && t > 0.38) discard;
 
   if (v_book_face < 0.5) {
-    // The captured WebView remains a page for its entire lifetime. It never
-    // cross-fades or recolors into leather.
+    // The captured WebView is a thin inner page. Reveal the cover by sweeping
+    // from the folding right edge toward the spine/left edge instead of fading
+    // the whole UI sheet uniformly. A growing perimeter inset also keeps UI
+    // pixels away from the physical page-block sides during oblique views.
     vec4 page = texture(u_texture, vec2(uv.x, 1.0 - uv.y));
     color = page.rgb;
-    // Once the physical cover has swept over the page, only the page-block
-    // side faces remain visible. This is occlusion, not a page-to-cover tint.
-    faceAlpha = page.a * (1.0 - smoothstep(0.22, 0.36, t));
-    // A zero-alpha page must not keep writing depth in front of the cover.
-    // Discarding it also prevents a pale texture flash during the final shrink.
+    float pageInsetPhase = smoothstep(0.07, 0.22, t);
+    float pageInset = mix(0.0, 0.060, pageInsetPhase);
+    float pageInterior = smoothstep(pageInset, pageInset + 0.018, edgeDistance);
+    float coverSweep = smoothstep(0.10, 0.30, t);
+    float coverFrontX = mix(1.08, -0.08, coverSweep);
+    float coveredByCover = smoothstep(coverFrontX - 0.040, coverFrontX + 0.025, uv.x);
+    faceAlpha = page.a * pageInterior * (1.0 - coveredByCover);
+    // Covered page fragments must stop writing depth immediately; otherwise an
+    // invisible UI plane can still cut holes into the cover/page-block faces.
     if (faceAlpha < 0.012) discard;
   } else if (v_book_face < 1.5) {
     // The real cover lives underneath the page from the beginning. The right
@@ -765,23 +784,24 @@ void main() {
     color = mix(spineLeather, vec3(0.86, 0.55, 0.10), spineBand * 0.82);
     color *= 0.92 + spineGroove * 0.08;
   } else if (v_book_face < 3.5) {
-    // The folded right edge becomes the closed book's outer spine.
+    // The folded right edge becomes the closed book's outer spine. Keep its
+    // page edge parchment-like until the leather/gold spine has fully closed.
     float spineBand = pow(0.5 + 0.5 * cos((uv.y * 4.0 - 0.50) * PI * 2.0), 18.0);
     float pageGroove = pow(0.5 + 0.5 * sin(uv.y * PI * 104.0), 12.0);
-    vec3 pageEdge = mix(vec3(0.42, 0.25, 0.060), vec3(0.84, 0.66, 0.25), 0.42 + pageGroove * 0.20);
+    vec3 pageEdge = mix(vec3(0.62, 0.54, 0.37), vec3(0.92, 0.84, 0.65), 0.50 + pageGroove * 0.12);
     vec3 closedSpine = mix(vec3(0.11, 0.016, 0.012), vec3(0.88, 0.56, 0.11), spineBand * 0.84);
     color = mix(pageEdge, closedSpine, smoothstep(0.26, 0.42, t));
   } else {
-    // Right, top and bottom are its recessed solid page block.
-    float lineAxis = v_book_face < 3.5 ? uv.y : uv.x;
-    float pageLine = pow(0.5 + 0.5 * sin(lineAxis * PI * 104.0 + sin(uv.y * 19.0) * 0.55), 10.0);
-    vec3 parchment = mix(vec3(0.43, 0.27, 0.070), vec3(0.85, 0.68, 0.29), 0.46 + pageLine * 0.17);
-    parchment *= 1.0 - pageLine * 0.10;
-    float coverLip = 1.0 - smoothstep(0.025, 0.085, min(
-      min(uv.x, 1.0 - uv.x),
-      min(uv.y, 1.0 - uv.y)
-    ));
-    color = mix(parchment, vec3(0.78, 0.50, 0.085), coverLip * 0.86);
+    // Top/bottom page-block faces are real solid parchment, never captured UI.
+    // UV.y is the cover-depth axis for these face roles, so gold belongs only
+    // to thin lips at the two cover boundaries rather than around every UV edge.
+    float pageLine = pow(0.5 + 0.5 * sin(uv.x * PI * 104.0 + sin(uv.x * 19.0) * 0.42), 10.0);
+    vec3 parchment = mix(vec3(0.64, 0.56, 0.39), vec3(0.94, 0.87, 0.70), 0.54 + pageLine * 0.11);
+    parchment *= 1.0 - pageLine * 0.065;
+    float depthEdge = min(uv.y, 1.0 - uv.y);
+    float coverLip = 1.0 - smoothstep(0.055, 0.145, depthEdge);
+    vec3 lipGold = mix(vec3(0.58, 0.34, 0.055), vec3(0.82, 0.56, 0.13), 0.58 + 0.18 * uv.x);
+    color = mix(parchment, lipGold, coverLip * 0.78);
   }
 
   if (v_book_face > 0.5) {
