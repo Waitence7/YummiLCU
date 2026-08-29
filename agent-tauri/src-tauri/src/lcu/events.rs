@@ -17,7 +17,7 @@ use tokio_tungstenite::{
 
 use crate::config::Config;
 
-use super::{discover_lockfile, lockfile_path, LcuClient, LcuIdentity};
+use super::{discover_lockfile, LcuClient, LcuIdentity, LockfileDiscovery};
 
 const GAMEFLOW_PHASE: &str = "/lol-gameflow/v1/gameflow-phase";
 const READY_CHECK: &str = "/lol-matchmaking/v1/ready-check";
@@ -28,8 +28,10 @@ const GAMEFLOW_SESSION: &str = "/lol-gameflow/v1/session";
 const LIVE_GAME_DATA: &str = "/liveclientdata/allgamedata";
 const LIVE_GAME_EVENTS: &str = "/liveclientdata/eventdata";
 const LCU_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(1);
+const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(5);
 const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const LOCKFILE_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
+const LOCKFILE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const LIVE_GAME_PARTICIPANT_COUNT: usize = 10;
 const MAX_LCU_EVENT_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -46,6 +48,10 @@ pub(crate) struct LcuEventPoller {
     live_game_polling: Option<bool>,
     eog_sent: bool,
     diagnostics: Vec<String>,
+    last_lockfile_diagnostics: Vec<String>,
+    cached_lockfile_discovery: Option<LockfileDiscovery>,
+    last_lockfile_discovery: Option<Instant>,
+    lockfile_discovery_slow: bool,
     lockfile_available: Option<bool>,
     lcu_available: Option<bool>,
     live_client_available: Option<bool>,
@@ -133,7 +139,13 @@ impl LcuEventPoller {
             if *stop.borrow() {
                 return;
             }
-            let Some(path) = lockfile_path(&config) else {
+            let Some(discovery) = discover_lockfile_nonblocking(&config).await else {
+                if !wait_for_socket_retry(&mut stop).await {
+                    return;
+                }
+                continue;
+            };
+            let Some(path) = discovery.path else {
                 if !wait_for_socket_retry(&mut stop).await {
                     return;
                 }
@@ -293,11 +305,38 @@ impl LcuEventPoller {
             }
         }
 
-        let discovery = discover_lockfile(config);
-        if self.lockfile_available != Some(true) {
+        let should_refresh_lockfile = self
+            .last_lockfile_discovery
+            .is_none_or(|last| last.elapsed() >= LOCKFILE_DISCOVERY_INTERVAL);
+        if should_refresh_lockfile {
+            self.last_lockfile_discovery = Some(Instant::now());
+            match discover_lockfile_nonblocking(config).await {
+                Some(discovery) => {
+                    if self.lockfile_discovery_slow {
+                        self.diagnostic("LCU lockfile 탐색 응답 정상화");
+                    }
+                    self.lockfile_discovery_slow = false;
+                    self.cached_lockfile_discovery = Some(discovery);
+                }
+                None => {
+                    if !self.lockfile_discovery_slow {
+                        self.diagnostic(
+                            "LCU lockfile 탐색이 2초를 초과해 이번 주기는 건너뜀 — Relay 처리는 계속함",
+                        );
+                    }
+                    self.lockfile_discovery_slow = true;
+                }
+            }
+        }
+
+        let Some(discovery) = self.cached_lockfile_discovery.clone() else {
+            return events;
+        };
+        if self.last_lockfile_diagnostics != discovery.diagnostics {
             for message in &discovery.diagnostics {
                 self.diagnostic(message.clone());
             }
+            self.last_lockfile_diagnostics = discovery.diagnostics.clone();
         }
         let Some(path) = discovery.path else {
             if self.lockfile_available != Some(false) {
@@ -463,6 +502,19 @@ impl LcuEventPoller {
             Err(error) => self.diagnostic(format!("LCU lobby API 응답 실패: {error}")),
         }
         events
+    }
+}
+
+async fn discover_lockfile_nonblocking(config: &Config) -> Option<LockfileDiscovery> {
+    let config = config.clone();
+    match timeout(
+        LOCKFILE_DISCOVERY_TIMEOUT,
+        tokio::task::spawn_blocking(move || discover_lockfile(&config)),
+    )
+    .await
+    {
+        Ok(Ok(discovery)) => Some(discovery),
+        Ok(Err(_)) | Err(_) => None,
     }
 }
 

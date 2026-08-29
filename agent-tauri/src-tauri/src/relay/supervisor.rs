@@ -95,6 +95,93 @@ impl Drop for LcuSocketWatch {
     }
 }
 
+struct LcuPollBatch {
+    events: Vec<(&'static str, Value)>,
+    diagnostics: Vec<String>,
+}
+
+struct LcuPollWorker {
+    stop: watch::Sender<bool>,
+    trigger: mpsc::Sender<()>,
+    live_game_polling: watch::Sender<bool>,
+    task: JoinHandle<()>,
+}
+
+impl LcuPollWorker {
+    fn start(state: Arc<AppState>) -> (Self, mpsc::Receiver<LcuPollBatch>) {
+        let (batch_tx, batch_rx) = mpsc::channel(8);
+        let (trigger_tx, mut trigger_rx) = mpsc::channel(8);
+        let (live_game_polling_tx, mut live_game_polling_rx) = watch::channel(true);
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+
+        let task = tokio::spawn(async move {
+            let mut poller = LcuEventPoller::default();
+            let mut poll_tick = interval(LCU_EVENT_POLL_INTERVAL);
+            poll_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+            poll_tick.tick().await;
+
+            loop {
+                let should_poll = tokio::select! {
+                    changed = stop_rx.changed() => {
+                        if changed.is_err() || *stop_rx.borrow() {
+                            return;
+                        }
+                        false
+                    }
+                    changed = live_game_polling_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        poller.set_live_game_polling(*live_game_polling_rx.borrow());
+                        false
+                    }
+                    _ = poll_tick.tick() => true,
+                    Some(()) = trigger_rx.recv() => true,
+                };
+
+                if !should_poll {
+                    continue;
+                }
+
+                let config = state.config.read().await.clone();
+                let events = poller.poll(&config).await;
+                let diagnostics = poller.take_diagnostics();
+                if events.is_empty() && diagnostics.is_empty() {
+                    continue;
+                }
+
+                if batch_tx
+                    .send(LcuPollBatch {
+                        events,
+                        diagnostics,
+                    })
+                    .await
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+
+        (
+            Self {
+                stop: stop_tx,
+                trigger: trigger_tx,
+                live_game_polling: live_game_polling_tx,
+                task,
+            },
+            batch_rx,
+        )
+    }
+}
+
+impl Drop for LcuPollWorker {
+    fn drop(&mut self) {
+        let _ = self.stop.send(true);
+        self.task.abort();
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RelayConnectionState {
     Stopped,
@@ -469,15 +556,11 @@ async fn connect_once(
     );
     durable_replay_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut awaiting_pong: Option<Instant> = None;
-    let mut lcu_events = LcuEventPoller::default();
     let mut live_game_announced = false;
-    let mut lcu_event_poll = interval(LCU_EVENT_POLL_INTERVAL);
-    lcu_event_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    lcu_event_poll.tick().await;
     let mut session_bound = false;
     let mut durable_replay_enabled = false;
     let mut unexpected_error_reports_enabled = false;
-    let (lcu_event_tx, mut lcu_event_rx) = mpsc::channel(8);
+    let (lcu_poll_worker, mut lcu_poll_rx) = LcuPollWorker::start(Arc::clone(state));
     let mut lcu_socket_watch: Option<LcuSocketWatch> = None;
 
     loop {
@@ -510,7 +593,16 @@ async fn connect_once(
                         let incoming = IncomingMessage::parse(text.as_str())
                             .map_err(|message| AgentError::Relay(message.into()))?;
                         match &incoming {
-                            IncomingMessage::Pong => awaiting_pong = None,
+                            IncomingMessage::Pong => {
+                                if let Some(sent_at) = awaiting_pong.take() {
+                                    state
+                                        .record_flight(
+                                            "relay_heartbeat",
+                                            format!("pong rtt_ms={}", sent_at.elapsed().as_millis()),
+                                        )
+                                        .await;
+                                }
+                            }
                             IncomingMessage::EventAck { event_id } => {
                                 if durable_replay.ack(event_id) {
                                     state.record_flight("relay_ack", format!("event_id={event_id}")).await;
@@ -563,7 +655,15 @@ async fn connect_once(
                                     return Ok(ConnectionEnd::Stopped);
                                 }
                                 *needs_login = false;
-                                handle_incoming(app, state, &mut websocket, incoming, false, &mut lcu_events).await?;
+                                handle_incoming(
+                                    app,
+                                    state,
+                                    &mut websocket,
+                                    incoming,
+                                    false,
+                                    &lcu_poll_worker.live_game_polling,
+                                )
+                                .await?;
                                 session_bound = true;
                                 if durable_replay_enabled {
                                     let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
@@ -576,7 +676,7 @@ async fn connect_once(
                                 if lcu_socket_watch.is_none() {
                                     let (stop_tx, stop_rx) = watch::channel(false);
                                     let event_config = config.clone();
-                                    let event_tx = lcu_event_tx.clone();
+                                    let event_tx = lcu_poll_worker.trigger.clone();
                                     let task = tokio::spawn(async move {
                                         LcuEventPoller::watch_socket(event_config, event_tx, stop_rx).await;
                                     });
@@ -595,7 +695,7 @@ async fn connect_once(
                                 &mut websocket,
                                 incoming,
                                 session_bound,
-                                &mut lcu_events,
+                                &lcu_poll_worker.live_game_polling,
                             ).await?,
                         }
                     }
@@ -603,7 +703,16 @@ async fn connect_once(
                         websocket.send(Message::Pong(payload)).await
                             .map_err(|_| AgentError::Relay("Relay pong 전송 실패".into()))?;
                     }
-                    Some(Ok(Message::Pong(_))) => awaiting_pong = None,
+                    Some(Ok(Message::Pong(_))) => {
+                        if let Some(sent_at) = awaiting_pong.take() {
+                            state
+                                .record_flight(
+                                    "relay_heartbeat",
+                                    format!("ws_pong rtt_ms={}", sent_at.elapsed().as_millis()),
+                                )
+                                .await;
+                        }
+                    }
                     Some(Ok(Message::Close(_))) | None => {
                         state.relay.set_oauth_sender(generation, None).await;
                         return Ok(ConnectionEnd::Closed { authenticated: session_bound });
@@ -660,9 +769,8 @@ async fn connect_once(
                     open_login_url(app, &config.login_url(&session.session_id)?)?;
                 }
             }
-            _ = lcu_event_poll.tick(), if session_bound => {
-                let config = state.config.read().await.clone();
-                for (message_type, data) in lcu_events.poll(&config).await {
+            Some(batch) = lcu_poll_rx.recv(), if session_bound => {
+                for (message_type, data) in batch.events {
                     let event_log = event_summary(message_type, &data);
                     state.record_flight("lcu_event", event_log.clone()).await;
                     let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
@@ -684,36 +792,7 @@ async fn connect_once(
                         state.log(app, format!("실시간 관전 데이터 서버 전송 확인 ({count}명)")).await;
                     }
                 }
-                for diagnostic in lcu_events.take_diagnostics() {
-                    state.record_flight("lcu_diagnostic", diagnostic.clone()).await;
-                    state.log(app, format!("LCU 진단: {diagnostic}")).await;
-                }
-            }
-            Some(()) = lcu_event_rx.recv(), if session_bound => {
-                let config = state.config.read().await.clone();
-                for (message_type, data) in lcu_events.poll(&config).await {
-                    let event_log = event_summary(message_type, &data);
-                    state.record_flight("lcu_event", event_log.clone()).await;
-                    let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
-                        .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
-                    let Some(event) = serialize_agent_event(message_type, data)? else {
-                        state.log(app, "LCU 이벤트가 Relay 크기 제한을 초과해 생략됨").await;
-                        continue;
-                    };
-                    if durable_replay_enabled && is_durable_event(message_type) {
-                        if durable_replay.track(event.clone()) {
-                            state.log(app, "EOG replay buffer가 가득 차 가장 오래된 이벤트를 제거함").await;
-                        }
-                    }
-                    websocket.send(Message::Text(event.text.into())).await
-                        .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
-                    state.log(app, format!("Relay 이벤트 전송: {event_log}")).await;
-                    if let Some(count) = live_participant_count {
-                        live_game_announced = true;
-                        state.log(app, format!("실시간 관전 데이터 서버 전송 확인 ({count}명)")).await;
-                    }
-                }
-                for diagnostic in lcu_events.take_diagnostics() {
+                for diagnostic in batch.diagnostics {
                     state.record_flight("lcu_diagnostic", diagnostic.clone()).await;
                     state.log(app, format!("LCU 진단: {diagnostic}")).await;
                 }
@@ -728,7 +807,7 @@ async fn handle_incoming<S>(
     websocket: &mut S,
     incoming: IncomingMessage,
     session_bound: bool,
-    lcu_events: &mut LcuEventPoller,
+    live_game_polling: &watch::Sender<bool>,
 ) -> AgentResult<()>
 where
     S: futures_util::Sink<Message> + Unpin,
@@ -843,7 +922,7 @@ where
         }
         IncomingMessage::LiveGamePolling { enabled } => {
             if session_bound {
-                lcu_events.set_live_game_polling(enabled);
+                let _ = live_game_polling.send(enabled);
                 state
                     .log(
                         app,

@@ -15,7 +15,6 @@ const MAX_LOCKFILE_BYTES: u64 = 4 * 1024;
 const MAX_LCU_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 const LCU_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const LIVE_CLIENT_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
-const EXPECTED_LCU_PROCESS_NAME: &str = "LeagueClientUx.exe";
 
 struct SensitiveBuffer(Vec<u8>);
 
@@ -279,8 +278,15 @@ impl LcuClient {
 }
 
 fn valid_lcu_process_label(value: &str) -> bool {
-    value.eq_ignore_ascii_case("LeagueClientUx")
-        || value.eq_ignore_ascii_case(EXPECTED_LCU_PROCESS_NAME)
+    value.eq_ignore_ascii_case("LeagueClient")
+        || value.eq_ignore_ascii_case("LeagueClient.exe")
+        || value.eq_ignore_ascii_case("LeagueClientUx")
+        || value.eq_ignore_ascii_case("LeagueClientUx.exe")
+}
+
+fn valid_lcu_executable_name(value: &str) -> bool {
+    value.eq_ignore_ascii_case("LeagueClient.exe")
+        || value.eq_ignore_ascii_case("LeagueClientUx.exe")
 }
 
 #[cfg(windows)]
@@ -317,10 +323,10 @@ fn validate_lcu_process(lockfile: &Path, process_id: u32) -> AgentResult<()> {
     if !executable
         .file_name()
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case(EXPECTED_LCU_PROCESS_NAME))
+        .is_some_and(valid_lcu_executable_name)
     {
         return Err(AgentError::Lcu(
-            "lockfile PID가 League Client가 아닙니다.".into(),
+            "lockfile PID와 프로세스 이름이 일치하지 않습니다.".into(),
         ));
     }
 
@@ -438,6 +444,18 @@ fn live_client_url(endpoint: &str) -> AgentResult<Url> {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn recognizes_current_lcu_lockfile_process_labels() {
+        assert!(valid_lcu_process_label("LeagueClient"));
+        assert!(valid_lcu_process_label("LeagueClient.exe"));
+        assert!(valid_lcu_process_label("LeagueClientUx"));
+        assert!(valid_lcu_process_label("LeagueClientUx.exe"));
+        assert!(!valid_lcu_process_label("RiotClientUx"));
+        assert!(valid_lcu_executable_name("LeagueClient.exe"));
+        assert!(valid_lcu_executable_name("LeagueClientUx.exe"));
+        assert!(!valid_lcu_executable_name("RiotClientUx.exe"));
+    }
 
     #[test]
     fn lockfile_rejects_bad_shape() {

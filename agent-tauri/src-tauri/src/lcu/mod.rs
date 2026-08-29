@@ -7,7 +7,7 @@ mod rewards;
 
 pub(crate) use client::{LcuClient, LcuIdentity};
 pub(crate) use events::LcuEventPoller;
-pub(crate) use lockfile::{discover_lockfile, lockfile_path};
+pub(crate) use lockfile::{discover_lockfile, lockfile_path, LockfileDiscovery};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LcuConnectionState {
