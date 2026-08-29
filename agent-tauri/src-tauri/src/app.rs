@@ -31,7 +31,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
     );
     let args = std::env::args().collect::<Vec<_>>();
     let shutdown_on_start = installer_shutdown_requested(&args);
-    let post_install_parent_pid = post_install_parent_pid(&args);
+    let startup_post_install_parent_pid = post_install_parent_pid(&args);
     let start_hidden = background_start_requested(&args);
     let state = Arc::new(AppState::new(config));
     let update_state = state.clone();
@@ -46,9 +46,20 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if installer_shutdown_requested(&args) {
                 tray::request_exit(app);
-            } else {
-                tray::request_main_window(app);
+                return;
             }
+            if let Some(parent_pid) = post_install_parent_pid(&args) {
+                if let Some(state) = app.try_state::<Arc<AppState>>() {
+                    schedule_post_install_window(
+                        app.clone(),
+                        state.inner().clone(),
+                        parent_pid,
+                        "single_instance",
+                    );
+                    return;
+                }
+            }
+            tray::request_main_window(app);
         }));
     }
 
@@ -84,7 +95,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 app.handle().exit(0);
                 return Ok(());
             }
-            let launch_mode = if post_install_parent_pid.is_some() {
+            let launch_mode = if startup_post_install_parent_pid.is_some() {
                 "post_install"
             } else if start_hidden {
                 "background"
@@ -145,48 +156,12 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             // our builder so beta/dev builds can opt into HTML-in-Canvas WebView2 flags,
             // and background startup does not keep an unused WebView alive.
             tray::destroy_main_window(app.handle());
-            if let Some(parent_pid) = post_install_parent_pid {
-                let post_install_handle = app.handle().clone();
-                let post_install_state = update_state.clone();
-                spawn_monitored(
-                    post_install_state.clone(),
-                    "ui",
-                    "task_panicked",
-                    async move {
-                        post_install_state
-                            .record_flight(
-                                "post_install_launch",
-                                format!("waiting_for_installer pid={parent_pid}"),
-                            )
-                            .await;
-                        wait_for_installer_exit(parent_pid).await;
-                        // Give Explorer/WebView2 a short hand-off window after NSIS has
-                        // fully disappeared, then retry focus if window creation races.
-                        sleep(Duration::from_millis(140)).await;
-                        for attempt in 1..=3 {
-                            tray::request_main_window(&post_install_handle);
-                            sleep(Duration::from_millis(420)).await;
-                            if post_install_handle.get_webview_window("main").is_some() {
-                                post_install_state
-                                    .record_flight(
-                                        "post_install_launch",
-                                        format!("window_ready attempt={attempt}"),
-                                    )
-                                    .await;
-                                return;
-                            }
-                        }
-                        post_install_state
-                            .record_flight("post_install_launch", "window_not_ready_after_retries")
-                            .await;
-                        post_install_state
-                            .report_unexpected_error(
-                                "ui",
-                                "window_creation_failed",
-                                "post-install launch window was not ready after retries",
-                            )
-                            .await;
-                    },
+            if let Some(parent_pid) = startup_post_install_parent_pid {
+                schedule_post_install_window(
+                    app.handle().clone(),
+                    update_state.clone(),
+                    parent_pid,
+                    "primary",
                 );
             } else if !start_hidden {
                 tray::request_main_window(app.handle());
@@ -284,6 +259,53 @@ fn post_install_parent_pid(args: &[String]) -> Option<u32> {
             .and_then(|value| value.parse::<u32>().ok())
             .filter(|pid| *pid > 0)
     })
+}
+
+fn schedule_post_install_window(
+    app: AppHandle,
+    state: Arc<AppState>,
+    parent_pid: u32,
+    source: &'static str,
+) {
+    spawn_monitored(state.clone(), "ui", "task_panicked", async move {
+        state
+            .record_flight(
+                "post_install_launch",
+                format!("received source={source} installer_pid={parent_pid}"),
+            )
+            .await;
+        wait_for_installer_exit(parent_pid).await;
+        state
+            .record_flight("post_install_launch", "installer_exited")
+            .await;
+        sleep(Duration::from_millis(180)).await;
+        for attempt in 1..=4 {
+            tray::request_main_window(&app);
+            sleep(Duration::from_millis(450)).await;
+            if let Some(window) = app.get_webview_window("main") {
+                let visible = window.is_visible().unwrap_or(false);
+                state
+                    .record_flight(
+                        "post_install_launch",
+                        format!("window_ready attempt={attempt} visible={visible}"),
+                    )
+                    .await;
+                if visible {
+                    return;
+                }
+            }
+        }
+        state
+            .record_flight("post_install_launch", "window_not_visible_after_retries")
+            .await;
+        state
+            .report_unexpected_error(
+                "ui",
+                "window_creation_failed",
+                "post-install window was not visible after retries",
+            )
+            .await;
+    });
 }
 
 async fn wait_for_installer_exit(process_id: u32) {

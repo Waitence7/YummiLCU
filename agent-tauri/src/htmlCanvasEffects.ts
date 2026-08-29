@@ -1,5 +1,5 @@
 import { reportTrayEffectDiagnostic } from './api/commands';
-import bookReturnV2ModelUrl from './assets/book-return-v2.glb?url';
+import bookReturnV2ModelUrl from './assets/book-return-v2.glb?url&inline';
 
 export type HtmlCanvasTrayEffect =
   | 'fold'
@@ -518,10 +518,18 @@ void main() {
   // Once folding begins, inset it slightly from the solid cover so it cannot
   // protrude as a full-size white sheet when the book is viewed edge-on.
   if (a_book_face < 0.5) {
-    float uiPageInset = smoothstep(0.08, 0.25, t);
-    p.x *= mix(1.0, 0.945, uiPageInset);
-    p.y *= mix(1.0, 0.930, uiPageInset);
-    p.z += 0.020 * uiPageInset;
+    // Keep the captured UI visible while the book is still open, but turn the
+    // original full-window sheet into two inset inner pages. Shrinking each
+    // half around its own centre creates a real gutter at the spine and a
+    // leather/gold margin around the cover without breaking the initial
+    // full-screen hand-off at t=0.
+    float pageForm = smoothstep(0.035, 0.18, t);
+    float pageSide = step(0.5, a_book_uv.x);
+    float halfCenter = mix(-0.43, 0.43, pageSide);
+    float localPageX = p.x - halfCenter;
+    p.x = halfCenter + localPageX * mix(1.0, 0.875, pageForm);
+    p.y *= mix(1.0, 0.905, pageForm);
+    p.z += 0.024 * pageForm;
   }
   if (a_book_face > 0.5 && a_book_face < 1.5 && rightHalf > 0.5) {
     // Match the Blender asset's physical relief without introducing a second
@@ -756,13 +764,27 @@ void main() {
     // pixels away from the physical page-block sides during oblique views.
     vec4 page = texture(u_texture, vec2(uv.x, 1.0 - uv.y));
     color = page.rgb;
-    float pageInsetPhase = smoothstep(0.07, 0.22, t);
+    // Treat each half as its own page. This gives both pages an inner gutter
+    // and outer margin instead of letting the captured WebView reach all the
+    // way to the physical cover/page-block edges.
+    float localU = uv.x < 0.5 ? uv.x * 2.0 : (uv.x - 0.5) * 2.0;
+    vec2 pageUv = vec2(localU, uv.y);
+    float localEdgeDistance = min(
+      min(pageUv.x, 1.0 - pageUv.x),
+      min(pageUv.y, 1.0 - pageUv.y)
+    );
+    float pageInsetPhase = smoothstep(0.035, 0.18, t);
     float pageInset = mix(0.0, 0.060, pageInsetPhase);
-    float pageInterior = smoothstep(pageInset, pageInset + 0.018, edgeDistance);
-    float coverSweep = smoothstep(0.10, 0.30, t);
-    float coverFrontX = mix(1.08, -0.08, coverSweep);
+    float pageInterior = smoothstep(pageInset, pageInset + 0.016, localEdgeDistance);
+
+    // Keep the UI readable throughout the open/closing-book phase. The right
+    // cover performs the visual occlusion, and only near the fully-closed pose
+    // do we retire any remaining fragments as a safety cap.
+    float coverSweep = smoothstep(0.14, 0.34, t);
+    float coverFrontX = mix(1.06, -0.10, coverSweep);
     float coveredByCover = smoothstep(coverFrontX - 0.040, coverFrontX + 0.025, uv.x);
-    faceAlpha = page.a * pageInterior * (1.0 - coveredByCover);
+    float pageLifetime = 1.0 - smoothstep(0.31, 0.37, t);
+    faceAlpha = page.a * pageInterior * (1.0 - coveredByCover) * pageLifetime;
     // Covered page fragments must stop writing depth immediately; otherwise an
     // invisible UI plane can still cut holes into the cover/page-block faces.
     if (faceAlpha < 0.012) discard;
@@ -1589,11 +1611,15 @@ export async function playHtmlCanvasTrayEffect(
     ? createProgram(gl, BOOK_VERTEX_SHADER, BOOK_FRAGMENT_SHADER)
     : null;
   let bookMesh: BookGpuMesh | null = null;
+  let bookMeshSource = 'none';
   if (effect === 'book-return-v2') {
     bookMesh = await createBookMeshFromModel(gl);
-    if (!bookMesh) {
-      reportDiagnostic('mesh_failed', 'book-return-v2 GLB load failed; procedural fallback used');
+    if (bookMesh) {
+      bookMeshSource = 'glb-inline';
+    } else {
+      reportDiagnostic('mesh_failed', 'book-return-v2 GLB parse/load failed; procedural fallback used');
       bookMesh = createBookMesh(gl, spec.grid[0], spec.grid[1]);
+      bookMeshSource = bookMesh ? 'procedural-fallback' : 'failed';
     }
   }
   const texture = gl.createTexture();
@@ -1680,7 +1706,7 @@ export async function playHtmlCanvasTrayEffect(
   const startedAt = performance.now();
   reportDiagnostic(
     'ready',
-    `effect=${effect}; rate=${playbackRate.toFixed(2)}; WebGL2; texElementImage2D.length=${gl.texElementImage2D.length}${effect === 'book-return-v2' ? '; solid-book-one-draw; model=book-return-v2.glb' : ''}`,
+    `effect=${effect}; rate=${playbackRate.toFixed(2)}; WebGL2; texElementImage2D.length=${gl.texElementImage2D.length}${effect === 'book-return-v2' ? `; solid-book-one-draw; model=${bookMeshSource}` : ''}`,
   );
   await new Promise<void>((resolve) => {
     const render = (now: number) => {
