@@ -24,6 +24,9 @@ src/assets/book-return-v2.blend
 - Keep a UV map on all faces. `Yummi_Page_Front` receives the live Agent window snapshot.
 - The front and cover are intentionally subdivided (32 x 26) so the shader can fold them smoothly.
 - Object rotation/scale should be applied before export.
+- Preview cover geometry intentionally uses separate Y-depth layers for the lower and upper covers. Do not make them coplanar; the separation prevents z-fighting in the closed pose.
+- The lower cover carries only a restrained outer rail. The upper/right cover owns the inner rail, medallion, and gem so ornaments do not duplicate when the book closes.
+- Gold frame rails are generated as continuous rounded curves rather than four intersecting bars; keep that topology when changing the frame proportions.
 
 You can change proportions, thickness, vertices, UVs, bevels, or silhouette as long as the face-role materials remain assigned.
 
