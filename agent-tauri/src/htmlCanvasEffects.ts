@@ -1,4 +1,5 @@
 import { reportTrayEffectDiagnostic } from './api/commands';
+import bookReturnV2ModelUrl from './assets/book-return-v2.glb?url';
 
 export type HtmlCanvasTrayEffect =
   | 'fold'
@@ -572,7 +573,16 @@ void main() {
 
   float perspective = 1.0 / (1.0 + p.z * 0.42);
   vec2 bookCenter = vec2(0.02 * formBook, -0.02 * formBook);
-  vec2 projected = bookCenter + p.xy * perspective + dropOffset;
+
+  // During the initial toss the rotating solid can temporarily become larger
+  // than the WebView clip-space even though the final book itself is smaller.
+  // That produced a hard horizontal cut across the top edge. Pull the virtual
+  // camera back only while the silhouette is at its widest, then release the
+  // guard once flightScale has naturally made the book small enough again.
+  float frameGuardPhase =
+    smoothstep(0.02, 0.16, t) * (1.0 - smoothstep(0.34, 0.55, t));
+  vec2 frameGuard = mix(vec2(1.0), vec2(0.74, 0.69), frameGuardPhase);
+  vec2 projected = bookCenter + (p.xy * perspective) * frameGuard + dropOffset;
   gl_Position = vec4(projected, p.z * 0.45, 1.0);
   v_book_uv = a_book_uv;
   v_book_face = a_book_face;
@@ -906,6 +916,20 @@ function createMesh(gl: WebGLRenderingContext, columns: number, rows: number) {
   return { vertexBuffer, indexBuffer, indexCount: indices.length };
 }
 
+type BookGpuMesh = {
+  vertexBuffer: WebGLBuffer;
+  indexBuffer: WebGLBuffer;
+  indexCount: number;
+  indexType: number;
+};
+
+type BookModelCpu = {
+  vertices: Float32Array;
+  indices: Uint16Array | Uint32Array;
+};
+
+let bookModelCpuPromise: Promise<BookModelCpu | null> | null = null;
+
 function createBookMesh(gl: WebGLRenderingContext, columns: number, rows: number) {
   const vertices: number[] = [];
   const indices: number[] = [];
@@ -1047,7 +1071,267 @@ function createBookMesh(gl: WebGLRenderingContext, columns: number, rows: number
   gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(vertices), gl.STATIC_DRAW);
   gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
   gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
-  return { vertexBuffer, indexBuffer, indexCount: indices.length };
+  return {
+    vertexBuffer,
+    indexBuffer,
+    indexCount: indices.length,
+    indexType: gl.UNSIGNED_SHORT,
+  };
+}
+
+const BOOK_FACE_BY_MATERIAL: Readonly<Record<string, number>> = {
+  Yummi_Page_Front: 0,
+  Yummi_Cover: 1,
+  Yummi_Spine_Left: 2,
+  Yummi_Spine_Right: 3,
+  Yummi_Page_Top_Left: 4,
+  Yummi_Page_Bottom_Left: 5,
+  Yummi_Page_Top_Right: 6,
+  Yummi_Page_Bottom_Right: 7,
+};
+
+type GlbBufferView = {
+  byteOffset?: number;
+  byteLength: number;
+  byteStride?: number;
+};
+
+type GlbAccessor = {
+  bufferView?: number;
+  byteOffset?: number;
+  componentType: number;
+  count: number;
+  type: string;
+  sparse?: unknown;
+};
+
+type GlbPrimitive = {
+  attributes?: Record<string, number>;
+  indices?: number;
+  material?: number;
+  mode?: number;
+  extras?: { yummiBookFace?: number };
+};
+
+type GlbDocument = {
+  bufferViews?: GlbBufferView[];
+  accessors?: GlbAccessor[];
+  materials?: Array<{ name?: string }>;
+  meshes?: Array<{ name?: string; primitives?: GlbPrimitive[] }>;
+};
+
+function glbComponentSize(componentType: number) {
+  switch (componentType) {
+    case 5121:
+      return 1;
+    case 5123:
+      return 2;
+    case 5125:
+    case 5126:
+      return 4;
+    default:
+      return 0;
+  }
+}
+
+function glbComponentCount(type: string) {
+  switch (type) {
+    case 'SCALAR':
+      return 1;
+    case 'VEC2':
+      return 2;
+    case 'VEC3':
+      return 3;
+    case 'VEC4':
+      return 4;
+    default:
+      return 0;
+  }
+}
+
+function readGlbAccessor(
+  document: GlbDocument,
+  binary: ArrayBuffer,
+  accessorIndex: number,
+  expectedType: string,
+): number[] | null {
+  const accessor = document.accessors?.[accessorIndex];
+  if (
+    !accessor
+    || accessor.type !== expectedType
+    || accessor.sparse
+    || accessor.bufferView === undefined
+  ) {
+    return null;
+  }
+  const view = document.bufferViews?.[accessor.bufferView];
+  if (!view) return null;
+
+  const components = glbComponentCount(accessor.type);
+  const componentSize = glbComponentSize(accessor.componentType);
+  if (components < 1 || componentSize < 1) return null;
+
+  const packedStride = components * componentSize;
+  const stride = view.byteStride ?? packedStride;
+  if (stride < packedStride) return null;
+
+  const start = (view.byteOffset ?? 0) + (accessor.byteOffset ?? 0);
+  const data = new DataView(binary);
+  const values: number[] = [];
+  for (let element = 0; element < accessor.count; element += 1) {
+    const base = start + element * stride;
+    for (let component = 0; component < components; component += 1) {
+      const offset = base + component * componentSize;
+      switch (accessor.componentType) {
+        case 5121:
+          values.push(data.getUint8(offset));
+          break;
+        case 5123:
+          values.push(data.getUint16(offset, true));
+          break;
+        case 5125:
+          values.push(data.getUint32(offset, true));
+          break;
+        case 5126:
+          values.push(data.getFloat32(offset, true));
+          break;
+        default:
+          return null;
+      }
+    }
+  }
+  return values;
+}
+
+function parseBookModelGlb(buffer: ArrayBuffer): BookModelCpu | null {
+  const bytes = new DataView(buffer);
+  if (
+    buffer.byteLength < 20
+    || bytes.getUint32(0, true) !== 0x46546c67
+    || bytes.getUint32(4, true) !== 2
+  ) {
+    return null;
+  }
+
+  let cursor = 12;
+  let document: GlbDocument | null = null;
+  let binary: ArrayBuffer | null = null;
+  while (cursor + 8 <= buffer.byteLength) {
+    const chunkLength = bytes.getUint32(cursor, true);
+    const chunkType = bytes.getUint32(cursor + 4, true);
+    cursor += 8;
+    if (cursor + chunkLength > buffer.byteLength) return null;
+    const chunk = buffer.slice(cursor, cursor + chunkLength);
+    if (chunkType === 0x4e4f534a) {
+      try {
+        const text = new TextDecoder().decode(chunk).replace(/[\u0000 ]+$/g, '');
+        document = JSON.parse(text) as GlbDocument;
+      } catch {
+        return null;
+      }
+    } else if (chunkType === 0x004e4942) {
+      binary = chunk;
+    }
+    cursor += chunkLength;
+  }
+
+  if (!document || !binary) return null;
+  const mesh = document.meshes?.find((candidate) => candidate.name === 'YummiBook')
+    ?? document.meshes?.[0];
+  const primitives = mesh?.primitives;
+  if (!primitives?.length) return null;
+
+  const vertices: number[] = [];
+  const indices: number[] = [];
+  for (let primitiveIndex = 0; primitiveIndex < primitives.length; primitiveIndex += 1) {
+    const primitive = primitives[primitiveIndex];
+    if (primitive.mode !== undefined && primitive.mode !== 4) continue;
+    const positionAccessor = primitive.attributes?.POSITION;
+    const uvAccessor = primitive.attributes?.TEXCOORD_0;
+    if (positionAccessor === undefined || uvAccessor === undefined) return null;
+
+    const positions = readGlbAccessor(document, binary, positionAccessor, 'VEC3');
+    const uvs = readGlbAccessor(document, binary, uvAccessor, 'VEC2');
+    if (!positions || !uvs || positions.length / 3 !== uvs.length / 2) return null;
+
+    const materialName = primitive.material === undefined
+      ? undefined
+      : document.materials?.[primitive.material]?.name;
+    const explicitFace = primitive.extras?.yummiBookFace;
+    const faceId = Number.isInteger(explicitFace)
+      ? Number(explicitFace)
+      : materialName !== undefined && BOOK_FACE_BY_MATERIAL[materialName] !== undefined
+        ? BOOK_FACE_BY_MATERIAL[materialName]
+        : primitiveIndex;
+    if (faceId < 0 || faceId > 7) return null;
+
+    const baseVertex = vertices.length / 6;
+    const vertexCount = positions.length / 3;
+    for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+      vertices.push(
+        positions[vertex * 3],
+        positions[vertex * 3 + 1],
+        positions[vertex * 3 + 2],
+        uvs[vertex * 2],
+        uvs[vertex * 2 + 1],
+        faceId,
+      );
+    }
+
+    if (primitive.indices === undefined) {
+      for (let vertex = 0; vertex < vertexCount; vertex += 1) {
+        indices.push(baseVertex + vertex);
+      }
+    } else {
+      const sourceIndices = readGlbAccessor(document, binary, primitive.indices, 'SCALAR');
+      if (!sourceIndices) return null;
+      for (const index of sourceIndices) {
+        if (!Number.isInteger(index) || index < 0 || index >= vertexCount) return null;
+        indices.push(baseVertex + index);
+      }
+    }
+  }
+
+  if (vertices.length === 0 || indices.length === 0) return null;
+  const maxIndex = Math.max(...indices);
+  const typedIndices = maxIndex > 65_535
+    ? new Uint32Array(indices)
+    : new Uint16Array(indices);
+  return {
+    vertices: new Float32Array(vertices),
+    indices: typedIndices,
+  };
+}
+
+async function loadBookModelCpu(): Promise<BookModelCpu | null> {
+  if (!bookModelCpuPromise) {
+    bookModelCpuPromise = fetch(bookReturnV2ModelUrl)
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return parseBookModelGlb(await response.arrayBuffer());
+      })
+      .catch(() => null);
+  }
+  return bookModelCpuPromise;
+}
+
+async function createBookMeshFromModel(gl: WebGL2RenderingContext): Promise<BookGpuMesh | null> {
+  const model = await loadBookModelCpu();
+  if (!model) return null;
+  const vertexBuffer = gl.createBuffer();
+  const indexBuffer = gl.createBuffer();
+  if (!vertexBuffer || !indexBuffer) return null;
+
+  gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
+  gl.bufferData(gl.ARRAY_BUFFER, model.vertices, gl.STATIC_DRAW);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, model.indices, gl.STATIC_DRAW);
+  return {
+    vertexBuffer,
+    indexBuffer,
+    indexCount: model.indices.length,
+    indexType: model.indices instanceof Uint32Array ? gl.UNSIGNED_INT : gl.UNSIGNED_SHORT,
+  };
 }
 
 function nextFrame() {
@@ -1280,9 +1564,14 @@ export async function playHtmlCanvasTrayEffect(
   const bookProgram = effect === 'book-return-v2'
     ? createProgram(gl, BOOK_VERTEX_SHADER, BOOK_FRAGMENT_SHADER)
     : null;
-  const bookMesh = effect === 'book-return-v2'
-    ? createBookMesh(gl, spec.grid[0], spec.grid[1])
-    : null;
+  let bookMesh: BookGpuMesh | null = null;
+  if (effect === 'book-return-v2') {
+    bookMesh = await createBookMeshFromModel(gl);
+    if (!bookMesh) {
+      reportDiagnostic('mesh_failed', 'book-return-v2 GLB load failed; procedural fallback used');
+      bookMesh = createBookMesh(gl, spec.grid[0], spec.grid[1]);
+    }
+  }
   const texture = gl.createTexture();
   if (!program) return false;
   if (!mesh) {
@@ -1367,7 +1656,7 @@ export async function playHtmlCanvasTrayEffect(
   const startedAt = performance.now();
   reportDiagnostic(
     'ready',
-    `effect=${effect}; rate=${playbackRate.toFixed(2)}; WebGL2; texElementImage2D.length=${gl.texElementImage2D.length}${effect === 'book-return-v2' ? '; solid-book-one-draw' : ''}`,
+    `effect=${effect}; rate=${playbackRate.toFixed(2)}; WebGL2; texElementImage2D.length=${gl.texElementImage2D.length}${effect === 'book-return-v2' ? '; solid-book-one-draw; model=book-return-v2.glb' : ''}`,
   );
   await new Promise<void>((resolve) => {
     const render = (now: number) => {
@@ -1400,7 +1689,7 @@ export async function playHtmlCanvasTrayEffect(
         gl.bindTexture(gl.TEXTURE_2D, texture);
         gl.uniform1i(bookTextureUniform, 0);
         gl.uniform1f(bookProgress, raw);
-        gl.drawElements(gl.TRIANGLES, bookMesh.indexCount, gl.UNSIGNED_SHORT, 0);
+        gl.drawElements(gl.TRIANGLES, bookMesh.indexCount, bookMesh.indexType, 0);
       } else {
         gl.useProgram(program);
         gl.bindBuffer(gl.ARRAY_BUFFER, mesh.vertexBuffer);
