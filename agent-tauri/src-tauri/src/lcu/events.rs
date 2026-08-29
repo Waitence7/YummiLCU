@@ -15,7 +15,7 @@ use tokio_tungstenite::{
     Connector,
 };
 
-use crate::config::Config;
+use crate::{config::Config, error::AgentError};
 
 use super::{discover_lockfile, LcuClient, LcuIdentity, LockfileDiscovery};
 
@@ -151,7 +151,9 @@ impl LcuEventPoller {
                 }
                 continue;
             };
-            let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
+            let Ok(client) =
+                LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
+            else {
                 if !wait_for_socket_retry(&mut stop).await {
                     return;
                 }
@@ -231,7 +233,11 @@ impl LcuEventPoller {
         }
     }
 
-    pub(crate) async fn poll(&mut self, config: &Config) -> Vec<(&'static str, Value)> {
+    pub(crate) async fn poll(
+        &mut self,
+        config: &Config,
+        poll_lcu: bool,
+    ) -> Vec<(&'static str, Value)> {
         let mut events = Vec::new();
 
         // Live Client Data is independent of the League Client lockfile. This is
@@ -305,6 +311,13 @@ impl LcuEventPoller {
             }
         }
 
+        // The 1s worker tick exists to keep Live Client Data responsive. LCU
+        // itself is event-driven through OnJsonApiEvent, with an 8s recovery
+        // poll supplied by the supervisor in case an event is missed.
+        if !poll_lcu {
+            return events;
+        }
+
         let should_refresh_lockfile = self
             .last_lockfile_discovery
             .is_none_or(|last| last.elapsed() >= LOCKFILE_DISCOVERY_INTERVAL);
@@ -354,7 +367,9 @@ impl LcuEventPoller {
             self.diagnostic(format!("LCU lockfile 발견: {}", path.display()));
         }
         self.lockfile_available = Some(true);
-        let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
+        let Ok(client) =
+            LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
+        else {
             if self.lcu_available != Some(false) {
                 self.diagnostic("LCU lockfile/PID 검증 실패 — 관전 API 독립 조회는 계속함");
             }
@@ -419,90 +434,183 @@ impl LcuEventPoller {
             self.eog_sent = false;
         }
 
-        match client.request(Method::GET, READY_CHECK, None).await {
-            Ok(value) => {
-                self.observe_schema(
-                "ready_check",
-                value.is_object()
-                    && value.get("state").is_some_and(Value::is_string)
-                    && value.get("playerResponse").is_some_and(Value::is_string),
-            );
-            let payload = ready_check_payload(&value);
-            push_changed(
-                &mut self.ready_check,
-                fingerprint(&payload),
-                "ready_check_update",
-                payload,
-                &mut events,
-            );
-            }
-            Err(error) => self.diagnostic(format!("LCU ready_check API 응답 실패: {error}")),
-        }
-        match client.request(Method::GET, CHAMP_SELECT, None).await {
-            Ok(value) => {
-                self.observe_schema(
-                "champ_select",
-                value.is_object()
-                    && value.get("timer").is_some_and(Value::is_object)
-                    && value.get("actions").is_some_and(Value::is_array),
-            );
-            let mut payload = champ_select_payload(&value);
-            if payload
-                .get("is_spectating")
-                .and_then(Value::as_bool)
-                == Some(true)
-            {
-                let champ_select_picks = spectator_champ_select_picks(&value);
-                let gameflow_picks = match client
-                    .request(Method::GET, GAMEFLOW_SESSION, None)
-                    .await
-                {
-                    Ok(gameflow_session) => spectator_gameflow_picks(&gameflow_session),
-                    Err(_) => None,
-                };
-                if let Some(observer_picks) =
-                    prefer_more_complete_picks(champ_select_picks, gameflow_picks)
-                {
-                    payload["observer_picks"] = observer_picks;
+        let plan = phase_poll_plan(&phase);
+        clear_inactive_phase_snapshots(self, &phase, plan, &mut events);
+
+        if plan.ready_check {
+            match client.request(Method::GET, READY_CHECK, None).await {
+                Ok(value) => {
+                    self.observe_schema(
+                        "ready_check",
+                        value.is_object()
+                            && value.get("state").is_some_and(Value::is_string)
+                            && value.get("playerResponse").is_some_and(Value::is_string),
+                    );
+                    let payload = ready_check_payload(&value);
+                    push_changed(
+                        &mut self.ready_check,
+                        fingerprint(&payload),
+                        "ready_check_update",
+                        payload,
+                        &mut events,
+                    );
+                }
+                Err(error) => {
+                    if !is_expected_missing_lcu_endpoint(&error) {
+                        self.diagnostic(format!("LCU ready_check API 응답 실패: {error}"));
+                    }
                 }
             }
-            push_changed(
-                &mut self.champ_select,
-                champ_select_fingerprint(&payload),
-                "champ_select_update",
-                payload,
-                &mut events,
-            );
-            }
-            Err(error) => self.diagnostic(format!("LCU champ_select API 응답 실패: {error}")),
         }
-        match client.request(Method::GET, LOBBY, None).await {
-            Ok(value) => {
-                self.observe_schema(
-                "lobby",
-                value.is_object() && value.get("members").is_some_and(Value::is_array),
-            );
-            let payload = party_payload(&value);
-            push_changed(
-                &mut self.party,
-                fingerprint(&payload),
-                "party_lobby_update",
-                payload.clone(),
-                &mut events,
-            );
-            let status = participant_status(&phase, &payload);
-            push_changed(
-                &mut self.participant,
-                fingerprint(&status),
-                "participant_status_update",
-                status,
-                &mut events,
-            );
+        if plan.champ_select {
+            match client.request(Method::GET, CHAMP_SELECT, None).await {
+                Ok(value) => {
+                    self.observe_schema(
+                        "champ_select",
+                        value.is_object()
+                            && value.get("timer").is_some_and(Value::is_object)
+                            && value.get("actions").is_some_and(Value::is_array),
+                    );
+                    let mut payload = champ_select_payload(&value);
+                    if payload.get("is_spectating").and_then(Value::as_bool) == Some(true) {
+                        let champ_select_picks = spectator_champ_select_picks(&value);
+                        let gameflow_picks =
+                            match client.request(Method::GET, GAMEFLOW_SESSION, None).await {
+                                Ok(gameflow_session) => spectator_gameflow_picks(&gameflow_session),
+                                Err(_) => None,
+                            };
+                        if let Some(observer_picks) =
+                            prefer_more_complete_picks(champ_select_picks, gameflow_picks)
+                        {
+                            payload["observer_picks"] = observer_picks;
+                        }
+                    }
+                    push_changed(
+                        &mut self.champ_select,
+                        champ_select_fingerprint(&payload),
+                        "champ_select_update",
+                        payload,
+                        &mut events,
+                    );
+                }
+                Err(error) => {
+                    if !is_expected_missing_lcu_endpoint(&error) {
+                        self.diagnostic(format!("LCU champ_select API 응답 실패: {error}"));
+                    }
+                }
             }
-            Err(error) => self.diagnostic(format!("LCU lobby API 응답 실패: {error}")),
+        }
+        if plan.lobby {
+            match client.request(Method::GET, LOBBY, None).await {
+                Ok(value) => {
+                    self.observe_schema(
+                        "lobby",
+                        value.is_object() && value.get("members").is_some_and(Value::is_array),
+                    );
+                    let payload = party_payload(&value);
+                    push_changed(
+                        &mut self.party,
+                        fingerprint(&payload),
+                        "party_lobby_update",
+                        payload.clone(),
+                        &mut events,
+                    );
+                    let status = participant_status(&phase, &payload);
+                    push_changed(
+                        &mut self.participant,
+                        fingerprint(&status),
+                        "participant_status_update",
+                        status,
+                        &mut events,
+                    );
+                }
+                Err(error) => {
+                    if !is_expected_missing_lcu_endpoint(&error) {
+                        self.diagnostic(format!("LCU lobby API 응답 실패: {error}"));
+                    }
+                }
+            }
         }
         events
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct PhasePollPlan {
+    ready_check: bool,
+    champ_select: bool,
+    lobby: bool,
+}
+
+fn phase_poll_plan(phase: &str) -> PhasePollPlan {
+    match phase {
+        "Lobby" => PhasePollPlan {
+            lobby: true,
+            ..PhasePollPlan::default()
+        },
+        "Matchmaking" => PhasePollPlan {
+            ready_check: true,
+            lobby: true,
+            ..PhasePollPlan::default()
+        },
+        // ChampSelect can become available a few milliseconds before the
+        // gameflow phase event arrives, so probe it while ReadyCheck is active.
+        // This is event/8s driven now, not a 1s 404 loop.
+        "ReadyCheck" => PhasePollPlan {
+            ready_check: true,
+            champ_select: true,
+            lobby: true,
+        },
+        "ChampSelect" | "GameStart" => PhasePollPlan {
+            champ_select: true,
+            ..PhasePollPlan::default()
+        },
+        _ => PhasePollPlan::default(),
+    }
+}
+
+fn clear_inactive_phase_snapshots(
+    poller: &mut LcuEventPoller,
+    phase: &str,
+    plan: PhasePollPlan,
+    events: &mut Vec<(&'static str, Value)>,
+) {
+    if !plan.ready_check && poller.ready_check.take().is_some() {
+        events.push((
+            "ready_check_update",
+            json!({"active": false, "state": "", "player_response": ""}),
+        ));
+    }
+    if !plan.champ_select && poller.champ_select.take().is_some() {
+        events.push(("champ_select_update", json!({"active": false})));
+    }
+    if !plan.lobby && poller.party.take().is_some() {
+        events.push((
+            "party_lobby_update",
+            json!({"in_lobby": false, "riot_ids_in_party": []}),
+        ));
+    }
+
+    // Participant status is primarily phase-derived. Keep it fresh even when
+    // the lobby endpoint is intentionally not queried for the current phase.
+    if !plan.lobby {
+        let status =
+            participant_status(phase, &json!({"in_lobby": false, "riot_ids_in_party": []}));
+        push_changed(
+            &mut poller.participant,
+            fingerprint(&status),
+            "participant_status_update",
+            status,
+            events,
+        );
+    }
+}
+
+fn is_expected_missing_lcu_endpoint(error: &AgentError) -> bool {
+    matches!(
+        error,
+        AgentError::Lcu(message) if message.contains("HTTP 404 Not Found")
+    )
 }
 
 async fn discover_lockfile_nonblocking(config: &Config) -> Option<LockfileDiscovery> {
@@ -784,7 +892,6 @@ fn champ_select_payload(value: &Value) -> Value {
     })
 }
 
-
 fn spectator_member_side(member: &Value) -> Option<&'static str> {
     match member.get("team").and_then(Value::as_i64) {
         Some(1 | 100) => Some("blue"),
@@ -822,7 +929,10 @@ fn spectator_champ_select_picks(session: &Value) -> Option<Value> {
                 cell_sides.push((cell_id, side));
             }
             if let Some(champion_id) = positive_champion_id(member) {
-                push_unique_pick(if side == "blue" { &mut blue } else { &mut red }, champion_id);
+                push_unique_pick(
+                    if side == "blue" { &mut blue } else { &mut red },
+                    champion_id,
+                );
             }
         }
     }
@@ -851,7 +961,10 @@ fn spectator_champ_select_picks(session: &Value) -> Option<Value> {
         else {
             continue;
         };
-        push_unique_pick(if *side == "blue" { &mut blue } else { &mut red }, champion_id);
+        push_unique_pick(
+            if *side == "blue" { &mut blue } else { &mut red },
+            champion_id,
+        );
     }
     if blue.is_empty() && red.is_empty() {
         return None;
@@ -879,7 +992,11 @@ fn prefer_more_complete_picks(primary: Option<Value>, fallback: Option<Value>) -
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
-        if second.len() > first.len() { second } else { first }
+        if second.len() > first.len() {
+            second
+        } else {
+            first
+        }
     };
     let blue = choose("blue");
     let red = choose("red");
@@ -924,11 +1041,7 @@ fn positive_champion_id(value: &Value) -> Option<u64> {
 
 fn spectator_team_picks(team: Option<&Value>, selections: &[Value]) -> Vec<Value> {
     let mut picks = Vec::new();
-    for member in team
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-    {
+    for member in team.and_then(Value::as_array).into_iter().flatten() {
         let champion_id = positive_champion_id(member).or_else(|| {
             let member_keys = spectator_identity_keys(member);
             if member_keys.is_empty() {
@@ -1426,6 +1539,89 @@ mod tests {
         assert!(payload["events"][0].get("raw").is_none());
         assert!(payload["events"][0].get("futureSecret").is_none());
         assert_eq!(payload["events"][1]["dragon_type"], "EarthDragon");
+    }
+
+    #[test]
+    fn phase_poll_plan_queries_only_relevant_endpoints() {
+        assert_eq!(phase_poll_plan("None"), PhasePollPlan::default());
+        assert_eq!(
+            phase_poll_plan("Lobby"),
+            PhasePollPlan {
+                lobby: true,
+                ..PhasePollPlan::default()
+            }
+        );
+        assert_eq!(
+            phase_poll_plan("Matchmaking"),
+            PhasePollPlan {
+                ready_check: true,
+                lobby: true,
+                ..PhasePollPlan::default()
+            }
+        );
+        assert_eq!(
+            phase_poll_plan("ReadyCheck"),
+            PhasePollPlan {
+                ready_check: true,
+                champ_select: true,
+                lobby: true,
+            }
+        );
+        assert_eq!(
+            phase_poll_plan("ChampSelect"),
+            PhasePollPlan {
+                champ_select: true,
+                ..PhasePollPlan::default()
+            }
+        );
+        assert_eq!(phase_poll_plan("InProgress"), PhasePollPlan::default());
+    }
+
+    #[test]
+    fn inactive_phase_snapshots_are_cleared_once() {
+        let mut poller = LcuEventPoller {
+            ready_check: Some("ready".into()),
+            champ_select: Some("champ".into()),
+            party: Some("party".into()),
+            participant: Some("participant".into()),
+            ..LcuEventPoller::default()
+        };
+        let mut events = Vec::new();
+
+        clear_inactive_phase_snapshots(
+            &mut poller,
+            "InProgress",
+            PhasePollPlan::default(),
+            &mut events,
+        );
+
+        assert!(poller.ready_check.is_none());
+        assert!(poller.champ_select.is_none());
+        assert!(poller.party.is_none());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(kind, _)| *kind == "ready_check_update")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(kind, _)| *kind == "champ_select_update")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|(kind, _)| *kind == "party_lobby_update")
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|(kind, payload)| {
+            *kind == "participant_status_update" && payload["status"] == "in_game"
+        }));
     }
 
     #[test]

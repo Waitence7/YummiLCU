@@ -37,7 +37,8 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
-const LCU_EVENT_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const LCU_WORKER_TICK_INTERVAL: Duration = Duration::from_secs(1);
+const LCU_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(8);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_DURABLE_REPLAY_EVENTS: usize = 64;
 const DURABLE_REPLAY_INTERVAL: Duration = Duration::from_secs(30);
@@ -116,35 +117,38 @@ impl LcuPollWorker {
 
         let task = tokio::spawn(async move {
             let mut poller = LcuEventPoller::default();
-            let mut poll_tick = interval(LCU_EVENT_POLL_INTERVAL);
+            let mut poll_tick = interval(LCU_WORKER_TICK_INTERVAL);
             poll_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
             poll_tick.tick().await;
+            let mut last_lcu_poll: Option<Instant> = None;
 
             loop {
-                let should_poll = tokio::select! {
+                let poll_lcu = tokio::select! {
                     changed = stop_rx.changed() => {
                         if changed.is_err() || *stop_rx.borrow() {
                             return;
                         }
-                        false
+                        continue;
                     }
                     changed = live_game_polling_rx.changed() => {
                         if changed.is_err() {
                             return;
                         }
                         poller.set_live_game_polling(*live_game_polling_rx.borrow());
-                        false
+                        continue;
                     }
-                    _ = poll_tick.tick() => true,
+                    _ = poll_tick.tick() => {
+                        last_lcu_poll.is_none_or(|last| last.elapsed() >= LCU_RECOVERY_POLL_INTERVAL)
+                    },
                     Some(()) = trigger_rx.recv() => true,
                 };
 
-                if !should_poll {
-                    continue;
+                if poll_lcu {
+                    last_lcu_poll = Some(Instant::now());
                 }
 
                 let config = state.config.read().await.clone();
-                let events = poller.poll(&config).await;
+                let events = poller.poll(&config, poll_lcu).await;
                 let diagnostics = poller.take_diagnostics();
                 if events.is_empty() && diagnostics.is_empty() {
                     continue;
@@ -441,9 +445,7 @@ async fn run_supervisor(
                     .relay
                     .set_connection_state(&app, &state, generation, RelayConnectionState::Failed)
                     .await;
-                state
-                    .record_flight("relay_error", error.to_string())
-                    .await;
+                state.record_flight("relay_error", error.to_string()).await;
                 state.log(&app, format!("Relay 오류: {error}")).await;
             }
         }
@@ -897,7 +899,9 @@ where
                     let config = state.config.read().await.clone();
                     if let Some(path) = lockfile_path(&config) {
                         let _guard = state.command_lock.lock().await;
-                        match LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) {
+                        match LcuClient::from_lockfile(&path)
+                            .or_else(|_| LcuClient::from_lockfile_legacy(&path))
+                        {
                             Ok(client) => match client
                                 .execute_action(action, &payload, &config)
                                 .await
