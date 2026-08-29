@@ -447,9 +447,16 @@ Function YummiInstallPageShow
   SendMessage $1 0x000C 0 "STR:Yummi LCU Agent 설치 중..."
   SetCtlColors $1 "" "F0F0F0"
 
-  ; Center the two visible controls in the existing installer client area.
-  System::Call 'user32::SetWindowPos(p r1, p 0, i 38, i 64, i 340, i 18, i 0x0004)'
-  System::Call 'user32::SetWindowPos(p r2, p 0, i 38, i 92, i 340, i 14, i 0x0004)'
+  ; Keep generous vertical spacing so the status text and native progress bar
+  ; never visually touch at Windows DPI/font scaling values above 100%.
+  System::Call 'user32::SetWindowPos(p r1, p 0, i 38, i 56, i 340, i 20, i 0x0004)'
+  System::Call 'user32::SetWindowPos(p r2, p 0, i 38, i 94, i 340, i 16, i 0x0004)'
+
+  ; A quiet reassurance below the progress bar. Keep it subtle and italic.
+  System::Call 'user32::CreateWindowExW(i 0, w "STATIC", w "보통 이 글을 읽기 전에 다운로드가 끝납니다", i 0x50000001, i 38, i 120, i 340, i 18, p r0, p 0, p 0, p 0) p .r7'
+  CreateFont $R8 "Segoe UI" 9 400 /ITALIC
+  SendMessage $R7 0x0030 $R8 1
+  SetCtlColors $R7 "6B7280" "F0F0F0"
 
   ; Prevent accidental closure while files are being replaced.
   System::Call 'user32::GetSystemMenu(p $HWNDPARENT, i 0) p .r6'
