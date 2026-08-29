@@ -38,7 +38,16 @@
 !macro NSIS_HOOK_POSTINSTALL
   IfSilent yummi_postinstall_done 0
   DetailPrint "Starting ${PRODUCTNAME}..."
-  nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" ""
+  ; This installer runs as the current user, so launch the finished binary
+  ; through the Windows shell. SW_SHOWNORMAL makes the first Agent window
+  ; eligible to come to the foreground immediately after installation.
+  ClearErrors
+  ExecShell "open" "$INSTDIR\${MAINBINARYNAME}.exe" "" SW_SHOWNORMAL
+  ${If} ${Errors}
+    ; Keep a direct Exec fallback for systems where ShellExecute is unavailable.
+    ClearErrors
+    Exec '"$INSTDIR\${MAINBINARYNAME}.exe"'
+  ${EndIf}
   SetAutoClose true
   yummi_postinstall_done:
 !macroend
