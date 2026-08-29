@@ -32,22 +32,11 @@
   !insertmacro YUMMI_STOP_RUNNING_AGENT
 !macroend
 
-; Interactive installs should not require a separate Finish -> Run click.
-; Silent/update installs keep their existing unattended behaviour and never
-; launch a foreground Agent window unexpectedly.
+; Interactive installs skip the Finish page. Let the installer finish first;
+; .onInstSuccess marks the launch and .onGUIEnd starts the Agent only after the
+; installer window has fully closed. Silent/update installs remain unattended.
 !macro NSIS_HOOK_POSTINSTALL
   IfSilent yummi_postinstall_done 0
-  DetailPrint "Starting ${PRODUCTNAME}..."
-  ; This installer runs as the current user, so launch the finished binary
-  ; through the Windows shell. SW_SHOWNORMAL makes the first Agent window
-  ; eligible to come to the foreground immediately after installation.
-  ClearErrors
-  ExecShell "open" "$INSTDIR\${MAINBINARYNAME}.exe" "" SW_SHOWNORMAL
-  ${If} ${Errors}
-    ; Keep a direct Exec fallback for systems where ShellExecute is unavailable.
-    ClearErrors
-    Exec '"$INSTDIR\${MAINBINARYNAME}.exe"'
-  ${EndIf}
   SetAutoClose true
   yummi_postinstall_done:
 !macroend
