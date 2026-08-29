@@ -23,6 +23,7 @@ export type TrayHideEffect =
   | 'none';
 
 export type Config = {
+  ConfigSchemaVersion: number;
   RelayPublicBaseUrl: string;
   AuthPollIntervalMs: number;
   LockfilePath?: string | null;
@@ -82,6 +83,7 @@ export const initialState: AgentState = {
   oauth_pending: false,
   update_message: null,
   config: {
+    ConfigSchemaVersion: 1,
     RelayPublicBaseUrl: 'https://yummi.duckdns.org',
     AuthPollIntervalMs: 1500,
     PreventQueueAfterDodge: true,

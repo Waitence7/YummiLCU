@@ -16,6 +16,7 @@ const BETA_UPDATE_MANIFEST_URL: &str =
     "https://yummi.duckdns.org/agent/releases/tauri/beta/version.json";
 const DEV_UPDATE_MANIFEST_URL: &str =
     "https://yummi.duckdns.org/agent/releases/tauri/dev/version.json";
+const CURRENT_CONFIG_SCHEMA_VERSION: u32 = 1;
 
 fn embedded_release_channel() -> &'static str {
     match option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable") {
@@ -33,9 +34,21 @@ fn public_update_manifest_url(channel: &str) -> &'static str {
     }
 }
 
+fn apply_schema_migrations(config: &mut Config, source_schema_version: u32) {
+    // Schema v1 makes automatic update checks/install the default for existing
+    // installations. Once v1 is persisted, later explicit user choices remain
+    // untouched instead of being forced back on at every startup.
+    if source_schema_version < 1 {
+        config.check_updates_on_startup = true;
+        config.auto_update_enabled = true;
+    }
+    config.config_schema_version = CURRENT_CONFIG_SCHEMA_VERSION;
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "PascalCase")]
 pub struct Config {
+    pub config_schema_version: u32,
     pub relay_public_base_url: String,
     // Retained for agent.json compatibility; the WebSocket OAuth flow no longer polls HTTP.
     pub auth_poll_interval_ms: u64,
@@ -62,6 +75,7 @@ impl Default for Config {
     fn default() -> Self {
         let update_channel = embedded_release_channel();
         Self {
+            config_schema_version: CURRENT_CONFIG_SCHEMA_VERSION,
             relay_public_base_url: "https://yummi.duckdns.org".into(),
             auth_poll_interval_ms: 1500,
             lockfile_path: None,
@@ -122,7 +136,7 @@ impl Config {
 
     pub(crate) fn load() -> Self {
         let path = Self::path();
-        let mut config = fs::symlink_metadata(&path)
+        let raw_config = fs::symlink_metadata(&path)
             .ok()
             .filter(|metadata| {
                 metadata.is_file()
@@ -139,9 +153,23 @@ impl Config {
                 (bytes.len() as u64 <= Self::MAX_CONFIG_BYTES)
                     .then(|| String::from_utf8(bytes).ok())
                     .flatten()
+            });
+        let source_schema_version = raw_config
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+            .and_then(|value| {
+                value
+                    .get("ConfigSchemaVersion")
+                    .and_then(|version| version.as_u64())
             })
-            .and_then(|raw| serde_json::from_str::<Self>(&raw).ok())
+            .and_then(|version| u32::try_from(version).ok())
+            .unwrap_or(0);
+        let mut config = raw_config
+            .as_deref()
+            .and_then(|raw| serde_json::from_str::<Self>(raw).ok())
             .unwrap_or_default();
+
+        apply_schema_migrations(&mut config, source_schema_version);
         config.normalize();
         // The desktop agent is intentionally a background tray service. Older
         // installs may still contain RunAtWindowsStartup=false from the former
@@ -419,6 +447,35 @@ mod tests {
 
         config.normalize();
 
+        assert!(!config.auto_update_enabled);
+    }
+
+    #[test]
+    fn legacy_config_migrates_automatic_updates_on_once() {
+        let mut config = Config {
+            check_updates_on_startup: false,
+            auto_update_enabled: false,
+            ..Config::default()
+        };
+
+        apply_schema_migrations(&mut config, 0);
+
+        assert!(config.check_updates_on_startup);
+        assert!(config.auto_update_enabled);
+        assert_eq!(config.config_schema_version, CURRENT_CONFIG_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn current_schema_preserves_explicit_auto_update_choice() {
+        let mut config = Config {
+            check_updates_on_startup: false,
+            auto_update_enabled: false,
+            ..Config::default()
+        };
+
+        apply_schema_migrations(&mut config, CURRENT_CONFIG_SCHEMA_VERSION);
+
+        assert!(!config.check_updates_on_startup);
         assert!(!config.auto_update_enabled);
     }
 
