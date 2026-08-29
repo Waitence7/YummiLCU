@@ -23,6 +23,9 @@ use crate::{
 const DEFAULT_DISCORD_APPLICATION_ID: &str = "1491092609001722106";
 const PRESENCE_POLL_INTERVAL: Duration = Duration::from_secs(4);
 const DISCORD_RETRY_INTERVAL: Duration = Duration::from_secs(15);
+const DISCORD_STARTUP_RETRY_DELAY: Duration = Duration::from_millis(250);
+const DISCORD_STARTUP_RETRY_ATTEMPTS: usize = 6;
+const DISCORD_STARTING_ERROR: &str = "Discord IPC connection is starting";
 const LIVE_GAME_ENDPOINT: &str = "/liveclientdata/allgamedata";
 const DOWNLOAD_URL: &str = "https://yummi.duckdns.org/download";
 const JOIN_SECRET_PREFIX: &str = "yummi:lobby:v1:";
@@ -66,7 +69,7 @@ impl PresenceSession {
     }
 
     fn is_connected(&self) -> bool {
-        self.client.is_some()
+        self.client.is_some() && Client::is_ready()
     }
 
     fn set_activity(&mut self, snapshot: &PresenceSnapshot) -> Result<(), String> {
@@ -122,7 +125,9 @@ impl PresenceSession {
 
     fn ensure_connected(&mut self) -> Result<(), String> {
         if self.client.is_some() {
-            return Ok(());
+            return Client::is_ready()
+                .then_some(())
+                .ok_or_else(|| DISCORD_STARTING_ERROR.to_string());
         }
 
         let application_id = discord_application_id()
@@ -143,7 +148,9 @@ impl PresenceSession {
 
         self.client = Some(client);
         self.subscribed_to_join = false;
-        Ok(())
+        Client::is_ready()
+            .then_some(())
+            .ok_or_else(|| DISCORD_STARTING_ERROR.to_string())
     }
 
     fn ensure_join_subscription(&mut self) -> Result<(), String> {
@@ -171,6 +178,30 @@ impl Drop for PresenceSession {
     fn drop(&mut self) {
         self.clear();
     }
+}
+
+async fn set_activity_with_startup_retry(
+    session: &mut PresenceSession,
+    snapshot: &PresenceSnapshot,
+) -> Result<(), String> {
+    for attempt in 0..DISCORD_STARTUP_RETRY_ATTEMPTS {
+        match session.set_activity(snapshot) {
+            Ok(()) => return Ok(()),
+            Err(error) if error == DISCORD_STARTING_ERROR => {
+                if attempt + 1 < DISCORD_STARTUP_RETRY_ATTEMPTS {
+                    sleep(DISCORD_STARTUP_RETRY_DELAY).await;
+                    continue;
+                }
+                session.disconnect();
+                return Err(
+                    "Discord IPC 연결 준비 시간 초과 — Discord 실행 여부를 확인하세요".to_string(),
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    session.disconnect();
+    Err("Discord IPC 연결 준비 시간 초과".to_string())
 }
 
 pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>) {
@@ -210,7 +241,7 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
         if changed || should_retry {
             match snapshot.as_ref() {
                 Some(current) => {
-                    match session.set_activity(current) {
+                    match set_activity_with_startup_retry(&mut session, current).await {
                         Ok(()) => {
                             if last_presence_error.take().is_some() {
                                 state
@@ -268,11 +299,10 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
 }
 
 async fn handle_join_secret(state: &AppState, secret: &str) -> Result<(), String> {
-    let party_id = parse_join_secret(secret)
-        .ok_or_else(|| "Discord join secret 형식 오류".to_string())?;
+    let party_id =
+        parse_join_secret(secret).ok_or_else(|| "Discord join secret 형식 오류".to_string())?;
     let config = state.config.read().await.clone();
-    let path = lockfile_path(&config)
-        .ok_or_else(|| "LCU lockfile을 찾을 수 없음".to_string())?;
+    let path = lockfile_path(&config).ok_or_else(|| "LCU lockfile을 찾을 수 없음".to_string())?;
     let client = LcuClient::from_lockfile(&path)
         .or_else(|_| LcuClient::from_lockfile_legacy(&path))
         .map_err(|error| format!("LCU 연결 준비 실패: {error}"))?;
@@ -285,7 +315,9 @@ async fn handle_join_secret(state: &AppState, secret: &str) -> Result<(), String
 
 async fn detect_presence(config: &Config) -> Option<PresenceSnapshot> {
     if let Some(path) = lockfile_path(config) {
-        if let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) {
+        if let Ok(client) =
+            LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
+        {
             if let Ok(phase) = client.gameflow_phase().await {
                 if phase == "InProgress" {
                     if let Ok(live_game) = LcuClient::live_game_request(LIVE_GAME_ENDPOINT).await {
