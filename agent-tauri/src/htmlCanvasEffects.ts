@@ -474,7 +474,11 @@ void main() {
   float turn = smoothstep(0.02, 0.32, t);
   float closeBook = smoothstep(0.05, 0.35, t);
   float fall = smoothstep(0.00, 0.80, t);
-  float gravity = fall * fall;
+  // Preserve the gentle release/toss, then let gravity visibly take over near
+  // the end of the flight. Only the vertical drop uses this extra acceleration
+  // so tumble, perspective and scale keep their existing timing.
+  float lateGravity = smoothstep(0.56, 0.96, fall);
+  float gravity = fall * fall + 0.46 * lateGravity * lateGravity * lateGravity;
   float impact = smoothstep(0.71, 0.80, t);
   float rebound = sin(PI * impact) * 0.055;
   float impactCompression = sin(PI * impact);
