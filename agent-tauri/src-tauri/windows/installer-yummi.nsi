@@ -75,7 +75,6 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
-Var YummiLaunchAfterInstall
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -795,27 +794,14 @@ Section Install
 SectionEnd
 
 Function .onInstSuccess
-  ; Silent/passive installs preserve the explicit /R behaviour.
+  ; Silent/passive installs preserve the explicit /R behaviour. Interactive
+  ; installs are handled by NSIS_HOOK_POSTINSTALL with --post-install-launch.
   ${If} $PassiveMode = 1
   ${OrIf} ${Silent}
     ${GetOptions} $CMDLINE "/R" $R0
     ${IfNot} ${Errors}
       ${GetOptions} $CMDLINE "/ARGS" $R0
       nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
-    ${EndIf}
-  ${Else}
-    ; Interactive installs launch only after the installer UI has fully closed.
-    StrCpy $YummiLaunchAfterInstall 1
-  ${EndIf}
-FunctionEnd
-
-Function .onGUIEnd
-  ${If} $YummiLaunchAfterInstall = 1
-    ClearErrors
-    ExecShell "open" "$INSTDIR\${MAINBINARYNAME}.exe" "" SW_SHOWNORMAL
-    ${If} ${Errors}
-      ClearErrors
-      Exec '"$INSTDIR\${MAINBINARYNAME}.exe"'
     ${EndIf}
   ${EndIf}
 FunctionEnd

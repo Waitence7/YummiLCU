@@ -17,12 +17,21 @@ use crate::{
 
 const INSTALLER_SHUTDOWN_ARG: &str = "--shutdown-for-install";
 const BACKGROUND_START_ARG: &str = "--background";
+const POST_INSTALL_LAUNCH_PREFIX: &str = "--post-install-launch=";
+#[cfg(windows)]
+const POST_INSTALL_PARENT_WAIT_MS: u32 = 15_000;
 
 pub(crate) fn run() -> Result<(), tauri::Error> {
     let config = Config::load();
     let startup_sync_result = sync_windows_startup(config.run_at_windows_startup);
+    let update_policy = (
+        config.check_updates_on_startup,
+        config.auto_update_enabled,
+        config.update_channel.clone(),
+    );
     let args = std::env::args().collect::<Vec<_>>();
     let shutdown_on_start = installer_shutdown_requested(&args);
+    let post_install_parent_pid = post_install_parent_pid(&args);
     let start_hidden = background_start_requested(&args);
     let state = Arc::new(AppState::new(config));
     let update_state = state.clone();
@@ -75,12 +84,27 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 app.handle().exit(0);
                 return Ok(());
             }
-            let launch_mode = if start_hidden { "background" } else { "interactive" };
+            let launch_mode = if post_install_parent_pid.is_some() {
+                "post_install"
+            } else if start_hidden {
+                "background"
+            } else {
+                "interactive"
+            };
             let lifecycle_handle = app.handle().clone();
             let lifecycle_state = lifecycle_state.clone();
             tauri::async_runtime::spawn(async move {
                 lifecycle_state
                     .record_flight("app_lifecycle", format!("started mode={launch_mode}"))
+                    .await;
+                lifecycle_state
+                    .record_flight(
+                        "update_policy",
+                        format!(
+                            "check_on_startup={} auto_install={} channel={}",
+                            update_policy.0, update_policy.1, update_policy.2
+                        ),
+                    )
                     .await;
                 match startup_sync_result {
                     Ok(()) => {
@@ -121,7 +145,50 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             // our builder so beta/dev builds can opt into HTML-in-Canvas WebView2 flags,
             // and background startup does not keep an unused WebView alive.
             tray::destroy_main_window(app.handle());
-            if !start_hidden {
+            if let Some(parent_pid) = post_install_parent_pid {
+                let post_install_handle = app.handle().clone();
+                let post_install_state = update_state.clone();
+                spawn_monitored(
+                    post_install_state.clone(),
+                    "ui",
+                    "task_panicked",
+                    async move {
+                        post_install_state
+                            .record_flight(
+                                "post_install_launch",
+                                format!("waiting_for_installer pid={parent_pid}"),
+                            )
+                            .await;
+                        wait_for_installer_exit(parent_pid).await;
+                        // Give Explorer/WebView2 a short hand-off window after NSIS has
+                        // fully disappeared, then retry focus if window creation races.
+                        sleep(Duration::from_millis(140)).await;
+                        for attempt in 1..=3 {
+                            tray::request_main_window(&post_install_handle);
+                            sleep(Duration::from_millis(420)).await;
+                            if post_install_handle.get_webview_window("main").is_some() {
+                                post_install_state
+                                    .record_flight(
+                                        "post_install_launch",
+                                        format!("window_ready attempt={attempt}"),
+                                    )
+                                    .await;
+                                return;
+                            }
+                        }
+                        post_install_state
+                            .record_flight("post_install_launch", "window_not_ready_after_retries")
+                            .await;
+                        post_install_state
+                            .report_unexpected_error(
+                                "ui",
+                                "window_creation_failed",
+                                "post-install launch window was not ready after retries",
+                            )
+                            .await;
+                    },
+                );
+            } else if !start_hidden {
                 tray::request_main_window(app.handle());
             }
             let handle = app.handle().clone();
@@ -210,6 +277,41 @@ fn background_start_requested(args: &[String]) -> bool {
     args.iter().any(|argument| argument == BACKGROUND_START_ARG)
 }
 
+fn post_install_parent_pid(args: &[String]) -> Option<u32> {
+    args.iter().find_map(|argument| {
+        argument
+            .strip_prefix(POST_INSTALL_LAUNCH_PREFIX)
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|pid| *pid > 0)
+    })
+}
+
+async fn wait_for_installer_exit(process_id: u32) {
+    #[cfg(windows)]
+    {
+        let _ = tokio::task::spawn_blocking(move || {
+            use windows::Win32::{
+                Foundation::CloseHandle,
+                System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE},
+            };
+
+            let Ok(handle) = (unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, process_id) })
+            else {
+                // The installer already exited between RunAsUser and Agent startup.
+                return;
+            };
+            let _ = unsafe { WaitForSingleObject(handle, POST_INSTALL_PARENT_WAIT_MS) };
+            let _ = unsafe { CloseHandle(handle) };
+        })
+        .await;
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = process_id;
+    }
+}
+
 async fn watch_lcu(app: AppHandle, state: Arc<AppState>) {
     let mut shutdown = state.shutdown_receiver();
     loop {
@@ -231,7 +333,10 @@ async fn watch_lcu(app: AppHandle, state: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{background_start_requested, installer_shutdown_requested, should_keep_running};
+    use super::{
+        background_start_requested, installer_shutdown_requested, post_install_parent_pid,
+        should_keep_running,
+    };
 
     #[test]
     fn user_window_close_keeps_background_services_running() {
@@ -250,6 +355,31 @@ mod tests {
             "yummi-lcu-tauri.exe".into(),
             "--shutdown-for-installer".into(),
         ]));
+    }
+
+    #[test]
+    fn post_install_launch_parses_only_valid_parent_pid() {
+        assert_eq!(
+            post_install_parent_pid(&[
+                "yummi-lcu-tauri.exe".into(),
+                "--post-install-launch=12345".into(),
+            ]),
+            Some(12345)
+        );
+        assert_eq!(
+            post_install_parent_pid(&[
+                "yummi-lcu-tauri.exe".into(),
+                "--post-install-launch=0".into(),
+            ]),
+            None
+        );
+        assert_eq!(
+            post_install_parent_pid(&[
+                "yummi-lcu-tauri.exe".into(),
+                "--post-install-launch=abc".into(),
+            ]),
+            None
+        );
     }
 
     #[test]
@@ -299,7 +429,9 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
             .await;
     }
 
-    let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
+    let Ok(client) =
+        LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
+    else {
         return LcuConnectionState::Error;
     };
     if current != LcuConnectionState::LoggedIn {
