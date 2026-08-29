@@ -796,8 +796,17 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
 }
 
 async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, state: &AppState) {
-    let Ok(parsed) = Url::parse(url) else {
-        return;
+    let parsed = match Url::parse(url) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            let summary = format!("manifest URL parse failed: {error}");
+            state.record_flight("updater_error", &summary).await;
+            state.log(app, format!("자동 업데이트 설정 URL 오류: {error}")).await;
+            state
+                .report_unexpected_error("updater", "manifest_url_invalid", &summary)
+                .await;
+            return;
+        }
     };
     if parsed.scheme() != "https"
         || parsed.host().is_none()
@@ -805,18 +814,48 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
         || parsed.password().is_some()
         || parsed.fragment().is_some()
     {
+        state
+            .record_flight("updater_error", "manifest_url_rejected")
+            .await;
+        state.log(app, "자동 업데이트 manifest URL 보안 검증 실패").await;
+        state
+            .report_unexpected_error(
+                "updater",
+                "manifest_url_rejected",
+                "manifest URL failed security validation",
+            )
+            .await;
         return;
     }
-    let Ok(client) = Client::builder()
+    let client = match Client::builder()
         .https_only(true)
         .redirect(Policy::none())
         .timeout(Duration::from_secs(30))
         .build()
-    else {
-        return;
+    {
+        Ok(client) => client,
+        Err(error) => {
+            let summary = format!("HTTP client build failed: {error}");
+            state.record_flight("updater_error", &summary).await;
+            state.log(app, format!("자동 업데이트 HTTP 준비 실패: {error}")).await;
+            state
+                .report_unexpected_error("updater", "http_client_build_failed", &summary)
+                .await;
+            return;
+        }
     };
-    let Ok(bytes) = download_limited(&client, parsed, MAX_UPDATE_MANIFEST_BYTES).await else {
-        return;
+    let bytes = match download_limited(&client, parsed, MAX_UPDATE_MANIFEST_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            let summary = error.to_string();
+            state
+                .record_flight("updater_error", format!("manifest_download_failed: {summary}"))
+                .await;
+            state
+                .log(app, format!("자동 업데이트 확인 실패: {summary}"))
+                .await;
+            return;
+        }
     };
     let manifest = match parse_signed_manifest(&bytes) {
         Ok(manifest) => manifest,
@@ -846,7 +885,9 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
             crate::tray::remove(app);
             app.exit(0);
         }
-        Ok(false) => {}
+        Ok(false) => {
+            state.record_flight("updater", "no_applicable_update").await;
+        }
         Err(error) => {
             state.log(app, format!("자동 업데이트 실패: {error}")).await;
             state

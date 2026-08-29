@@ -21,6 +21,23 @@ static OPENING_MAIN_WINDOW: AtomicBool = AtomicBool::new(false);
 static EXITING: AtomicBool = AtomicBool::new(false);
 static HIDE_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
 
+fn report_ui_error(app: &AppHandle, code: &'static str, error: impl ToString) {
+    let summary = error.to_string();
+    let app = app.clone();
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        let state = state.inner().clone();
+        tauri::async_runtime::spawn(async move {
+            state
+                .record_flight("ui_error", format!("{code}: {summary}"))
+                .await;
+            state
+                .log(&app, format!("UI/트레이 오류 ({code}): {summary}"))
+                .await;
+            state.report_unexpected_error("ui", code, summary).await;
+        });
+    }
+}
+
 pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, OPEN_MENU_ID, "열기", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT_MENU_ID, "종료", true, None::<&str>)?;
@@ -55,10 +72,18 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
 pub(crate) fn request_main_window(app: &AppHandle) {
     cancel_pending_hide();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.unminimize();
-        let _ = window.set_skip_taskbar(false);
-        let _ = window.show();
-        let _ = window.set_focus();
+        if let Err(error) = window.unminimize() {
+            report_ui_error(app, "window_unminimize_failed", error);
+        }
+        if let Err(error) = window.set_skip_taskbar(false) {
+            report_ui_error(app, "window_taskbar_restore_failed", error);
+        }
+        if let Err(error) = window.show() {
+            report_ui_error(app, "window_show_failed", error);
+        }
+        if let Err(error) = window.set_focus() {
+            report_ui_error(app, "window_focus_failed", error);
+        }
         return;
     }
     if OPENING_MAIN_WINDOW.swap(true, Ordering::AcqRel) {
@@ -72,15 +97,7 @@ pub(crate) fn request_main_window(app: &AppHandle) {
         OPENING_MAIN_WINDOW.store(false, Ordering::Release);
         if let Err(error) = result {
             eprintln!("main window creation failed: {error}");
-            if let Some(state) = app.try_state::<Arc<AppState>>() {
-                let state = state.inner().clone();
-                let summary = error.to_string();
-                tauri::async_runtime::spawn(async move {
-                    state
-                        .report_unexpected_error("ui", "window_creation_failed", summary)
-                        .await;
-                });
-            }
+            report_ui_error(&app, "window_creation_failed", error);
         }
     });
 }
@@ -92,8 +109,12 @@ pub(crate) fn remove(app: &AppHandle) {
 pub(crate) fn hide_main_window(app: &AppHandle) {
     cancel_pending_hide();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.set_skip_taskbar(true);
-        let _ = window.hide();
+        if let Err(error) = window.set_skip_taskbar(true) {
+            report_ui_error(app, "window_taskbar_hide_failed", error);
+        }
+        if let Err(error) = window.hide() {
+            report_ui_error(app, "window_hide_failed", error);
+        }
     }
 }
 
@@ -110,9 +131,17 @@ pub(crate) fn request_animated_hide(app: &AppHandle) {
         })
         .unwrap_or(1.0);
     let watchdog_ms = tray_hide_watchdog_ms(playback_rate);
-    let emitted = app
-        .get_webview_window(MAIN_WINDOW_LABEL)
-        .is_some_and(|window| window.emit("yummi://tray-hide-requested", ()).is_ok());
+    let emitted = if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        match window.emit("yummi://tray-hide-requested", ()) {
+            Ok(()) => true,
+            Err(error) => {
+                report_ui_error(app, "tray_hide_event_emit_failed", error);
+                false
+            }
+        }
+    } else {
+        false
+    };
     if emitted {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -134,7 +163,9 @@ fn tray_hide_watchdog_ms(playback_rate: f64) -> u64 {
 pub(crate) fn destroy_main_window(app: &AppHandle) {
     cancel_pending_hide();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        let _ = window.destroy();
+        if let Err(error) = window.destroy() {
+            report_ui_error(app, "window_destroy_failed", error);
+        }
     }
 }
 

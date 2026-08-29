@@ -16,3 +16,7 @@ mod updater;
 pub fn run() -> Result<(), tauri::Error> {
     app::run()
 }
+
+pub fn write_bootstrap_error(summary: &str) {
+    diagnostics::write_bootstrap_error(summary);
+}

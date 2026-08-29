@@ -392,6 +392,16 @@ async fn run_supervisor(
 ) {
     let config = state.config.read().await.clone();
     let saved_session = session::load(&config);
+    state
+        .record_flight(
+            "session",
+            if saved_session.is_some() {
+                "saved_session_loaded"
+            } else {
+                "no_valid_saved_session"
+            },
+        )
+        .await;
     let mut needs_login = saved_session.is_none();
     let mut session = saved_session.unwrap_or_else(|| session::create(&config));
     let mut attempt = 0_u32;
@@ -430,6 +440,9 @@ async fn run_supervisor(
                 state
                     .relay
                     .set_connection_state(&app, &state, generation, RelayConnectionState::Failed)
+                    .await;
+                state
+                    .record_flight("relay_error", error.to_string())
                     .await;
                 state.log(&app, format!("Relay 오류: {error}")).await;
             }
@@ -542,7 +555,20 @@ async fn connect_once(
     }
     let auth_started = Instant::now();
     let mut login_opened = *needs_login;
-    let _ = session::save(session);
+    if let Err(error) = session::save(session) {
+        let summary = error.to_string();
+        state
+            .record_flight("session_error", format!("pre_auth_save_failed: {summary}"))
+            .await;
+        state
+            .log(app, format!("Relay 세션 저장 실패: {summary}"))
+            .await;
+        state
+            .report_unexpected_error("session", "save_failed", &summary)
+            .await;
+    } else {
+        state.record_flight("session", "saved_before_auth").await;
+    }
 
     let mut heartbeat = interval(HEARTBEAT_INTERVAL);
     heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
@@ -639,7 +665,14 @@ async fn connect_once(
                                     ));
                                 };
                                 if let Err(error) = session::pin_discord_id(session, discord_id) {
-                                    let _ = session::remove();
+                                    if let Err(remove_error) = session::remove() {
+                                        state
+                                            .record_flight(
+                                                "session_error",
+                                                format!("cleanup_after_pin_failure: {remove_error}"),
+                                            )
+                                            .await;
+                                    }
                                     *needs_login = true;
                                     state
                                         .set_oauth_pending(

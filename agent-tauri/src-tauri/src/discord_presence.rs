@@ -11,6 +11,7 @@ use discord_presence::{
     Client, Event,
 };
 use serde_json::Value;
+use tauri::AppHandle;
 use tokio::{sync::mpsc, time::sleep};
 
 use crate::{
@@ -172,12 +173,13 @@ impl Drop for PresenceSession {
     }
 }
 
-pub(crate) async fn watch_discord_presence(state: Arc<AppState>) {
+pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>) {
     let mut shutdown = state.shutdown_receiver();
     let (join_sender, mut join_receiver) = mpsc::unbounded_channel();
     let mut session = PresenceSession::new(join_sender);
     let mut last_snapshot: Option<PresenceSnapshot> = None;
     let mut retry_at = Instant::now();
+    let mut last_presence_error: Option<String> = None;
 
     loop {
         if *shutdown.borrow() {
@@ -185,7 +187,14 @@ pub(crate) async fn watch_discord_presence(state: Arc<AppState>) {
         }
 
         while let Ok(secret) = join_receiver.try_recv() {
-            handle_join_secret(&state, &secret).await;
+            if let Err(error) = handle_join_secret(&state, &secret).await {
+                state
+                    .record_flight("discord_presence_error", format!("join_failed: {error}"))
+                    .await;
+                state
+                    .log(&app, format!("Discord 파티 참가 처리 실패: {error}"))
+                    .await;
+            }
         }
 
         let config = state.config.read().await.clone();
@@ -201,11 +210,36 @@ pub(crate) async fn watch_discord_presence(state: Arc<AppState>) {
         if changed || should_retry {
             match snapshot.as_ref() {
                 Some(current) => {
-                    if session.set_activity(current).is_err() {
-                        retry_at = Instant::now() + DISCORD_RETRY_INTERVAL;
+                    match session.set_activity(current) {
+                        Ok(()) => {
+                            if last_presence_error.take().is_some() {
+                                state
+                                    .record_flight("discord_presence", "connection_recovered")
+                                    .await;
+                                state.log(&app, "Discord Rich Presence 연결 복구").await;
+                            }
+                        }
+                        Err(error) => {
+                            retry_at = Instant::now() + DISCORD_RETRY_INTERVAL;
+                            if last_presence_error.as_deref() != Some(error.as_str()) {
+                                state
+                                    .record_flight(
+                                        "discord_presence_error",
+                                        format!("set_activity_failed: {error}"),
+                                    )
+                                    .await;
+                                state
+                                    .log(&app, format!("Discord Rich Presence 오류: {error}"))
+                                    .await;
+                                last_presence_error = Some(error);
+                            }
+                        }
                     }
                 }
-                None => session.clear(),
+                None => {
+                    session.clear();
+                    last_presence_error = None;
+                }
             }
             last_snapshot = snapshot;
         }
@@ -213,7 +247,14 @@ pub(crate) async fn watch_discord_presence(state: Arc<AppState>) {
         tokio::select! {
             _ = sleep(PRESENCE_POLL_INTERVAL) => {}
             Some(secret) = join_receiver.recv() => {
-                handle_join_secret(&state, &secret).await;
+                if let Err(error) = handle_join_secret(&state, &secret).await {
+                    state
+                        .record_flight("discord_presence_error", format!("join_failed: {error}"))
+                        .await;
+                    state
+                        .log(&app, format!("Discord 파티 참가 처리 실패: {error}"))
+                        .await;
+                }
             }
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -226,18 +267,20 @@ pub(crate) async fn watch_discord_presence(state: Arc<AppState>) {
     session.clear();
 }
 
-async fn handle_join_secret(state: &AppState, secret: &str) {
-    let Some(party_id) = parse_join_secret(secret) else {
-        return;
-    };
+async fn handle_join_secret(state: &AppState, secret: &str) -> Result<(), String> {
+    let party_id = parse_join_secret(secret)
+        .ok_or_else(|| "Discord join secret 형식 오류".to_string())?;
     let config = state.config.read().await.clone();
-    let Some(path) = lockfile_path(&config) else {
-        return;
-    };
-    let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
-        return;
-    };
-    let _ = client.join_discord_party(party_id).await;
+    let path = lockfile_path(&config)
+        .ok_or_else(|| "LCU lockfile을 찾을 수 없음".to_string())?;
+    let client = LcuClient::from_lockfile(&path)
+        .or_else(|_| LcuClient::from_lockfile_legacy(&path))
+        .map_err(|error| format!("LCU 연결 준비 실패: {error}"))?;
+    client
+        .join_discord_party(party_id)
+        .await
+        .map_err(|error| format!("LCU 파티 참가 요청 실패: {error}"))?;
+    Ok(())
 }
 
 async fn detect_presence(config: &Config) -> Option<PresenceSnapshot> {

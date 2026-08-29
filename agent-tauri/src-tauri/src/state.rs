@@ -131,7 +131,9 @@ impl AppState {
             ui.push_log(message.into());
             ui.clone()
         };
-        let _ = app.emit("agent-state", snapshot);
+        if let Err(error) = app.emit("agent-state", snapshot) {
+            self.record_flight("ui_emit_error", error.to_string()).await;
+        }
     }
 
     pub(crate) async fn record_flight(&self, category: &'static str, detail: impl Into<String>) {
@@ -155,7 +157,9 @@ impl AppState {
 
     pub(crate) async fn emit(&self, app: &AppHandle) {
         let snapshot = self.snapshot().await;
-        let _ = app.emit("agent-state", snapshot);
+        if let Err(error) = app.emit("agent-state", snapshot) {
+            self.record_flight("ui_emit_error", error.to_string()).await;
+        }
     }
 
     pub(crate) async fn snapshot(&self) -> UiState {
@@ -269,9 +273,20 @@ impl AppState {
         }
         recent.insert(fingerprint, now);
         drop(recent);
-        let _ = self
+
+        self.record_flight(
+            "unexpected_error",
+            format!("{component}:{code}: {summary}"),
+        )
+        .await;
+        if self
             .unexpected_errors
-            .send(UnexpectedErrorReport::new(component, code, summary));
+            .send(UnexpectedErrorReport::new(component, code, summary))
+            .is_err()
+        {
+            self.record_flight("error_report", "no_active_relay_receiver")
+                .await;
+        }
     }
 
     pub(crate) async fn mark_stopped(&self, app: &AppHandle) {
@@ -317,6 +332,13 @@ fn build_diagnostic_bundle(ui: &UiState, flight: &[crate::diagnostics::FlightRec
     let _ = writeln!(out, "--- UI Logs ({} lines) ---", ui.logs.len());
     for line in &ui.logs {
         let _ = writeln!(out, "{}", sanitize_diagnostic_line(line));
+    }
+    if let Some(bootstrap) = crate::diagnostics::bootstrap_log_snapshot() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "--- Bootstrap Errors ---");
+        for line in bootstrap.lines() {
+            let _ = writeln!(out, "{}", sanitize_diagnostic_line(line));
+        }
     }
     out
 }

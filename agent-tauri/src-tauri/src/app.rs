@@ -20,7 +20,7 @@ const BACKGROUND_START_ARG: &str = "--background";
 
 pub(crate) fn run() -> Result<(), tauri::Error> {
     let config = Config::load();
-    let _ = sync_windows_startup(config.run_at_windows_startup);
+    let startup_sync_result = sync_windows_startup(config.run_at_windows_startup);
     let args = std::env::args().collect::<Vec<_>>();
     let shutdown_on_start = installer_shutdown_requested(&args);
     let start_hidden = background_start_requested(&args);
@@ -29,6 +29,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
     let connect_state = state.clone();
     let lcu_state = state.clone();
     let presence_state = state.clone();
+    let lifecycle_state = state.clone();
 
     let mut builder = tauri::Builder::default();
     #[cfg(desktop)]
@@ -74,6 +75,47 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 app.handle().exit(0);
                 return Ok(());
             }
+            let launch_mode = if start_hidden { "background" } else { "interactive" };
+            let lifecycle_handle = app.handle().clone();
+            let lifecycle_state = lifecycle_state.clone();
+            tauri::async_runtime::spawn(async move {
+                lifecycle_state
+                    .record_flight("app_lifecycle", format!("started mode={launch_mode}"))
+                    .await;
+                match startup_sync_result {
+                    Ok(()) => {
+                        lifecycle_state
+                            .record_flight("windows_startup", "registration_ok")
+                            .await;
+                        lifecycle_state
+                            .log(&lifecycle_handle, "Windows 로그인 자동 시작 등록 확인")
+                            .await;
+                    }
+                    Err(error) => {
+                        let summary = error.to_string();
+                        lifecycle_state
+                            .record_flight(
+                                "windows_startup",
+                                format!("registration_failed: {summary}"),
+                            )
+                            .await;
+                        lifecycle_state
+                            .log(
+                                &lifecycle_handle,
+                                format!("Windows 로그인 자동 시작 등록 실패: {summary}"),
+                            )
+                            .await;
+                        lifecycle_state
+                            .report_unexpected_error(
+                                "startup",
+                                "windows_startup_registration_failed",
+                                summary,
+                            )
+                            .await;
+                    }
+                }
+            });
+
             tray::setup(app)?;
             // Tauri creates the configured main window before setup. Recreate it through
             // our builder so beta/dev builds can opt into HTML-in-Canvas WebView2 flags,
@@ -99,7 +141,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 presence_state.clone(),
                 "discord_presence",
                 "task_panicked",
-                watch_discord_presence(presence_state),
+                watch_discord_presence(handle.clone(), presence_state),
             );
             let start_report_state = connect_state.clone();
             spawn_monitored(connect_state, "relay", "task_panicked", async move {
