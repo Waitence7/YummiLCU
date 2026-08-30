@@ -1030,6 +1030,7 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:
             conn.subscribe_gameflow(raw_id)
+            await conn.replay_gameflow_update(raw_id)
             await conn.sync_live_game_polling(raw_id)
         return
     if msg_type == "unsubscribe_gameflow":

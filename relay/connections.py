@@ -32,6 +32,7 @@ class ConnectionManager:
         self._bot_ws: WebSocket | None = None
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._gameflow_subscribers: set[int] = set()
+        self._gameflow: dict[int, dict[str, Any]] = {}
         self._live_game_subscribers: set[int] = set()
         self._live_game_recruitments: dict[int, str | None] = {}
         self._match_dm_subscribers: set[int] = set()
@@ -119,6 +120,7 @@ class ConnectionManager:
             if self._by_discord.get(did) is ws:
                 del self._by_discord[did]
             self._agent_info.pop(did, None)
+            self._gameflow.pop(did, None)
             self._live_game.pop(did, None)
             self._cancel_pending_for_discord_locked(did)
             logger.info("에이전트 해제: discord_id=%s", did)
@@ -446,9 +448,37 @@ class ConnectionManager:
             await self.unregister_bot_ws(ws)
             return False
 
-    async def forward_gameflow_update(self, discord_id: int, data: dict[str, Any]) -> bool:
+    async def replay_gameflow_update(self, discord_id: int) -> bool:
+        """늦은 Bot 구독에 마지막 gameflow 스냅샷을 즉시 재전송합니다."""
+        did = int(discord_id)
         async with self._lock:
-            if int(discord_id) not in self._gameflow_subscribers:
+            if did not in self._gameflow_subscribers:
+                return False
+            cached = self._gameflow.get(did)
+            ws = self._bot_ws
+        if cached is None or ws is None:
+            return False
+        try:
+            await ws.send_json(
+                {
+                    "type": "gameflow_update",
+                    "discord_id": did,
+                    "data": dict(cached),
+                }
+            )
+            logger.debug("봇 WS gameflow_update 캐시 재전송 discord_id=%s", did)
+            return True
+        except Exception:
+            logger.exception("봇 WS gameflow_update 캐시 재전송 실패 discord_id=%s", did)
+            await self.unregister_bot_ws(ws)
+            return False
+
+    async def forward_gameflow_update(self, discord_id: int, data: dict[str, Any]) -> bool:
+        did = int(discord_id)
+        async with self._lock:
+            # Bot 구독보다 Agent phase 전환이 먼저 도착할 수 있으므로 항상 캐시합니다.
+            self._gameflow[did] = dict(data)
+            if did not in self._gameflow_subscribers:
                 return False
             ws = self._bot_ws
         if ws is None:
@@ -457,13 +487,13 @@ class ConnectionManager:
             await ws.send_json(
                 {
                     "type": "gameflow_update",
-                    "discord_id": int(discord_id),
+                    "discord_id": did,
                     "data": data,
                 }
             )
             return True
         except Exception:
-            logger.exception("봇 WS gameflow_update 전달 실패 discord_id=%s", discord_id)
+            logger.exception("봇 WS gameflow_update 전달 실패 discord_id=%s", did)
             await self.unregister_bot_ws(ws)
             return False
 
