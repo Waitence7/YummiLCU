@@ -19,6 +19,7 @@ pub(crate) async fn start_agent(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    state.record_flight("command", "manual_start").await;
     start_agent_inner(app, state.inner().clone()).await
 }
 
@@ -32,12 +33,14 @@ pub(crate) async fn stop_agent(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
+    state.record_flight("command", "manual_stop").await;
     RelaySupervisor::stop(&app, state.inner()).await;
     Ok(())
 }
 
 #[tauri::command]
 pub(crate) async fn relogin(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state.record_flight("command", "discord_relogin").await;
     RelaySupervisor::stop(&app, state.inner()).await;
     session::remove().map_err(|error| error.to_string())?;
     RelaySupervisor::start(app, state.inner().clone())
