@@ -30,6 +30,7 @@ const LIVE_GAME_EVENTS: &str = "/liveclientdata/eventdata";
 const LCU_SOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(5);
 const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const GAMEFLOW_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(8);
 const LOCKFILE_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const LOCKFILE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const LIVE_GAME_PARTICIPANT_COUNT: usize = 10;
@@ -38,6 +39,7 @@ const MAX_LCU_EVENT_MESSAGE_BYTES: usize = 1024 * 1024;
 #[derive(Default)]
 pub(crate) struct LcuEventPoller {
     gameflow: Option<String>,
+    last_gameflow_emit: Option<Instant>,
     ready_check: Option<String>,
     champ_select: Option<String>,
     party: Option<String>,
@@ -64,6 +66,7 @@ pub(crate) struct LcuEventPoller {
 impl LcuEventPoller {
     fn reset_lcu_snapshot(&mut self) {
         self.gameflow = None;
+        self.last_gameflow_emit = None;
         self.ready_check = None;
         self.champ_select = None;
         self.party = None;
@@ -407,10 +410,10 @@ impl LcuEventPoller {
                 previous_phase.as_deref().unwrap_or("초기")
             ));
         }
-        push_changed(
+        push_gameflow_snapshot(
             &mut self.gameflow,
+            &mut self.last_gameflow_emit,
             phase.clone(),
-            "gameflow_update",
             json!({"phase": phase, "lcu_ready": true}),
             &mut events,
         );
@@ -758,6 +761,25 @@ fn is_lcu_event(text: &str) -> bool {
             .and_then(Value::as_str)
             .is_some_and(|uri| matches!(uri, GAMEFLOW_PHASE | READY_CHECK | CHAMP_SELECT | LOBBY))
 }
+
+fn push_gameflow_snapshot(
+    previous: &mut Option<String>,
+    last_emit: &mut Option<Instant>,
+    next: String,
+    payload: Value,
+    events: &mut Vec<(&'static str, Value)>,
+) {
+    let now = Instant::now();
+    let changed = previous.as_deref() != Some(next.as_str());
+    let snapshot_due = last_emit
+        .is_none_or(|last| now.duration_since(last) >= GAMEFLOW_SNAPSHOT_INTERVAL);
+    *previous = Some(next);
+    if changed || snapshot_due {
+        *last_emit = Some(now);
+        events.push(("gameflow_update", payload));
+    }
+}
+
 
 fn push_changed(
     previous: &mut Option<String>,
@@ -1326,6 +1348,45 @@ fn active_player_payload(value: Option<&Value>) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gameflow_snapshot_reemits_unchanged_phase_after_interval() {
+        let mut previous = Some("ChampSelect".to_string());
+        let mut last_emit = Some(Instant::now() - GAMEFLOW_SNAPSHOT_INTERVAL);
+        let mut events = Vec::new();
+
+        push_gameflow_snapshot(
+            &mut previous,
+            &mut last_emit,
+            "ChampSelect".to_string(),
+            json!({"phase": "ChampSelect", "lcu_ready": true}),
+            &mut events,
+        );
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "gameflow_update");
+        assert_eq!(events[0].1["phase"], "ChampSelect");
+
+        events.clear();
+        push_gameflow_snapshot(
+            &mut previous,
+            &mut last_emit,
+            "ChampSelect".to_string(),
+            json!({"phase": "ChampSelect", "lcu_ready": true}),
+            &mut events,
+        );
+        assert!(events.is_empty());
+
+        push_gameflow_snapshot(
+            &mut previous,
+            &mut last_emit,
+            "InProgress".to_string(),
+            json!({"phase": "InProgress", "lcu_ready": true}),
+            &mut events,
+        );
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1["phase"], "InProgress");
+    }
 
     #[test]
     fn connection_generation_resets_lcu_snapshots_on_identity_change() {
