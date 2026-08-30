@@ -196,13 +196,14 @@ impl AppState {
         discord_name: Option<String>,
         discord_avatar: Option<String>,
     ) {
+        let lcu_state = *self.lcu_state.read().await;
         {
             let mut ui = self.ui.lock().await;
             ui.oauth_pending = false;
             ui.discord_id = discord_id;
             ui.discord_name = discord_name;
             ui.discord_avatar = discord_avatar;
-            ui.status = "Discord 연결 완료 — LCU 확인 중…".into();
+            ui.status = connected_status_for_lcu(lcu_state).into();
         }
         self.emit(app).await;
         self.log(app, "Discord 연결 완료").await;
@@ -223,7 +224,13 @@ impl AppState {
                 if changed {
                     let label = lcu_state_label(next);
                     self.record_flight("lcu_state", label).await;
-                    self.ui.lock().await.lcu = next.is_ready();
+                    {
+                        let mut ui = self.ui.lock().await;
+                        ui.lcu = next.is_ready();
+                        if ui.discord_id.is_some() && !ui.oauth_pending {
+                            ui.status = connected_status_for_lcu(next).into();
+                        }
+                    }
                     self.emit(app).await;
                     self.log(app, format!("LCU 상태 변경: {label}")).await;
                 }
@@ -274,11 +281,8 @@ impl AppState {
         recent.insert(fingerprint, now);
         drop(recent);
 
-        self.record_flight(
-            "unexpected_error",
-            format!("{component}:{code}: {summary}"),
-        )
-        .await;
+        self.record_flight("unexpected_error", format!("{component}:{code}: {summary}"))
+            .await;
         if self
             .unexpected_errors
             .send(UnexpectedErrorReport::new(component, code, summary))
@@ -454,6 +458,18 @@ fn relay_state_flight_label(state: RelayConnectionState) -> &'static str {
         RelayConnectionState::Connected => "connected",
         RelayConnectionState::Reconnecting => "reconnecting",
         RelayConnectionState::Failed => "failed",
+    }
+}
+
+fn connected_status_for_lcu(state: LcuConnectionState) -> &'static str {
+    match state {
+        LcuConnectionState::LoggedIn => "연결됨 — 내전 결과 자동 보고 활성",
+        LcuConnectionState::Connected => "Discord 연결 완료 — LCU 로그인 확인 중…",
+        LcuConnectionState::LockfileFound | LcuConnectionState::Connecting => {
+            "Discord 연결 완료 — LCU 연결 중…"
+        }
+        LcuConnectionState::Error => "Discord 연결 완료 — LCU 재연결 중…",
+        LcuConnectionState::ClientStopped => "Discord 연결 완료 — League Client 대기 중…",
     }
 }
 
