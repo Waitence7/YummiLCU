@@ -524,6 +524,19 @@ async def _forward_guild_match_eog(
                     res.status,
                 )
                 return False
+            try:
+                outcome = await res.json(content_type=None)
+            except Exception:
+                outcome = None
+            matched = isinstance(outcome, dict) and outcome.get("matched") is True
+            if not matched:
+                reason = outcome.get("reason") if isinstance(outcome, dict) else "invalid_response"
+                logger.warning(
+                    "내전 LCU ingest 미매칭 — ACK 보류 discord_id=%s reason=%s",
+                    discord_id,
+                    reason,
+                )
+                return False
             logger.info("내전 LCU ingest OK discord_id=%s", discord_id)
             return True
     except Exception:
@@ -823,9 +836,12 @@ async def _handle_agent_message(
             return
         event_id = _relay_event_id(data)
         http: aiohttp.ClientSession = websocket.app.state.http
-        await conn.forward_guild_match_eog(discord_id, payload)
-        forwarded = await _forward_guild_match_eog(http, discord_id, payload, event_id)
-        if forwarded:
+        bot_forwarded = await conn.forward_guild_match_eog(discord_id, payload)
+        web_persisted = await _forward_guild_match_eog(http, discord_id, payload, event_id)
+        # Web 자동 매칭이 실패해도 Bot이 정확한 match view로 이벤트를 받으면
+        # Bot의 match-specific lcu-eog endpoint 저장 경로가 이어집니다. 둘 다
+        # 실패한 경우에만 ACK를 보류해 Agent durable replay가 계속되게 합니다.
+        if bot_forwarded or web_persisted:
             await _ack_agent_event(websocket, event_id)
         return
 

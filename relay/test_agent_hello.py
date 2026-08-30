@@ -225,6 +225,45 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(websocket.payloads), before)
 
+    async def test_guild_eog_ack_requires_bot_delivery_or_web_persist(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        event_id = "123e4567-e89b-42d3-a456-426614174010"
+
+        before = len(websocket.payloads)
+        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)):
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "guild_match_eog",
+                    "event_id": event_id,
+                    "data": {"participants": []},
+                }),
+            )
+        self.assertEqual(len(websocket.payloads), before)
+
+        bot_ws = _WebSocketStub()
+        await manager.register_bot_ws(bot_ws)
+        manager.subscribe_gameflow(42)
+        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)):
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "guild_match_eog",
+                    "event_id": event_id,
+                    "data": {"participants": []},
+                }),
+            )
+        self.assertEqual(
+            websocket.payloads[-1],
+            {"type": "event_ack", "event_id": event_id},
+        )
+        self.assertEqual(bot_ws.payloads[-1]["type"], "guild_match_eog")
+
     async def test_hello_before_oauth_binding_is_preserved(self) -> None:
         manager = ConnectionManager()
         websocket = _WebSocketStub()
