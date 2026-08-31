@@ -9,6 +9,8 @@ use crate::error::{AgentError, AgentResult};
 
 const CURRENT_SUMMONER_ENDPOINT: &str = "/lol-summoner/v1/current-summoner";
 const GAMEFLOW_PHASE_ENDPOINT: &str = "/lol-gameflow/v1/gameflow-phase";
+const GAMEFLOW_SESSION_ENDPOINT: &str = "/lol-gameflow/v1/session";
+const CHAMPION_SUMMARY_ENDPOINT: &str = "/lol-game-data/assets/v1/champion-summary.json";
 const MATCH_HISTORY_ENDPOINT_PREFIX: &str = "/lol-match-history/v1/products/lol";
 const OWNED_CHAMPIONS_ENDPOINT: &str = "/lol-champions/v1/owned-champions-minimal";
 const MAX_LOCKFILE_BYTES: u64 = 4 * 1024;
@@ -193,6 +195,18 @@ impl LcuClient {
             .as_str()
             .map(str::to_owned)
             .ok_or_else(|| AgentError::Lcu("게임 진행 상태 응답이 올바르지 않습니다.".into()))
+    }
+
+    pub(crate) async fn current_summoner(&self) -> AgentResult<Value> {
+        self.request(Method::GET, CURRENT_SUMMONER_ENDPOINT, None).await
+    }
+
+    pub(crate) async fn gameflow_session(&self) -> AgentResult<Value> {
+        self.request(Method::GET, GAMEFLOW_SESSION_ENDPOINT, None).await
+    }
+
+    pub(crate) async fn champion_summary(&self) -> AgentResult<Value> {
+        self.request(Method::GET, CHAMPION_SUMMARY_ENDPOINT, None).await
     }
 
     pub(crate) async fn recent_match(&self) -> AgentResult<Value> {

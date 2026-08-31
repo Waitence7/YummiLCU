@@ -120,6 +120,13 @@ impl LcuClient {
         .map(|_| ())
     }
 
+    pub(crate) async fn invite_discord_requester(
+        &self,
+        riot_id: &str,
+    ) -> AgentResult<ActionOutcome> {
+        self.invite_party_members(&json!({"riot_ids": [riot_id]})).await
+    }
+
     pub(super) async fn invite_party_members(&self, payload: &Value) -> AgentResult<ActionOutcome> {
         let lobby = self.request(Method::GET, LOBBY_ENDPOINT, None).await;
         if !lobby.as_ref().is_ok_and(lobby_is_open) {

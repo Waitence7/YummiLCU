@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 const MAX_UI_LOGS: usize = 2_000;
 const ERROR_REPORT_QUEUE_CAPACITY: usize = 32;
+const DISCORD_JOIN_REQUEST_QUEUE_CAPACITY: usize = 64;
 const ERROR_REPORT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const MAX_ERROR_SUMMARY_CHARS: usize = 512;
 
@@ -96,6 +97,20 @@ pub(crate) enum AgentEvent {
     RelayStateChanged(RelayConnectionState),
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct DiscordJoinResolution {
+    pub(crate) requester_discord_id: u64,
+    pub(crate) riot_id: Option<String>,
+    pub(crate) status: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DiscordPresenceMatchContext {
+    pub(crate) discord_guild_id: String,
+    pub(crate) invite_code: String,
+    pub(crate) status: String,
+}
+
 pub(crate) struct AppState {
     pub(crate) config: RwLock<Config>,
     pub(crate) ui: Mutex<UiState>,
@@ -105,6 +120,10 @@ pub(crate) struct AppState {
     lcu_state: RwLock<LcuConnectionState>,
     shutdown: watch::Sender<bool>,
     unexpected_errors: broadcast::Sender<UnexpectedErrorReport>,
+    discord_join_requests: broadcast::Sender<u64>,
+    discord_join_resolutions: broadcast::Sender<DiscordJoinResolution>,
+    discord_presence_context_requests: broadcast::Sender<()>,
+    discord_presence_match: RwLock<Option<DiscordPresenceMatchContext>>,
     recent_unexpected_errors: Mutex<HashMap<String, Instant>>,
 }
 
@@ -112,6 +131,12 @@ impl AppState {
     pub(crate) fn new(config: Config) -> Self {
         let (shutdown, _) = watch::channel(false);
         let (unexpected_errors, _) = broadcast::channel(ERROR_REPORT_QUEUE_CAPACITY);
+        let (discord_join_requests, _) =
+            broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
+        let (discord_join_resolutions, _) =
+            broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
+        let (discord_presence_context_requests, _) =
+            broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
         Self {
             config: RwLock::new(config.clone()),
             ui: Mutex::new(UiState::new(config)),
@@ -121,6 +146,10 @@ impl AppState {
             lcu_state: RwLock::new(LcuConnectionState::ClientStopped),
             shutdown,
             unexpected_errors,
+            discord_join_requests,
+            discord_join_resolutions,
+            discord_presence_context_requests,
+            discord_presence_match: RwLock::new(None),
             recent_unexpected_errors: Mutex::new(HashMap::new()),
         }
     }
@@ -243,6 +272,9 @@ impl AppState {
                 self.record_flight("relay_state", relay_state_flight_label(next))
                     .await;
                 self.ui.lock().await.relay = relay_ready;
+                if !relay_ready {
+                    *self.discord_presence_match.write().await = None;
+                }
                 self.emit(app).await;
             }
         }
@@ -262,6 +294,48 @@ impl AppState {
 
     pub(crate) fn unexpected_error_receiver(&self) -> broadcast::Receiver<UnexpectedErrorReport> {
         self.unexpected_errors.subscribe()
+    }
+
+    pub(crate) fn discord_join_request_receiver(&self) -> broadcast::Receiver<u64> {
+        self.discord_join_requests.subscribe()
+    }
+
+    pub(crate) fn discord_join_resolution_receiver(
+        &self,
+    ) -> broadcast::Receiver<DiscordJoinResolution> {
+        self.discord_join_resolutions.subscribe()
+    }
+
+    pub(crate) fn request_discord_join_resolution(&self, requester_discord_id: u64) -> bool {
+        self.discord_join_requests
+            .send(requester_discord_id)
+            .is_ok()
+    }
+
+    pub(crate) fn publish_discord_join_resolution(
+        &self,
+        resolution: DiscordJoinResolution,
+    ) -> bool {
+        self.discord_join_resolutions.send(resolution).is_ok()
+    }
+
+    pub(crate) fn discord_presence_context_request_receiver(&self) -> broadcast::Receiver<()> {
+        self.discord_presence_context_requests.subscribe()
+    }
+
+    pub(crate) fn request_discord_presence_context(&self) -> bool {
+        self.discord_presence_context_requests.send(()).is_ok()
+    }
+
+    pub(crate) async fn set_discord_presence_match(
+        &self,
+        context: Option<DiscordPresenceMatchContext>,
+    ) {
+        *self.discord_presence_match.write().await = context;
+    }
+
+    pub(crate) async fn discord_presence_match(&self) -> Option<DiscordPresenceMatchContext> {
+        self.discord_presence_match.read().await.clone()
     }
 
     pub(crate) async fn report_unexpected_error(

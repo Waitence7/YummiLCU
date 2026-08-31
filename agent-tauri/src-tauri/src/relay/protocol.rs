@@ -40,6 +40,19 @@ pub(crate) enum IncomingMessage {
     },
     #[serde(rename = "event_ack")]
     EventAck { event_id: String },
+    #[serde(rename = "discord_join_request_resolved")]
+    DiscordJoinRequestResolved {
+        requester_discord_id: u64,
+        riot_id: Option<String>,
+        status: String,
+    },
+    #[serde(rename = "discord_presence_context")]
+    DiscordPresenceContext {
+        active: bool,
+        status: String,
+        invite_code: Option<String>,
+        discord_guild_id: Option<String>,
+    },
     #[serde(other)]
     Unknown,
 }
@@ -65,6 +78,38 @@ impl IncomingMessage {
             }
             Self::EventAck { event_id } if Uuid::parse_str(event_id).is_err() => {
                 Err("invalid Relay event ack")
+            }
+            Self::DiscordJoinRequestResolved {
+                requester_discord_id,
+                riot_id,
+                status,
+            } if *requester_discord_id == 0
+                || status.is_empty()
+                || status.len() > 64
+                || riot_id
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.len() > 128) =>
+            {
+                Err("invalid Discord join resolution")
+            }
+            Self::DiscordPresenceContext {
+                active,
+                status,
+                invite_code,
+                discord_guild_id,
+            } if status.is_empty()
+                || status.len() > 64
+                || invite_code
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.len() > 64)
+                || discord_guild_id.as_ref().is_some_and(|value| {
+                    value.is_empty()
+                        || value.len() > 32
+                        || !value.chars().all(|character| character.is_ascii_digit())
+                })
+                || (*active && (invite_code.is_none() || discord_guild_id.is_none())) =>
+            {
+                Err("invalid Discord presence context")
             }
             Self::ServerHello { capabilities, .. }
                 if capabilities.len() > 64
@@ -454,6 +499,45 @@ mod tests {
         .is_err());
         assert!(IncomingMessage::parse(
             r#"{"type":"command","action":"ping","request_id":"id","payload":[]}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn discord_join_resolution_deserializes() {
+        assert_eq!(
+            IncomingMessage::parse(
+                r#"{"type":"discord_join_request_resolved","requester_discord_id":42,"riot_id":"Player#KR1","status":"resolved"}"#
+            )
+            .unwrap(),
+            IncomingMessage::DiscordJoinRequestResolved {
+                requester_discord_id: 42,
+                riot_id: Some("Player#KR1".into()),
+                status: "resolved".into(),
+            }
+        );
+        assert!(IncomingMessage::parse(
+            r#"{"type":"discord_join_request_resolved","requester_discord_id":0,"riot_id":null,"status":"nickname_missing"}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn discord_presence_context_deserializes() {
+        assert_eq!(
+            IncomingMessage::parse(
+                r#"{"type":"discord_presence_context","active":true,"status":"IN_GAME","invite_code":"ABCDE","discord_guild_id":"123456789"}"#
+            )
+            .unwrap(),
+            IncomingMessage::DiscordPresenceContext {
+                active: true,
+                status: "IN_GAME".into(),
+                invite_code: Some("ABCDE".into()),
+                discord_guild_id: Some("123456789".into()),
+            }
+        );
+        assert!(IncomingMessage::parse(
+            r#"{"type":"discord_presence_context","active":true,"status":"IN_GAME","invite_code":null,"discord_guild_id":null}"#
         )
         .is_err());
     }

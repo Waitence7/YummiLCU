@@ -496,6 +496,109 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
 # * ========================================================
 
 
+async def _resolve_discord_presence_match_context(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+) -> dict[str, Any]:
+    """Resolve whether the Presence owner is in an active guild match from team selection onward."""
+    api_base = config.tournament_api_base_url()
+    token = config.tournament_bot_internal_token()
+    if not token:
+        return {"active": False, "status": "lookup_unavailable"}
+
+    url = f"{api_base}/api/bot/guild-match/active-presence/{discord_id}"
+    headers = {"x-internal-bot-token": token}
+    try:
+        async with http.get(url, headers=headers) as res:
+            if res.status >= 400:
+                logger.warning(
+                    "Discord Presence 내전 조회 실패 discord_id=%s status=%s",
+                    discord_id,
+                    res.status,
+                )
+                return {"active": False, "status": "lookup_failed"}
+            try:
+                body = await res.json(content_type=None)
+            except Exception:
+                return {"active": False, "status": "lookup_failed"}
+    except Exception:
+        logger.exception("Discord Presence 내전 조회 예외 discord_id=%s", discord_id)
+        return {"active": False, "status": "lookup_failed"}
+
+    if not isinstance(body, dict) or body.get("active") is not True:
+        return {"active": False, "status": "inactive"}
+
+    invite_code = body.get("inviteCode")
+    guild_id = body.get("discordGuildId")
+    match_status = body.get("status")
+    if (
+        not isinstance(invite_code, str)
+        or not invite_code.strip()
+        or len(invite_code.strip()) > 64
+        or not isinstance(guild_id, str)
+        or not guild_id.isdigit()
+        or len(guild_id) > 32
+        or not isinstance(match_status, str)
+        or len(match_status) > 64
+    ):
+        return {"active": False, "status": "invalid_response"}
+
+    return {
+        "active": True,
+        "status": match_status,
+        "invite_code": invite_code.strip().upper(),
+        "discord_guild_id": guild_id,
+    }
+
+
+async def _resolve_discord_join_riot_id(
+    http: aiohttp.ClientSession,
+    requester_discord_id: int,
+) -> tuple[str, str | None]:
+    """Resolve a Discord user to the Riot ID stored in Yummi without exposing it publicly."""
+    api_base = config.tournament_api_base_url()
+    token = config.tournament_bot_internal_token()
+    if not token:
+        logger.warning("YUMMI_BOT_INTERNAL_TOKEN 미설정 — Discord 참가 요청 닉네임 조회 불가")
+        return "lookup_unavailable", None
+
+    url = f"{api_base}/api/bot/nicknames/{requester_discord_id}"
+    headers = {
+        "x-internal-bot-token": token,
+    }
+    try:
+        async with http.get(url, headers=headers) as res:
+            if res.status == 404:
+                return "nickname_missing", None
+            if res.status >= 400:
+                logger.warning(
+                    "Discord 참가 요청 닉네임 조회 실패 requester_discord_id=%s status=%s",
+                    requester_discord_id,
+                    res.status,
+                )
+                return "lookup_failed", None
+            try:
+                body = await res.json(content_type=None)
+            except Exception:
+                return "lookup_failed", None
+    except Exception:
+        logger.exception(
+            "Discord 참가 요청 닉네임 조회 예외 requester_discord_id=%s",
+            requester_discord_id,
+        )
+        return "lookup_failed", None
+
+    riot_id = body.get("riotId") if isinstance(body, dict) else None
+    if (
+        not isinstance(riot_id, str)
+        or not riot_id.strip()
+        or len(riot_id.strip()) > 128
+        or "#" not in riot_id
+    ):
+        return "nickname_missing", None
+    return "resolved", riot_id.strip()
+
+
 async def _forward_guild_match_eog(
     http: aiohttp.ClientSession,
     discord_id: int,
@@ -856,6 +959,58 @@ async def _handle_agent_message(
         forwarded = await _forward_match_eog(http, discord_id, payload, event_id)
         if forwarded:
             await _ack_agent_event(websocket, event_id)
+        return
+
+    if msg_type == "discord_presence_context_request":
+        host_discord_id = conn.discord_id_for_ws(websocket)
+        if host_discord_id is None:
+            return
+        context = await _resolve_discord_presence_match_context(
+            websocket.app.state.http,
+            host_discord_id,
+        )
+        await websocket.send_json(
+            {
+                "type": "discord_presence_context",
+                **context,
+            }
+        )
+        return
+
+    if msg_type == "discord_join_request":
+        host_discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("data")
+        requester_discord_id = (
+            payload.get("requester_discord_id")
+            if isinstance(payload, dict)
+            else None
+        )
+        if (
+            host_discord_id is None
+            or not isinstance(requester_discord_id, int)
+            or isinstance(requester_discord_id, bool)
+            or requester_discord_id <= 0
+        ):
+            return
+
+        status, riot_id = await _resolve_discord_join_riot_id(
+            websocket.app.state.http,
+            requester_discord_id,
+        )
+        await websocket.send_json(
+            {
+                "type": "discord_join_request_resolved",
+                "requester_discord_id": requester_discord_id,
+                "riot_id": riot_id,
+                "status": status,
+            }
+        )
+        logger.info(
+            "Discord 참가 요청 조회 host_discord_id=%s requester_discord_id=%s status=%s",
+            host_discord_id,
+            requester_discord_id,
+            status,
+        )
         return
 
     if msg_type == "agent_hello":

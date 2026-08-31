@@ -22,7 +22,7 @@ use crate::{
     lcu::{lockfile_path, LcuClient, LcuEventPoller},
     platform::{launch_league_client, open_login_url},
     session,
-    state::{AgentEvent, AppState},
+    state::{AgentEvent, AppState, DiscordJoinResolution, DiscordPresenceMatchContext},
 };
 
 use super::{
@@ -260,6 +260,9 @@ impl RelaySupervisor {
         let task_state = state.clone();
         let task_app = app.clone();
         let error_reports = state.unexpected_error_receiver();
+        let discord_join_requests = state.discord_join_request_receiver();
+        let discord_presence_context_requests =
+            state.discord_presence_context_request_receiver();
         let task = tokio::spawn(async move {
             run_supervisor(
                 task_app.clone(),
@@ -267,6 +270,8 @@ impl RelaySupervisor {
                 generation,
                 stop_rx,
                 error_reports,
+                discord_join_requests,
+                discord_presence_context_requests,
             )
             .await;
             task_state
@@ -393,6 +398,8 @@ async fn run_supervisor(
     generation: u64,
     mut stop_rx: watch::Receiver<bool>,
     mut error_reports: broadcast::Receiver<UnexpectedErrorReport>,
+    mut discord_join_requests: broadcast::Receiver<u64>,
+    mut discord_presence_context_requests: broadcast::Receiver<()>,
 ) {
     let config = state.config.read().await.clone();
     let saved_session = session::load(&config);
@@ -430,6 +437,8 @@ async fn run_supervisor(
             &mut needs_login,
             &mut durable_replay,
             &mut error_reports,
+            &mut discord_join_requests,
+            &mut discord_presence_context_requests,
         )
         .await
         {
@@ -481,6 +490,8 @@ async fn connect_once(
     needs_login: &mut bool,
     durable_replay: &mut DurableReplayBuffer,
     error_reports: &mut broadcast::Receiver<UnexpectedErrorReport>,
+    discord_join_requests: &mut broadcast::Receiver<u64>,
+    discord_presence_context_requests: &mut broadcast::Receiver<()>,
 ) -> AgentResult<ConnectionEnd> {
     let url = config.ws_url(&session.session_id)?;
     let connection = tokio::select! {
@@ -784,6 +795,72 @@ async fn connect_once(
                     }
                 }
             }
+            request = discord_join_requests.recv(), if session_bound => {
+                match request {
+                    Ok(requester_discord_id) => {
+                        let Some(event) = serialize_agent_event(
+                            "discord_join_request",
+                            json!({"requester_discord_id": requester_discord_id}),
+                        )? else {
+                            state
+                                .record_flight(
+                                    "discord_presence_join_request",
+                                    "relay_payload_too_large",
+                                )
+                                .await;
+                            continue;
+                        };
+                        websocket
+                            .send(Message::Text(event.text.into()))
+                            .await
+                            .map_err(|_| AgentError::Relay("Discord 참가 요청 Relay 전송 실패".into()))?;
+                        state
+                            .record_flight(
+                                "discord_presence_join_request",
+                                format!("lookup_sent requester_discord_id={requester_discord_id}"),
+                            )
+                            .await;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        state
+                            .record_flight(
+                                "discord_presence_join_request",
+                                format!("lookup_queue_lagged skipped={skipped}"),
+                            )
+                            .await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(AgentError::Relay("Discord 참가 요청 큐가 종료되었습니다.".into()));
+                    }
+                }
+            }
+            request = discord_presence_context_requests.recv(), if session_bound => {
+                match request {
+                    Ok(()) => {
+                        let Some(event) = serialize_agent_event(
+                            "discord_presence_context_request",
+                            json!({}),
+                        )? else {
+                            continue;
+                        };
+                        websocket
+                            .send(Message::Text(event.text.into()))
+                            .await
+                            .map_err(|_| AgentError::Relay("Discord Presence 내전 조회 요청 전송 실패".into()))?;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        state
+                            .record_flight(
+                                "discord_presence_context",
+                                format!("request_queue_lagged skipped={skipped}"),
+                            )
+                            .await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(AgentError::Relay("Discord Presence 조회 큐가 종료되었습니다.".into()));
+                    }
+                }
+            }
             _ = heartbeat.tick() => {
                 if awaiting_pong.is_none() {
                     websocket.send(Message::Text("ping".into())).await
@@ -956,6 +1033,57 @@ where
                     safe_avatar_url(discord_avatar.or(avatar_url)),
                 )
                 .await;
+        }
+        IncomingMessage::DiscordJoinRequestResolved {
+            requester_discord_id,
+            riot_id,
+            status,
+        } => {
+            if session_bound {
+                let published = state.publish_discord_join_resolution(DiscordJoinResolution {
+                    requester_discord_id,
+                    riot_id,
+                    status: status.clone(),
+                });
+                state
+                    .record_flight(
+                        "discord_presence_join_request",
+                        format!(
+                            "lookup_result requester_discord_id={requester_discord_id} status={status} published={published}"
+                        ),
+                    )
+                    .await;
+            }
+        }
+        IncomingMessage::DiscordPresenceContext {
+            active,
+            status,
+            invite_code,
+            discord_guild_id,
+        } => {
+            if session_bound {
+                let context = if active {
+                    match (discord_guild_id, invite_code) {
+                        (Some(discord_guild_id), Some(invite_code)) => {
+                            Some(DiscordPresenceMatchContext {
+                                discord_guild_id,
+                                invite_code,
+                                status: status.clone(),
+                            })
+                        }
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                state.set_discord_presence_match(context).await;
+                state
+                    .record_flight(
+                        "discord_presence_context",
+                        format!("active={active} status={status}"),
+                    )
+                    .await;
+            }
         }
         IncomingMessage::LiveGamePolling { enabled } => {
             if session_bound {
