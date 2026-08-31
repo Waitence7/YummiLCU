@@ -218,8 +218,12 @@ impl PresenceSession {
         client
             .on_activity_join_request(move |context| {
                 if let EventData::ActivityJoinRequest(data) = context.event {
-                    if let Ok(user_id) = data.user.id.parse::<u64>() {
-                        let _ = request_sender.send(user_id);
+                    if let Some(user) = data.user {
+                        if let Some(id) = user.id {
+                            if let Ok(user_id) = id.parse::<u64>() {
+                                let _ = request_sender.send(user_id);
+                            }
+                        }
                     }
                 }
             })
