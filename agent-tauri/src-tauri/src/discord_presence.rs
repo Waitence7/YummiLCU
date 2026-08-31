@@ -38,6 +38,7 @@ const JOIN_REQUEST_MAX_DELAY: Duration = Duration::from_secs(90 * 60);
 const JOIN_REQUEST_LOOKUP_RETRY: Duration = Duration::from_secs(30);
 const JOIN_INVITE_RETRY: Duration = Duration::from_secs(15);
 const MATCH_CONTEXT_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
+const PHASE_REPUBLISH_DELAY: Duration = Duration::from_millis(1500);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PresenceParty {
@@ -64,6 +65,7 @@ struct PendingJoinRequest {
 
 #[derive(Clone, Debug)]
 struct PresenceSnapshot {
+    phase_key: String,
     details: String,
     state: String,
     started_at_ms: Option<u64>,
@@ -76,7 +78,8 @@ struct PresenceSnapshot {
 
 impl PresenceSnapshot {
     fn same_activity(&self, other: &Self) -> bool {
-        self.details == other.details
+        self.phase_key == other.phase_key
+            && self.details == other.details
             && self.state == other.state
             && self.party == other.party
             && self.join_secret == other.join_secret
@@ -325,6 +328,8 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
     let mut champion_summary: Option<Value> = None;
     let mut pending_join_requests: HashMap<u64, PendingJoinRequest> = HashMap::new();
     let mut next_match_context_refresh = Instant::now();
+    let mut delayed_phase_republish_at: Option<Instant> = None;
+    let mut delayed_phase_key: Option<String> = None;
 
     loop {
         if *shutdown.borrow() {
@@ -401,19 +406,55 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
             match_join_url,
         )
         .await;
+        let phase_changed = match (&last_snapshot, &snapshot) {
+            (Some(previous), Some(current)) => previous.phase_key != current.phase_key,
+            (None, Some(_)) => true,
+            _ => false,
+        };
         let changed = match (&last_snapshot, &snapshot) {
             (Some(previous), Some(current)) => !previous.same_activity(current),
             (None, None) => false,
             _ => true,
         };
-        let should_retry =
-            snapshot.is_some() && !session.is_connected() && Instant::now() >= retry_at;
+        let now = Instant::now();
+        let should_retry = snapshot.is_some() && !session.is_connected() && now >= retry_at;
+        // Discord does not expose activity priority. As a best-effort nudge, resend
+        // Yummi shortly after League changes phase, once the first publish succeeded.
+        let delayed_republish_due = session.is_connected()
+            && delayed_phase_republish_at.is_some_and(|at| now >= at)
+            && snapshot.as_ref().is_some_and(|current| {
+                delayed_phase_key.as_deref() == Some(current.phase_key.as_str())
+            });
 
-        if changed || should_retry {
+        if changed || should_retry || delayed_republish_due {
             match snapshot.as_ref() {
                 Some(current) => {
                     match set_activity_with_startup_retry(&mut session, current).await {
                         Ok(()) => {
+                            if delayed_republish_due {
+                                state
+                                    .record_flight(
+                                        "discord_presence",
+                                        format!("phase_republish_sent phase={}", current.phase_key),
+                                    )
+                                    .await;
+                                delayed_phase_republish_at = None;
+                                delayed_phase_key = None;
+                            } else if phase_changed {
+                                delayed_phase_republish_at =
+                                    Some(Instant::now() + PHASE_REPUBLISH_DELAY);
+                                delayed_phase_key = Some(current.phase_key.clone());
+                                state
+                                    .record_flight(
+                                        "discord_presence",
+                                        format!(
+                                            "phase_republish_scheduled phase={} delay_ms={}",
+                                            current.phase_key,
+                                            PHASE_REPUBLISH_DELAY.as_millis()
+                                        ),
+                                    )
+                                    .await;
+                            }
                             if last_presence_error.take().is_some() {
                                 state
                                     .record_flight("discord_presence", "connection_recovered")
@@ -441,13 +482,26 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
                 None => {
                     session.clear();
                     last_presence_error = None;
+                    delayed_phase_republish_at = None;
+                    delayed_phase_key = None;
                 }
             }
             last_snapshot = snapshot;
         }
 
+        let next_wait = if session.is_connected() {
+            delayed_phase_republish_at
+                .map(|at| {
+                    at.saturating_duration_since(Instant::now())
+                        .min(PRESENCE_POLL_INTERVAL)
+                })
+                .unwrap_or(PRESENCE_POLL_INTERVAL)
+        } else {
+            PRESENCE_POLL_INTERVAL
+        };
+
         tokio::select! {
-            _ = sleep(PRESENCE_POLL_INTERVAL) => {}
+            _ = sleep(next_wait) => {}
             Some(secret) = join_receiver.recv() => {
                 if let Err(error) = handle_join_secret(&state, &secret).await {
                     state
@@ -973,6 +1027,7 @@ fn phase_snapshot(
     };
 
     Some(PresenceSnapshot {
+        phase_key: phase.to_string(),
         details: details.into(),
         state: "League of Legends".into(),
         started_at_ms: None,
@@ -1052,6 +1107,7 @@ fn in_progress_snapshot(
     };
 
     PresenceSnapshot {
+        phase_key: "InProgress".into(),
         details,
         state,
         started_at_ms: elapsed_seconds.and_then(activity_started_at_ms),
@@ -1248,10 +1304,9 @@ mod tests {
 
     #[test]
     fn maps_known_gameflow_phases() {
-        assert_eq!(
-            phase_snapshot("Matchmaking", None, None, None, None).unwrap().details,
-            "매칭 검색 중"
-        );
+        let matchmaking = phase_snapshot("Matchmaking", None, None, None, None).unwrap();
+        assert_eq!(matchmaking.phase_key, "Matchmaking");
+        assert_eq!(matchmaking.details, "매칭 검색 중");
         assert_eq!(
             phase_snapshot("ChampSelect", None, None, None, None).unwrap().details,
             "챔피언 선택 중"
@@ -1320,6 +1375,7 @@ mod tests {
             None,
         );
 
+        assert_eq!(snapshot.phase_key, "InProgress");
         assert_eq!(snapshot.details, "솔로랭크 플레이 중");
         assert_eq!(snapshot.state, "아리 · 7 / 2 / 9");
         assert!(snapshot.started_at_ms.is_some());
