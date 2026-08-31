@@ -818,7 +818,7 @@ fn opgg_url_for_riot_id(riot_id: &str) -> Option<String> {
     }
 
     let slug = format!("{game_name}-{tag_line}");
-    let mut url = url::Url::parse("https://www.op.gg/summoners/kr/").ok()?;
+    let mut url = url::Url::parse("https://www.op.gg/summoners/kr").ok()?;
     {
         let mut segments = url.path_segments_mut().ok()?;
         segments.push(&slug);
