@@ -33,6 +33,8 @@ const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const GAMEFLOW_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(8);
 const LOCKFILE_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const LOCKFILE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const RECENT_MATCH_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
+const EOG_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const LIVE_GAME_PARTICIPANT_COUNT: usize = 10;
 const MAX_LCU_EVENT_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -49,6 +51,7 @@ pub(crate) struct LcuEventPoller {
     // None keeps legacy agents compatible until Relay sends the first control message.
     live_game_polling: Option<bool>,
     eog_sent: bool,
+    last_eog_attempt: Option<Instant>,
     diagnostics: Vec<String>,
     last_lockfile_diagnostics: Vec<String>,
     cached_lockfile_discovery: Option<LockfileDiscovery>,
@@ -72,6 +75,7 @@ impl LcuEventPoller {
         self.party = None;
         self.participant = None;
         self.eog_sent = false;
+        self.last_eog_attempt = None;
         self.lcu_available = None;
         self.schema_warnings.clear();
     }
@@ -417,24 +421,23 @@ impl LcuEventPoller {
             json!({"phase": phase, "lcu_ready": true}),
             &mut events,
         );
-        if matches!(
-            phase.as_str(),
-            "PreEndOfGame" | "EndOfGame" | "WaitingForStats"
-        ) && !self.eog_sent
-            && matches!(
-                previous_phase.as_deref(),
-                Some("InProgress") | Some("PreEndOfGame")
-            )
-        {
+        if should_attempt_eog_recovery(
+            &phase,
+            previous_phase.as_deref(),
+            self.eog_sent,
+            self.last_eog_attempt,
+        ) {
+            self.last_eog_attempt = Some(Instant::now());
             let payload = eog_payload(&client, &phase).await;
+            self.eog_sent = has_usable_eog_result_evidence(&payload);
             events.push(("match_eog", payload.clone()));
             events.push(("guild_match_eog", payload));
-            self.eog_sent = true;
         } else if matches!(
             phase.as_str(),
             "Lobby" | "None" | "ChampSelect" | "Matchmaking"
         ) {
             self.eog_sent = false;
+            self.last_eog_attempt = None;
         }
 
         let plan = phase_poll_plan(&phase);
@@ -636,6 +639,107 @@ async fn wait_for_socket_retry(stop: &mut watch::Receiver<bool>) -> bool {
     }
 }
 
+fn has_consistent_eog_result_participants(value: Option<&Value>) -> bool {
+    let Some(rows) = value.and_then(Value::as_array) else {
+        return false;
+    };
+    let mut valid_count = 0usize;
+    let mut blue_result: Option<bool> = None;
+    let mut red_result: Option<bool> = None;
+
+    for row in rows {
+        let Some(row) = row.as_object() else {
+            continue;
+        };
+        let has_name = row
+            .get("gameName")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let has_tag = row
+            .get("tagLine")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty());
+        let Some(team_id) = row.get("teamId").and_then(Value::as_i64) else {
+            continue;
+        };
+        let Some(won) = row.get("won").and_then(Value::as_bool) else {
+            continue;
+        };
+        if !has_name || !has_tag || (team_id != 100 && team_id != 200) {
+            continue;
+        }
+        let slot = if team_id == 100 {
+            &mut blue_result
+        } else {
+            &mut red_result
+        };
+        if let Some(existing) = *slot {
+            if existing != won {
+                return false;
+            }
+        }
+        *slot = Some(won);
+        valid_count += 1;
+    }
+
+    valid_count >= 9
+        && blue_result.is_some()
+        && red_result.is_some()
+        && blue_result != red_result
+}
+
+fn json_scalar_id(value: Option<&Value>) -> Option<String> {
+    match value? {
+        Value::String(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn has_usable_eog_result_evidence(payload: &Value) -> bool {
+    if has_consistent_eog_result_participants(payload.get("participants")) {
+        return true;
+    }
+    let Some(recent) = payload.get("recentMatch").and_then(Value::as_object) else {
+        return false;
+    };
+    if !has_consistent_eog_result_participants(recent.get("participants")) {
+        return false;
+    }
+    let eog_game_id = json_scalar_id(payload.get("gameId"));
+    let recent_game_id = json_scalar_id(recent.get("gameId"));
+    match (eog_game_id, recent_game_id) {
+        (Some(eog), Some(recent)) => eog == recent,
+        (None, Some(_)) => true,
+        _ => false,
+    }
+}
+
+fn should_attempt_eog_recovery(
+    phase: &str,
+    previous_phase: Option<&str>,
+    eog_sent: bool,
+    last_attempt: Option<Instant>,
+) -> bool {
+    if eog_sent || !matches!(phase, "PreEndOfGame" | "EndOfGame" | "WaitingForStats") {
+        return false;
+    }
+    if !matches!(
+        previous_phase,
+        None
+            | Some("InProgress")
+            | Some("PreEndOfGame")
+            | Some("EndOfGame")
+            | Some("WaitingForStats")
+    ) {
+        return false;
+    }
+    match last_attempt {
+        None => true,
+        Some(attempt) => Instant::now().duration_since(attempt) >= EOG_RECOVERY_RETRY_INTERVAL,
+    }
+}
+
 async fn eog_payload(client: &LcuClient, phase: &str) -> Value {
     let mut none_reasons = Vec::new();
     let eog = match client.request(Method::GET, EOG_STATS, None).await {
@@ -649,6 +753,31 @@ async fn eog_payload(client: &LcuClient, phase: &str) -> Value {
         .request(Method::GET, GAMEFLOW_SESSION, None)
         .await
         .ok();
+    let recent_history = match timeout(
+        RECENT_MATCH_VERIFICATION_TIMEOUT,
+        client.recent_match_verification(),
+    )
+    .await
+    {
+        Ok(Ok(value)) => Some(value),
+        Ok(Err(_)) => {
+            none_reasons.push("recent_match_request_failed");
+            None
+        }
+        Err(_) => {
+            none_reasons.push("recent_match_request_timeout");
+            None
+        }
+    };
+    let recent_match = recent_history
+        .as_ref()
+        .and_then(|value| value.get("latest"))
+        .cloned();
+    let recent_matches = recent_history
+        .as_ref()
+        .and_then(|value| value.get("matches"))
+        .cloned()
+        .unwrap_or_else(|| Value::Array(Vec::new()));
     let mut participants = Vec::new();
     let mut missing_name_count = 0;
     let mut missing_tag_count = 0;
@@ -738,6 +867,8 @@ async fn eog_payload(client: &LcuClient, phase: &str) -> Value {
         "capturedAt": captured_at,
         "gameId": game_id,
         "participants": participants,
+        "recentMatch": recent_match,
+        "recentMatches": recent_matches,
         "eog_none_reason": (!none_reasons.is_empty()).then(|| none_reasons.join(",")),
         "eogStats": {
             "gameId": game_id,
@@ -1386,6 +1517,55 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].1["phase"], "InProgress");
+    }
+
+    #[test]
+    fn eog_recovery_accepts_late_connection_and_retries_after_interval() {
+        assert!(should_attempt_eog_recovery(
+            "WaitingForStats",
+            None,
+            false,
+            None,
+        ));
+        assert!(!should_attempt_eog_recovery(
+            "WaitingForStats",
+            Some("WaitingForStats"),
+            false,
+            Some(Instant::now()),
+        ));
+    }
+
+    #[test]
+    fn eog_recovery_retries_until_recent_match_matches_game_id() {
+        let stale = json!({
+            "gameId": 200,
+            "participants": [],
+            "recentMatch": {
+                "gameId": 199,
+                "participants": (0..10).map(|i| json!({
+                    "gameName": format!("Player{i}"),
+                    "tagLine": "KR1",
+                    "teamId": if i < 5 { 100 } else { 200 },
+                    "won": i < 5
+                })).collect::<Vec<_>>()
+            }
+        });
+        assert!(!has_usable_eog_result_evidence(&stale));
+
+        let current = json!({
+            "gameId": 200,
+            "participants": [],
+            "recentMatch": {
+                "gameId": 200,
+                "participants": (0..10).map(|i| json!({
+                    "gameName": format!("Player{i}"),
+                    "tagLine": "KR1",
+                    "teamId": if i < 5 { 100 } else { 200 },
+                    "won": i < 5
+                })).collect::<Vec<_>>()
+            }
+        });
+        assert!(has_usable_eog_result_evidence(&current));
     }
 
     #[test]

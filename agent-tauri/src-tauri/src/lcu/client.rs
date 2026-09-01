@@ -39,6 +39,81 @@ pub(crate) struct LcuClient {
     http: Client,
 }
 
+fn compact_match_history_game(game: &Value) -> Option<Value> {
+    let game_participants = game
+        .get("participants")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let participants = game
+        .get("participantIdentities")
+        .and_then(Value::as_array)
+        .map(|rows| {
+            rows.iter()
+                .filter_map(|row| {
+                    let participant_id = row.get("participantId").and_then(Value::as_i64)?;
+                    let player = row.get("player")?;
+                    let mut game_name = player
+                        .get("gameName")
+                        .or_else(|| player.get("riotIdGameName"))
+                        .and_then(Value::as_str);
+                    let mut tag_line = player
+                        .get("tagLine")
+                        .or_else(|| player.get("riotIdTagLine"))
+                        .or_else(|| player.get("riotIdTagline"))
+                        .and_then(Value::as_str);
+                    if game_name.is_none() || tag_line.is_none() {
+                        if let Some(summoner_name) =
+                            player.get("summonerName").and_then(Value::as_str)
+                        {
+                            if let Some((name, tag)) = summoner_name.rsplit_once('#') {
+                                if game_name.is_none() {
+                                    game_name = Some(name);
+                                }
+                                if tag_line.is_none() {
+                                    tag_line = Some(tag);
+                                }
+                            }
+                        }
+                    }
+                    let game_name = game_name?.trim();
+                    let tag_line = tag_line?.trim();
+                    if game_name.is_empty() || tag_line.is_empty() {
+                        return None;
+                    }
+                    let stats_row = game_participants.iter().find(|candidate| {
+                        candidate.get("participantId").and_then(Value::as_i64)
+                            == Some(participant_id)
+                    });
+                    let team_id = stats_row
+                        .and_then(|candidate| candidate.get("teamId"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let won = stats_row
+                        .and_then(|candidate| candidate.get("stats"))
+                        .and_then(|stats| stats.get("win"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    Some(json!({
+                        "gameName": game_name,
+                        "tagLine": tag_line,
+                        "teamId": team_id,
+                        "won": won
+                    }))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Some(json!({
+        "gameId": game.get("gameId").cloned().unwrap_or(Value::Null),
+        "gameCreation": game.get("gameCreation").cloned().unwrap_or(Value::Null),
+        "gameCreationDate": game.get("gameCreationDate").cloned().unwrap_or(Value::Null),
+        "gameDuration": game.get("gameDuration").cloned().unwrap_or(Value::Null),
+        "participants": participants
+    }))
+}
+
 impl std::fmt::Debug for LcuClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LcuClient")
@@ -207,6 +282,40 @@ impl LcuClient {
 
     pub(crate) async fn champion_summary(&self) -> AgentResult<Value> {
         self.request(Method::GET, CHAMPION_SUMMARY_ENDPOINT, None).await
+    }
+
+    pub(crate) async fn recent_match_verification(&self) -> AgentResult<Value> {
+        let summoner = self
+            .request(Method::GET, CURRENT_SUMMONER_ENDPOINT, None)
+            .await?;
+        let puuid = summoner
+            .get("puuid")
+            .and_then(Value::as_str)
+            .ok_or_else(|| AgentError::Lcu("소환사 PUUID를 찾지 못했습니다.".into()))?;
+        let matches = self
+            .request(
+                Method::GET,
+                &format!("{MATCH_HISTORY_ENDPOINT_PREFIX}/{puuid}/matches?begIndex=0&endIndex=5"),
+                None,
+            )
+            .await?;
+        let games = matches
+            .pointer("/games/games")
+            .and_then(Value::as_array)
+            .ok_or_else(|| AgentError::Lcu("최근 경기 목록을 찾지 못했습니다.".into()))?;
+        let compacted = games
+            .iter()
+            .take(5)
+            .filter_map(compact_match_history_game)
+            .collect::<Vec<_>>();
+        if compacted.is_empty() {
+            return Err(AgentError::Lcu("최근 경기가 없습니다.".into()));
+        }
+
+        Ok(json!({
+            "latest": compacted.first().cloned().unwrap_or(Value::Null),
+            "matches": compacted
+        }))
     }
 
     pub(crate) async fn recent_match(&self) -> AgentResult<Value> {
