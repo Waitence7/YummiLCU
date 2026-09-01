@@ -647,23 +647,27 @@ async def _forward_guild_match_eog(
         return False
 
 
+def _guild_match_live_ingest_matched(outcome: Any) -> bool:
+    return isinstance(outcome, dict) and outcome.get("matched") is True
+
+
 async def _forward_guild_match_live(
     http: aiohttp.ClientSession,
     discord_id: int,
     payload: dict[str, Any],
     event_id: str | None = None,
-) -> None:
+) -> bool:
     """관전자 Agent의 라이브 스냅샷도 웹 공개 경기 화면에서 사용할 수 있게 저장한다."""
     now = time.monotonic()
     previous = _live_game_web_ingest_at.get(int(discord_id), 0.0)
     if now - previous < _LIVE_GAME_WEB_INGEST_MIN_INTERVAL_SEC:
-        return
+        return False
     _live_game_web_ingest_at[int(discord_id)] = now
 
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
     if not token:
-        return
+        return False
     url = f"{api_base}/api/bot/guild-match/lcu-live-ingest"
     headers = {
         "content-type": "application/json",
@@ -680,10 +684,30 @@ async def _forward_guild_match_live(
                     discord_id,
                     res.status,
                 )
-                return
-            logger.info("내전 라이브 LCU ingest OK discord_id=%s", discord_id)
+                return False
+            try:
+                outcome = await res.json(content_type=None)
+            except Exception:
+                outcome = None
+            if not _guild_match_live_ingest_matched(outcome):
+                reason = outcome.get("reason") if isinstance(outcome, dict) else "invalid_response"
+                logger.warning(
+                    "내전 라이브 LCU ingest 미매칭 discord_id=%s reason=%s",
+                    discord_id,
+                    reason,
+                )
+                return False
+            logger.info(
+                "내전 라이브 LCU ingest OK discord_id=%s match_id=%s overlap=%s promoted=%s",
+                discord_id,
+                outcome.get("matchId"),
+                outcome.get("overlap"),
+                outcome.get("promotedFromLive") is True,
+            )
+            return True
     except Exception:
         logger.exception("내전 라이브 LCU ingest 요청 실패 discord_id=%s", discord_id)
+        return False
 
 
 async def _forward_match_eog(
