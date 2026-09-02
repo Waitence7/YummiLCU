@@ -1,6 +1,14 @@
 name: Build Tauri Agent (Windows)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "agent-tauri/package.json"
+      - "agent-tauri/package-lock.json"
+      - "agent-tauri/src-tauri/Cargo.toml"
+      - "agent-tauri/src-tauri/Cargo.lock"
+      - "agent-tauri/src-tauri/tauri.conf.json"
   workflow_dispatch:
     inputs:
       release_notes:
@@ -251,7 +259,7 @@ jobs:
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
         with:
           name: agent-release
           path: |
@@ -263,7 +271,7 @@ jobs:
   deploy:
     name: Deploy agent update files
     needs: build
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
