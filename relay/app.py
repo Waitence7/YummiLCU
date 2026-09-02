@@ -45,6 +45,7 @@ OAUTH_LINK_CODE_TTL_SEC = 600
 WS_AUTH_TIMEOUT_SEC = 15.0
 MAX_WS_AUTH_MESSAGE_BYTES = 4 * 1024
 MAX_AGENT_MESSAGE_BYTES = 256 * 1024
+BOT_EOG_PERSIST_ACK_TIMEOUT_SEC = 8.0
 _SERVER_PROTOCOL_VERSION = 1
 _SERVER_CAPABILITIES = frozenset({
     "command_result_v2",
@@ -1151,12 +1152,29 @@ async def _handle_agent_message(
             return
         event_id = _relay_event_id(data)
         http: aiohttp.ClientSession = websocket.app.state.http
-        bot_forwarded = await conn.forward_guild_match_eog(discord_id, payload)
+        bot_pending = conn.register_pending_bot_eog(event_id) if event_id is not None else None
+        bot_forwarded = await conn.forward_guild_match_eog(discord_id, payload, event_id)
+        if not bot_forwarded and event_id is not None:
+            conn.cancel_pending_bot_eog(event_id)
         web_persisted = await _forward_guild_match_eog(http, discord_id, payload, event_id)
-        # Web 자동 매칭이 실패해도 Bot이 정확한 match view로 이벤트를 받으면
-        # Bot의 match-specific lcu-eog endpoint 저장 경로가 이어집니다. 둘 다
-        # 실패한 경우에만 ACK를 보류해 Agent durable replay가 계속되게 합니다.
-        if bot_forwarded or web_persisted:
+        if web_persisted:
+            if event_id is not None:
+                conn.cancel_pending_bot_eog(event_id)
+            await _ack_agent_event(websocket, event_id)
+            return
+
+        # Bot websocket 전달 성공은 영속화가 아닙니다. direct ingest가 실패한 경우
+        # 정확한 matchId를 아는 Bot이 API commit을 마쳤다는 event-id ACK까지 확인합니다.
+        bot_persisted = False
+        if bot_forwarded and bot_pending is not None and event_id is not None:
+            try:
+                bot_persisted = await asyncio.wait_for(
+                    bot_pending, timeout=BOT_EOG_PERSIST_ACK_TIMEOUT_SEC
+                )
+            except asyncio.TimeoutError:
+                conn.cancel_pending_bot_eog(event_id)
+                logger.warning("Bot EOG persistence ACK timeout event_id=%s", event_id)
+        if bot_persisted:
             await _ack_agent_event(websocket, event_id)
         return
 
@@ -1397,6 +1415,11 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
         return
 
     msg_type = data.get("type")
+    if msg_type == "guild_match_eog_persisted":
+        event_id = _relay_event_id(data)
+        if event_id is not None:
+            conn.complete_pending_bot_eog(event_id, data.get("ok") is True)
+        return
     if msg_type == "subscribe_party":
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import unittest
@@ -12,6 +13,7 @@ from relay.app import (
     _agent_error_last_by_discord,
     _agent_error_recent,
     _handle_agent_message,
+    _handle_bot_message,
     _read_ws_auth_payload,
     _safe_compare_digest,
     _server_hello,
@@ -225,7 +227,7 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(websocket.payloads), before)
 
-    async def test_guild_eog_ack_requires_bot_delivery_or_web_persist(self) -> None:
+    async def test_guild_eog_ack_requires_durable_web_or_bot_persist(self) -> None:
         manager = ConnectionManager()
         websocket = _WebSocketStub()
         await manager.attach_session("session-1", websocket, "token")
@@ -248,7 +250,9 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         bot_ws = _WebSocketStub()
         await manager.register_bot_ws(bot_ws)
         manager.subscribe_gameflow(42)
-        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)):
+        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)), patch(
+            "relay.app.BOT_EOG_PERSIST_ACK_TIMEOUT_SEC", 0.01
+        ):
             await _handle_agent_message(
                 websocket,
                 manager,
@@ -258,11 +262,48 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
                     "data": {"participants": []},
                 }),
             )
+        self.assertEqual(len(websocket.payloads), before)
+        self.assertEqual(bot_ws.payloads[-1]["type"], "guild_match_eog")
+        self.assertEqual(bot_ws.payloads[-1]["event_id"], event_id)
+
+        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)):
+            task = asyncio.create_task(
+                _handle_agent_message(
+                    websocket,
+                    manager,
+                    json.dumps({
+                        "type": "guild_match_eog",
+                        "event_id": event_id,
+                        "data": {"participants": []},
+                    }),
+                )
+            )
+            for _ in range(20):
+                if manager._pending_bot_eog.get(event_id) is not None:
+                    break
+                await asyncio.sleep(0)
+            self.assertTrue(manager.complete_pending_bot_eog(event_id, True))
+            await task
         self.assertEqual(
             websocket.payloads[-1],
             {"type": "event_ack", "event_id": event_id},
         )
-        self.assertEqual(bot_ws.payloads[-1]["type"], "guild_match_eog")
+
+    async def test_bot_persistence_message_completes_event_waiter(self) -> None:
+        manager = ConnectionManager()
+        event_id = "123e4567-e89b-42d3-a456-426614174011"
+        pending = manager.register_pending_bot_eog(event_id)
+        await _handle_bot_message(
+            manager,
+            None,  # this message type does not touch Redis
+            json.dumps({
+                "type": "guild_match_eog_persisted",
+                "event_id": event_id,
+                "ok": True,
+            }),
+        )
+        self.assertTrue(await pending)
+
 
     async def test_hello_before_oauth_binding_is_preserved(self) -> None:
         manager = ConnectionManager()

@@ -29,6 +29,7 @@ class ConnectionManager:
         self._ws_session: dict[int, str] = {}  # id(ws) -> session_id (인증 전)
         self._ws_session_id: dict[int, str] = {}  # id(ws) -> session_id (TTL 갱신용)
         self._pending_results: dict[tuple[int, str], asyncio.Future[dict[str, Any]]] = {}
+        self._pending_bot_eog: dict[str, asyncio.Future[bool]] = {}
         self._bot_ws: WebSocket | None = None
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._gameflow_subscribers: set[int] = set()
@@ -186,6 +187,26 @@ class ConnectionManager:
         if fut is not None and not fut.done():
             fut.cancel()
 
+    def register_pending_bot_eog(self, event_id: str) -> asyncio.Future[bool]:
+        existing = self._pending_bot_eog.pop(event_id, None)
+        if existing is not None and not existing.done():
+            existing.set_result(False)
+        fut: asyncio.Future[bool] = asyncio.get_running_loop().create_future()
+        self._pending_bot_eog[event_id] = fut
+        return fut
+
+    def complete_pending_bot_eog(self, event_id: str, ok: bool) -> bool:
+        fut = self._pending_bot_eog.pop(event_id, None)
+        if fut is None or fut.done():
+            return False
+        fut.set_result(bool(ok))
+        return True
+
+    def cancel_pending_bot_eog(self, event_id: str) -> None:
+        fut = self._pending_bot_eog.pop(event_id, None)
+        if fut is not None and not fut.done():
+            fut.set_result(False)
+
     async def send_command(self, discord_id: int, payload: dict[str, Any]) -> bool:
         async with self._lock:
             ws = self._by_discord.get(discord_id)
@@ -210,6 +231,10 @@ class ConnectionManager:
         async with self._lock:
             if self._bot_ws is ws:
                 self._bot_ws = None
+                for event_id, fut in list(self._pending_bot_eog.items()):
+                    if not fut.done():
+                        fut.set_result(False)
+                    self._pending_bot_eog.pop(event_id, None)
                 logger.info("봇 WS 해제")
 
     def subscribe_party_lobby(self, discord_id: int) -> None:
@@ -497,8 +522,10 @@ class ConnectionManager:
             await self.unregister_bot_ws(ws)
             return False
 
-    async def forward_guild_match_eog(self, discord_id: int, data: dict[str, Any]) -> bool:
-        """내전 EOG 결과를 gameflow 구독 중인 Bot에도 전달합니다."""
+    async def forward_guild_match_eog(
+        self, discord_id: int, data: dict[str, Any], event_id: str | None = None
+    ) -> bool:
+        """내전 EOG 결과와 durable event id를 gameflow 구독 중인 Bot에 전달합니다."""
         async with self._lock:
             if int(discord_id) not in self._gameflow_subscribers:
                 return False
@@ -506,13 +533,14 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await ws.send_json(
-                {
-                    "type": "guild_match_eog",
-                    "discord_id": int(discord_id),
-                    "data": data,
-                }
-            )
+            payload: dict[str, Any] = {
+                "type": "guild_match_eog",
+                "discord_id": int(discord_id),
+                "data": data,
+            }
+            if event_id is not None:
+                payload["event_id"] = event_id
+            await ws.send_json(payload)
             return True
         except Exception:
             logger.exception("봇 WS guild_match_eog 전달 실패 discord_id=%s", discord_id)
