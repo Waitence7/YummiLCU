@@ -11,6 +11,7 @@ import asyncio
 import html
 import json
 import logging
+import re
 import secrets
 import time
 import uuid
@@ -21,7 +22,7 @@ from typing import Any
 import aiohttp
 import redis.asyncio as redis
 from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from relay import auth, config
@@ -372,16 +373,141 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-_AGENT_VERSION_FILE = Path(__file__).resolve().parents[1] / "deploy" / "agent-version.json"
+_AGENT_RELEASE_REPOSITORY = "Waitence7/YummiLCU"
+_AGENT_RELEASE_BASE = f"https://github.com/{_AGENT_RELEASE_REPOSITORY}/releases/download"
+_AGENT_RELEASE_CHANNEL_TAG = {
+    "stable": "agent-stable",
+    "beta": "agent-beta",
+    "dev": "agent-dev",
+}
+_AGENT_VERSION_RE = r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?"
+_AGENT_PROXY_ALLOWED_HOSTS = frozenset({
+    "github.com",
+    "release-assets.githubusercontent.com",
+    "objects.githubusercontent.com",
+})
 
 
-@app.get("/agent/version.json")
-async def agent_version_manifest() -> JSONResponse:
-    """에이전트 자동 업데이트용 manifest (deploy/agent-version.json)."""
-    if not _AGENT_VERSION_FILE.is_file():
-        return JSONResponse({"version": "0.0.0", "url": "", "notes": "manifest not configured"})
-    data = json.loads(_AGENT_VERSION_FILE.read_text(encoding="utf-8"))
-    return JSONResponse(data)
+def _agent_release_asset(path: str) -> tuple[str, str, str | None] | None:
+    """Map legacy/public Agent URLs to GitHub Release assets.
+
+    The desktop updater deliberately disables redirects, so the relay must
+    return the final asset body itself rather than a 30x response.
+    """
+    if path in {"/agent/version.json", "/agent/latest.json"}:
+        tag = _AGENT_RELEASE_CHANNEL_TAG["stable"]
+        return (f"{_AGENT_RELEASE_BASE}/{tag}/agent-version.json", "application/json", None)
+    if path in {"/agent/setup.exe", "/agent/latest", "/agent/releases/tauri/latest-setup.exe"}:
+        tag = _AGENT_RELEASE_CHANNEL_TAG["stable"]
+        return (
+            f"{_AGENT_RELEASE_BASE}/{tag}/Yummi-LCU-Agent-latest-setup.exe",
+            "application/octet-stream",
+            'attachment; filename="Yummi-LCU-Agent-latest-setup.exe"',
+        )
+    if path == "/agent/YummiLcuTauri.zip":
+        tag = _AGENT_RELEASE_CHANNEL_TAG["stable"]
+        return (
+            f"{_AGENT_RELEASE_BASE}/{tag}/tauri-latest.zip",
+            "application/zip",
+            'attachment; filename="YummiLcuTauri.zip"',
+        )
+
+    manifest = re.fullmatch(r"/agent/releases/tauri/(beta|dev)/version\.json", path)
+    if manifest:
+        channel = manifest.group(1)
+        tag = _AGENT_RELEASE_CHANNEL_TAG[channel]
+        return (f"{_AGENT_RELEASE_BASE}/{tag}/agent-version.json", "application/json", None)
+
+    latest_installer = re.fullmatch(r"/agent/releases/tauri/(beta|dev)/latest-setup\.exe", path)
+    if latest_installer:
+        channel = latest_installer.group(1)
+        tag = _AGENT_RELEASE_CHANNEL_TAG[channel]
+        return (
+            f"{_AGENT_RELEASE_BASE}/{tag}/Yummi-LCU-Agent-latest-setup.exe",
+            "application/octet-stream",
+            f'attachment; filename="Yummi-LCU-Agent-{channel}-latest-setup.exe"',
+        )
+
+    archive = re.fullmatch(
+        rf"/agent/releases/tauri/(?:(beta|dev)/)?tauri-({_AGENT_VERSION_RE})\.zip",
+        path,
+    )
+    if archive:
+        channel = archive.group(1) or "stable"
+        version = archive.group(2)
+        tag = f"v{version}" if channel == "stable" else _AGENT_RELEASE_CHANNEL_TAG[channel]
+        return (
+            f"{_AGENT_RELEASE_BASE}/{tag}/tauri-{version}.zip",
+            "application/zip",
+            f'attachment; filename="tauri-{version}.zip"',
+        )
+
+    installer = re.fullmatch(
+        rf"/agent/releases/tauri/(?:(beta|dev)/)?Yummi-LCU-Agent-({_AGENT_VERSION_RE})-setup\.exe",
+        path,
+    )
+    if installer:
+        channel = installer.group(1) or "stable"
+        version = installer.group(2)
+        tag = f"v{version}" if channel == "stable" else _AGENT_RELEASE_CHANNEL_TAG[channel]
+        return (
+            f"{_AGENT_RELEASE_BASE}/{tag}/Yummi-LCU-Agent-{version}-setup.exe",
+            "application/octet-stream",
+            f'attachment; filename="Yummi-LCU-Agent-{version}-setup.exe"',
+        )
+    return None
+
+
+async def _agent_proxy_response(request: Request, path: str) -> Response:
+    asset = _agent_release_asset(path)
+    if asset is None:
+        raise HTTPException(404, "agent asset not found")
+    upstream_url, media_type, disposition = asset
+    http: aiohttp.ClientSession = request.app.state.http
+    try:
+        upstream = await http.request(request.method, upstream_url, allow_redirects=True)
+    except aiohttp.ClientError as exc:
+        logger.warning("Agent release proxy upstream failed: %s", exc)
+        raise HTTPException(502, "agent release upstream unavailable") from exc
+
+    final_host = upstream.url.host or ""
+    if final_host not in _AGENT_PROXY_ALLOWED_HOSTS:
+        upstream.close()
+        logger.error("Agent release proxy rejected redirect host: %s", final_host)
+        raise HTTPException(502, "agent release upstream rejected")
+    if upstream.status == 404:
+        upstream.close()
+        raise HTTPException(404, "agent asset not published")
+    if upstream.status != 200:
+        status = upstream.status
+        upstream.close()
+        logger.warning("Agent release proxy returned HTTP %s for %s", status, path)
+        raise HTTPException(502, "agent release upstream failed")
+
+    headers = {"Cache-Control": "no-cache" if media_type == "application/json" else "public, max-age=300"}
+    length = upstream.headers.get("Content-Length")
+    if length:
+        headers["Content-Length"] = length
+    if disposition:
+        headers["Content-Disposition"] = disposition
+
+    if request.method == "HEAD":
+        upstream.close()
+        return Response(status_code=200, media_type=media_type, headers=headers)
+
+    async def body():
+        try:
+            async for chunk in upstream.content.iter_chunked(256 * 1024):
+                yield chunk
+        finally:
+            upstream.close()
+
+    return StreamingResponse(body(), media_type=media_type, headers=headers)
+
+
+@app.api_route("/agent/{asset_path:path}", methods=["GET", "HEAD"])
+async def agent_release_proxy(request: Request, asset_path: str) -> Response:
+    return await _agent_proxy_response(request, f"/agent/{asset_path}")
 
 
 @app.get("/login")
