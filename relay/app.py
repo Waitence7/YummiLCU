@@ -405,7 +405,7 @@ def _agent_release_asset(path: str) -> tuple[str, str, str | None] | None:
         )
     if path == "/agent/YummiLcuTauri.zip":
         return (
-            f"https://github.com/{_AGENT_RELEASE_REPOSITORY}/releases/latest/download/tauri-latest.zip",
+            "latest-archive://stable",
             "application/zip",
             'attachment; filename="YummiLcuTauri.zip"',
         )
@@ -495,6 +495,20 @@ async def _agent_latest_prerelease_tag(request: Request, channel: str) -> str:
 
 
 async def _agent_resolve_upstream(request: Request, upstream: str) -> str:
+    if upstream == "latest-archive://stable":
+        http: aiohttp.ClientSession = request.app.state.http
+        manifest_url = f"https://github.com/{_AGENT_RELEASE_REPOSITORY}/releases/latest/download/agent-version.json"
+        try:
+            async with http.get(manifest_url, allow_redirects=True) as response:
+                if response.status != 200:
+                    raise HTTPException(502, "agent stable manifest unavailable")
+                data = await response.json(content_type=None)
+        except aiohttp.ClientError as exc:
+            raise HTTPException(502, "agent stable manifest unavailable") from exc
+        version = str(data.get("version") or "") if isinstance(data, dict) else ""
+        if not re.fullmatch(_AGENT_VERSION_RE, version):
+            raise HTTPException(502, "agent stable manifest invalid")
+        return f"{_AGENT_RELEASE_BASE}/v{version}/tauri-{version}.zip"
     if not upstream.startswith("channel://"):
         return upstream
     _, remainder = upstream.split("channel://", 1)

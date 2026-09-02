@@ -33,7 +33,9 @@ class AgentReleaseProxyMappingTests(unittest.TestCase):
         self.assertIsNotNone(_agent_release_asset("/agent/setup.exe"))
         self.assertIsNotNone(_agent_release_asset("/agent/latest"))
         self.assertIsNotNone(_agent_release_asset("/agent/latest.json"))
-        self.assertIsNotNone(_agent_release_asset("/agent/YummiLcuTauri.zip"))
+        legacy_zip = _agent_release_asset("/agent/YummiLcuTauri.zip")
+        self.assertIsNotNone(legacy_zip)
+        self.assertEqual(legacy_zip[0], "latest-archive://stable")
 
     def test_unknown_or_traversal_like_paths_are_rejected(self):
         self.assertIsNone(_agent_release_asset("/agent/nope"))
