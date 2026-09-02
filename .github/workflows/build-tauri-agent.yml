@@ -268,6 +268,50 @@ jobs:
             ${{ steps.manifest.outputs.setup }}
           retention-days: 7
 
+  publish-github-release:
+    name: Publish GitHub release
+    needs: build
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: agent-release
+          path: release
+
+      - name: Publish versioned and latest installer
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(jq -r '.version' release/agent-version.json)"
+          test -n "$version"
+          test "$version" != "null"
+          installer="release/Yummi-LCU-Agent-${version}-setup.exe"
+          archive="release/tauri-${version}.zip"
+          test -s "$installer"
+          test -s "$archive"
+          cp "$installer" release/Yummi-LCU-Agent-latest-setup.exe
+
+          tag="v${version}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            gh release create "$tag" \
+              --target "$TARGET_SHA" \
+              --title "Yummi LCU Agent ${tag}" \
+              --notes "Stable Yummi LCU Agent release."
+          fi
+          gh release upload "$tag" \
+            "$installer" \
+            release/Yummi-LCU-Agent-latest-setup.exe \
+            "$archive" \
+            release/agent-version.json \
+            --clobber
+
   deploy:
     name: Deploy agent update files
     needs: build
