@@ -375,11 +375,8 @@ async def health() -> dict[str, str]:
 
 _AGENT_RELEASE_REPOSITORY = "Waitence7/YummiLCU"
 _AGENT_RELEASE_BASE = f"https://github.com/{_AGENT_RELEASE_REPOSITORY}/releases/download"
-_AGENT_RELEASE_CHANNEL_TAG = {
-    "stable": "agent-stable",
-    "beta": "agent-beta",
-    "dev": "agent-dev",
-}
+_AGENT_CHANNEL_TAG_CACHE_TTL_SEC = 300.0
+_agent_channel_tag_cache: dict[str, tuple[float, str]] = {}
 _AGENT_VERSION_RE = r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?"
 _AGENT_PROXY_ALLOWED_HOSTS = frozenset({
     "github.com",
@@ -395,19 +392,20 @@ def _agent_release_asset(path: str) -> tuple[str, str, str | None] | None:
     return the final asset body itself rather than a 30x response.
     """
     if path in {"/agent/version.json", "/agent/latest.json"}:
-        tag = _AGENT_RELEASE_CHANNEL_TAG["stable"]
-        return (f"{_AGENT_RELEASE_BASE}/{tag}/agent-version.json", "application/json", None)
-    if path in {"/agent/setup.exe", "/agent/latest", "/agent/releases/tauri/latest-setup.exe"}:
-        tag = _AGENT_RELEASE_CHANNEL_TAG["stable"]
         return (
-            f"{_AGENT_RELEASE_BASE}/{tag}/Yummi-LCU-Agent-latest-setup.exe",
+            f"https://github.com/{_AGENT_RELEASE_REPOSITORY}/releases/latest/download/agent-version.json",
+            "application/json",
+            None,
+        )
+    if path in {"/agent/setup.exe", "/agent/latest", "/agent/releases/tauri/latest-setup.exe"}:
+        return (
+            f"https://github.com/{_AGENT_RELEASE_REPOSITORY}/releases/latest/download/Yummi-LCU-Agent-latest-setup.exe",
             "application/octet-stream",
             'attachment; filename="Yummi-LCU-Agent-latest-setup.exe"',
         )
     if path == "/agent/YummiLcuTauri.zip":
-        tag = _AGENT_RELEASE_CHANNEL_TAG["stable"]
         return (
-            f"{_AGENT_RELEASE_BASE}/{tag}/tauri-latest.zip",
+            f"https://github.com/{_AGENT_RELEASE_REPOSITORY}/releases/latest/download/tauri-latest.zip",
             "application/zip",
             'attachment; filename="YummiLcuTauri.zip"',
         )
@@ -415,15 +413,13 @@ def _agent_release_asset(path: str) -> tuple[str, str, str | None] | None:
     manifest = re.fullmatch(r"/agent/releases/tauri/(beta|dev)/version\.json", path)
     if manifest:
         channel = manifest.group(1)
-        tag = _AGENT_RELEASE_CHANNEL_TAG[channel]
-        return (f"{_AGENT_RELEASE_BASE}/{tag}/agent-version.json", "application/json", None)
+        return (f"channel://{channel}/agent-version.json", "application/json", None)
 
     latest_installer = re.fullmatch(r"/agent/releases/tauri/(beta|dev)/latest-setup\.exe", path)
     if latest_installer:
         channel = latest_installer.group(1)
-        tag = _AGENT_RELEASE_CHANNEL_TAG[channel]
         return (
-            f"{_AGENT_RELEASE_BASE}/{tag}/Yummi-LCU-Agent-latest-setup.exe",
+            f"channel://{channel}/Yummi-LCU-Agent-latest-setup.exe",
             "application/octet-stream",
             f'attachment; filename="Yummi-LCU-Agent-{channel}-latest-setup.exe"',
         )
@@ -435,9 +431,13 @@ def _agent_release_asset(path: str) -> tuple[str, str, str | None] | None:
     if archive:
         channel = archive.group(1) or "stable"
         version = archive.group(2)
-        tag = f"v{version}" if channel == "stable" else _AGENT_RELEASE_CHANNEL_TAG[channel]
+        upstream = (
+            f"{_AGENT_RELEASE_BASE}/v{version}/tauri-{version}.zip"
+            if channel == "stable"
+            else f"channel://{channel}/tauri-{version}.zip"
+        )
         return (
-            f"{_AGENT_RELEASE_BASE}/{tag}/tauri-{version}.zip",
+            upstream,
             "application/zip",
             f'attachment; filename="tauri-{version}.zip"',
         )
@@ -449,13 +449,60 @@ def _agent_release_asset(path: str) -> tuple[str, str, str | None] | None:
     if installer:
         channel = installer.group(1) or "stable"
         version = installer.group(2)
-        tag = f"v{version}" if channel == "stable" else _AGENT_RELEASE_CHANNEL_TAG[channel]
+        upstream = (
+            f"{_AGENT_RELEASE_BASE}/v{version}/Yummi-LCU-Agent-{version}-setup.exe"
+            if channel == "stable"
+            else f"channel://{channel}/Yummi-LCU-Agent-{version}-setup.exe"
+        )
         return (
-            f"{_AGENT_RELEASE_BASE}/{tag}/Yummi-LCU-Agent-{version}-setup.exe",
+            upstream,
             "application/octet-stream",
             f'attachment; filename="Yummi-LCU-Agent-{version}-setup.exe"',
         )
     return None
+
+
+async def _agent_latest_prerelease_tag(request: Request, channel: str) -> str:
+    now = time.monotonic()
+    cached = _agent_channel_tag_cache.get(channel)
+    if cached and now - cached[0] < _AGENT_CHANNEL_TAG_CACHE_TTL_SEC:
+        return cached[1]
+
+    http: aiohttp.ClientSession = request.app.state.http
+    api_url = f"https://api.github.com/repos/{_AGENT_RELEASE_REPOSITORY}/releases?per_page=30"
+    try:
+        async with http.get(
+            api_url,
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "Yummi-LCU-Relay/1.0",
+            },
+            allow_redirects=False,
+        ) as response:
+            if response.status != 200:
+                raise HTTPException(502, "agent release index unavailable")
+            releases = await response.json()
+    except aiohttp.ClientError as exc:
+        raise HTTPException(502, "agent release index unavailable") from exc
+
+    pattern = re.compile(rf"^v{_AGENT_VERSION_RE}-{re.escape(channel)}\.[0-9]+$")
+    for release in releases if isinstance(releases, list) else []:
+        tag = str(release.get("tag_name") or "")
+        if release.get("prerelease") is True and pattern.fullmatch(tag):
+            _agent_channel_tag_cache[channel] = (now, tag)
+            return tag
+    raise HTTPException(404, f"{channel} agent release not published")
+
+
+async def _agent_resolve_upstream(request: Request, upstream: str) -> str:
+    if not upstream.startswith("channel://"):
+        return upstream
+    _, remainder = upstream.split("channel://", 1)
+    channel, asset_name = remainder.split("/", 1)
+    if channel not in {"beta", "dev"}:
+        raise HTTPException(404, "agent channel not found")
+    tag = await _agent_latest_prerelease_tag(request, channel)
+    return f"{_AGENT_RELEASE_BASE}/{tag}/{asset_name}"
 
 
 async def _agent_proxy_response(request: Request, path: str) -> Response:
@@ -463,6 +510,7 @@ async def _agent_proxy_response(request: Request, path: str) -> Response:
     if asset is None:
         raise HTTPException(404, "agent asset not found")
     upstream_url, media_type, disposition = asset
+    upstream_url = await _agent_resolve_upstream(request, upstream_url)
     http: aiohttp.ClientSession = request.app.state.http
     try:
         upstream = await http.request(request.method, upstream_url, allow_redirects=True)

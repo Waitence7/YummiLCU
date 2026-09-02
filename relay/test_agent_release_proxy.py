@@ -9,7 +9,7 @@ class AgentReleaseProxyMappingTests(unittest.TestCase):
         self.assertIsNotNone(asset)
         self.assertEqual(
             asset[0],
-            "https://github.com/Waitence7/YummiLCU/releases/download/agent-stable/agent-version.json",
+            "https://github.com/Waitence7/YummiLCU/releases/latest/download/agent-version.json",
         )
         self.assertEqual(asset[1], "application/json")
 
@@ -26,8 +26,8 @@ class AgentReleaseProxyMappingTests(unittest.TestCase):
         dev = _agent_release_asset("/agent/releases/tauri/dev/latest-setup.exe")
         self.assertIsNotNone(beta)
         self.assertIsNotNone(dev)
-        self.assertIn("/agent-beta/agent-version.json", beta[0])
-        self.assertIn("/agent-dev/Yummi-LCU-Agent-latest-setup.exe", dev[0])
+        self.assertEqual(beta[0], "channel://beta/agent-version.json")
+        self.assertEqual(dev[0], "channel://dev/Yummi-LCU-Agent-latest-setup.exe")
 
     def test_legacy_paths_remain_supported(self):
         self.assertIsNotNone(_agent_release_asset("/agent/setup.exe"))
