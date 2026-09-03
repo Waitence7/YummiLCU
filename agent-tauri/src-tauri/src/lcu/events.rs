@@ -2,7 +2,7 @@ use futures_util::SinkExt;
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, watch};
@@ -47,6 +47,7 @@ pub(crate) struct LcuEventPoller {
     party: Option<String>,
     participant: Option<String>,
     live_game: Option<String>,
+    live_respawn_samples: HashMap<String, u8>,
     last_live_game_poll: Option<Instant>,
     // None keeps legacy agents compatible until Relay sends the first control message.
     live_game_polling: Option<bool>,
@@ -74,6 +75,7 @@ impl LcuEventPoller {
         self.champ_select = None;
         self.party = None;
         self.participant = None;
+        self.live_respawn_samples.clear();
         self.eog_sent = false;
         self.last_eog_attempt = None;
         self.lcu_available = None;
@@ -112,6 +114,7 @@ impl LcuEventPoller {
             if !enabled {
                 self.live_game = None;
                 self.live_game_id = None;
+                self.live_respawn_samples.clear();
             }
         }
     }
@@ -277,6 +280,7 @@ impl LcuEventPoller {
                                 .map(Value::to_string)
                                 .unwrap_or_else(|| "unknown".into());
                             if self.live_game_id.as_deref() != Some(game_id.as_str()) {
+                                self.live_respawn_samples.clear();
                                 self.diagnostic(format!(
                                     "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건, active_player={}",
                                     payload
@@ -297,13 +301,14 @@ impl LcuEventPoller {
                             }
                             push_changed(
                                 &mut self.live_game,
-                                live_game_fingerprint(&payload),
+                                live_game_fingerprint(&payload, &mut self.live_respawn_samples),
                                 "live_game_update",
                                 payload,
                                 &mut events,
                             );
                         } else {
                             self.live_game = None;
+                            self.live_respawn_samples.clear();
                         }
                     }
                     Err(error) => {
@@ -948,12 +953,125 @@ fn wall_clock_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn live_game_fingerprint(value: &Value) -> String {
+fn live_game_fingerprint(
+    value: &Value,
+    respawn_samples: &mut HashMap<String, u8>,
+) -> String {
     let mut stable = value.clone();
     if let Some(object) = stable.as_object_mut() {
+        // Wall-clock / continuously advancing game clock values must not make an
+        // otherwise identical live state look changed. The original payload still
+        // carries these timestamps when a meaningful state change is emitted.
         object.remove("captured_at_ms");
+        object.remove("match_created_at_ms");
+
+        // active_player is local-Agent-only data (not shared match state), and its
+        // continuously changing current_gold would otherwise force an update almost
+        // every poll. Keep it in the transmitted payload, but ignore it for dedupe.
+        object.remove("active_player");
+
+        if let Some(game) = object.get_mut("game").and_then(Value::as_object_mut) {
+            game.remove("time_seconds");
+            game.remove("game_time");
+        }
+
+        if let Some(participants) = object
+            .get_mut("participants")
+            .and_then(Value::as_array_mut)
+        {
+            let mut alive_keys = Vec::new();
+            for (index, participant) in participants.iter_mut().enumerate() {
+                let Some(row) = participant.as_object_mut() else {
+                    continue;
+                };
+                let key = participant_fingerprint_key(row, index);
+                let is_dead = row
+                    .get("is_dead")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+
+                // ward_score and creep_score remain in emitted payloads, but changes
+                // to either value alone are too noisy to trigger a network update.
+                // Item slot/order/metadata changes are also ignored for dedupe; only
+                // the item id + count multiset is fingerprinted.
+                row.remove("ward_score");
+                row.remove("creep_score");
+                normalize_live_items(row);
+
+                // respawn_timer is a continuously decreasing float. Preserve exactly
+                // two post-death samples in the outgoing payload, but dedupe on a
+                // bounded sample phase (1 -> 2 -> 2...) so the countdown itself does
+                // not cause endless updates. is_dead still catches the actual revive.
+                row.remove("respawn_timer");
+                if is_dead {
+                    let sample = respawn_samples.entry(key).or_insert(0);
+                    *sample = (*sample + 1).min(2);
+                    row.insert(
+                        "respawn_sample_phase".to_string(),
+                        Value::from(*sample),
+                    );
+                } else {
+                    alive_keys.push(key);
+                }
+            }
+            for key in alive_keys {
+                respawn_samples.remove(&key);
+            }
+        }
     }
     fingerprint(&stable)
+}
+
+fn participant_fingerprint_key(
+    participant: &serde_json::Map<String, Value>,
+    index: usize,
+) -> String {
+    for field in ["riot_id", "summoner_name", "riot_id_game_name"] {
+        if let Some(value) = participant
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return format!("{field}:{value}");
+        }
+    }
+    format!("index:{index}")
+}
+
+fn normalize_live_items(participant: &mut serde_json::Map<String, Value>) {
+    let Some(items) = participant.get_mut("items").and_then(Value::as_array_mut) else {
+        return;
+    };
+
+    let mut normalized = items
+        .iter()
+        .map(|item| {
+            let id = item
+                .get("item_id")
+                .filter(|value| !value.is_null())
+                .or_else(|| item.get("id"))
+                .cloned()
+                .unwrap_or(Value::Null);
+            let count = item
+                .get("count")
+                .cloned()
+                .unwrap_or_else(|| Value::from(1));
+            json!({"id": id, "count": count})
+        })
+        .collect::<Vec<_>>();
+
+    normalized.sort_by_cached_key(|item| {
+        (
+            item.get("id")
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            item.get("count")
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+        )
+    });
+    *items = normalized;
 }
 
 fn ready_check_payload(value: &Value) -> Value {
@@ -1900,12 +2018,243 @@ mod tests {
     }
 
     #[test]
-    fn live_game_fingerprint_ignores_capture_timestamp() {
-        let first = json!({"captured_at_ms": 1, "game": {"id": 42}});
-        let second = json!({"captured_at_ms": 2, "game": {"id": 42}});
+    fn live_game_fingerprint_ignores_only_advancing_clock_fields() {
+        let first = json!({
+            "captured_at_ms": 1_000,
+            "match_created_at_ms": 500,
+            "game": {"id": 42, "time_seconds": 500.1, "game_time": 500.1},
+            "participants": [{"kills": 1, "deaths": 0, "assists": 2, "gold": 4200}],
+            "events": [{"id": 7, "name": "ChampionKill", "time_seconds": 499.9}]
+        });
+        let second = json!({
+            "captured_at_ms": 2_000,
+            "match_created_at_ms": 501,
+            "game": {"id": 42, "time_seconds": 501.1, "game_time": 501.1},
+            "participants": [{"kills": 1, "deaths": 0, "assists": 2, "gold": 4200}],
+            "events": [{"id": 7, "name": "ChampionKill", "time_seconds": 499.9}]
+        });
         assert_eq!(
-            live_game_fingerprint(&first),
-            live_game_fingerprint(&second)
+            live_game_fingerprint(&first, &mut HashMap::new()),
+            live_game_fingerprint(&second, &mut HashMap::new())
         );
     }
+
+    #[test]
+    fn live_game_fingerprint_changes_for_meaningful_state_updates() {
+        let baseline = json!({
+            "captured_at_ms": 1_000,
+            "game": {"id": 42, "time_seconds": 500.1},
+            "participants": [{"kills": 1, "deaths": 0, "assists": 2, "gold": 4200}],
+            "events": []
+        });
+        let kda_changed = json!({
+            "captured_at_ms": 2_000,
+            "game": {"id": 42, "time_seconds": 501.1},
+            "participants": [{"kills": 2, "deaths": 0, "assists": 2, "gold": 4200}],
+            "events": []
+        });
+        let event_changed = json!({
+            "captured_at_ms": 2_000,
+            "game": {"id": 42, "time_seconds": 501.1},
+            "participants": [{"kills": 1, "deaths": 0, "assists": 2, "gold": 4200}],
+            "events": [{"id": 8, "name": "ChampionKill", "time_seconds": 500.8}]
+        });
+        assert_ne!(
+            live_game_fingerprint(&baseline, &mut HashMap::new()),
+            live_game_fingerprint(&kda_changed, &mut HashMap::new())
+        );
+        assert_ne!(
+            live_game_fingerprint(&baseline, &mut HashMap::new()),
+            live_game_fingerprint(&event_changed, &mut HashMap::new())
+        );
+    }
+    #[test]
+    fn live_game_fingerprint_ignores_active_player_changes() {
+        let mut samples = HashMap::new();
+        let first = json!({
+            "game": {"id": 42},
+            "active_player": {"current_gold": 100.0, "level": 5},
+            "participants": []
+        });
+        let second = json!({
+            "game": {"id": 42},
+            "active_player": {"current_gold": 123.4, "level": 6},
+            "participants": []
+        });
+        assert_eq!(
+            live_game_fingerprint(&first, &mut samples),
+            live_game_fingerprint(&second, &mut samples)
+        );
+    }
+
+    #[test]
+    fn live_game_fingerprint_ignores_ward_score_changes() {
+        let first = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "ward_score": 1.25,
+                "creep_score": 40
+            }]
+        });
+        let second = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "ward_score": 99.75,
+                "creep_score": 40
+            }]
+        });
+
+        assert_eq!(
+            live_game_fingerprint(&first, &mut HashMap::new()),
+            live_game_fingerprint(&second, &mut HashMap::new())
+        );
+    }
+
+    #[test]
+    fn live_game_fingerprint_ignores_creep_score_changes() {
+        let first = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "creep_score": 40,
+                "kills": 1
+            }]
+        });
+        let second = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "creep_score": 130,
+                "kills": 1
+            }]
+        });
+
+        assert_eq!(
+            live_game_fingerprint(&first, &mut HashMap::new()),
+            live_game_fingerprint(&second, &mut HashMap::new())
+        );
+    }
+
+    #[test]
+    fn live_game_fingerprint_normalizes_item_slot_order_and_metadata() {
+        let first = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "items": [
+                    {"id": 1056, "item_id": 1056, "count": 1, "slot": 0, "name": "A", "price": 400, "can_use": false},
+                    {"id": 2003, "item_id": 2003, "count": 2, "slot": 1, "name": "Potion", "price": 50, "can_use": true}
+                ]
+            }]
+        });
+        let second = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "items": [
+                    {"id": 2003, "item_id": 2003, "count": 2, "slot": 5, "name": "Changed", "price": 999, "can_use": false},
+                    {"id": 1056, "item_id": 1056, "count": 1, "slot": 3, "name": "Changed", "price": 0, "can_use": true}
+                ]
+            }]
+        });
+
+        assert_eq!(
+            live_game_fingerprint(&first, &mut HashMap::new()),
+            live_game_fingerprint(&second, &mut HashMap::new())
+        );
+    }
+
+    #[test]
+    fn live_game_fingerprint_detects_item_id_or_count_changes() {
+        let baseline = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "items": [{"id": 1056, "item_id": 1056, "count": 1, "slot": 0}]
+            }]
+        });
+        let id_changed = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "items": [{"id": 1052, "item_id": 1052, "count": 1, "slot": 0}]
+            }]
+        });
+        let count_changed = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "items": [{"id": 1056, "item_id": 1056, "count": 2, "slot": 0}]
+            }]
+        });
+
+        let baseline_fp = live_game_fingerprint(&baseline, &mut HashMap::new());
+        assert_ne!(
+            baseline_fp,
+            live_game_fingerprint(&id_changed, &mut HashMap::new())
+        );
+        assert_ne!(
+            baseline_fp,
+            live_game_fingerprint(&count_changed, &mut HashMap::new())
+        );
+    }
+
+    #[test]
+    fn live_game_fingerprint_sends_two_respawn_samples_then_ignores_countdown() {
+        let mut samples = HashMap::new();
+        let dead = |timer| json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "is_dead": true,
+                "deaths": 1,
+                "respawn_timer": timer
+            }],
+            "events": []
+        });
+
+        let first = live_game_fingerprint(&dead(30.5), &mut samples);
+        let second = live_game_fingerprint(&dead(29.5), &mut samples);
+        let third = live_game_fingerprint(&dead(28.5), &mut samples);
+        let fourth = live_game_fingerprint(&dead(27.5), &mut samples);
+
+        assert_ne!(first, second);
+        assert_eq!(second, third);
+        assert_eq!(third, fourth);
+    }
+
+    #[test]
+    fn live_game_fingerprint_revive_resets_respawn_sampling() {
+        let mut samples = HashMap::new();
+        let dead = |timer, deaths| json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "is_dead": true,
+                "deaths": deaths,
+                "respawn_timer": timer
+            }]
+        });
+        let alive = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "is_dead": false,
+                "deaths": 1,
+                "respawn_timer": 0
+            }]
+        });
+
+        let _ = live_game_fingerprint(&dead(30.0, 1), &mut samples);
+        let second_dead = live_game_fingerprint(&dead(29.0, 1), &mut samples);
+        let revived = live_game_fingerprint(&alive, &mut samples);
+        assert_ne!(second_dead, revived);
+
+        let next_death_first = live_game_fingerprint(&dead(35.0, 2), &mut samples);
+        let next_death_second = live_game_fingerprint(&dead(34.0, 2), &mut samples);
+        assert_ne!(next_death_first, next_death_second);
+    }
+
 }
