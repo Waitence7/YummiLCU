@@ -788,6 +788,43 @@ async def _resolve_discord_join_riot_id(
     return "resolved", riot_id.strip()
 
 
+def _eog_log_context(payload: dict[str, Any], event_id: str | None = None) -> dict[str, Any]:
+    diagnostics = payload.get("eogDiagnostics")
+    if not isinstance(diagnostics, dict):
+        diagnostics = {}
+    participants = payload.get("participants")
+    recent_match = payload.get("recentMatch")
+    recent_participants = recent_match.get("participants") if isinstance(recent_match, dict) else None
+    return {
+        "event_id": event_id,
+        "phase": payload.get("gameflowPhase"),
+        "game_id": payload.get("gameId"),
+        "expected_game_id": payload.get("expectedGameId"),
+        "attempt": diagnostics.get("attempt"),
+        "recovery_age_ms": diagnostics.get("recoveryAgeMs"),
+        "eog_status": diagnostics.get("eogRequestStatus"),
+        "eog_error": diagnostics.get("eogRequestError"),
+        "session_status": diagnostics.get("sessionRequestStatus"),
+        "recent_status": diagnostics.get("recentMatchRequestStatus"),
+        "recent_error": diagnostics.get("recentMatchRequestError"),
+        "recent_game_id": diagnostics.get("recentMatchGameId"),
+        "participants": len(participants) if isinstance(participants, list) else 0,
+        "recent_participants": len(recent_participants) if isinstance(recent_participants, list) else 0,
+        "evidence": diagnostics.get("evidenceSource"),
+        "usable": diagnostics.get("usableEvidence"),
+        "none_reason": payload.get("eog_none_reason"),
+    }
+
+
+def _eog_log_json(payload: dict[str, Any], event_id: str | None = None) -> str:
+    return json.dumps(
+        _eog_log_context(payload, event_id),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
 async def _forward_guild_match_eog(
     http: aiohttp.ClientSession,
     discord_id: int,
@@ -797,7 +834,11 @@ async def _forward_guild_match_eog(
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
     if not token:
-        logger.warning("TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — 내전 LCU 전송 생략")
+        logger.warning(
+            "TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — 내전 LCU 전송 생략 discord_id=%s context=%s",
+            discord_id,
+            _eog_log_json(payload, event_id),
+        )
         return False
 
     url = f"{api_base}/api/bot/guild-match/lcu-ingest"
@@ -811,9 +852,10 @@ async def _forward_guild_match_eog(
         async with http.post(url, headers=headers, json=body) as res:
             if res.status >= 400:
                 logger.warning(
-                    "내전 LCU ingest 실패 discord_id=%s status=%s",
+                    "내전 LCU ingest 실패 discord_id=%s status=%s context=%s",
                     discord_id,
                     res.status,
+                    _eog_log_json(payload, event_id),
                 )
                 return False
             try:
@@ -824,15 +866,26 @@ async def _forward_guild_match_eog(
             if not matched:
                 reason = outcome.get("reason") if isinstance(outcome, dict) else "invalid_response"
                 logger.warning(
-                    "내전 LCU ingest 미매칭 — ACK 보류 discord_id=%s reason=%s",
+                    "내전 LCU ingest 미매칭 — ACK 보류 discord_id=%s reason=%s outcome_match_id=%s context=%s",
                     discord_id,
                     reason,
+                    outcome.get("matchId") if isinstance(outcome, dict) else None,
+                    _eog_log_json(payload, event_id),
                 )
                 return False
-            logger.info("내전 LCU ingest OK discord_id=%s", discord_id)
+            logger.info(
+                "내전 LCU ingest OK discord_id=%s match_id=%s context=%s",
+                discord_id,
+                outcome.get("matchId") if isinstance(outcome, dict) else None,
+                _eog_log_json(payload, event_id),
+            )
             return True
     except Exception:
-        logger.exception("내전 LCU ingest 요청 실패 discord_id=%s", discord_id)
+        logger.exception(
+            "내전 LCU ingest 요청 실패 discord_id=%s context=%s",
+            discord_id,
+            _eog_log_json(payload, event_id),
+        )
         return False
 
 
@@ -908,7 +961,11 @@ async def _forward_match_eog(
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
     if not token:
-        logger.warning("TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — LCU 종료 매치 저장 생략")
+        logger.warning(
+            "TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — LCU 종료 매치 저장 생략 discord_id=%s context=%s",
+            discord_id,
+            _eog_log_json(payload, event_id),
+        )
         return False
 
     url = f"{api_base}/api/bot/lcu/matches/eog-ingest"
@@ -922,15 +979,24 @@ async def _forward_match_eog(
         async with http.post(url, headers=headers, json=body) as res:
             if res.status >= 400:
                 logger.warning(
-                    "LCU 종료 매치 저장 실패 discord_id=%s status=%s",
+                    "LCU 종료 매치 저장 실패 discord_id=%s status=%s context=%s",
                     discord_id,
                     res.status,
+                    _eog_log_json(payload, event_id),
                 )
                 return False
-            logger.info("LCU 종료 매치 저장 OK discord_id=%s", discord_id)
+            logger.info(
+                "LCU 종료 매치 저장 OK discord_id=%s context=%s",
+                discord_id,
+                _eog_log_json(payload, event_id),
+            )
             return True
     except Exception:
-        logger.exception("LCU 종료 매치 저장 요청 실패 discord_id=%s", discord_id)
+        logger.exception(
+            "LCU 종료 매치 저장 요청 실패 discord_id=%s context=%s",
+            discord_id,
+            _eog_log_json(payload, event_id),
+        )
         return False
 
 
@@ -1151,6 +1217,11 @@ async def _handle_agent_message(
             logger.warning("guild_match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return
         event_id = _relay_event_id(data)
+        logger.info(
+            "guild_match_eog 수신 discord_id=%s context=%s",
+            discord_id,
+            _eog_log_json(payload, event_id),
+        )
         http: aiohttp.ClientSession = websocket.app.state.http
         bot_pending = conn.register_pending_bot_eog(event_id) if event_id is not None else None
         bot_forwarded = await conn.forward_guild_match_eog(discord_id, payload, event_id)
@@ -1161,6 +1232,11 @@ async def _handle_agent_message(
             if event_id is not None:
                 conn.cancel_pending_bot_eog(event_id)
             await _ack_agent_event(websocket, event_id)
+            logger.info(
+                "guild_match_eog ACK direct-web discord_id=%s context=%s",
+                discord_id,
+                _eog_log_json(payload, event_id),
+            )
             return
 
         # Bot websocket 전달 성공은 영속화가 아닙니다. direct ingest가 실패한 경우
@@ -1176,6 +1252,19 @@ async def _handle_agent_message(
                 logger.warning("Bot EOG persistence ACK timeout event_id=%s", event_id)
         if bot_persisted:
             await _ack_agent_event(websocket, event_id)
+            logger.info(
+                "guild_match_eog ACK bot-persisted discord_id=%s context=%s",
+                discord_id,
+                _eog_log_json(payload, event_id),
+            )
+        else:
+            logger.warning(
+                "guild_match_eog ACK 보류 discord_id=%s bot_forwarded=%s web_persisted=%s context=%s",
+                discord_id,
+                bot_forwarded,
+                web_persisted,
+                _eog_log_json(payload, event_id),
+            )
         return
 
     if msg_type == "match_eog":
@@ -1185,10 +1274,26 @@ async def _handle_agent_message(
             logger.warning("match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return
         event_id = _relay_event_id(data)
+        logger.info(
+            "match_eog 수신 discord_id=%s context=%s",
+            discord_id,
+            _eog_log_json(payload, event_id),
+        )
         http: aiohttp.ClientSession = websocket.app.state.http
         forwarded = await _forward_match_eog(http, discord_id, payload, event_id)
         if forwarded:
             await _ack_agent_event(websocket, event_id)
+            logger.info(
+                "match_eog ACK archive-persisted discord_id=%s context=%s",
+                discord_id,
+                _eog_log_json(payload, event_id),
+            )
+        else:
+            logger.warning(
+                "match_eog ACK 보류 discord_id=%s context=%s",
+                discord_id,
+                _eog_log_json(payload, event_id),
+            )
         return
 
     if msg_type == "discord_presence_context_request":
