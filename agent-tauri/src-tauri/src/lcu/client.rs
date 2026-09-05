@@ -485,42 +485,106 @@ fn validate_lcu_process(_: &Path, _: u32) -> AgentResult<()> {
 }
 
 async fn read_json_response(request: RequestBuilder, service: &str) -> AgentResult<Value> {
-    let response = request
-        .send()
-        .await
-        .map_err(|_| AgentError::Lcu(format!("{service} 요청 실패")))?;
+    let response = request.send().await.map_err(|error| {
+        AgentError::Lcu(format!(
+            "{service} 요청 실패 ({})",
+            reqwest_error_kind(&error)
+        ))
+    })?;
     let status = response.status();
     if response
         .content_length()
         .is_some_and(|length| length > MAX_LCU_RESPONSE_BYTES as u64)
     {
-        return Err(AgentError::Lcu(format!("{service} 응답이 너무 큽니다.")));
+        return Err(AgentError::Lcu(format!(
+            "{service} 응답이 너무 큽니다. (HTTP {status})"
+        )));
     }
     let mut body = Vec::new();
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.map_err(|_| AgentError::Lcu(format!("{service} 응답 읽기 실패")))?;
+        let chunk = chunk.map_err(|error| {
+            AgentError::Lcu(format!(
+                "{service} 응답 읽기 실패 (HTTP {status}, {})",
+                reqwest_error_kind(&error)
+            ))
+        })?;
         if body.len().saturating_add(chunk.len()) > MAX_LCU_RESPONSE_BYTES {
-            return Err(AgentError::Lcu(format!("{service} 응답이 너무 큽니다.")));
+            return Err(AgentError::Lcu(format!(
+                "{service} 응답이 너무 큽니다. (HTTP {status})"
+            )));
         }
         body.extend_from_slice(&chunk);
     }
     if !status.is_success() {
+        let detail = compact_lcu_error_detail(&body)
+            .map(|detail| format!(", {detail}"))
+            .unwrap_or_default();
         return Err(AgentError::Lcu(format!(
-            "{service} 요청 실패 (HTTP {status})"
+            "{service} 요청 실패 (HTTP {status}{detail})"
         )));
     }
     if body.is_empty() {
         return Ok(Value::Null);
     }
     let value: Value = serde_json::from_slice(&body)
-        .map_err(|_| AgentError::Lcu(format!("{service} 응답 형식 오류")))?;
+        .map_err(|_| AgentError::Lcu(format!("{service} 응답 형식 오류 (HTTP {status})")))?;
     if is_lcu_error_envelope(&value) {
+        let detail = compact_lcu_error_detail(&body)
+            .map(|detail| format!(": {detail}"))
+            .unwrap_or_default();
         return Err(AgentError::Lcu(format!(
-            "{service} 요청 실패 (LCU 오류 응답)"
+            "{service} 요청 실패 (LCU 오류 응답){detail}"
         )));
     }
     Ok(value)
+}
+
+fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
+    if error.is_timeout() {
+        "timeout"
+    } else if error.is_connect() {
+        "connect"
+    } else if error.is_request() {
+        "request"
+    } else if error.is_body() {
+        "body"
+    } else if error.is_decode() {
+        "decode"
+    } else {
+        "transport"
+    }
+}
+
+fn compact_lcu_error_detail(body: &[u8]) -> Option<String> {
+    let value: Value = serde_json::from_slice(body).ok()?;
+    let object = value.as_object()?;
+    let mut fields = Vec::new();
+    for key in ["errorCode", "httpStatus", "message"] {
+        let Some(value) = object.get(key) else {
+            continue;
+        };
+        let rendered = match value {
+            Value::String(value) => sanitize_lcu_error_text(value),
+            Value::Number(value) => value.to_string(),
+            Value::Bool(value) => value.to_string(),
+            _ => continue,
+        };
+        if !rendered.is_empty() {
+            fields.push(format!("{key}={rendered}"));
+        }
+    }
+    (!fields.is_empty()).then(|| fields.join(" "))
+}
+
+fn sanitize_lcu_error_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(160)
+        .collect()
 }
 
 fn is_lcu_error_envelope(value: &Value) -> bool {
@@ -644,6 +708,18 @@ mod tests {
         assert!(!is_lcu_error_envelope(&json!({"httpStatus":204})));
         assert!(!is_lcu_error_envelope(&json!({"phase":"Lobby"})));
         assert!(!is_lcu_error_envelope(&Value::Null));
+    }
+
+    #[test]
+    fn lcu_error_details_are_bounded_and_structured() {
+        let detail = compact_lcu_error_detail(
+            br#"{"errorCode":"RPC_ERROR","httpStatus":404,"message":"  stats   not ready  "}"#,
+        )
+        .unwrap();
+        assert!(detail.contains("errorCode=RPC_ERROR"));
+        assert!(detail.contains("httpStatus=404"));
+        assert!(detail.contains("message=stats not ready"));
+        assert!(sanitize_lcu_error_text(&"x".repeat(500)).len() <= 160);
     }
 
     #[test]
