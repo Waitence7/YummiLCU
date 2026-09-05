@@ -19,7 +19,7 @@ use crate::{
     diagnostics::FlightRecorder,
     lcu::LcuConnectionState,
     relay::{
-        protocol::UnexpectedErrorReport,
+        protocol::{UnexpectedErrorReport, UpdateDiagnosticReport},
         supervisor::{RelayConnectionState, RelaySupervisor},
     },
 };
@@ -120,6 +120,7 @@ pub(crate) struct AppState {
     lcu_state: RwLock<LcuConnectionState>,
     shutdown: watch::Sender<bool>,
     unexpected_errors: broadcast::Sender<UnexpectedErrorReport>,
+    update_diagnostics: broadcast::Sender<UpdateDiagnosticReport>,
     discord_join_requests: broadcast::Sender<u64>,
     discord_join_resolutions: broadcast::Sender<DiscordJoinResolution>,
     discord_presence_context_requests: broadcast::Sender<()>,
@@ -131,6 +132,7 @@ impl AppState {
     pub(crate) fn new(config: Config) -> Self {
         let (shutdown, _) = watch::channel(false);
         let (unexpected_errors, _) = broadcast::channel(ERROR_REPORT_QUEUE_CAPACITY);
+        let (update_diagnostics, _) = broadcast::channel(ERROR_REPORT_QUEUE_CAPACITY);
         let (discord_join_requests, _) =
             broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
         let (discord_join_resolutions, _) =
@@ -146,6 +148,7 @@ impl AppState {
             lcu_state: RwLock::new(LcuConnectionState::ClientStopped),
             shutdown,
             unexpected_errors,
+            update_diagnostics,
             discord_join_requests,
             discord_join_resolutions,
             discord_presence_context_requests,
@@ -294,6 +297,24 @@ impl AppState {
 
     pub(crate) fn unexpected_error_receiver(&self) -> broadcast::Receiver<UnexpectedErrorReport> {
         self.unexpected_errors.subscribe()
+    }
+
+    pub(crate) fn update_diagnostic_receiver(&self) -> broadcast::Receiver<UpdateDiagnosticReport> {
+        self.update_diagnostics.subscribe()
+    }
+
+    pub(crate) async fn report_update_diagnostic(
+        &self,
+        stage: &'static str,
+        detail: impl AsRef<str>,
+        target_version: Option<String>,
+    ) {
+        let detail = sanitize_error_summary(detail.as_ref());
+        self.record_flight("updater", format!("{stage}: {detail}"))
+            .await;
+        let _ = self
+            .update_diagnostics
+            .send(UpdateDiagnosticReport::new(stage, detail, target_version));
     }
 
     pub(crate) fn discord_join_request_receiver(&self) -> broadcast::Receiver<u64> {

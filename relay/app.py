@@ -60,6 +60,7 @@ _SERVER_CAPABILITIES = frozenset({
     "eog_events",
     "live_game_events",
     "unexpected_error_reports",
+    "update_diagnostics",
 })
 
 _AGENT_ERROR_COMPONENTS = frozenset({
@@ -1134,6 +1135,59 @@ def _agent_error_report(data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+_AGENT_UPDATE_STAGES = frozenset({
+    "update_check",
+    "update_available",
+    "blocked",
+    "download_start",
+    "download_success",
+    "install_start",
+    "install_success",
+    "failure",
+})
+
+
+def _agent_update_report(data: dict[str, Any]) -> dict[str, Any] | None:
+    report_id = data.get("report_id")
+    occurred_at_ms = data.get("occurred_at_ms")
+    stage = data.get("stage")
+    detail = data.get("detail")
+    target_version = data.get("target_version")
+    if (
+        not isinstance(report_id, str)
+        or not isinstance(occurred_at_ms, int)
+        or isinstance(occurred_at_ms, bool)
+        or occurred_at_ms <= 0
+        or stage not in _AGENT_UPDATE_STAGES
+        or not isinstance(detail, str)
+        or not detail.strip()
+        or len(detail) > 512
+        or (target_version is not None and (not isinstance(target_version, str) or len(target_version) > 64))
+    ):
+        return None
+    try:
+        report_id = str(uuid.UUID(report_id))
+    except ValueError:
+        return None
+    metadata = {}
+    for field, limit in {
+        "app_version": 64, "release_label": 128, "release_channel": 32,
+        "build_id": 128, "git_commit": 128,
+    }.items():
+        value = data.get(field)
+        if not isinstance(value, str) or not value or len(value) > limit or not value.isascii():
+            return None
+        metadata[field] = value
+    return {
+        "report_id": report_id,
+        "occurred_at_ms": occurred_at_ms,
+        "stage": stage,
+        "detail": redact_log_text(" ".join(detail.split())),
+        "target_version": target_version,
+        **metadata,
+    }
+
+
 def _should_accept_agent_error(discord_id: int, report: dict[str, Any]) -> bool:
     now = time.monotonic()
     fingerprint = "|".join((
@@ -1170,6 +1224,19 @@ async def _handle_agent_message(
         return
 
     msg_type = data.get("type")
+    if msg_type == "agent_update_report":
+        discord_id = conn.discord_id_for_ws(websocket)
+        report = _agent_update_report(data)
+        if discord_id is None or report is None:
+            return
+        logger.info(
+            "Agent update diagnostic discord_id=%s stage=%s version=%s target=%s release=%s channel=%s build=%s commit=%s occurred_at_ms=%s detail=%s",
+            discord_id, report["stage"], report["app_version"], report["target_version"] or "-",
+            report["release_label"], report["release_channel"], report["build_id"],
+            report["git_commit"], report["occurred_at_ms"], report["detail"],
+        )
+        return
+
     if msg_type == "agent_error_report":
         discord_id = conn.discord_id_for_ws(websocket)
         report = _agent_error_report(data)

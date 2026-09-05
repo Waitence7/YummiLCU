@@ -10,6 +10,7 @@ from relay.app import (
     MAX_WS_AUTH_MESSAGE_BYTES,
     _agent_hello_info,
     _agent_error_report,
+    _agent_update_report,
     _agent_error_last_by_discord,
     _agent_error_recent,
     _handle_agent_message,
@@ -77,6 +78,31 @@ class AgentHelloTests(unittest.TestCase):
         self.assertFalse(info["lcu_ready"])
         self.assertEqual(info["protocol_version"], 0)
         self.assertEqual(info["capabilities"], {"runes": True})
+
+    def test_agent_update_report_is_bounded_and_redacted(self) -> None:
+        report = _agent_update_report({
+            "type": "agent_update_report",
+            "report_id": "123e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 1,
+            "stage": "blocked",
+            "detail": "gameflow_phase=WaitingForStats token=secret",
+            "target_version": "0.7.6",
+            "app_version": "0.7.4",
+            "release_label": "0.7.4",
+            "release_channel": "stable",
+            "build_id": "build-1",
+            "git_commit": "abc123",
+        })
+        self.assertIsNotNone(report)
+        self.assertEqual(report["stage"], "blocked")
+        self.assertEqual(report["target_version"], "0.7.6")
+        self.assertNotIn("secret", report["detail"])
+        self.assertIsNone(_agent_update_report({
+            "report_id": "123e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 1,
+            "stage": "unknown",
+            "detail": "x",
+        }))
 
     def test_agent_error_report_is_strictly_bounded_and_redacted(self) -> None:
         report = _agent_error_report({

@@ -260,6 +260,7 @@ impl RelaySupervisor {
         let task_state = state.clone();
         let task_app = app.clone();
         let error_reports = state.unexpected_error_receiver();
+        let update_reports = state.update_diagnostic_receiver();
         let discord_join_requests = state.discord_join_request_receiver();
         let discord_presence_context_requests =
             state.discord_presence_context_request_receiver();
@@ -599,6 +600,7 @@ async fn connect_once(
     let mut session_bound = false;
     let mut durable_replay_enabled = false;
     let mut unexpected_error_reports_enabled = false;
+    let mut update_diagnostics_enabled = false;
     let (lcu_poll_worker, mut lcu_poll_rx) = LcuPollWorker::start(Arc::clone(state));
     let mut lcu_socket_watch: Option<LcuSocketWatch> = None;
 
@@ -653,6 +655,8 @@ async fn connect_once(
                                     && capabilities.get("durable_event_replay") == Some(&true);
                                 unexpected_error_reports_enabled = *protocol_version >= 1
                                     && capabilities.get("unexpected_error_reports") == Some(&true);
+                                update_diagnostics_enabled = *protocol_version >= 1
+                                    && capabilities.get("update_diagnostics") == Some(&true);
                                 state
                                     .record_flight(
                                         "protocol",
@@ -774,6 +778,21 @@ async fn connect_once(
                 let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
                 if replayed > 0 {
                     state.log(app, format!("ACK 대기 EOG 이벤트 {replayed}건 재전송")).await;
+                }
+            }
+            report = update_reports.recv(), if session_bound && update_diagnostics_enabled => {
+                match report {
+                    Ok(report) => {
+                        let message = serde_json::to_string(&report)?;
+                        websocket.send(Message::Text(message.into())).await
+                            .map_err(|_| AgentError::Relay("업데이트 진단 전송 실패".into()))?;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        state.record_flight("updater", format!("diagnostic_queue_lagged skipped={skipped}")).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(AgentError::Relay("업데이트 진단 큐가 종료되었습니다.".into()));
+                    }
                 }
             }
             report = error_reports.recv(), if session_bound && unexpected_error_reports_enabled => {

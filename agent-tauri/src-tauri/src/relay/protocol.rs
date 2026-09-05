@@ -321,6 +321,7 @@ pub(crate) struct AgentCapabilities {
     eog_events: bool,
     live_game_events: bool,
     unexpected_error_reports: bool,
+    update_diagnostics: bool,
 }
 
 impl AgentCapabilities {
@@ -346,6 +347,7 @@ impl AgentCapabilities {
             eog_events: true,
             live_game_events: true,
             unexpected_error_reports: true,
+            update_diagnostics: true,
         }
     }
 }
@@ -364,6 +366,44 @@ pub(crate) struct UnexpectedErrorReport {
     release_channel: &'static str,
     build_id: &'static str,
     git_commit: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct UpdateDiagnosticReport {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    report_id: String,
+    occurred_at_ms: u64,
+    stage: &'static str,
+    detail: String,
+    target_version: Option<String>,
+    app_version: &'static str,
+    release_label: &'static str,
+    release_channel: &'static str,
+    build_id: &'static str,
+    git_commit: &'static str,
+}
+
+impl UpdateDiagnosticReport {
+    pub(crate) fn new(stage: &'static str, detail: String, target_version: Option<String>) -> Self {
+        let occurred_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self {
+            message_type: "agent_update_report",
+            report_id: Uuid::new_v4().to_string(),
+            occurred_at_ms,
+            stage,
+            detail,
+            target_version,
+            app_version: env!("CARGO_PKG_VERSION"),
+            release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(env!("CARGO_PKG_VERSION")),
+            release_channel: option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable"),
+            build_id: option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
+            git_commit: option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
+        }
+    }
 }
 
 impl UnexpectedErrorReport {
@@ -648,6 +688,21 @@ mod tests {
         assert_eq!(value["capabilities"]["party_events"], true);
         assert_eq!(value["capabilities"]["live_game_events"], true);
         assert_eq!(value["capabilities"]["unexpected_error_reports"], true);
+        assert_eq!(value["capabilities"]["update_diagnostics"], true);
+    }
+
+    #[test]
+    fn update_diagnostic_report_contains_bounded_stage_metadata() {
+        let value = serde_json::to_value(UpdateDiagnosticReport::new(
+            "blocked",
+            "gameflow_phase=WaitingForStats".into(),
+            Some("0.7.6".into()),
+        ))
+        .unwrap();
+        assert_eq!(value["type"], "agent_update_report");
+        assert_eq!(value["stage"], "blocked");
+        assert_eq!(value["target_version"], "0.7.6");
+        assert_eq!(value["app_version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

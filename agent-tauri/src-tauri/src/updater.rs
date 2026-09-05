@@ -591,7 +591,8 @@ async fn apply_update(
     ) {
         return Ok(false);
     }
-    if update_blocked_by_game(config).await {
+    if let Some(reason) = update_block_reason(config).await {
+        state.report_update_diagnostic("blocked", &reason, Some(target_manifest.version.clone())).await;
         state
             .log(
                 app,
@@ -648,6 +649,11 @@ async fn apply_update(
     validate_update_download_url(&parsed)?;
     let expected_thumbprint = expected_publisher_thumbprint(&target_manifest)?;
 
+    state.report_update_diagnostic(
+        "download_start",
+        if use_patch { "patch" } else { "archive" },
+        Some(target_manifest.version.clone()),
+    ).await;
     state
         .set_update_message(
             app,
@@ -665,6 +671,11 @@ async fn apply_update(
         .map_err(|_| AgentError::Update("업데이트 HTTP client 생성 실패".into()))?;
     let bytes = download_limited(&client, parsed, MAX_UPDATE_ARCHIVE_BYTES).await?;
     validate_hash(&bytes, hash)?;
+    state.report_update_diagnostic(
+        "download_success",
+        format!("bytes={}", bytes.len()),
+        Some(target_manifest.version.clone()),
+    ).await;
 
     let work_root = std::env::temp_dir().join("yummi-lcu-update");
     fs::create_dir_all(&work_root)?;
@@ -752,6 +763,11 @@ async fn apply_update(
     );
     fs::write(&script, script_text)?;
 
+    state.report_update_diagnostic(
+        "install_start",
+        "apply_script_spawn",
+        Some(target_manifest.version.clone()),
+    ).await;
     state
         .set_update_message(
             app,
@@ -771,6 +787,11 @@ async fn apply_update(
             .map_err(|error| AgentError::Update(format!("업데이트 실행 실패: {error}")))?;
         update_mutex.hold_until_process_exit();
     }
+    state.report_update_diagnostic(
+        "install_success",
+        "apply_script_spawned",
+        Some(target_manifest.version.clone()),
+    ).await;
     Ok(true)
 }
 
@@ -781,13 +802,23 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
     }
     loop {
         let config = state.config.read().await.clone();
-        if config.check_updates_on_startup && config.auto_update_enabled {
-            if let Some(url) = config.update_manifest_url.clone() {
-                check_and_apply_update(&url, &config, &app, &state).await;
-                if *shutdown.borrow() {
-                    return;
-                }
+        if !config.check_updates_on_startup {
+            state
+                .report_update_diagnostic("blocked", "check_updates_on_startup=false", None)
+                .await;
+        } else if !config.auto_update_enabled {
+            state
+                .report_update_diagnostic("blocked", "auto_update_enabled=false", None)
+                .await;
+        } else if let Some(url) = config.update_manifest_url.clone() {
+            check_and_apply_update(&url, &config, &app, &state).await;
+            if *shutdown.borrow() {
+                return;
             }
+        } else {
+            state
+                .report_update_diagnostic("blocked", "manifest_url_missing", None)
+                .await;
         }
         if !wait_for_update_check(&mut shutdown, AUTO_UPDATE_RECHECK_INTERVAL).await {
             return;
@@ -796,10 +827,12 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
 }
 
 async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, state: &AppState) {
+    state.report_update_diagnostic("update_check", "scheduled", None).await;
     let parsed = match Url::parse(url) {
         Ok(parsed) => parsed,
         Err(error) => {
             let summary = format!("manifest URL parse failed: {error}");
+            state.report_update_diagnostic("failure", &summary, None).await;
             state.record_flight("updater_error", &summary).await;
             state.log(app, format!("자동 업데이트 설정 URL 오류: {error}")).await;
             state
@@ -814,6 +847,9 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
         || parsed.password().is_some()
         || parsed.fragment().is_some()
     {
+        state
+            .report_update_diagnostic("failure", "manifest_url_rejected", None)
+            .await;
         state
             .record_flight("updater_error", "manifest_url_rejected")
             .await;
@@ -836,6 +872,7 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
         Ok(client) => client,
         Err(error) => {
             let summary = format!("HTTP client build failed: {error}");
+            state.report_update_diagnostic("failure", &summary, None).await;
             state.record_flight("updater_error", &summary).await;
             state.log(app, format!("자동 업데이트 HTTP 준비 실패: {error}")).await;
             state
@@ -848,6 +885,7 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
         Ok(bytes) => bytes,
         Err(error) => {
             let summary = error.to_string();
+            state.report_update_diagnostic("failure", format!("manifest_download: {summary}"), None).await;
             state
                 .record_flight("updater_error", format!("manifest_download_failed: {summary}"))
                 .await;
@@ -860,6 +898,7 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
     let manifest = match parse_signed_manifest(&bytes) {
         Ok(manifest) => manifest,
         Err(error) => {
+            state.report_update_diagnostic("failure", format!("manifest_verification: {error}"), None).await;
             state
                 .log(app, format!("자동 업데이트 manifest 검증 실패: {error}"))
                 .await;
@@ -877,6 +916,17 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
             return;
         }
     };
+    if let Some(target) = manifest.tauri.clone() {
+        if should_apply_target(
+            &target,
+            env!("CARGO_PKG_VERSION"),
+            option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(env!("CARGO_PKG_VERSION")),
+            option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
+            &config.update_channel,
+        ) {
+            state.report_update_diagnostic("update_available", "applicable", Some(target.version)).await;
+        }
+    }
     match apply_update(manifest, app, state, config).await {
         Ok(true) => {
             state.log(app, "새 버전을 설치하고 재시작합니다.").await;
@@ -889,6 +939,7 @@ async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, sta
             state.record_flight("updater", "no_applicable_update").await;
         }
         Err(error) => {
+            state.report_update_diagnostic("failure", error.to_string(), None).await;
             state.log(app, format!("자동 업데이트 실패: {error}")).await;
             state
                 .report_unexpected_error("updater", "apply_failed", error.to_string())
@@ -915,17 +966,13 @@ async fn wait_for_update_check(
     }
 }
 
-async fn update_blocked_by_game(config: &Config) -> bool {
-    let Some(path) = lockfile_path(config) else {
-        return false;
-    };
-    let Ok(client) = LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) else {
-        return false;
-    };
-    client
-        .gameflow_phase()
-        .await
-        .is_ok_and(|phase| blocks_update_for_gameflow_phase(&phase))
+async fn update_block_reason(config: &Config) -> Option<String> {
+    let path = lockfile_path(config)?;
+    let client = LcuClient::from_lockfile(&path)
+        .or_else(|_| LcuClient::from_lockfile_legacy(&path))
+        .ok()?;
+    let phase = client.gameflow_phase().await.ok()?;
+    blocks_update_for_gameflow_phase(&phase).then(|| format!("gameflow_phase={phase}"))
 }
 
 fn blocks_update_for_gameflow_phase(phase: &str) -> bool {
