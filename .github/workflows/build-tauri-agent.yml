@@ -11,6 +11,10 @@ on:
       - "agent-tauri/src-tauri/tauri.conf.json"
   workflow_dispatch:
     inputs:
+      version:
+        description: "배포할 버전 (소스 버전과 반드시 일치)"
+        required: true
+        type: string
       release_notes:
         description: "배포 노트"
         required: false
@@ -65,6 +69,42 @@ jobs:
       CERT_THUMBPRINT_SECRET: ${{ secrets.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Validate release versions
+        shell: pwsh
+        run: |
+          $packageVersion = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
+          $packageLock = Get-Content agent-tauri/package-lock.json | ConvertFrom-Json
+          $packageLockVersion = $packageLock.version
+          $packageLockRootVersion = $packageLock.packages."".version
+          $tauriVersion = (Get-Content agent-tauri/src-tauri/tauri.conf.json | ConvertFrom-Json).version
+          $cargoTomlText = Get-Content agent-tauri/src-tauri/Cargo.toml -Raw
+          if ($cargoTomlText -notmatch '(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"') { throw "Cargo.toml package version not found" }
+          $cargoTomlVersion = $Matches[1]
+          $cargoLockText = Get-Content agent-tauri/src-tauri/Cargo.lock -Raw
+          $cargoLockPattern = '(?ms)\[\[package\]\]\s*name\s*=\s*"yummi-lcu-tauri"\s*version\s*=\s*"([^"]+)"'
+          if ($cargoLockText -notmatch $cargoLockPattern) { throw "Cargo.lock yummi-lcu-tauri version not found" }
+          $cargoLockVersion = $Matches[1]
+          $versions = @{
+            'package.json' = $packageVersion
+            'package-lock.json' = $packageLockVersion
+            'package-lock root' = $packageLockRootVersion
+            'Cargo.toml' = $cargoTomlVersion
+            'Cargo.lock' = $cargoLockVersion
+            'tauri.conf.json' = $tauriVersion
+          }
+          foreach ($entry in $versions.GetEnumerator()) {
+            if ($entry.Value -ne $packageVersion) {
+              throw "Version mismatch: $($entry.Key)=$($entry.Value), expected=$packageVersion"
+            }
+          }
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            $requestedVersion = "${{ github.event.inputs.version }}".Trim()
+            if ($requestedVersion -ne $packageVersion) {
+              throw "Requested version $requestedVersion does not match source version $packageVersion"
+            }
+          }
+          Write-Host "Version preflight OK: $packageVersion"
 
       - name: Configure release metadata
         id: release_meta
