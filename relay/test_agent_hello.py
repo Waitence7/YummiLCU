@@ -253,6 +253,38 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(len(websocket.payloads), before)
 
+    async def test_durable_rofl_is_acked_only_after_persist(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        event_id = "123e4567-e89b-42d3-a456-426614174020"
+        payload = {"schemaVersion": 1, "kind": "movement", "gameId": "123", "part": 0}
+
+        with patch("relay.app._forward_match_rofl", new=AsyncMock(return_value=True)):
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({"type": "match_rofl", "event_id": event_id, "data": payload}),
+            )
+        self.assertEqual(
+            websocket.payloads[-1],
+            {"type": "event_ack", "event_id": event_id},
+        )
+
+        before = len(websocket.payloads)
+        with patch("relay.app._forward_match_rofl", new=AsyncMock(return_value=False)):
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "match_rofl",
+                    "event_id": "123e4567-e89b-42d3-a456-426614174021",
+                    "data": payload,
+                }),
+            )
+        self.assertEqual(len(websocket.payloads), before)
+
     async def test_guild_eog_ack_requires_durable_web_or_bot_persist(self) -> None:
         manager = ConnectionManager()
         websocket = _WebSocketStub()

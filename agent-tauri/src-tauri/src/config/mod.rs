@@ -274,6 +274,24 @@ impl Config {
         url.query_pairs_mut().append_pair("session_id", session_id);
         Ok(url.into())
     }
+
+    pub(crate) fn replay_upload_target_url(&self, session_id: &str) -> AgentResult<String> {
+        let mut url = validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
+        url.set_path("/agent/replay-upload-target");
+        url.set_query(None);
+        url.query_pairs_mut().append_pair("session_id", session_id);
+        Ok(url.into())
+    }
+
+    pub(crate) fn replay_upload_url(&self, session_id: &str, game_id: &str) -> AgentResult<String> {
+        let mut url = validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
+        url.set_path("/agent/replay-upload");
+        url.set_query(None);
+        url.query_pairs_mut()
+            .append_pair("session_id", session_id)
+            .append_pair("game_id", game_id);
+        Ok(url.into())
+    }
 }
 
 pub(crate) fn validate_tray_hide_effect(raw: &str) -> AgentResult<()> {

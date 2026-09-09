@@ -45,6 +45,7 @@ OAUTH_LINK_CODE_TTL_SEC = 600
 WS_AUTH_TIMEOUT_SEC = 15.0
 MAX_WS_AUTH_MESSAGE_BYTES = 4 * 1024
 MAX_AGENT_MESSAGE_BYTES = 256 * 1024
+MAX_REPLAY_UPLOAD_BYTES = 128 * 1024 * 1024
 BOT_EOG_PERSIST_ACK_TIMEOUT_SEC = 8.0
 _SERVER_PROTOCOL_VERSION = 1
 _SERVER_CAPABILITIES = frozenset({
@@ -58,6 +59,7 @@ _SERVER_CAPABILITIES = frozenset({
     "champ_select_events",
     "party_events",
     "eog_events",
+    "rofl_events",
     "live_game_events",
     "unexpected_error_reports",
     "update_diagnostics",
@@ -652,6 +654,125 @@ async def auth_callback(
     )
 
 
+async def _authenticate_agent_http(request: Request, session_id: str) -> int:
+    try:
+        uuid.UUID(session_id)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid session_id") from exc
+    token = request.headers.get("x-yummi-ws-token", "")
+    if not token or len(token) > 128 or not token.isascii():
+        raise HTTPException(401, "invalid agent token")
+    r: redis.Redis = request.app.state.redis
+    stored = await r.get(_ws_token_redis_key(session_id))
+    if not stored or not _safe_compare_digest(stored, token):
+        raise HTTPException(401, "invalid agent token")
+    conn: ConnectionManager = request.app.state.connections
+    if not conn.has_active_session_ws(session_id):
+        raise HTTPException(409, "agent session is not active")
+    raw_discord_id = await r.get(_session_redis_key(session_id))
+    try:
+        discord_id = int(raw_discord_id or "")
+    except ValueError as exc:
+        raise HTTPException(401, "agent session is not bound") from exc
+    if discord_id <= 0:
+        raise HTTPException(401, "agent session is not bound")
+    await _refresh_session_ttl(r, session_id)
+    return discord_id
+
+
+async def _broadcast_replay_target(http: aiohttp.ClientSession, discord_id: int) -> dict[str, Any]:
+    token = config.tournament_bot_internal_token()
+    if not token:
+        return {"upload": False}
+    url = f"{config.tournament_api_base_url()}/api/bot/tournaments/lcu-broadcast/replay-target"
+    headers = {
+        "x-internal-bot-token": token,
+        "x-actor-discord-user-id": str(discord_id),
+    }
+    try:
+        async with http.get(url, headers=headers) as res:
+            if res.status >= 400:
+                logger.warning("대회 ROFL target 조회 실패 discord_id=%s status=%s", discord_id, res.status)
+                return {"upload": False}
+            body = await res.json(content_type=None)
+            return body if isinstance(body, dict) else {"upload": False}
+    except Exception:
+        logger.exception("대회 ROFL target 조회 예외 discord_id=%s", discord_id)
+        return {"upload": False}
+
+
+@app.get("/agent/replay-upload-target")
+async def agent_replay_upload_target(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+) -> JSONResponse:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    target = await _broadcast_replay_target(request.app.state.http, discord_id)
+    return JSONResponse({
+        "upload": target.get("upload") is True,
+        "code": target.get("code") if isinstance(target.get("code"), str) else None,
+    })
+
+
+@app.post("/agent/replay-upload")
+async def agent_replay_upload(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+    game_id: str = Query(..., min_length=1, max_length=64),
+) -> JSONResponse:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
+        raise HTTPException(400, "invalid game_id")
+    target = await _broadcast_replay_target(request.app.state.http, discord_id)
+    if target.get("upload") is not True:
+        return JSONResponse({"uploaded": False, "reason": "no_active_broadcast"}, status_code=409)
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type != "application/octet-stream":
+        raise HTTPException(415, "application/octet-stream required")
+    raw_length = request.headers.get("content-length")
+    if raw_length:
+        try:
+            content_length = int(raw_length)
+        except ValueError as exc:
+            raise HTTPException(400, "invalid content-length") from exc
+        if content_length <= 0 or content_length > MAX_REPLAY_UPLOAD_BYTES:
+            raise HTTPException(413, "replay file too large")
+    file_name = request.headers.get("x-replay-file-name", f"{game_id}.rofl")[:160]
+    api_token = config.tournament_bot_internal_token()
+    if not api_token:
+        raise HTTPException(503, "tournament api unavailable")
+    headers = {
+        "content-type": "application/octet-stream",
+        "x-internal-bot-token": api_token,
+        "x-actor-discord-user-id": str(discord_id),
+        "x-replay-game-id": game_id,
+        "x-replay-file-name": file_name,
+    }
+    # The API enforces the size while streaming. Do not forward Content-Length
+    # with an async iterator because aiohttp may otherwise conflict with chunked framing.
+    url = f"{config.tournament_api_base_url()}/api/bot/lcu/replays/file-ingest"
+    try:
+        async with request.app.state.http.post(url, headers=headers, data=request.stream()) as res:
+            raw = await res.read()
+            if res.status >= 400:
+                logger.warning(
+                    "대회 ROFL 원본 전달 실패 discord_id=%s game_id=%s status=%s",
+                    discord_id, game_id, res.status
+                )
+                raise HTTPException(res.status, "replay upstream rejected")
+            try:
+                body = json.loads(raw.decode("utf-8"))
+            except Exception:
+                body = {}
+            logger.info("대회 ROFL 원본 전달 완료 discord_id=%s game_id=%s bytes=%s", discord_id, game_id, raw_length or "chunked")
+            return JSONResponse({"uploaded": True, "gameId": game_id, "broadcast": body.get("broadcast") if isinstance(body, dict) else None})
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("대회 ROFL 원본 전달 예외 discord_id=%s game_id=%s", discord_id, game_id)
+        raise HTTPException(502, "replay upload failed") from exc
+
+
 @app.get("/auth/status")
 async def auth_status(request: Request, session_id: str = Query(..., min_length=8, max_length=64)) -> JSONResponse:
     """에이전트 폴링 — pending | link_pending | ok | expired."""
@@ -684,6 +805,65 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
 # * ========================================================
 # * # WebSocket (에이전트) 파트 #
 # * ========================================================
+
+
+async def _forward_tournament_broadcast_lcu(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+    kind: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Forward broadcaster LCU snapshots to the active tournament broadcast page.
+
+    The Tournament API only accepts a reporter while an authorized broadcast page
+    is actively heartbeating, so ordinary Agent traffic is ignored server-side.
+    """
+    if kind not in {"gameflow", "champ_select"}:
+        return False
+    api_base = config.tournament_api_base_url()
+    token = config.tournament_bot_internal_token()
+    if not token:
+        return False
+
+    url = f"{api_base}/api/bot/tournaments/lcu-broadcast"
+    headers = {
+        "content-type": "application/json",
+        "x-internal-bot-token": token,
+        "x-actor-discord-user-id": str(discord_id),
+    }
+    try:
+        async with http.post(
+            url, headers=headers, json={"kind": kind, "data": payload}
+        ) as res:
+            if res.status >= 400:
+                logger.warning(
+                    "대회 중계 LCU 전달 실패 discord_id=%s kind=%s status=%s",
+                    discord_id,
+                    kind,
+                    res.status,
+                )
+                return False
+            try:
+                body = await res.json(content_type=None)
+            except Exception:
+                body = None
+            matched = isinstance(body, dict) and body.get("matched") is True
+            if matched:
+                logger.debug(
+                    "대회 중계 LCU 전달 OK discord_id=%s kind=%s code=%s phase=%s",
+                    discord_id,
+                    kind,
+                    body.get("code"),
+                    body.get("phase"),
+                )
+            return matched
+    except Exception:
+        logger.exception(
+            "대회 중계 LCU 전달 예외 discord_id=%s kind=%s",
+            discord_id,
+            kind,
+        )
+        return False
 
 
 async def _resolve_discord_presence_match_context(
@@ -1000,6 +1180,61 @@ async def _forward_match_eog(
         )
         return False
 
+
+
+async def _forward_match_rofl(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+    payload: dict[str, Any],
+    event_id: str | None = None,
+) -> bool:
+    api_base = config.tournament_api_base_url()
+    token = config.tournament_bot_internal_token()
+    if not token:
+        logger.warning(
+            "TOURNAMENT_BOT_INTERNAL_TOKEN 미설정 — ROFL 저장 생략 discord_id=%s event_id=%s",
+            discord_id,
+            event_id,
+        )
+        return False
+
+    url = f"{api_base}/api/bot/lcu/replays/ingest"
+    headers = {
+        "content-type": "application/json",
+        "x-internal-bot-token": token,
+        "x-actor-discord-user-id": str(discord_id),
+    }
+    body = {"rawData": payload, "eventId": event_id}
+    try:
+        async with http.post(url, headers=headers, json=body) as res:
+            if res.status >= 400:
+                logger.warning(
+                    "ROFL 저장 실패 discord_id=%s status=%s game_id=%s kind=%s event_id=%s",
+                    discord_id,
+                    res.status,
+                    payload.get("gameId"),
+                    payload.get("kind"),
+                    event_id,
+                )
+                return False
+            logger.info(
+                "ROFL 저장 OK discord_id=%s game_id=%s kind=%s part=%s event_id=%s",
+                discord_id,
+                payload.get("gameId"),
+                payload.get("kind"),
+                payload.get("part"),
+                event_id,
+            )
+            return True
+    except Exception:
+        logger.exception(
+            "ROFL 저장 요청 실패 discord_id=%s game_id=%s kind=%s event_id=%s",
+            discord_id,
+            payload.get("gameId"),
+            payload.get("kind"),
+            event_id,
+        )
+        return False
 
 def _agent_hello_info(data: dict[str, Any]) -> dict[str, Any]:
     """Legacy hello와 capability handshake를 안전한 세션 metadata로 정규화한다."""
@@ -1363,6 +1598,27 @@ async def _handle_agent_message(
             )
         return
 
+    if msg_type == "match_rofl":
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("payload", data.get("data"))
+        if discord_id is None or not isinstance(payload, dict):
+            logger.warning("match_rofl 무시: discord_id=%s payload=%s", discord_id, type(payload))
+            return
+        event_id = _relay_event_id(data)
+        http: aiohttp.ClientSession = websocket.app.state.http
+        persisted = await _forward_match_rofl(http, discord_id, payload, event_id)
+        if persisted:
+            await _ack_agent_event(websocket, event_id)
+        else:
+            logger.warning(
+                "match_rofl ACK 보류 discord_id=%s game_id=%s kind=%s event_id=%s",
+                discord_id,
+                payload.get("gameId"),
+                payload.get("kind"),
+                event_id,
+            )
+        return
+
     if msg_type == "discord_presence_context_request":
         host_discord_id = conn.discord_id_for_ws(websocket)
         if host_discord_id is None:
@@ -1453,6 +1709,9 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         await conn.forward_champ_select_update(discord_id, payload)
+        await _forward_tournament_broadcast_lcu(
+            websocket.app.state.http, discord_id, "champ_select", payload
+        )
         return
 
     if msg_type == "gameflow_update":
@@ -1461,6 +1720,9 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         await conn.forward_gameflow_update(discord_id, payload)
+        await _forward_tournament_broadcast_lcu(
+            websocket.app.state.http, discord_id, "gameflow", payload
+        )
         if isinstance(payload, dict) and payload.get("phase") == "ReadyCheck":
             await conn.forward_ready_check_update(
                 discord_id, {"active": True, "source": "gameflow"}

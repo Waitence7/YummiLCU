@@ -1,5 +1,6 @@
 use std::{
     collections::VecDeque,
+    path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -12,6 +13,7 @@ use tokio::{
     task::JoinHandle,
     time::{interval, interval_at, sleep, timeout, Instant, MissedTickBehavior},
 };
+use tokio_util::io::ReaderStream;
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{protocol::WebSocketConfig, Message},
@@ -42,6 +44,8 @@ const LCU_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(8);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_DURABLE_REPLAY_EVENTS: usize = 64;
 const DURABLE_REPLAY_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_BROADCAST_REPLAY_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
+const BROADCAST_REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
 
 #[derive(Clone)]
 struct SerializedAgentEvent {
@@ -671,7 +675,7 @@ async fn connect_once(
                                 if durable_replay_enabled && session_bound {
                                     let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
                                     if replayed > 0 {
-                                        state.log(app, format!("미확인 EOG 이벤트 {replayed}건 재전송")).await;
+                                        state.log(app, format!("미확인 durable 이벤트 {replayed}건 재전송")).await;
                                     }
                                 }
                             }
@@ -718,7 +722,7 @@ async fn connect_once(
                                 if durable_replay_enabled {
                                     let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
                                     if replayed > 0 {
-                                        state.log(app, format!("미확인 EOG 이벤트 {replayed}건 재전송")).await;
+                                        state.log(app, format!("미확인 durable 이벤트 {replayed}건 재전송")).await;
                                     }
                                 }
                                 state.log(app, "Relay 세션 인증 완료 — LCU 이벤트 감시 시작").await;
@@ -777,7 +781,7 @@ async fn connect_once(
             _ = durable_replay_tick.tick(), if session_bound && durable_replay_enabled => {
                 let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
                 if replayed > 0 {
-                    state.log(app, format!("ACK 대기 EOG 이벤트 {replayed}건 재전송")).await;
+                    state.log(app, format!("ACK 대기 durable 이벤트 {replayed}건 재전송")).await;
                 }
             }
             report = update_reports.recv(), if session_bound && update_diagnostics_enabled => {
@@ -902,6 +906,38 @@ async fn connect_once(
             }
             Some(batch) = lcu_poll_rx.recv(), if session_bound => {
                 for (message_type, data) in batch.events {
+                    if message_type == "match_rofl_file_ready" {
+                        if let Some(upload) = replay_upload_request(&data) {
+                            let upload_app = app.clone();
+                            let upload_state = Arc::clone(state);
+                            let upload_config = config.clone();
+                            let upload_session_id = session.session_id.clone();
+                            let upload_ws_token = session.ws_token.clone();
+                            tokio::spawn(async move {
+                                match upload_broadcast_replay_file(
+                                    &upload_config,
+                                    &upload_session_id,
+                                    &upload_ws_token,
+                                    &upload,
+                                ).await {
+                                    Ok(ReplayUploadOutcome::Uploaded) => {
+                                        upload_state.record_flight("rofl_upload", format!("uploaded game_id={} bytes={}", upload.game_id, upload.file_size)).await;
+                                        upload_state.log(&upload_app, format!("대회 ROFL 원본 업로드 완료: game_id={} bytes={}", upload.game_id, upload.file_size)).await;
+                                    }
+                                    Ok(ReplayUploadOutcome::NotNeeded) => {
+                                        upload_state.record_flight("rofl_upload", format!("skipped_no_broadcast game_id={}", upload.game_id)).await;
+                                    }
+                                    Err(error) => {
+                                        upload_state.record_flight("rofl_upload", format!("failed game_id={} error={}", upload.game_id, error)).await;
+                                        upload_state.log(&upload_app, format!("대회 ROFL 원본 업로드 실패: game_id={} error={}", upload.game_id, error)).await;
+                                    }
+                                }
+                            });
+                        } else {
+                            state.record_flight("rofl_upload", "invalid_file_ready_event").await;
+                        }
+                        continue;
+                    }
                     let event_log = event_summary(message_type, &data);
                     state.record_flight("lcu_event", event_log.clone()).await;
                     let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
@@ -912,7 +948,7 @@ async fn connect_once(
                     };
                     if durable_replay_enabled && is_durable_event(message_type) {
                         if durable_replay.track(event.clone()) {
-                            state.log(app, "EOG replay buffer가 가득 차 가장 오래된 이벤트를 제거함").await;
+                            state.log(app, "durable replay buffer가 가득 차 가장 오래된 이벤트를 제거함").await;
                         }
                     }
                     websocket.send(Message::Text(event.text.into())).await
@@ -1141,6 +1177,147 @@ fn safe_avatar_url(value: Option<String>) -> Option<String> {
     .then_some(value)
 }
 
+#[derive(Clone, Debug)]
+struct ReplayUploadRequest {
+    game_id: String,
+    path: PathBuf,
+    file_name: String,
+    file_size: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReplayUploadOutcome {
+    Uploaded,
+    NotNeeded,
+}
+
+fn replay_upload_request(data: &Value) -> Option<ReplayUploadRequest> {
+    let game_id = data.get("gameId")?.as_str()?.trim().to_owned();
+    if game_id.is_empty()
+        || game_id.len() > 64
+        || !game_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let path = PathBuf::from(data.get("path")?.as_str()?);
+    if !path
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("rofl"))
+    {
+        return None;
+    }
+    let raw_file_name = data
+        .get("fileName")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty() && value.len() <= 160)
+        .unwrap_or("replay.rofl");
+    let mut file_name = raw_file_name
+        .chars()
+        .take(120)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if !file_name.to_ascii_lowercase().ends_with(".rofl") {
+        file_name = format!("{}.rofl", game_id);
+    }
+    let file_size = data.get("fileSize")?.as_u64()?;
+    if file_size == 0 || file_size > MAX_BROADCAST_REPLAY_UPLOAD_BYTES {
+        return None;
+    }
+    Some(ReplayUploadRequest { game_id, path, file_name, file_size })
+}
+
+async fn upload_broadcast_replay_file(
+    config: &crate::config::Config,
+    session_id: &str,
+    ws_token: &str,
+    upload: &ReplayUploadRequest,
+) -> AgentResult<ReplayUploadOutcome> {
+    let metadata = tokio::fs::symlink_metadata(&upload.path)
+        .await
+        .map_err(|_| AgentError::Relay("ROFL 원본 파일을 열 수 없습니다.".into()))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != upload.file_size {
+        return Err(AgentError::Relay("ROFL 원본 파일 상태가 변경되었습니다.".into()));
+    }
+    if metadata.len() == 0 || metadata.len() > MAX_BROADCAST_REPLAY_UPLOAD_BYTES {
+        return Err(AgentError::Relay("ROFL 원본 파일 크기가 허용 범위를 벗어났습니다.".into()));
+    }
+
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(15))
+        .timeout(Duration::from_secs(5 * 60))
+        .build()
+        .map_err(|_| AgentError::Relay("ROFL 업로드 클라이언트 생성 실패".into()))?;
+    let target_url = config.replay_upload_target_url(session_id)?;
+    let upload_url = config.replay_upload_url(session_id, &upload.game_id)?;
+    let mut last_error = "ROFL 원본 업로드 실패".to_owned();
+
+    for attempt in 1..=BROADCAST_REPLAY_UPLOAD_ATTEMPTS {
+        let target = client
+            .get(target_url.clone())
+            .header("x-yummi-ws-token", ws_token)
+            .send()
+            .await;
+        match target {
+            Ok(response) if response.status().is_success() => {
+                match response.json::<Value>().await {
+                    Ok(body) if body.get("upload").and_then(Value::as_bool) == Some(true) => {
+                        last_error.clear();
+                    }
+                    Ok(_) => return Ok(ReplayUploadOutcome::NotNeeded),
+                    Err(_) => last_error = "ROFL 업로드 대상 응답 형식 오류".into(),
+                }
+            }
+            Ok(response) => {
+                last_error = format!("ROFL 업로드 대상 확인 HTTP {}", response.status());
+            }
+            Err(_) => {
+                last_error = "ROFL 업로드 대상 확인 네트워크 실패".into();
+            }
+        }
+
+        if !last_error.is_empty() && last_error.starts_with("ROFL 업로드 대상") {
+            if attempt < BROADCAST_REPLAY_UPLOAD_ATTEMPTS {
+                sleep(Duration::from_secs(u64::from(attempt.min(6)) * 2)).await;
+                continue;
+            }
+            break;
+        }
+
+        let file = tokio::fs::File::open(&upload.path)
+            .await
+            .map_err(|_| AgentError::Relay("ROFL 원본 파일 열기 실패".into()))?;
+        let stream = ReaderStream::new(file);
+        match client
+            .post(upload_url.clone())
+            .header("x-yummi-ws-token", ws_token)
+            .header("x-replay-file-name", &upload.file_name)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .header(reqwest::header::CONTENT_LENGTH, upload.file_size)
+            .body(reqwest::Body::wrap_stream(stream))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => return Ok(ReplayUploadOutcome::Uploaded),
+            Ok(response) if response.status().as_u16() == 409 => return Ok(ReplayUploadOutcome::NotNeeded),
+            Ok(response) => last_error = format!("ROFL 원본 업로드 HTTP {}", response.status()),
+            Err(_) => last_error = "ROFL 원본 업로드 네트워크 실패".into(),
+        }
+
+        if attempt < BROADCAST_REPLAY_UPLOAD_ATTEMPTS {
+            sleep(Duration::from_secs(u64::from(attempt.min(6)) * 2)).await;
+        }
+    }
+
+    Err(AgentError::Relay(last_error))
+}
+
 fn serialize_agent_event(
     message_type: &'static str,
     data: Value,
@@ -1152,7 +1329,7 @@ fn serialize_agent_event(
 }
 
 fn is_durable_event(message_type: &str) -> bool {
-    matches!(message_type, "match_eog" | "guild_match_eog")
+    matches!(message_type, "match_eog" | "guild_match_eog" | "match_rofl")
 }
 
 async fn replay_durable_events<S>(

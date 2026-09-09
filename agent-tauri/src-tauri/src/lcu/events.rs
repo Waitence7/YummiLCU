@@ -17,7 +17,10 @@ use tokio_tungstenite::{
 
 use crate::{config::Config, error::AgentError};
 
-use super::{discover_lockfile, LcuClient, LcuIdentity, LockfileDiscovery};
+use super::{
+    collect_replay_bundle, discover_lockfile, LcuClient, LcuIdentity, LockfileDiscovery,
+    RoflMatchHint,
+};
 
 const GAMEFLOW_PHASE: &str = "/lol-gameflow/v1/gameflow-phase";
 const READY_CHECK: &str = "/lol-matchmaking/v1/ready-check";
@@ -36,6 +39,9 @@ const LOCKFILE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const RECENT_MATCH_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
 const EOG_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const EOG_POSTGAME_RECOVERY_GRACE: Duration = Duration::from_secs(90);
+const ROFL_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const ROFL_POSTGAME_RECOVERY_GRACE: Duration = Duration::from_secs(120);
+const ROFL_PARSE_TIMEOUT: Duration = Duration::from_secs(25);
 const LIVE_GAME_PARTICIPANT_COUNT: usize = 10;
 const MAX_LCU_EVENT_MESSAGE_BYTES: usize = 1024 * 1024;
 
@@ -57,6 +63,12 @@ pub(crate) struct LcuEventPoller {
     eog_recovery_started_at: Option<Instant>,
     eog_attempt_count: u32,
     eog_expected_game_id: Option<String>,
+    rofl_match_hint: Option<RoflMatchHint>,
+    rofl_sent_game_id: Option<String>,
+    rofl_recovery_started_at: Option<Instant>,
+    last_rofl_attempt: Option<Instant>,
+    rofl_attempt_count: u32,
+    rofl_download_requested_game_id: Option<String>,
     diagnostics: Vec<String>,
     last_lockfile_diagnostics: Vec<String>,
     cached_lockfile_discovery: Option<LockfileDiscovery>,
@@ -85,6 +97,12 @@ impl LcuEventPoller {
         self.eog_recovery_started_at = None;
         self.eog_attempt_count = 0;
         self.eog_expected_game_id = None;
+        self.rofl_match_hint = None;
+        self.rofl_sent_game_id = None;
+        self.rofl_recovery_started_at = None;
+        self.last_rofl_attempt = None;
+        self.rofl_attempt_count = 0;
+        self.rofl_download_requested_game_id = None;
         self.lcu_available = None;
         self.schema_warnings.clear();
     }
@@ -439,6 +457,12 @@ impl LcuEventPoller {
             self.eog_recovery_started_at = None;
             self.eog_attempt_count = 0;
             self.eog_expected_game_id = None;
+            self.rofl_match_hint = None;
+            self.rofl_sent_game_id = None;
+            self.rofl_recovery_started_at = None;
+            self.last_rofl_attempt = None;
+            self.rofl_attempt_count = 0;
+            self.rofl_download_requested_game_id = None;
         }
         if is_eog_phase(&phase) && self.eog_recovery_started_at.is_none() {
             self.eog_recovery_started_at = Some(Instant::now());
@@ -479,6 +503,33 @@ impl LcuEventPoller {
             }
             let evidence_source = eog_result_evidence_source(&payload);
             self.eog_sent = evidence_source.is_some();
+            if self.eog_sent {
+                if let Some(game_id) = json_scalar_id(payload.get("gameId"))
+                    .or_else(|| self.eog_expected_game_id.clone())
+                {
+                    let is_new_replay = self
+                        .rofl_match_hint
+                        .as_ref()
+                        .is_none_or(|hint| hint.game_id != game_id);
+                    if is_new_replay {
+                        let mut hint = RoflMatchHint::from_eog(game_id.clone(), &payload);
+                        if let Ok(path_value) = client
+                            .request(Method::GET, "/lol-replays/v1/rofls/path", None)
+                            .await
+                        {
+                            if let Some(path) = path_value.as_str() {
+                                hint.set_replay_dir(path);
+                            }
+                        }
+                        self.rofl_match_hint = Some(hint);
+                        self.rofl_recovery_started_at = Some(Instant::now());
+                        self.last_rofl_attempt = None;
+                        self.rofl_attempt_count = 0;
+                        self.rofl_download_requested_game_id = None;
+                        self.diagnostic(format!("ROFL 수집 대기 시작: game_id={game_id}"));
+                    }
+                }
+            }
             let diagnostics = payload.get("eogDiagnostics").and_then(Value::as_object);
             let eog_status = diagnostics
                 .and_then(|value| value.get("eogRequestStatus"))
@@ -559,6 +610,117 @@ impl LcuEventPoller {
             self.eog_recovery_started_at = None;
             self.eog_attempt_count = 0;
             self.eog_expected_game_id = None;
+        }
+
+        if let Some(hint) = self.rofl_match_hint.clone() {
+            if self.rofl_sent_game_id.as_deref() != Some(hint.game_id.as_str()) {
+                if self.rofl_download_requested_game_id.as_deref() != Some(hint.game_id.as_str()) {
+                    let endpoint = format!(
+                        "/lol-replays/v1/rofls/{}/download/graceful",
+                        hint.game_id
+                    );
+                    match client.request(Method::POST, &endpoint, None).await {
+                        Ok(_) => self.diagnostic(format!(
+                            "LCU ROFL 다운로드 요청 완료: game_id={}",
+                            hint.game_id
+                        )),
+                        Err(error) => self.diagnostic(format!(
+                            "LCU ROFL 다운로드 요청 실패(로컬 파일 탐색은 계속): game_id={} error={error}",
+                            hint.game_id
+                        )),
+                    }
+                    self.rofl_download_requested_game_id = Some(hint.game_id.clone());
+                }
+
+                let should_attempt_rofl = self
+                    .last_rofl_attempt
+                    .is_none_or(|last| last.elapsed() >= ROFL_RECOVERY_RETRY_INTERVAL);
+                if should_attempt_rofl {
+                    self.last_rofl_attempt = Some(Instant::now());
+                    self.rofl_attempt_count = self.rofl_attempt_count.saturating_add(1);
+                    let attempt = self.rofl_attempt_count;
+                    let game_id = hint.game_id.clone();
+                    let worker_hint = hint.clone();
+                    let parsed = timeout(
+                        ROFL_PARSE_TIMEOUT,
+                        tokio::task::spawn_blocking(move || collect_replay_bundle(&worker_hint)),
+                    )
+                    .await;
+                    match parsed {
+                        Ok(Ok(Ok(Some(bundle)))) if !bundle.events.is_empty() => {
+                            let event_count = bundle.events.len();
+                            let file_size = std::fs::metadata(&bundle.path).map(|meta| meta.len()).unwrap_or(0);
+                            let file_name = bundle
+                                .path
+                                .file_name()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or("replay.rofl")
+                                .to_owned();
+                            let file_path = bundle.path.to_string_lossy().into_owned();
+                            for payload in bundle.events {
+                                events.push(("match_rofl", payload));
+                            }
+                            events.push((
+                                "match_rofl_file_ready",
+                                json!({
+                                    "gameId": game_id,
+                                    "path": file_path,
+                                    "fileName": file_name,
+                                    "fileSize": file_size,
+                                }),
+                            ));
+                            self.rofl_sent_game_id = Some(game_id.clone());
+                            self.diagnostic(format!(
+                                "ROFL 수집 완료: game_id={game_id} events={event_count} file_bytes={file_size} attempts={attempt}"
+                            ));
+                        }
+                        Ok(Ok(Ok(Some(_)))) => {
+                            self.diagnostic(format!(
+                                "ROFL 파싱 결과가 비어 있음: game_id={game_id} attempt={attempt}"
+                            ));
+                        }
+                        Ok(Ok(Ok(None))) => {
+                            if attempt == 1 || attempt % 4 == 0 {
+                                self.diagnostic(format!(
+                                    "ROFL 파일 대기 중: game_id={game_id} attempt={attempt}"
+                                ));
+                            }
+                        }
+                        Ok(Ok(Err(error))) => {
+                            self.diagnostic(format!(
+                                "ROFL 파싱 실패: game_id={game_id} attempt={attempt} error={error}"
+                            ));
+                        }
+                        Ok(Err(error)) => {
+                            self.diagnostic(format!(
+                                "ROFL worker 실패: game_id={game_id} attempt={attempt} error={error}"
+                            ));
+                        }
+                        Err(_) => {
+                            self.diagnostic(format!(
+                                "ROFL 파싱 시간 초과: game_id={game_id} attempt={attempt}"
+                            ));
+                        }
+                    }
+                }
+
+                if self
+                    .rofl_recovery_started_at
+                    .is_some_and(|started| started.elapsed() > ROFL_POSTGAME_RECOVERY_GRACE)
+                    && self.rofl_sent_game_id.as_deref() != Some(hint.game_id.as_str())
+                {
+                    self.diagnostic(format!(
+                        "ROFL 수집 시간 초과: game_id={} attempts={} grace_sec={}",
+                        hint.game_id,
+                        self.rofl_attempt_count,
+                        ROFL_POSTGAME_RECOVERY_GRACE.as_secs()
+                    ));
+                    self.rofl_match_hint = None;
+                    self.rofl_recovery_started_at = None;
+                    self.last_rofl_attempt = None;
+                    self.rofl_attempt_count = 0;
+                }
+            }
         }
 
         let plan = phase_poll_plan(&phase);
