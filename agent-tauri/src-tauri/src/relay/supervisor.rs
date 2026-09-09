@@ -31,7 +31,8 @@ use super::{
     command_auth,
     protocol::{
         Action, AgentEventMessage, AgentHelloMessage, AuthMessage, CommandResult, IncomingMessage,
-        OAuthCodeMessage, PongMessage, UnexpectedErrorReport, MAX_RELAY_MESSAGE_BYTES,
+        OAuthCodeMessage, PongMessage, UnexpectedErrorReport, UpdateDiagnosticReport,
+        MAX_RELAY_MESSAGE_BYTES,
     },
 };
 
@@ -275,6 +276,7 @@ impl RelaySupervisor {
                 generation,
                 stop_rx,
                 error_reports,
+                update_reports,
                 discord_join_requests,
                 discord_presence_context_requests,
             )
@@ -403,6 +405,7 @@ async fn run_supervisor(
     generation: u64,
     mut stop_rx: watch::Receiver<bool>,
     mut error_reports: broadcast::Receiver<UnexpectedErrorReport>,
+    mut update_reports: broadcast::Receiver<UpdateDiagnosticReport>,
     mut discord_join_requests: broadcast::Receiver<u64>,
     mut discord_presence_context_requests: broadcast::Receiver<()>,
 ) {
@@ -442,6 +445,7 @@ async fn run_supervisor(
             &mut needs_login,
             &mut durable_replay,
             &mut error_reports,
+            &mut update_reports,
             &mut discord_join_requests,
             &mut discord_presence_context_requests,
         )
@@ -495,6 +499,7 @@ async fn connect_once(
     needs_login: &mut bool,
     durable_replay: &mut DurableReplayBuffer,
     error_reports: &mut broadcast::Receiver<UnexpectedErrorReport>,
+    update_reports: &mut broadcast::Receiver<UpdateDiagnosticReport>,
     discord_join_requests: &mut broadcast::Receiver<u64>,
     discord_presence_context_requests: &mut broadcast::Receiver<()>,
 ) -> AgentResult<ConnectionEnd> {
