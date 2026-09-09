@@ -109,19 +109,38 @@ struct MovementRecord {
 }
 
 #[derive(Clone, Debug)]
+pub(crate) struct CollectedReplayFile {
+    pub(crate) path: PathBuf,
+    pub(crate) size: u64,
+}
+
+#[derive(Clone, Debug)]
 pub(crate) struct CollectedReplay {
     pub(crate) path: PathBuf,
     pub(crate) events: Vec<Value>,
 }
 
-pub(crate) fn collect_replay_bundle(hint: &RoflMatchHint) -> Result<Option<CollectedReplay>, String> {
+pub(crate) fn collect_replay_file(hint: &RoflMatchHint) -> Result<Option<CollectedReplayFile>, String> {
     let Some(path) = find_matching_replay(hint)? else {
         return Ok(None);
     };
     let bytes = fs::read(&path).map_err(|error| format!("ROFL 읽기 실패: {error}"))?;
-    if bytes.len() as u64 > MAX_REPLAY_FILE_BYTES {
-        return Err("ROFL 파일이 허용 크기를 초과함".into());
+    if bytes.is_empty() || bytes.len() as u64 > MAX_REPLAY_FILE_BYTES {
+        return Err("ROFL 파일 크기가 허용 범위를 벗어남".into());
     }
+    // A filename may appear while Riot is still writing the replay. Requiring a
+    // complete v2 envelope keeps the upload path from racing a partial file,
+    // without waiting for the agent-side semantic decoder.
+    let _ = parse_envelope(&bytes)?;
+    Ok(Some(CollectedReplayFile { path, size: bytes.len() as u64 }))
+}
+
+pub(crate) fn collect_replay_bundle(hint: &RoflMatchHint) -> Result<Option<CollectedReplay>, String> {
+    let Some(file) = collect_replay_file(hint)? else {
+        return Ok(None);
+    };
+    let path = file.path;
+    let bytes = fs::read(&path).map_err(|error| format!("ROFL 읽기 실패: {error}"))?;
     let replay = parse_envelope(&bytes)?;
     let mut events = Vec::new();
     events.push(summary_event(hint, &path, &replay));

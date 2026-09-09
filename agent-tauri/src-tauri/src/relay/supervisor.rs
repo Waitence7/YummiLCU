@@ -1281,7 +1281,17 @@ async fn upload_broadcast_replay_file(
                     Ok(body) if body.get("upload").and_then(Value::as_bool) == Some(true) => {
                         last_error.clear();
                     }
-                    Ok(_) => return Ok(ReplayUploadOutcome::NotNeeded),
+                    Ok(_) => {
+                        // EndOfGame and the local ROFL file can become ready before
+                        // Relay has persisted the matching broadcast gameflow event.
+                        // Give that short propagation race time to settle instead of
+                        // permanently discarding the replay on the first upload:false.
+                        if attempt < BROADCAST_REPLAY_UPLOAD_ATTEMPTS {
+                            sleep(Duration::from_secs(u64::from(attempt.min(6)) * 2)).await;
+                            continue;
+                        }
+                        return Ok(ReplayUploadOutcome::NotNeeded);
+                    }
                     Err(_) => last_error = "ROFL 업로드 대상 응답 형식 오류".into(),
                 }
             }
