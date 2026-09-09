@@ -267,8 +267,7 @@ impl RelaySupervisor {
         let error_reports = state.unexpected_error_receiver();
         let update_reports = state.update_diagnostic_receiver();
         let discord_join_requests = state.discord_join_request_receiver();
-        let discord_presence_context_requests =
-            state.discord_presence_context_request_receiver();
+        let discord_presence_context_requests = state.discord_presence_context_request_receiver();
         let task = tokio::spawn(async move {
             run_supervisor(
                 task_app.clone(),
@@ -621,16 +620,14 @@ async fn connect_once(
                 state.relay.set_oauth_sender(generation, None).await;
                 return Ok(ConnectionEnd::Stopped);
             }
-            code = oauth_rx.recv() => {
-                if let Some(mut code) = code {
-                    state.log(app, "Discord OAuth 코드 전송 시작").await;
-                    let message = serde_json::to_string(&OAuthCodeMessage::new(&code))?;
-                    let sent = websocket.send(Message::Text(message.into())).await;
-                    // The code is ASCII, so zeroing its bytes keeps the String valid before drop.
-                    unsafe { code.as_bytes_mut().fill(0) };
-                    sent.map_err(|_| AgentError::Relay("OAuth 코드 전송 실패".into()))?;
-                    state.log(app, "Discord OAuth 코드 전송 완료").await;
-                }
+            mut code = receive_oauth_code(&mut oauth_rx) => {
+                state.log(app, "Discord OAuth 코드 전송 시작").await;
+                let message = serde_json::to_string(&OAuthCodeMessage::new(&code))?;
+                let sent = websocket.send(Message::Text(message.into())).await;
+                // The code is ASCII, so zeroing its bytes keeps the String valid before drop.
+                unsafe { code.as_bytes_mut().fill(0) };
+                sent.map_err(|_| AgentError::Relay("OAuth 코드 전송 실패".into()))?;
+                state.log(app, "Discord OAuth 코드 전송 완료").await;
             }
             message = websocket.next() => {
                 match message {
@@ -970,6 +967,15 @@ async fn connect_once(
                 }
             }
         }
+    }
+}
+
+async fn receive_oauth_code(receiver: &mut mpsc::Receiver<String>) -> String {
+    match receiver.recv().await {
+        Some(code) => code,
+        // SessionBound drops the sender. A closed receiver immediately returns None;
+        // keep this select branch pending so it cannot spin the authenticated relay loop.
+        None => std::future::pending().await,
     }
 }
 
@@ -1463,6 +1469,65 @@ async fn wait_for_retry(stop_rx: &mut watch::Receiver<bool>, delay: Duration) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn closed_oauth_channel_stays_pending_across_select_iterations() {
+        let (sender, mut receiver) = mpsc::channel::<String>(1);
+        drop(sender);
+
+        for _ in 0..3 {
+            tokio::select! {
+                biased;
+                _ = receive_oauth_code(&mut receiver) => {
+                    panic!("closed OAuth channel must not wake the relay loop");
+                }
+                _ = std::future::ready(()) => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oauth_code_queued_before_sender_closes_is_delivered() {
+        let (sender, mut receiver) = mpsc::channel::<String>(1);
+        sender.send("test-code".into()).await.unwrap();
+        drop(sender);
+
+        assert_eq!(receive_oauth_code(&mut receiver).await, "test-code");
+        assert!(futures_util::poll!(Box::pin(receive_oauth_code(&mut receiver))).is_pending());
+    }
+
+    #[tokio::test]
+    async fn cancelled_oauth_receive_preserves_the_next_code() {
+        let (sender, mut receiver) = mpsc::channel::<String>(1);
+        assert!(futures_util::poll!(Box::pin(receive_oauth_code(&mut receiver))).is_pending());
+
+        sender.send("test-code".into()).await.unwrap();
+        assert_eq!(receive_oauth_code(&mut receiver).await, "test-code");
+    }
+
+    #[tokio::test]
+    async fn closed_oauth_channel_allows_heartbeat_and_shutdown() {
+        let (sender, mut receiver) = mpsc::channel::<String>(1);
+        drop(sender);
+        let mut heartbeat = interval(Duration::from_secs(15));
+
+        tokio::select! {
+            biased;
+            _ = receive_oauth_code(&mut receiver) => panic!("unexpected OAuth wakeup"),
+            _ = heartbeat.tick() => {}
+        }
+
+        let (stop_tx, mut stop_rx) = watch::channel(false);
+        stop_tx.send(true).unwrap();
+        tokio::select! {
+            biased;
+            _ = receive_oauth_code(&mut receiver) => panic!("unexpected OAuth wakeup"),
+            changed = stop_rx.changed() => {
+                changed.unwrap();
+                assert!(*stop_rx.borrow());
+            }
+        }
+    }
 
     #[test]
     fn relay_close_reconnects_unless_manually_stopped() {
