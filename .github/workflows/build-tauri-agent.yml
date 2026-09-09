@@ -259,7 +259,7 @@ jobs:
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+        if: github.event_name == 'workflow_dispatch'
         with:
           name: agent-release
           path: |
@@ -271,7 +271,7 @@ jobs:
   publish-github-release:
     name: Publish GitHub release
     needs: build
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -303,7 +303,7 @@ jobs:
 
           tag="v${version}"
           if [ "$RELEASE_CHANNEL" != "stable" ]; then tag="v${RELEASE_LABEL}"; fi
-          if ! gh release view "$tag" >/dev/null 2>&1; then
+          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             args=(
               "$tag"
               --target "$TARGET_SHA"
@@ -311,7 +311,7 @@ jobs:
               --notes "Yummi LCU Agent ${RELEASE_LABEL}."
             )
             if [ "$RELEASE_CHANNEL" != "stable" ]; then args+=(--prerelease); fi
-            gh release create "${args[@]}"
+            gh release create "${args[@]}" --repo "$GITHUB_REPOSITORY"
           fi
           gh release upload "$tag" \
             "$installer" \
@@ -319,12 +319,13 @@ jobs:
             "$archive" \
             release/tauri-latest.zip \
             release/agent-version.json \
+            --repo "$GITHUB_REPOSITORY" \
             --clobber
 
   deploy:
     name: Deploy agent update files
     needs: build
-    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     permissions:
       contents: read
