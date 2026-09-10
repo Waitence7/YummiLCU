@@ -66,3 +66,17 @@ def test_tournament_broadcast_forward_ignores_unbound_reporter() -> None:
         assert matched is False
 
     asyncio.run(run())
+
+
+def test_tournament_broadcast_forward_accepts_live_game() -> None:
+    async def run() -> None:
+        payload = {"game": {"time_seconds": 600}, "participants": [{} for _ in range(10)]}
+        http = _Http(_Response(200, {"matched": True, "code": "ABCDE"}))
+        with patch("relay.app.config.tournament_api_base_url", return_value="http://api:4000"), patch(
+            "relay.app.config.tournament_bot_internal_token", return_value="secret"
+        ):
+            matched = await _forward_tournament_broadcast_lcu(http, 12345, "live_game", payload)
+        assert matched is True
+        assert http.calls[0][2] == {"kind": "live_game", "data": payload}
+
+    asyncio.run(run())

@@ -818,7 +818,7 @@ async def _forward_tournament_broadcast_lcu(
     The Tournament API only accepts a reporter while an authorized broadcast page
     is actively heartbeating, so ordinary Agent traffic is ignored server-side.
     """
-    if kind not in {"gameflow", "champ_select"}:
+    if kind not in {"gameflow", "champ_select", "live_game"}:
         return False
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
@@ -1737,6 +1737,9 @@ async def _handle_agent_message(
         event_id = _relay_event_id(data)
         await conn.forward_live_game_update(discord_id, payload)
         await _forward_guild_match_live(websocket.app.state.http, discord_id, payload, event_id)
+        await _forward_tournament_broadcast_lcu(
+            websocket.app.state.http, discord_id, "live_game", payload
+        )
         return
 
     if msg_type == "participant_status_update":
