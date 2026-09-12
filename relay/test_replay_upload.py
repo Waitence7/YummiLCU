@@ -55,6 +55,8 @@ class ReplayUploadAuthTests(unittest.TestCase):
         self.assertIn(("/auth/status", frozenset({"GET"})), routes)
         self.assertIn(("/agent/replay-upload-target", frozenset({"GET"})), routes)
         self.assertIn(("/agent/replay-upload", frozenset({"POST"})), routes)
+        self.assertIn(("/lcu/replay-upload-target", frozenset({"GET"})), routes)
+        self.assertIn(("/lcu/replay-upload", frozenset({"POST"})), routes)
 
     def test_legacy_target_request_without_game_id_keeps_tournament_upload(self) -> None:
         async def run() -> None:

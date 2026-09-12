@@ -752,6 +752,7 @@ async def _replay_upload_target(
 
 
 @app.get("/agent/replay-upload-target")
+@app.get("/lcu/replay-upload-target")
 async def agent_replay_upload_target(
     request: Request,
     session_id: str = Query(..., min_length=8, max_length=64),
@@ -778,6 +779,7 @@ async def agent_replay_upload_target(
 
 
 @app.post("/agent/replay-upload")
+@app.post("/lcu/replay-upload")
 async def agent_replay_upload(
     request: Request,
     session_id: str = Query(..., min_length=8, max_length=64),
