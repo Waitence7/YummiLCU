@@ -74,9 +74,9 @@ jobs:
         shell: pwsh
         run: |
           $packageVersion = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
-          $packageLock = Get-Content agent-tauri/package-lock.json | ConvertFrom-Json
-          $packageLockVersion = $packageLock.version
-          $packageLockRootVersion = $packageLock.packages."".version
+          $packageLock = Get-Content agent-tauri/package-lock.json -Raw | ConvertFrom-Json -AsHashtable
+          $packageLockVersion = $packageLock['version']
+          $packageLockRootVersion = $packageLock['packages']['']['version']
           $tauriVersion = (Get-Content agent-tauri/src-tauri/tauri.conf.json | ConvertFrom-Json).version
           $cargoTomlText = Get-Content agent-tauri/src-tauri/Cargo.toml -Raw
           if ($cargoTomlText -notmatch '(?ms)^\[package\].*?^version\s*=\s*"([^"]+)"') { throw "Cargo.toml package version not found" }
