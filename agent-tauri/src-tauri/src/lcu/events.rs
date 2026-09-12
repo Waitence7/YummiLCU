@@ -1510,9 +1510,18 @@ fn champ_select_payload(value: &Value) -> Value {
             })
         })
         .collect::<Vec<_>>();
+    let is_spectating = session
+        .get("isSpectating")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let current_action = actions.iter().find(|action| {
+        if action.get("is_in_progress").and_then(Value::as_bool) != Some(true) {
+            return false;
+        }
+        if is_spectating {
+            return true;
+        }
         action.get("is_ally_action").and_then(Value::as_bool) == Some(true)
-            && action.get("is_in_progress").and_then(Value::as_bool) == Some(true)
             && action
                 .get("actor_cell_id")
                 .and_then(Value::as_i64)
@@ -1553,7 +1562,7 @@ fn champ_select_payload(value: &Value) -> Value {
             "authoritative_epoch": phase_end_at_ms.is_some(),
         },
         "local_cell_id": local_cell_id,
-        "is_spectating": session.get("isSpectating").and_then(Value::as_bool).unwrap_or(false),
+        "is_spectating": is_spectating,
         "my_team": team_payload(session.get("myTeam")),
         "their_team": team_payload(session.get("theirTeam")),
         "actions": actions,
@@ -2225,6 +2234,37 @@ mod tests {
         assert_eq!(payload["current_action"]["id"], 7);
         assert_eq!(payload["timer"]["remaining_ms"], 12000);
         assert!(payload["timer"]["captured_at_ms"].as_u64().is_some());
+    }
+
+    #[test]
+    fn spectator_champ_select_uses_any_in_progress_action_as_current() {
+        let payload = champ_select_payload(&json!({
+            "isSpectating": true,
+            "localPlayerCellId": -1,
+            "actions": [[
+                {
+                    "id": 11,
+                    "type": "ban",
+                    "championId": 103,
+                    "completed": false,
+                    "isAllyAction": false,
+                    "isInProgress": true,
+                    "actorCellId": 7
+                }
+            ]],
+            "timer": {
+                "phase": "BAN_PICK",
+                "adjustedTimeLeftInPhase": 12000,
+                "totalTimeInPhase": 30000
+            },
+            "myTeam": [],
+            "theirTeam": []
+        }));
+
+        assert_eq!(payload["is_spectating"], true);
+        assert_eq!(payload["current_action"]["id"], 11);
+        assert_eq!(payload["current_action"]["type"], "ban");
+        assert_eq!(payload["current_action"]["actor_cell_id"], 7);
     }
 
     #[test]
