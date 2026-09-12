@@ -5669,7 +5669,7 @@ dependencies = [
 
 [[package]]
 name = "yummi-lcu-tauri"
-version = "0.7.9"
+version = "0.7.10"
 dependencies = [
  "base64 0.22.1",
  "dirs",
