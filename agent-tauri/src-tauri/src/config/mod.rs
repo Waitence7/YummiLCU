@@ -275,11 +275,17 @@ impl Config {
         Ok(url.into())
     }
 
-    pub(crate) fn replay_upload_target_url(&self, session_id: &str) -> AgentResult<String> {
+    pub(crate) fn replay_upload_target_url(
+        &self,
+        session_id: &str,
+        game_id: &str,
+    ) -> AgentResult<String> {
         let mut url = validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
         url.set_path("/agent/replay-upload-target");
         url.set_query(None);
-        url.query_pairs_mut().append_pair("session_id", session_id);
+        url.query_pairs_mut()
+            .append_pair("session_id", session_id)
+            .append_pair("game_id", game_id);
         Ok(url.into())
     }
 
@@ -441,6 +447,20 @@ mod tests {
             "wss://relay.example:9443/ws/agent?session_id=session"
         );
         assert!(validate_relay_base_url("https://user:secret@relay.example", true).is_err());
+    }
+
+    #[test]
+    fn replay_upload_target_url_includes_game_id() {
+        let config = Config {
+            relay_public_base_url: "https://relay.example".into(),
+            ..Config::default()
+        };
+        assert_eq!(
+            config
+                .replay_upload_target_url("session", "KR-123")
+                .unwrap(),
+            "https://relay.example/agent/replay-upload-target?session_id=session&game_id=KR-123"
+        );
     }
 
     #[test]

@@ -701,16 +701,79 @@ async def _broadcast_replay_target(http: aiohttp.ClientSession, discord_id: int)
         return {"upload": False}
 
 
+async def _guild_match_replay_target(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+    game_id: str,
+) -> dict[str, Any]:
+    token = config.tournament_bot_internal_token()
+    if not token:
+        return {"upload": False}
+    url = f"{config.tournament_api_base_url()}/api/bot/guild-match/replay-target"
+    headers = {
+        "x-internal-bot-token": token,
+        "x-actor-discord-user-id": str(discord_id),
+    }
+    try:
+        async with http.get(url, headers=headers, params={"gameId": game_id}) as res:
+            if res.status >= 400:
+                logger.warning(
+                    "내전 ROFL target 조회 실패 discord_id=%s game_id=%s status=%s",
+                    discord_id,
+                    game_id,
+                    res.status,
+                )
+                return {"upload": False}
+            body = await res.json(content_type=None)
+            return body if isinstance(body, dict) else {"upload": False}
+    except Exception:
+        logger.exception(
+            "내전 ROFL target 조회 예외 discord_id=%s game_id=%s",
+            discord_id,
+            game_id,
+        )
+        return {"upload": False}
+
+
+async def _replay_upload_target(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+    game_id: str,
+) -> dict[str, Any]:
+    broadcast = await _broadcast_replay_target(http, discord_id)
+    if broadcast.get("upload") is True:
+        return {**broadcast, "targetKind": "tournament_broadcast"}
+
+    guild_match = await _guild_match_replay_target(http, discord_id, game_id)
+    if guild_match.get("upload") is True:
+        return {**guild_match, "targetKind": "guild_match"}
+
+    return {"upload": False}
+
+
 @app.get("/agent/replay-upload-target")
 async def agent_replay_upload_target(
     request: Request,
     session_id: str = Query(..., min_length=8, max_length=64),
+    game_id: str | None = Query(None, min_length=1, max_length=64),
 ) -> JSONResponse:
     discord_id = await _authenticate_agent_http(request, session_id)
-    target = await _broadcast_replay_target(request.app.state.http, discord_id)
+    if game_id is None:
+        # Backward compatibility for older Agents: tournament replay upload
+        # target lookup existed before game_id was sent by the client.
+        target = await _broadcast_replay_target(request.app.state.http, discord_id)
+        if target.get("upload") is True:
+            target = {**target, "targetKind": "tournament_broadcast"}
+    else:
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
+            raise HTTPException(400, "invalid game_id")
+        target = await _replay_upload_target(request.app.state.http, discord_id, game_id)
     return JSONResponse({
         "upload": target.get("upload") is True,
+        "targetKind": target.get("targetKind") if isinstance(target.get("targetKind"), str) else None,
         "code": target.get("code") if isinstance(target.get("code"), str) else None,
+        "matchId": target.get("matchId") if isinstance(target.get("matchId"), str) else None,
+        "inviteCode": target.get("inviteCode") if isinstance(target.get("inviteCode"), str) else None,
     })
 
 
@@ -723,9 +786,9 @@ async def agent_replay_upload(
     discord_id = await _authenticate_agent_http(request, session_id)
     if not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
         raise HTTPException(400, "invalid game_id")
-    target = await _broadcast_replay_target(request.app.state.http, discord_id)
+    target = await _replay_upload_target(request.app.state.http, discord_id, game_id)
     if target.get("upload") is not True:
-        return JSONResponse({"uploaded": False, "reason": "no_active_broadcast"}, status_code=409)
+        return JSONResponse({"uploaded": False, "reason": "not_yummi_match"}, status_code=409)
     content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
     if content_type != "application/octet-stream":
         raise HTTPException(415, "application/octet-stream required")
@@ -756,20 +819,29 @@ async def agent_replay_upload(
             raw = await res.read()
             if res.status >= 400:
                 logger.warning(
-                    "대회 ROFL 원본 전달 실패 discord_id=%s game_id=%s status=%s",
-                    discord_id, game_id, res.status
+                    "ROFL 원본 전달 실패 discord_id=%s game_id=%s target=%s status=%s",
+                    discord_id, game_id, target.get("targetKind"), res.status
                 )
                 raise HTTPException(res.status, "replay upstream rejected")
             try:
                 body = json.loads(raw.decode("utf-8"))
             except Exception:
                 body = {}
-            logger.info("대회 ROFL 원본 전달 완료 discord_id=%s game_id=%s bytes=%s", discord_id, game_id, raw_length or "chunked")
-            return JSONResponse({"uploaded": True, "gameId": game_id, "broadcast": body.get("broadcast") if isinstance(body, dict) else None})
+            logger.info(
+                "ROFL 원본 전달 완료 discord_id=%s game_id=%s target=%s bytes=%s",
+                discord_id, game_id, target.get("targetKind"), raw_length or "chunked"
+            )
+            return JSONResponse({
+                "uploaded": True,
+                "gameId": game_id,
+                "targetKind": target.get("targetKind"),
+                "broadcast": body.get("broadcast") if isinstance(body, dict) else None,
+                "guildMatch": body.get("guildMatch") if isinstance(body, dict) else None,
+            })
     except HTTPException:
         raise
     except Exception as exc:
-        logger.exception("대회 ROFL 원본 전달 예외 discord_id=%s game_id=%s", discord_id, game_id)
+        logger.exception("ROFL 원본 전달 예외 discord_id=%s game_id=%s", discord_id, game_id)
         raise HTTPException(502, "replay upload failed") from exc
 
 

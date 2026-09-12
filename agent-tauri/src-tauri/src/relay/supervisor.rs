@@ -45,8 +45,8 @@ const LCU_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(8);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_DURABLE_REPLAY_EVENTS: usize = 64;
 const DURABLE_REPLAY_INTERVAL: Duration = Duration::from_secs(30);
-const MAX_BROADCAST_REPLAY_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
-const BROADCAST_REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
+const MAX_REPLAY_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
+const REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
 
 #[derive(Clone)]
 struct SerializedAgentEvent {
@@ -916,7 +916,7 @@ async fn connect_once(
                             let upload_session_id = session.session_id.clone();
                             let upload_ws_token = session.ws_token.clone();
                             tokio::spawn(async move {
-                                match upload_broadcast_replay_file(
+                                match upload_replay_file(
                                     &upload_config,
                                     &upload_session_id,
                                     &upload_ws_token,
@@ -924,14 +924,14 @@ async fn connect_once(
                                 ).await {
                                     Ok(ReplayUploadOutcome::Uploaded) => {
                                         upload_state.record_flight("rofl_upload", format!("uploaded game_id={} bytes={}", upload.game_id, upload.file_size)).await;
-                                        upload_state.log(&upload_app, format!("대회 ROFL 원본 업로드 완료: game_id={} bytes={}", upload.game_id, upload.file_size)).await;
+                                        upload_state.log(&upload_app, format!("ROFL 원본 서버 업로드 완료: game_id={} bytes={}", upload.game_id, upload.file_size)).await;
                                     }
                                     Ok(ReplayUploadOutcome::NotNeeded) => {
-                                        upload_state.record_flight("rofl_upload", format!("skipped_no_broadcast game_id={}", upload.game_id)).await;
+                                        upload_state.record_flight("rofl_upload", format!("skipped_not_yummi_match game_id={}", upload.game_id)).await;
                                     }
                                     Err(error) => {
                                         upload_state.record_flight("rofl_upload", format!("failed game_id={} error={}", upload.game_id, error)).await;
-                                        upload_state.log(&upload_app, format!("대회 ROFL 원본 업로드 실패: game_id={} error={}", upload.game_id, error)).await;
+                                        upload_state.log(&upload_app, format!("ROFL 원본 서버 업로드 실패: game_id={} error={}", upload.game_id, error)).await;
                                     }
                                 }
                             });
@@ -1238,13 +1238,13 @@ fn replay_upload_request(data: &Value) -> Option<ReplayUploadRequest> {
         file_name = format!("{}.rofl", game_id);
     }
     let file_size = data.get("fileSize")?.as_u64()?;
-    if file_size == 0 || file_size > MAX_BROADCAST_REPLAY_UPLOAD_BYTES {
+    if file_size == 0 || file_size > MAX_REPLAY_UPLOAD_BYTES {
         return None;
     }
     Some(ReplayUploadRequest { game_id, path, file_name, file_size })
 }
 
-async fn upload_broadcast_replay_file(
+async fn upload_replay_file(
     config: &crate::config::Config,
     session_id: &str,
     ws_token: &str,
@@ -1256,7 +1256,7 @@ async fn upload_broadcast_replay_file(
     if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != upload.file_size {
         return Err(AgentError::Relay("ROFL 원본 파일 상태가 변경되었습니다.".into()));
     }
-    if metadata.len() == 0 || metadata.len() > MAX_BROADCAST_REPLAY_UPLOAD_BYTES {
+    if metadata.len() == 0 || metadata.len() > MAX_REPLAY_UPLOAD_BYTES {
         return Err(AgentError::Relay("ROFL 원본 파일 크기가 허용 범위를 벗어났습니다.".into()));
     }
 
@@ -1265,11 +1265,11 @@ async fn upload_broadcast_replay_file(
         .timeout(Duration::from_secs(5 * 60))
         .build()
         .map_err(|_| AgentError::Relay("ROFL 업로드 클라이언트 생성 실패".into()))?;
-    let target_url = config.replay_upload_target_url(session_id)?;
+    let target_url = config.replay_upload_target_url(session_id, &upload.game_id)?;
     let upload_url = config.replay_upload_url(session_id, &upload.game_id)?;
     let mut last_error = "ROFL 원본 업로드 실패".to_owned();
 
-    for attempt in 1..=BROADCAST_REPLAY_UPLOAD_ATTEMPTS {
+    for attempt in 1..=REPLAY_UPLOAD_ATTEMPTS {
         let target = client
             .get(target_url.clone())
             .header("x-yummi-ws-token", ws_token)
@@ -1283,10 +1283,10 @@ async fn upload_broadcast_replay_file(
                     }
                     Ok(_) => {
                         // EndOfGame and the local ROFL file can become ready before
-                        // Relay has persisted the matching broadcast gameflow event.
+                        // the matching tournament/guild-match state reaches the API.
                         // Give that short propagation race time to settle instead of
                         // permanently discarding the replay on the first upload:false.
-                        if attempt < BROADCAST_REPLAY_UPLOAD_ATTEMPTS {
+                        if attempt < REPLAY_UPLOAD_ATTEMPTS {
                             sleep(Duration::from_secs(u64::from(attempt.min(6)) * 2)).await;
                             continue;
                         }
@@ -1304,7 +1304,7 @@ async fn upload_broadcast_replay_file(
         }
 
         if !last_error.is_empty() && last_error.starts_with("ROFL 업로드 대상") {
-            if attempt < BROADCAST_REPLAY_UPLOAD_ATTEMPTS {
+            if attempt < REPLAY_UPLOAD_ATTEMPTS {
                 sleep(Duration::from_secs(u64::from(attempt.min(6)) * 2)).await;
                 continue;
             }
@@ -1331,7 +1331,7 @@ async fn upload_broadcast_replay_file(
             Err(_) => last_error = "ROFL 원본 업로드 네트워크 실패".into(),
         }
 
-        if attempt < BROADCAST_REPLAY_UPLOAD_ATTEMPTS {
+        if attempt < REPLAY_UPLOAD_ATTEMPTS {
             sleep(Duration::from_secs(u64::from(attempt.min(6)) * 2)).await;
         }
     }
