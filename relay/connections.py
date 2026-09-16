@@ -80,6 +80,10 @@ class ConnectionManager:
             pending_agent_info = self._pending_agent_info_by_ws.pop(id(ws), None)
             if pending_agent_info is not None:
                 self._agent_info[discord_id] = pending_agent_info
+            self._connected_participant_status_locked(
+                discord_id,
+                lcu_ready=bool((pending_agent_info or {}).get("lcu_ready")),
+            )
             logger.info("에이전트 등록: discord_id=%s session=%s", discord_id, session_id[:8])
         if replaced is not None:
             try:
@@ -161,6 +165,10 @@ class ConnectionManager:
                 self._pending_agent_info_by_ws[id(ws)] = dict(info)
                 return None
             self._agent_info[discord_id] = dict(info)
+            self._connected_participant_status_locked(
+                discord_id,
+                lcu_ready=bool(info.get("lcu_ready")),
+            )
             return discord_id
 
     def agent_info(self, discord_id: int) -> dict[str, Any] | None:
@@ -333,6 +341,20 @@ class ConnectionManager:
     def participant_status_subscribers_snapshot(self) -> set[int]:
         return set(self._participant_status_subscribers)
 
+    def _connected_participant_status_locked(
+        self, discord_id: int, *, lcu_ready: bool
+    ) -> dict[str, Any]:
+        payload = {
+            "status": "waiting",
+            "phase": "None",
+            "game_started_at_ms": None,
+            "lcu_ready": bool(lcu_ready),
+            "agent_online": True,
+            "updated_at": time.time(),
+        }
+        self._participant_status[int(discord_id)] = dict(payload)
+        return payload
+
     def _offline_participant_status_locked(self, discord_id: int) -> dict[str, Any]:
         payload = {
             "status": "offline",
@@ -362,7 +384,11 @@ class ConnectionManager:
                 payload["game_started_at_ms"] = int(started_raw)
             except (TypeError, ValueError):
                 payload["game_started_at_ms"] = None
-        self._participant_status[int(discord_id)] = payload
+        did = int(discord_id)
+        self._participant_status[did] = payload
+        agent = self._agent_info.get(did)
+        if agent is not None:
+            agent["lcu_ready"] = payload["lcu_ready"]
         return payload
 
     def get_participant_status(self, discord_id: int) -> dict[str, Any] | None:
@@ -503,6 +529,10 @@ class ConnectionManager:
         async with self._lock:
             # Bot 구독보다 Agent phase 전환이 먼저 도착할 수 있으므로 항상 캐시합니다.
             self._gameflow[did] = dict(data)
+            if data.get("lcu_ready") is True:
+                agent = self._agent_info.get(did)
+                if agent is not None:
+                    agent["lcu_ready"] = True
             if did not in self._gameflow_subscribers:
                 return False
             ws = self._bot_ws

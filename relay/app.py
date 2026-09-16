@@ -29,6 +29,7 @@ from relay import auth, config
 from relay.actions import ALLOWED_ACTIONS, action_policy
 from relay.connections import ConnectionManager
 from relay.lcu_linked import is_lcu_linked, lcu_linked_map, mark_lcu_linked
+from relay.lcu_recent import mark_recent_lcu_data, recent_lcu_data, recent_lcu_data_map
 from relay.logging_safety import redact_log_text
 
 logger = logging.getLogger("yummi_lcu.relay")
@@ -48,6 +49,17 @@ MAX_AGENT_MESSAGE_BYTES = 256 * 1024
 MAX_REPLAY_UPLOAD_BYTES = 128 * 1024 * 1024
 BOT_EOG_PERSIST_ACK_TIMEOUT_SEC = 8.0
 _SERVER_PROTOCOL_VERSION = 1
+_LCU_DATA_MESSAGE_TYPES = frozenset({
+    "party_lobby_update",
+    "ready_check_update",
+    "champ_select_update",
+    "gameflow_update",
+    "live_game_update",
+    "participant_status_update",
+    "guild_match_eog",
+    "match_eog",
+    "match_rofl",
+})
 _SERVER_CAPABILITIES = frozenset({
     "command_result_v2",
     "heartbeat",
@@ -256,6 +268,15 @@ async def _try_bind_discord(
     return bound
 
 
+async def _remember_recent_lcu_data(r: redis.Redis, discord_id: int) -> None:
+    try:
+        await mark_recent_lcu_data(r, discord_id)
+    except Exception:
+        # 최근 사용 이력은 UI 판정용 보조 근거다. Redis 장애가 실제 LCU 이벤트
+        # 처리(EOG/ROFL 포함)를 막아서는 안 된다.
+        logger.exception("최근 LCU 데이터 시각 저장 실패 discord_id=%s", discord_id)
+
+
 async def _forward_participant_status(
     conn: ConnectionManager,
     r: redis.Redis,
@@ -266,6 +287,7 @@ async def _forward_participant_status(
     if payload.get("agent_online"):
         await mark_lcu_linked(r, discord_id)
     payload["lcu_linked"] = await is_lcu_linked(r, discord_id)
+    payload.update(await recent_lcu_data(r, discord_id))
     await conn.forward_participant_status_update(discord_id, payload)
 
 
@@ -1533,6 +1555,16 @@ async def _handle_agent_message(
         return
 
     msg_type = data.get("type")
+    if msg_type in _LCU_DATA_MESSAGE_TYPES:
+        discord_id = conn.discord_id_for_ws(websocket)
+        payload = data.get("payload", data.get("data"))
+        if (
+            discord_id is not None
+            and isinstance(payload, dict)
+            and (msg_type != "participant_status_update" or payload.get("lcu_ready") is True)
+        ):
+            await _remember_recent_lcu_data(websocket.app.state.redis, discord_id)
+
     if msg_type == "agent_update_report":
         discord_id = conn.discord_id_for_ws(websocket)
         report = _agent_update_report(data)
@@ -1753,6 +1785,9 @@ async def _handle_agent_message(
             return
         r: redis.Redis = websocket.app.state.redis
         await mark_lcu_linked(r, discord_id)
+        cached_status = conn.get_participant_status(discord_id)
+        if cached_status is not None:
+            await _forward_participant_status(conn, r, discord_id, cached_status)
         logger.info(
             "agent_hello discord_id=%s version=%s lcu_ready=%s",
             discord_id,
@@ -2137,6 +2172,7 @@ async def internal_participant_status(
     statuses = conn.get_participant_statuses(discord_ids)
     r: redis.Redis = request.app.state.redis
     linked = await lcu_linked_map(r, discord_ids)
+    recent = await recent_lcu_data_map(r, discord_ids)
     for did in discord_ids:
         row = statuses.get(did)
         if row is None:
@@ -2150,6 +2186,7 @@ async def internal_participant_status(
             }
             statuses[did] = row
         row["lcu_linked"] = linked.get(did, False)
+        row.update(recent.get(did, {"recent_lcu_data": False, "last_lcu_data_at_ms": None}))
     return JSONResponse({"statuses": {str(k): v for k, v in statuses.items()}})
 
 

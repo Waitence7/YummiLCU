@@ -190,6 +190,36 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
             websocket.payloads[-1]["capabilities"]["unexpected_error_reports"]
         )
 
+    async def test_bound_agent_hello_refreshes_and_forwards_connected_status(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+
+        with patch("relay.app.mark_lcu_linked", new=AsyncMock()), patch(
+            "relay.app._forward_participant_status", new=AsyncMock()
+        ) as forward_status:
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "agent_hello",
+                    "version": "0.7.10",
+                    "os": "windows",
+                    "lcu_ready": True,
+                    "protocol_version": 1,
+                    "capabilities": {},
+                }),
+            )
+
+        status = manager.get_participant_status(42)
+        self.assertIsNotNone(status)
+        self.assertTrue(status["agent_online"])
+        self.assertTrue(status["lcu_ready"])
+        forward_status.assert_awaited_once()
+        self.assertEqual(forward_status.await_args.args[2], 42)
+        self.assertTrue(forward_status.await_args.args[3]["lcu_ready"])
+
     async def test_bound_agent_can_report_only_minimal_unexpected_error(self) -> None:
         manager = ConnectionManager()
         websocket = _WebSocketStub()
@@ -373,6 +403,62 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.bind_discord("session-1", 42))
 
         self.assertEqual(manager.agent_info(42), info)
+
+    async def test_reconnect_replaces_stale_offline_status_with_online_agent(self) -> None:
+        manager = ConnectionManager()
+        first = _WebSocketStub()
+        await manager.attach_session("session-1", first, "token-1")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        offline = await manager.unregister_ws(first)
+        self.assertIsNotNone(offline)
+        self.assertFalse(manager.get_participant_status(42)["agent_online"])
+
+        second = _WebSocketStub()
+        await manager.attach_session("session-2", second, "token-2")
+        self.assertTrue(await manager.bind_discord("session-2", 42))
+
+        status = manager.get_participant_status(42)
+        self.assertIsNotNone(status)
+        self.assertTrue(status["agent_online"])
+        self.assertFalse(status["lcu_ready"])
+        self.assertEqual(status["status"], "waiting")
+
+    async def test_participant_status_keeps_agent_lcu_metadata_in_sync(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        await manager.set_agent_info_for_ws(
+            websocket,
+            {"version": "0.7.10", "lcu_ready": False, "capabilities": {}},
+        )
+
+        manager.set_participant_status(
+            42,
+            {"status": "lobby", "phase": "Lobby", "lcu_ready": True, "agent_online": True},
+        )
+        self.assertTrue(manager.agent_info(42)["lcu_ready"])
+
+        manager.set_participant_status(
+            42,
+            {"status": "waiting", "phase": "None", "lcu_ready": False, "agent_online": True},
+        )
+        self.assertFalse(manager.agent_info(42)["lcu_ready"])
+
+    async def test_gameflow_ready_signal_refreshes_stale_agent_metadata(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        await manager.set_agent_info_for_ws(
+            websocket,
+            {"version": "0.7.10", "lcu_ready": False, "capabilities": {}},
+        )
+
+        self.assertFalse(await manager.forward_gameflow_update(
+            42, {"phase": "ReadyCheck", "lcu_ready": True}
+        ))
+        self.assertTrue(manager.agent_info(42)["lcu_ready"])
 
     async def test_duplicate_session_keeps_first_websocket_active(self) -> None:
         manager = ConnectionManager()
