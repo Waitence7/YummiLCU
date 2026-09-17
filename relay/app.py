@@ -1665,12 +1665,28 @@ async def _handle_agent_message(
                 discord_id,
                 _eog_log_json(payload, event_id),
             )
+            return
+
+        # 매칭에 실패한 EOG도 원본 archive에 보존되면 terminal 처리한다.
+        # 이전에는 ACK를 영구 보류해 Agent가 같은 event를 30초마다 무한 재전송했다.
+        archived = await _forward_match_eog(http, discord_id, payload, event_id)
+        if archived:
+            if event_id is not None:
+                conn.cancel_pending_bot_eog(event_id)
+            await _ack_agent_event(websocket, event_id)
+            logger.warning(
+                "guild_match_eog ACK terminal-archive discord_id=%s bot_forwarded=%s context=%s",
+                discord_id,
+                bot_forwarded,
+                _eog_log_json(payload, event_id),
+            )
         else:
             logger.warning(
-                "guild_match_eog ACK 보류 discord_id=%s bot_forwarded=%s web_persisted=%s context=%s",
+                "guild_match_eog ACK 보류 discord_id=%s bot_forwarded=%s web_persisted=%s archive_persisted=%s context=%s",
                 discord_id,
                 bot_forwarded,
                 web_persisted,
+                archived,
                 _eog_log_json(payload, event_id),
             )
         return

@@ -323,7 +323,9 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         event_id = "123e4567-e89b-42d3-a456-426614174010"
 
         before = len(websocket.payloads)
-        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)):
+        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)), patch(
+            "relay.app._forward_match_eog", new=AsyncMock(return_value=False)
+        ):
             await _handle_agent_message(
                 websocket,
                 manager,
@@ -339,8 +341,8 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         await manager.register_bot_ws(bot_ws)
         manager.subscribe_gameflow(42)
         with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)), patch(
-            "relay.app.BOT_EOG_PERSIST_ACK_TIMEOUT_SEC", 0.01
-        ):
+            "relay.app._forward_match_eog", new=AsyncMock(return_value=False)
+        ), patch("relay.app.BOT_EOG_PERSIST_ACK_TIMEOUT_SEC", 0.01):
             await _handle_agent_message(
                 websocket,
                 manager,
@@ -354,7 +356,9 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot_ws.payloads[-1]["type"], "guild_match_eog")
         self.assertEqual(bot_ws.payloads[-1]["event_id"], event_id)
 
-        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)):
+        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)), patch(
+            "relay.app._forward_match_eog", new=AsyncMock(return_value=False)
+        ):
             task = asyncio.create_task(
                 _handle_agent_message(
                     websocket,
@@ -372,6 +376,32 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(0)
             self.assertTrue(manager.complete_pending_bot_eog(event_id, True))
             await task
+        self.assertEqual(
+            websocket.payloads[-1],
+            {"type": "event_ack", "event_id": event_id},
+        )
+
+
+    async def test_guild_eog_unmatched_is_terminal_after_archive(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+        event_id = "123e4567-e89b-42d3-a456-426614174099"
+
+        with patch("relay.app._forward_guild_match_eog", new=AsyncMock(return_value=False)), patch(
+            "relay.app._forward_match_eog", new=AsyncMock(return_value=True)
+        ):
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "guild_match_eog",
+                    "event_id": event_id,
+                    "data": {"participants": [{"summonerName": "test"}]},
+                }),
+            )
+
         self.assertEqual(
             websocket.payloads[-1],
             {"type": "event_ack", "event_id": event_id},
