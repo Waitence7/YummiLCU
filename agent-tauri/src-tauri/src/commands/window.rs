@@ -271,7 +271,9 @@ fn monitor_work_area(x: i32, y: i32) -> Option<MonitorWorkArea> {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    unsafe { GetMonitorInfoW(handle, &mut info) }.ok()?;
+    if !unsafe { GetMonitorInfoW(handle, &mut info) }.as_bool() {
+        return None;
+    }
 
     Some(MonitorWorkArea {
         handle,

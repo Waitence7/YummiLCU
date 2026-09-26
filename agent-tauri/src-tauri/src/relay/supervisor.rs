@@ -1442,8 +1442,12 @@ async fn upload_replay_file(
         .map_err(|_| AgentError::Relay("ROFL 업로드 클라이언트 생성 실패".into()))?;
     let target_url = config.replay_upload_target_url(session_id, &upload.game_id)?;
     let upload_url = config.replay_upload_url(session_id, &upload.game_id)?;
-    let target_url_label = safe_url(&target_url);
-    let upload_url_label = safe_url(&upload_url);
+    let target_url_label = reqwest::Url::parse(&target_url)
+        .map(|url| safe_url(&url))
+        .unwrap_or_else(|_| "invalid-url".into());
+    let upload_url_label = reqwest::Url::parse(&upload_url)
+        .map(|url| safe_url(&url))
+        .unwrap_or_else(|_| "invalid-url".into());
     let mut last_error = "ROFL 원본 업로드 실패".to_owned();
 
     for attempt in 1..=REPLAY_UPLOAD_ATTEMPTS {
