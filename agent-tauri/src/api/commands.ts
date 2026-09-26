@@ -30,11 +30,8 @@ export const hideMainWindow = () => call<void>('hide_main_window');
 export const completeTrayHide = () => call<void>('complete_tray_hide');
 export const minimizeMainWindow = () => call<void>('minimize_main_window');
 export const requestTrayHide = () => call<void>('request_tray_hide');
-export const startMainWindowDrag = async () => {
-  if (useMockBridge) return;
-  const { getCurrentWindow } = await import('@tauri-apps/api/window');
-  await getCurrentWindow().startDragging();
-};
+export const startMainWindowDrag = () =>
+  useMockBridge ? Promise.resolve() : call<void>('start_main_window_drag');
 export const getBetaReleaseInfo = () => call<BetaReleaseInfo>('get_beta_release_info');
 export const openBetaDownload = () => call<void>('open_beta_download');
 

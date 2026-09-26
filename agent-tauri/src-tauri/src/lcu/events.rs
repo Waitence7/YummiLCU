@@ -18,8 +18,8 @@ use tokio_tungstenite::{
 use crate::{config::Config, error::AgentError};
 
 use super::{
-    collect_replay_bundle, collect_replay_file, discover_lockfile, LcuClient, LcuIdentity,
-    LockfileDiscovery, RoflMatchHint,
+    collect_replay_bundle, collect_replay_file, discover_lockfile, find_existing_replay_path,
+    LcuClient, LcuIdentity, LockfileDiscovery, RoflMatchHint,
 };
 
 const GAMEFLOW_PHASE: &str = "/lol-gameflow/v1/gameflow-phase";
@@ -40,6 +40,7 @@ const RECENT_MATCH_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
 const EOG_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const EOG_POSTGAME_RECOVERY_GRACE: Duration = Duration::from_secs(90);
 const ROFL_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+const ROFL_DOWNLOAD_COMPONENT_TYPE: &str = "replay-button_end-of-game";
 const ROFL_POSTGAME_RECOVERY_GRACE: Duration = Duration::from_secs(300);
 const ROFL_PARSE_TIMEOUT: Duration = Duration::from_secs(25);
 const LIVE_GAME_PARTICIPANT_COUNT: usize = 10;
@@ -70,6 +71,7 @@ pub(crate) struct LcuEventPoller {
     last_rofl_attempt: Option<Instant>,
     rofl_attempt_count: u32,
     rofl_download_requested_game_id: Option<String>,
+    rofl_auto_download_owned_game_id: Option<String>,
     diagnostics: Vec<String>,
     last_lockfile_diagnostics: Vec<String>,
     cached_lockfile_discovery: Option<LockfileDiscovery>,
@@ -105,6 +107,7 @@ impl LcuEventPoller {
         self.last_rofl_attempt = None;
         self.rofl_attempt_count = 0;
         self.rofl_download_requested_game_id = None;
+        self.rofl_auto_download_owned_game_id = None;
         self.lcu_available = None;
         self.schema_warnings.clear();
     }
@@ -132,6 +135,35 @@ impl LcuEventPoller {
             "LCU 연결 세대 #{} 종료 — 다음 연결은 새 상태로 초기화",
             self.connection_generation
         ));
+    }
+
+    fn mark_lcu_unavailable(
+        &mut self,
+        events: &mut Vec<(&'static str, Value)>,
+        disconnected: bool,
+    ) {
+        let was_available = self.lcu_available == Some(true);
+        if disconnected {
+            self.observe_disconnected();
+        }
+        self.lcu_available = Some(false);
+        if !was_available {
+            return;
+        }
+        let status = json!({
+            "status": "waiting",
+            "phase": "None",
+            "game_started_at_ms": Value::Null,
+            "lcu_ready": false,
+            "agent_online": true
+        });
+        push_changed(
+            &mut self.participant,
+            fingerprint(&status),
+            "participant_status_update",
+            status,
+            events,
+        );
     }
 
     pub(crate) fn set_live_game_polling(&mut self, enabled: bool) {
@@ -394,9 +426,8 @@ impl LcuEventPoller {
             if self.lockfile_available != Some(false) {
                 self.diagnostic("LCU lockfile 없음 — 관전 API 독립 조회만 계속함");
             }
-            self.observe_disconnected();
             self.lockfile_available = Some(false);
-            self.lcu_available = Some(false);
+            self.mark_lcu_unavailable(&mut events, true);
             return events;
         };
         if discovery.legacy_fallback && self.lockfile_available != Some(true) {
@@ -412,7 +443,7 @@ impl LcuEventPoller {
             if self.lcu_available != Some(false) {
                 self.diagnostic("LCU lockfile/PID 검증 실패 — 관전 API 독립 조회는 계속함");
             }
-            self.lcu_available = Some(false);
+            self.mark_lcu_unavailable(&mut events, true);
             return events;
         };
         self.observe_connection(client.identity());
@@ -423,7 +454,7 @@ impl LcuEventPoller {
                 if self.lcu_available != Some(false) {
                     self.diagnostic(format!("LCU gameflow API 응답 실패: {error}"));
                 }
-                self.lcu_available = Some(false);
+                self.mark_lcu_unavailable(&mut events, false);
                 return events;
             }
         };
@@ -432,10 +463,11 @@ impl LcuEventPoller {
             if self.lcu_available != Some(false) {
                 self.diagnostic("LCU gameflow API 응답 형식 오류");
             }
-            self.lcu_available = Some(false);
+            self.mark_lcu_unavailable(&mut events, false);
             return events;
         };
-        if self.lcu_available != Some(true) {
+        let lcu_became_available = self.lcu_available != Some(true);
+        if lcu_became_available {
             self.diagnostic("LCU gameflow API 연결됨");
         }
         self.lcu_available = Some(true);
@@ -453,6 +485,17 @@ impl LcuEventPoller {
             json!({"phase": phase, "lcu_ready": true}),
             &mut events,
         );
+        if lcu_became_available {
+            let status =
+                participant_status(&phase, &json!({"in_lobby": false, "riot_ids_in_party": []}));
+            push_changed(
+                &mut self.participant,
+                fingerprint(&status),
+                "participant_status_update",
+                status,
+                &mut events,
+            );
+        }
         if phase == "InProgress" && previous_phase.as_deref() != Some("InProgress") {
             self.eog_sent = false;
             self.last_eog_attempt = None;
@@ -466,6 +509,7 @@ impl LcuEventPoller {
             self.last_rofl_attempt = None;
             self.rofl_attempt_count = 0;
             self.rofl_download_requested_game_id = None;
+            self.rofl_auto_download_owned_game_id = None;
         }
         if is_eog_phase(&phase) && self.eog_recovery_started_at.is_none() {
             self.eog_recovery_started_at = Some(Instant::now());
@@ -508,8 +552,8 @@ impl LcuEventPoller {
             // gameflow session usually exposes gameId before eog-stats-block is
             // populated, so seed ROFL recovery as soon as that id is trustworthy
             // and run result recovery + replay recovery in parallel.
-            if let Some(game_id) = json_scalar_id(payload.get("gameId"))
-                .or_else(|| self.eog_expected_game_id.clone())
+            if let Some(game_id) =
+                json_scalar_id(payload.get("gameId")).or_else(|| self.eog_expected_game_id.clone())
             {
                 let is_new_replay = self
                     .rofl_match_hint
@@ -530,6 +574,7 @@ impl LcuEventPoller {
                     self.last_rofl_attempt = None;
                     self.rofl_attempt_count = 0;
                     self.rofl_download_requested_game_id = None;
+                    self.rofl_auto_download_owned_game_id = None;
                     self.rofl_file_ready_game_id = None;
                     self.diagnostic(format!("ROFL 자동 다운로드 대기 시작: game_id={game_id}"));
                 }
@@ -621,22 +666,81 @@ impl LcuEventPoller {
         if let Some(hint) = self.rofl_match_hint.clone() {
             if self.rofl_sent_game_id.as_deref() != Some(hint.game_id.as_str()) {
                 if self.rofl_download_requested_game_id.as_deref() != Some(hint.game_id.as_str()) {
-                    let endpoint = format!(
-                        "/lol-replays/v1/rofls/{}/download/graceful",
-                        hint.game_id
-                    );
-                    match client.request(Method::POST, &endpoint, None).await {
-                        Ok(_) => {
+                    let precheck_hint = hint.clone();
+                    let preexisting = timeout(
+                        ROFL_PARSE_TIMEOUT,
+                        tokio::task::spawn_blocking(move || {
+                            find_existing_replay_path(&precheck_hint)
+                        }),
+                    )
+                    .await;
+
+                    let mut safe_auto_delete = false;
+                    let should_request_download = match preexisting {
+                        Ok(Ok(Ok(Some(path)))) => {
                             self.rofl_download_requested_game_id = Some(hint.game_id.clone());
+                            self.rofl_auto_download_owned_game_id = None;
                             self.diagnostic(format!(
-                                "LCU ROFL 다운로드 요청 완료: game_id={}",
+                                "기존 ROFL 감지 — 사용자 파일 보호, 자동 다운로드/삭제 생략: game_id={} file={}",
+                                hint.game_id,
+                                path.file_name()
+                                    .and_then(|value| value.to_str())
+                                    .unwrap_or("replay.rofl")
+                            ));
+                            false
+                        }
+                        Ok(Ok(Ok(None))) => {
+                            safe_auto_delete = true;
+                            true
+                        }
+                        Ok(Ok(Err(error))) => {
+                            self.diagnostic(format!(
+                                "ROFL 기존 파일 확인 실패 — 자동 삭제 비활성 상태로 다운로드 계속: game_id={} error={error}",
                                 hint.game_id
                             ));
+                            true
                         }
-                        Err(error) => self.diagnostic(format!(
-                            "LCU ROFL 다운로드 요청 실패(다음 poll에서 재시도): game_id={} error={error}",
-                            hint.game_id
-                        )),
+                        Ok(Err(error)) => {
+                            self.diagnostic(format!(
+                                "ROFL 기존 파일 확인 worker 실패 — 자동 삭제 비활성 상태로 다운로드 계속: game_id={} error={error}",
+                                hint.game_id
+                            ));
+                            true
+                        }
+                        Err(_) => {
+                            self.diagnostic(format!(
+                                "ROFL 기존 파일 확인 시간 초과 — 자동 삭제 비활성 상태로 다운로드 계속: game_id={}",
+                                hint.game_id
+                            ));
+                            true
+                        }
+                    };
+
+                    if should_request_download {
+                        let endpoint =
+                            format!("/lol-replays/v1/rofls/{}/download/graceful", hint.game_id);
+                        let context_data = json!({
+                            "componentType": ROFL_DOWNLOAD_COMPONENT_TYPE,
+                        });
+                        match client
+                            .request(Method::POST, &endpoint, Some(context_data))
+                            .await
+                        {
+                            Ok(_) => {
+                                self.rofl_download_requested_game_id = Some(hint.game_id.clone());
+                                self.rofl_auto_download_owned_game_id =
+                                    safe_auto_delete.then(|| hint.game_id.clone());
+                                self.diagnostic(format!(
+                                    "LCU ROFL 다운로드 요청 완료: game_id={} auto_cleanup={}",
+                                    hint.game_id,
+                                    if safe_auto_delete { "eligible" } else { "disabled" }
+                                ));
+                            }
+                            Err(error) => self.diagnostic(format!(
+                                "LCU ROFL 다운로드 요청 실패(다음 poll에서 재시도): game_id={} error={error}",
+                                hint.game_id
+                            )),
+                        }
                     }
                 }
 
@@ -665,6 +769,10 @@ impl LcuEventPoller {
                                     .unwrap_or("replay.rofl")
                                     .to_owned();
                                 let file_path = file.path.to_string_lossy().into_owned();
+                                let delete_after_upload =
+                                    self.rofl_auto_download_owned_game_id.as_deref()
+                                        == Some(game_id.as_str())
+                                        && file.modified_at_ms.is_some();
                                 events.push((
                                     "match_rofl_file_ready",
                                     json!({
@@ -672,6 +780,8 @@ impl LcuEventPoller {
                                         "path": file_path,
                                         "fileName": file_name,
                                         "fileSize": file.size,
+                                        "fileModifiedAtMs": file.modified_at_ms,
+                                        "deleteAfterUpload": delete_after_upload,
                                     }),
                                 ));
                                 self.rofl_file_ready_game_id = Some(game_id.clone());
@@ -710,7 +820,9 @@ impl LcuEventPoller {
                         let worker_hint = hint.clone();
                         let parsed = timeout(
                             ROFL_PARSE_TIMEOUT,
-                            tokio::task::spawn_blocking(move || collect_replay_bundle(&worker_hint)),
+                            tokio::task::spawn_blocking(move || {
+                                collect_replay_bundle(&worker_hint)
+                            }),
                         )
                         .await;
                         match parsed {
@@ -757,6 +869,7 @@ impl LcuEventPoller {
                     self.rofl_match_hint = None;
                     self.rofl_file_ready_game_id = None;
                     self.rofl_download_requested_game_id = None;
+                    self.rofl_auto_download_owned_game_id = None;
                     self.rofl_recovery_started_at = None;
                     self.last_rofl_attempt = None;
                     self.rofl_attempt_count = 0;
@@ -1006,10 +1119,7 @@ fn has_consistent_eog_result_participants(value: Option<&Value>) -> bool {
         valid_count += 1;
     }
 
-    valid_count >= 9
-        && blue_result.is_some()
-        && red_result.is_some()
-        && blue_result != red_result
+    valid_count >= 9 && blue_result.is_some() && red_result.is_some() && blue_result != red_result
 }
 
 fn json_scalar_id(value: Option<&Value>) -> Option<String> {
@@ -1032,7 +1142,9 @@ fn eog_result_evidence_source(payload: &Value) -> Option<&'static str> {
         (Some(_), None) => false,
         (None, _) => true,
     };
-    if game_id_matches_expected && has_consistent_eog_result_participants(payload.get("participants")) {
+    if game_id_matches_expected
+        && has_consistent_eog_result_participants(payload.get("participants"))
+    {
         return Some("eog_stats");
     }
 
@@ -1062,7 +1174,8 @@ fn should_attempt_eog_recovery(
     }
     let in_eog_phase = is_eog_phase(phase);
     let postgame_grace = matches!(phase, "Lobby" | "None")
-        && recovery_started_at.is_some_and(|started| started.elapsed() <= EOG_POSTGAME_RECOVERY_GRACE)
+        && recovery_started_at
+            .is_some_and(|started| started.elapsed() <= EOG_POSTGAME_RECOVERY_GRACE)
         && expected_game_id.is_some();
     if !in_eog_phase && !postgame_grace {
         return false;
@@ -1070,8 +1183,7 @@ fn should_attempt_eog_recovery(
     if in_eog_phase
         && !matches!(
             previous_phase,
-            None
-                | Some("InProgress")
+            None | Some("InProgress")
                 | Some("PreEndOfGame")
                 | Some("EndOfGame")
                 | Some("WaitingForStats")
@@ -1113,16 +1225,14 @@ async fn eog_payload(
         (None, "skipped", None)
     };
 
-    let (session, session_request_status, session_request_error) = match client
-        .request(Method::GET, GAMEFLOW_SESSION, None)
-        .await
-    {
-        Ok(value) => (Some(value), "ok", None),
-        Err(error) => {
-            none_reasons.push("gameflow_session_request_failed");
-            (None, "error", Some(error.to_string()))
-        }
-    };
+    let (session, session_request_status, session_request_error) =
+        match client.request(Method::GET, GAMEFLOW_SESSION, None).await {
+            Ok(value) => (Some(value), "ok", None),
+            Err(error) => {
+                none_reasons.push("gameflow_session_request_failed");
+                (None, "error", Some(error.to_string()))
+            }
+        };
 
     let (recent_history, recent_request_status, recent_request_error) = match timeout(
         RECENT_MATCH_VERIFICATION_TIMEOUT,
@@ -1137,7 +1247,11 @@ async fn eog_payload(
         }
         Err(_) => {
             none_reasons.push("recent_match_request_timeout");
-            (None, "timeout", Some("recent match verification timeout".into()))
+            (
+                None,
+                "timeout",
+                Some("recent match verification timeout".into()),
+            )
         }
     };
     let recent_match = recent_history
@@ -1305,15 +1419,14 @@ fn push_gameflow_snapshot(
 ) {
     let now = Instant::now();
     let changed = previous.as_deref() != Some(next.as_str());
-    let snapshot_due = last_emit
-        .is_none_or(|last| now.duration_since(last) >= GAMEFLOW_SNAPSHOT_INTERVAL);
+    let snapshot_due =
+        last_emit.is_none_or(|last| now.duration_since(last) >= GAMEFLOW_SNAPSHOT_INTERVAL);
     *previous = Some(next);
     if changed || snapshot_due {
         *last_emit = Some(now);
         events.push(("gameflow_update", payload));
     }
 }
-
 
 fn push_changed(
     previous: &mut Option<String>,
@@ -1351,10 +1464,7 @@ fn wall_clock_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn live_game_fingerprint(
-    value: &Value,
-    respawn_samples: &mut HashMap<String, u8>,
-) -> String {
+fn live_game_fingerprint(value: &Value, respawn_samples: &mut HashMap<String, u8>) -> String {
     let mut stable = value.clone();
     if let Some(object) = stable.as_object_mut() {
         // Wall-clock / continuously advancing game clock values must not make an
@@ -1373,20 +1483,14 @@ fn live_game_fingerprint(
             game.remove("game_time");
         }
 
-        if let Some(participants) = object
-            .get_mut("participants")
-            .and_then(Value::as_array_mut)
-        {
+        if let Some(participants) = object.get_mut("participants").and_then(Value::as_array_mut) {
             let mut alive_keys = Vec::new();
             for (index, participant) in participants.iter_mut().enumerate() {
                 let Some(row) = participant.as_object_mut() else {
                     continue;
                 };
                 let key = participant_fingerprint_key(row, index);
-                let is_dead = row
-                    .get("is_dead")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
+                let is_dead = row.get("is_dead").and_then(Value::as_bool).unwrap_or(false);
 
                 // ward_score and creep_score remain in emitted payloads, but changes
                 // to either value alone are too noisy to trigger a network update.
@@ -1404,10 +1508,7 @@ fn live_game_fingerprint(
                 if is_dead {
                     let sample = respawn_samples.entry(key).or_insert(0);
                     *sample = (*sample + 1).min(2);
-                    row.insert(
-                        "respawn_sample_phase".to_string(),
-                        Value::from(*sample),
-                    );
+                    row.insert("respawn_sample_phase".to_string(), Value::from(*sample));
                 } else {
                     alive_keys.push(key);
                 }
@@ -1451,10 +1552,7 @@ fn normalize_live_items(participant: &mut serde_json::Map<String, Value>) {
                 .or_else(|| item.get("id"))
                 .cloned()
                 .unwrap_or(Value::Null);
-            let count = item
-                .get("count")
-                .cloned()
-                .unwrap_or_else(|| Value::from(1));
+            let count = item.get("count").cloned().unwrap_or_else(|| Value::from(1));
             json!({"id": id, "count": count})
         })
         .collect::<Vec<_>>();
@@ -2199,6 +2297,31 @@ mod tests {
     }
 
     #[test]
+    fn lcu_unavailable_emits_connected_agent_status_once() {
+        let mut poller = LcuEventPoller::default();
+        poller.observe_connection(LcuIdentity {
+            process_id: 10,
+            port: 5000,
+        });
+        poller.lcu_available = Some(true);
+        let mut events = Vec::new();
+
+        poller.mark_lcu_unavailable(&mut events, true);
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "participant_status_update");
+        assert_eq!(events[0].1["status"], "waiting");
+        assert_eq!(events[0].1["phase"], "None");
+        assert_eq!(events[0].1["lcu_ready"], false);
+        assert_eq!(events[0].1["agent_online"], true);
+        assert!(poller.connection_identity.is_none());
+        assert_eq!(poller.lcu_available, Some(false));
+
+        poller.mark_lcu_unavailable(&mut events, true);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
     fn schema_canary_reports_drift_once_and_recovery_once() {
         let mut poller = LcuEventPoller::default();
         poller.observe_schema("champ_select", false);
@@ -2697,16 +2820,18 @@ mod tests {
     #[test]
     fn live_game_fingerprint_sends_two_respawn_samples_then_ignores_countdown() {
         let mut samples = HashMap::new();
-        let dead = |timer| json!({
-            "game": {"id": 42},
-            "participants": [{
-                "riot_id": "Player#KR1",
-                "is_dead": true,
-                "deaths": 1,
-                "respawn_timer": timer
-            }],
-            "events": []
-        });
+        let dead = |timer| {
+            json!({
+                "game": {"id": 42},
+                "participants": [{
+                    "riot_id": "Player#KR1",
+                    "is_dead": true,
+                    "deaths": 1,
+                    "respawn_timer": timer
+                }],
+                "events": []
+            })
+        };
 
         let first = live_game_fingerprint(&dead(30.5), &mut samples);
         let second = live_game_fingerprint(&dead(29.5), &mut samples);
@@ -2721,15 +2846,17 @@ mod tests {
     #[test]
     fn live_game_fingerprint_revive_resets_respawn_sampling() {
         let mut samples = HashMap::new();
-        let dead = |timer, deaths| json!({
-            "game": {"id": 42},
-            "participants": [{
-                "riot_id": "Player#KR1",
-                "is_dead": true,
-                "deaths": deaths,
-                "respawn_timer": timer
-            }]
-        });
+        let dead = |timer, deaths| {
+            json!({
+                "game": {"id": 42},
+                "participants": [{
+                    "riot_id": "Player#KR1",
+                    "is_dead": true,
+                    "deaths": deaths,
+                    "respawn_timer": timer
+                }]
+            })
+        };
         let alive = json!({
             "game": {"id": 42},
             "participants": [{
@@ -2749,5 +2876,4 @@ mod tests {
         let next_death_second = live_game_fingerprint(&dead(34.0, 2), &mut samples);
         assert_ne!(next_death_first, next_death_second);
     }
-
 }

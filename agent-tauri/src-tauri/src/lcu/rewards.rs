@@ -31,58 +31,74 @@ impl LcuClient {
     }
 
     async fn claim_loot_notifications(&self, lines: &mut Vec<String>) -> usize {
-        let Ok(value) = self.request(Method::GET, LOOT_NOTIFICATIONS, None).await else {
-            return 0;
+        let value = match self.request(Method::GET, LOOT_NOTIFICATIONS, None).await {
+            Ok(value) => value,
+            Err(error) => {
+                lines.push(format!("알림 조회 실패: {error}"));
+                return 0;
+            }
         };
         let mut claimed = 0;
         for item in value.as_array().into_iter().flatten() {
             let Some(id) = item.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if self
+            match self
                 .request(
                     Method::POST,
                     &format!("{LOOT_NOTIFICATIONS}/{}/acknowledge", encode_component(id)),
                     None,
                 )
                 .await
-                .is_ok()
             {
-                claimed += 1;
-                lines.push(format!("알림: {}", truncate(id, 20)));
+                Ok(_) => {
+                    claimed += 1;
+                    lines.push(format!("알림: {}", truncate(id, 20)));
+                }
+                Err(error) => lines.push(format!("알림 수령 실패: {error}")),
             }
         }
         claimed
     }
 
     async fn claim_milestones(&self, lines: &mut Vec<String>) -> usize {
-        let Ok(value) = self.request(Method::GET, MILESTONES, None).await else {
-            return 0;
+        let value = match self.request(Method::GET, MILESTONES, None).await {
+            Ok(value) => value,
+            Err(error) => {
+                lines.push(format!("마일스톤 조회 실패: {error}"));
+                return 0;
+            }
         };
         let mut claimed = 0;
         for milestone in value.as_array().into_iter().flatten() {
             let Some(id) = milestone.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if self
+            match self
                 .request(
                     Method::POST,
                     &format!("{MILESTONES}/{}/claim", encode_component(id)),
                     None,
                 )
                 .await
-                .is_ok()
             {
-                claimed += 1;
-                lines.push(format!("마일스톤: {id}"));
+                Ok(_) => {
+                    claimed += 1;
+                    lines.push(format!("마일스톤: {id}"));
+                }
+                Err(error) => lines.push(format!("마일스톤 수령 실패: {error}")),
             }
         }
         claimed
     }
 
     async fn claim_missions(&self, lines: &mut Vec<String>) -> usize {
-        let Ok(value) = self.request(Method::GET, MISSIONS, None).await else {
-            return 0;
+        let value = match self.request(Method::GET, MISSIONS, None).await {
+            Ok(value) => value,
+            Err(error) => {
+                lines.push(format!("미션 조회 실패: {error}"));
+                return 0;
+            }
         };
         let mut claimed = 0;
         for mission in value.as_array().into_iter().flatten() {
@@ -93,50 +109,62 @@ impl LcuClient {
             let Some(id) = mission.get("id").and_then(Value::as_str) else {
                 continue;
             };
-            if self
+            match self
                 .request(
                     Method::PUT,
                     &format!("/lol-missions/v1/player/{}", encode_component(id)),
                     Some(json!({})),
                 )
                 .await
-                .is_ok()
             {
-                claimed += 1;
-                lines.push(format!("미션: {}", truncate(id, 24)));
+                Ok(_) => {
+                    claimed += 1;
+                    lines.push(format!("미션: {}", truncate(id, 24)));
+                }
+                Err(error) => lines.push(format!("미션 수령 실패: {error}")),
             }
         }
         claimed
     }
 
     async fn claim_event_hub(&self, lines: &mut Vec<String>) -> usize {
-        let Ok(value) = self.request(Method::GET, EVENTS, None).await else {
-            return 0;
+        let value = match self.request(Method::GET, EVENTS, None).await {
+            Ok(value) => value,
+            Err(error) => {
+                lines.push(format!("이벤트 조회 실패: {error}"));
+                return 0;
+            }
         };
         let mut claimed = 0;
         for event in value.as_array().into_iter().flatten() {
             let Some(id) = event.get("eventId").and_then(Value::as_str) else {
                 continue;
             };
-            if self
+            match self
                 .request(
                     Method::POST,
                     &format!("{EVENTS}/{}/reward-track/claim-all", encode_component(id)),
                     None,
                 )
                 .await
-                .is_ok()
             {
-                claimed += 1;
-                lines.push(format!("이벤트: {id}"));
+                Ok(_) => {
+                    claimed += 1;
+                    lines.push(format!("이벤트: {id}"));
+                }
+                Err(error) => lines.push(format!("이벤트 수령 실패: {error}")),
             }
         }
         claimed
     }
 
     async fn redeem_player_loot(&self, lines: &mut Vec<String>) -> usize {
-        let Ok(value) = self.request(Method::GET, PLAYER_LOOT, None).await else {
-            return 0;
+        let value = match self.request(Method::GET, PLAYER_LOOT, None).await {
+            Ok(value) => value,
+            Err(error) => {
+                lines.push(format!("루트 조회 실패: {error}"));
+                return 0;
+            }
         };
         let mut claimed = 0;
         for loot in value.as_array().into_iter().flatten() {
@@ -146,19 +174,21 @@ impl LcuClient {
             let Some(name) = loot.get("lootName").and_then(Value::as_str) else {
                 continue;
             };
-            if self
+            match self
                 .request(
                     Method::POST,
                     &format!("{PLAYER_LOOT}/{}/redeem", encode_component(name)),
                     None,
                 )
                 .await
-                .is_ok()
             {
-                claimed += 1;
-                if lines.len() < 8 {
-                    lines.push(format!("루트: {name}"));
+                Ok(_) => {
+                    claimed += 1;
+                    if lines.len() < 8 {
+                        lines.push(format!("루트: {name}"));
+                    }
                 }
+                Err(error) => lines.push(format!("루트 수령 실패: {error}")),
             }
         }
         claimed

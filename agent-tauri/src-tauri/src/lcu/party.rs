@@ -5,7 +5,7 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use tokio::time::sleep;
 
-use crate::error::AgentResult;
+use crate::error::{AgentError, AgentResult};
 
 use super::{actions::ActionOutcome, LcuClient};
 
@@ -124,12 +124,13 @@ impl LcuClient {
         &self,
         riot_id: &str,
     ) -> AgentResult<ActionOutcome> {
-        self.invite_party_members(&json!({"riot_ids": [riot_id]})).await
+        self.invite_party_members(&json!({"riot_ids": [riot_id]}))
+            .await
     }
 
     pub(super) async fn invite_party_members(&self, payload: &Value) -> AgentResult<ActionOutcome> {
-        let lobby = self.request(Method::GET, LOBBY_ENDPOINT, None).await;
-        if !lobby.as_ref().is_ok_and(lobby_is_open) {
+        let lobby = self.request(Method::GET, LOBBY_ENDPOINT, None).await?;
+        if !lobby_is_open(&lobby) {
             return Ok(ActionOutcome::failure("로비(파티)가 열려 있지 않습니다."));
         }
 
@@ -175,21 +176,23 @@ impl LcuClient {
                 continue;
             };
 
-            if self
+            match self
                 .request(
                     Method::POST,
                     INVITATIONS_ENDPOINT,
                     Some(json!([{"toSummonerId": summoner_id}])),
                 )
                 .await
-                .is_ok()
             {
-                invited += 1;
-                set_status(&mut statuses, &display, "invited");
-            } else {
-                failed += 1;
-                set_status(&mut statuses, &display, "invite_failed");
-                details.push(format!("{display}: 초대 실패"));
+                Ok(_) => {
+                    invited += 1;
+                    set_status(&mut statuses, &display, "invited");
+                }
+                Err(error) => {
+                    failed += 1;
+                    set_status(&mut statuses, &display, "invite_failed");
+                    details.push(format!("{display}: 초대 실패 ({error})"));
+                }
             }
             sleep(INVITE_DELAY).await;
         }
@@ -240,8 +243,8 @@ impl LcuClient {
     }
 
     pub(super) async fn check_party_members(&self, payload: &Value) -> AgentResult<ActionOutcome> {
-        let lobby = self.request(Method::GET, LOBBY_ENDPOINT, None).await;
-        if !lobby.as_ref().is_ok_and(lobby_is_open) {
+        let lobby = self.request(Method::GET, LOBBY_ENDPOINT, None).await?;
+        if !lobby_is_open(&lobby) {
             return Ok(ActionOutcome::failure("로비(파티)가 열려 있지 않습니다."));
         }
 
@@ -300,30 +303,39 @@ impl LcuClient {
     }
 
     async fn resolve_summoner_id(&self, riot_id: &RiotId) -> AgentResult<Option<i64>> {
-        if let Ok(friends) = self.request(Method::GET, FRIENDS_ENDPOINT, None).await {
-            if let Some(rows) = friends.as_array() {
-                for friend in rows {
-                    let game_name = first_string(friend, &["gameName", "riotIdGameName"]);
-                    let tag_line = first_string(
-                        friend,
-                        &["gameTag", "tagLine", "riotIdTagline", "riotIdTagLine"],
-                    );
-                    if game_name.is_some_and(|value| value.eq_ignore_ascii_case(&riot_id.game_name))
-                        && tag_line
-                            .is_some_and(|value| value.eq_ignore_ascii_case(&riot_id.tag_line))
-                    {
-                        if let Some(puuid) = friend.get("puuid").and_then(Value::as_str) {
-                            if let Some(id) = self.summoner_id_by_puuid(puuid).await? {
-                                return Ok(Some(id));
+        let mut lookup_errors = Vec::new();
+
+        match self.request(Method::GET, FRIENDS_ENDPOINT, None).await {
+            Ok(friends) => {
+                if let Some(rows) = friends.as_array() {
+                    for friend in rows {
+                        let game_name = first_string(friend, &["gameName", "riotIdGameName"]);
+                        let tag_line = first_string(
+                            friend,
+                            &["gameTag", "tagLine", "riotIdTagline", "riotIdTagLine"],
+                        );
+                        if game_name
+                            .is_some_and(|value| value.eq_ignore_ascii_case(&riot_id.game_name))
+                            && tag_line
+                                .is_some_and(|value| value.eq_ignore_ascii_case(&riot_id.tag_line))
+                        {
+                            if let Some(puuid) = friend.get("puuid").and_then(Value::as_str) {
+                                match self.summoner_id_by_puuid(puuid).await {
+                                    Ok(Some(id)) => return Ok(Some(id)),
+                                    Ok(None) => {}
+                                    Err(error) => lookup_errors
+                                        .push(format!("friends/summoner-by-puuid: {error}")),
+                                }
                             }
                         }
                     }
                 }
             }
+            Err(error) => lookup_errors.push(format!("friends: {error}")),
         }
 
         let encoded_id = encode_component(&riot_id.display());
-        if let Ok(summoner) = self
+        match self
             .request(
                 Method::GET,
                 &format!("/lol-summoner/v1/summoners?name={encoded_id}"),
@@ -331,12 +343,15 @@ impl LcuClient {
             )
             .await
         {
-            if let Some(id) = summoner.get("summonerId").and_then(Value::as_i64) {
-                return Ok(Some(id));
+            Ok(summoner) => {
+                if let Some(id) = summoner.get("summonerId").and_then(Value::as_i64) {
+                    return Ok(Some(id));
+                }
             }
+            Err(error) => lookup_errors.push(format!("summoner-name: {error}")),
         }
 
-        if let Ok(aliases) = self
+        match self
             .request(
                 Method::GET,
                 &format!("/lol-account/v1/accounts/aliases?riotId={encoded_id}"),
@@ -344,17 +359,31 @@ impl LcuClient {
             )
             .await
         {
-            if let Some(rows) = aliases.as_array() {
-                for alias in rows {
-                    if let Some(puuid) = alias.get("puuid").and_then(Value::as_str) {
-                        if let Some(id) = self.summoner_id_by_puuid(puuid).await? {
-                            return Ok(Some(id));
+            Ok(aliases) => {
+                if let Some(rows) = aliases.as_array() {
+                    for alias in rows {
+                        if let Some(puuid) = alias.get("puuid").and_then(Value::as_str) {
+                            match self.summoner_id_by_puuid(puuid).await {
+                                Ok(Some(id)) => return Ok(Some(id)),
+                                Ok(None) => {}
+                                Err(error) => lookup_errors
+                                    .push(format!("aliases/summoner-by-puuid: {error}")),
+                            }
                         }
                     }
                 }
             }
+            Err(error) => lookup_errors.push(format!("aliases: {error}")),
         }
-        Ok(None)
+
+        if lookup_errors.is_empty() {
+            Ok(None)
+        } else {
+            Err(AgentError::Lcu(format!(
+                "Riot ID 조회 실패: {}",
+                lookup_errors.join(" | ")
+            )))
+        }
     }
 
     async fn summoner_id_by_puuid(&self, puuid: &str) -> AgentResult<Option<i64>> {
@@ -370,10 +399,8 @@ impl LcuClient {
                 ),
                 None,
             )
-            .await;
-        Ok(response
-            .ok()
-            .and_then(|value| value.get("summonerId").and_then(Value::as_i64)))
+            .await?;
+        Ok(response.get("summonerId").and_then(Value::as_i64))
     }
 }
 

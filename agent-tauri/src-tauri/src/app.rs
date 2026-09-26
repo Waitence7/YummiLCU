@@ -84,7 +84,8 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::window::hide_main_window,
             crate::commands::window::complete_tray_hide,
             crate::commands::window::minimize_main_window,
-            crate::commands::window::request_tray_hide
+            crate::commands::window::request_tray_hide,
+            crate::commands::window::start_main_window_drag
         ])
         .setup(move |app| {
             // The installer only launches this argument when it observed an

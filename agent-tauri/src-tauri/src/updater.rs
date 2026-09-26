@@ -22,6 +22,7 @@ use uuid::Uuid;
 use crate::{
     config::Config,
     error::{AgentError, AgentResult},
+    http_diagnostics::{safe_url, status_detail, transport_detail},
     lcu::{lockfile_path, LcuClient},
     state::AppState,
 };
@@ -537,33 +538,49 @@ fn windows_signature_check_cmd(source: &Path, expected_thumbprint: Option<&str>)
 }
 
 async fn download_limited(client: &Client, url: Url, max_bytes: usize) -> AgentResult<Vec<u8>> {
+    let url_label = safe_url(&url);
     let response = client
         .get(url)
         .send()
         .await
-        .map_err(|_| AgentError::Update("업데이트 다운로드 연결 실패".into()))?;
-    if !response.status().is_success() {
+        .map_err(|error| {
+            AgentError::Update(format!(
+                "업데이트 다운로드 연결 실패 (method=GET endpoint={url_label} {})",
+                transport_detail(&error)
+            ))
+        })?;
+    let status = response.status();
+    if !status.is_success() {
         return Err(AgentError::Update(format!(
-            "업데이트 다운로드 실패 (HTTP {})",
-            response.status()
+            "업데이트 다운로드 실패 (method=GET endpoint={url_label} {})",
+            status_detail(status)
         )));
     }
     if response
         .content_length()
         .is_some_and(|length| length > max_bytes as u64)
     {
-        return Err(AgentError::Update(
-            "업데이트 다운로드 크기 제한 초과".into(),
-        ));
+        return Err(AgentError::Update(format!(
+            "업데이트 다운로드 크기 제한 초과 (method=GET endpoint={url_label} {} content_length={})",
+            status_detail(status),
+            response.content_length().unwrap_or_default()
+        )));
     }
     let mut bytes = Vec::new();
     let mut chunks = response.bytes_stream();
     while let Some(chunk) = chunks.next().await {
-        let chunk = chunk.map_err(|_| AgentError::Update("업데이트 다운로드 실패".into()))?;
+        let chunk = chunk.map_err(|error| {
+            AgentError::Update(format!(
+                "업데이트 다운로드 읽기 실패 (method=GET endpoint={url_label} {} {})",
+                status_detail(status),
+                transport_detail(&error)
+            ))
+        })?;
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            return Err(AgentError::Update(
-                "업데이트 다운로드 크기 제한 초과".into(),
-            ));
+            return Err(AgentError::Update(format!(
+                "업데이트 다운로드 크기 제한 초과 (method=GET endpoint={url_label} {} received_bytes>{max_bytes})",
+                status_detail(status)
+            )));
         }
         bytes.extend_from_slice(&chunk);
     }

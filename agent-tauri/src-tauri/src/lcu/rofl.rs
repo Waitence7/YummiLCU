@@ -112,6 +112,7 @@ struct MovementRecord {
 pub(crate) struct CollectedReplayFile {
     pub(crate) path: PathBuf,
     pub(crate) size: u64,
+    pub(crate) modified_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -120,7 +121,9 @@ pub(crate) struct CollectedReplay {
     pub(crate) events: Vec<Value>,
 }
 
-pub(crate) fn collect_replay_file(hint: &RoflMatchHint) -> Result<Option<CollectedReplayFile>, String> {
+pub(crate) fn collect_replay_file(
+    hint: &RoflMatchHint,
+) -> Result<Option<CollectedReplayFile>, String> {
     let Some(path) = find_matching_replay(hint)? else {
         return Ok(None);
     };
@@ -132,10 +135,57 @@ pub(crate) fn collect_replay_file(hint: &RoflMatchHint) -> Result<Option<Collect
     // complete v2 envelope keeps the upload path from racing a partial file,
     // without waiting for the agent-side semantic decoder.
     let _ = parse_envelope(&bytes)?;
-    Ok(Some(CollectedReplayFile { path, size: bytes.len() as u64 }))
+    let metadata = fs::metadata(&path).map_err(|error| format!("ROFL 상태 확인 실패: {error}"))?;
+    if metadata.len() != bytes.len() as u64 {
+        return Err("ROFL 파일이 읽는 동안 변경됨".into());
+    }
+    let modified_at_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+    Ok(Some(CollectedReplayFile {
+        path,
+        size: bytes.len() as u64,
+        modified_at_ms,
+    }))
 }
 
-pub(crate) fn collect_replay_bundle(hint: &RoflMatchHint) -> Result<Option<CollectedReplay>, String> {
+pub(crate) fn find_existing_replay_path(hint: &RoflMatchHint) -> Result<Option<PathBuf>, String> {
+    for dir in replay_dirs(hint) {
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| value.eq_ignore_ascii_case("rofl"))
+            {
+                continue;
+            }
+            let file_name_matches = path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .is_some_and(|name| name.contains(&hint.game_id));
+            if !file_name_matches {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if metadata.is_file() && metadata.len() > 0 {
+                return Ok(Some(path));
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub(crate) fn collect_replay_bundle(
+    hint: &RoflMatchHint,
+) -> Result<Option<CollectedReplay>, String> {
     let Some(file) = collect_replay_file(hint)? else {
         return Ok(None);
     };
@@ -899,7 +949,10 @@ fn movement_events(
     let mut player_entities: Vec<u32> = Vec::new();
     for start in fountain_ids {
         let run: Vec<u32> = (0..10).map(|offset| start.saturating_add(offset)).collect();
-        if !run.iter().all(|entity| fountain_entities.contains_key(entity)) {
+        if !run
+            .iter()
+            .all(|entity| fountain_entities.contains_key(entity))
+        {
             continue;
         }
         let blue = run

@@ -14,7 +14,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use url::Url;
 
-use crate::error::{AgentError, AgentResult};
+use crate::{
+    error::{AgentError, AgentResult},
+    http_diagnostics::{status_detail, transport_detail},
+};
 
 const AUTH_FIELD: &str = "__yummi_auth";
 const COMMAND_KEY_URL: &str = "https://yummi.duckdns.org/api/public/lcu-command-key";
@@ -210,26 +213,55 @@ async fn fetch_key() -> AgentResult<CachedKey> {
         .get(url)
         .send()
         .await
-        .map_err(|_| AgentError::Relay("LCU command key 조회 실패".into()))?;
-    if !response.status().is_success()
-        || response
-            .content_length()
-            .is_some_and(|length| length > MAX_KEY_RESPONSE_BYTES as u64)
+        .map_err(|error| {
+            AgentError::Relay(format!(
+                "LCU command key 조회 실패 ({})",
+                transport_detail(&error)
+            ))
+        })?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(AgentError::Relay(format!(
+            "LCU command key 응답 오류 ({})",
+            status_detail(status)
+        )));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_KEY_RESPONSE_BYTES as u64)
     {
-        return Err(AgentError::Relay("LCU command key 응답 오류".into()));
+        return Err(AgentError::Relay(format!(
+            "LCU command key 응답 크기 초과 ({} content_length={})",
+            status_detail(status),
+            response.content_length().unwrap_or_default()
+        )));
     }
 
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| AgentError::Relay("LCU command key 읽기 실패".into()))?;
+        let chunk = chunk.map_err(|error| {
+            AgentError::Relay(format!(
+                "LCU command key 읽기 실패 ({} {})",
+                status_detail(status),
+                transport_detail(&error)
+            ))
+        })?;
         if bytes.len().saturating_add(chunk.len()) > MAX_KEY_RESPONSE_BYTES {
-            return Err(AgentError::Relay("LCU command key 응답 크기 초과".into()));
+            return Err(AgentError::Relay(format!(
+                "LCU command key 응답 크기 초과 ({} received_bytes>{MAX_KEY_RESPONSE_BYTES})",
+                status_detail(status)
+            )));
         }
         bytes.extend_from_slice(&chunk);
     }
-    let body: CommandKeyResponse = serde_json::from_slice(&bytes)
-        .map_err(|_| AgentError::Relay("LCU command key 응답 형식 오류".into()))?;
+    let body: CommandKeyResponse = serde_json::from_slice(&bytes).map_err(|error| {
+        AgentError::Relay(format!(
+            "LCU command key 응답 형식 오류 ({} decode_reason={})",
+            status_detail(status),
+            error
+        ))
+    })?;
     if body.algorithm != "Ed25519" || body.version != 1 {
         return Err(AgentError::Relay("LCU command key 알고리즘 오류".into()));
     }

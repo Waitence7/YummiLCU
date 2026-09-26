@@ -22,7 +22,11 @@ pub(crate) fn discover_lockfile(config: &Config) -> LockfileDiscovery {
     if let Some(raw) = &config.lockfile_path {
         let path = PathBuf::from(expand_environment(raw));
         if valid_lcu_lockfile(&path) {
-            return LockfileDiscovery { path: Some(path), diagnostics: Vec::new(), legacy_fallback: false };
+            return LockfileDiscovery {
+                path: Some(path),
+                diagnostics: Vec::new(),
+                legacy_fallback: false,
+            };
         }
     }
 
@@ -84,9 +88,18 @@ pub(crate) fn discover_lockfile(config: &Config) -> LockfileDiscovery {
             continue;
         }
         match LcuClient::from_lockfile(&path) {
-            Ok(_) => return LockfileDiscovery { path: Some(path), diagnostics, legacy_fallback: false },
+            Ok(_) => {
+                return LockfileDiscovery {
+                    path: Some(path),
+                    diagnostics,
+                    legacy_fallback: false,
+                }
+            }
             Err(error) => {
-                diagnostics.push(format!("LCU lockfile 후보 검증 실패: {} ({error})", path.display()));
+                diagnostics.push(format!(
+                    "LCU lockfile 후보 검증 실패: {} ({error})",
+                    path.display()
+                ));
                 // Preserve the pre-hardening behavior as a final fallback: if a
                 // real lockfile file exists, return it and let the normal LCU
                 // client path report/handle the validation failure explicitly.
@@ -101,20 +114,33 @@ pub(crate) fn discover_lockfile(config: &Config) -> LockfileDiscovery {
     }
 
     if let Some(path) = legacy_candidate {
-        diagnostics.push(format!("LCU lockfile 과거 방식 fallback 사용: {}", path.display()));
-        return LockfileDiscovery { path: Some(path), diagnostics, legacy_fallback: true };
+        diagnostics.push(format!(
+            "LCU lockfile 과거 방식 fallback 사용: {}",
+            path.display()
+        ));
+        return LockfileDiscovery {
+            path: Some(path),
+            diagnostics,
+            legacy_fallback: true,
+        };
     }
 
-    if riot_client_lockfile.as_ref().is_some_and(|path| path.is_file()) {
+    if riot_client_lockfile
+        .as_ref()
+        .is_some_and(|path| path.is_file())
+    {
         diagnostics.push(
             "Riot Client는 감지됐지만 LeagueClientUx lockfile은 없음 — League of Legends 클라이언트 실행 여부 확인"
                 .into(),
         );
     }
 
-    LockfileDiscovery { path: None, diagnostics, legacy_fallback: false }
+    LockfileDiscovery {
+        path: None,
+        diagnostics,
+        legacy_fallback: false,
+    }
 }
-
 
 #[cfg(windows)]
 fn running_lcu_lockfile_candidates() -> (bool, bool, Vec<PathBuf>) {

@@ -5,11 +5,15 @@ use reqwest::{redirect::Policy, Client, Method, RequestBuilder};
 use serde_json::{json, Value};
 use url::Url;
 
-use crate::error::{AgentError, AgentResult};
+use crate::{
+    error::{AgentError, AgentResult},
+    http_diagnostics::{response_detail, safe_endpoint, status_detail, transport_detail},
+};
 
 const CURRENT_SUMMONER_ENDPOINT: &str = "/lol-summoner/v1/current-summoner";
 const GAMEFLOW_PHASE_ENDPOINT: &str = "/lol-gameflow/v1/gameflow-phase";
 const GAMEFLOW_SESSION_ENDPOINT: &str = "/lol-gameflow/v1/session";
+const GAMEFLOW_WATCH_ENDPOINT: &str = "/lol-gameflow/v1/watch";
 const CHAMPION_SUMMARY_ENDPOINT: &str = "/lol-game-data/assets/v1/champion-summary.json";
 const MATCH_HISTORY_ENDPOINT_PREFIX: &str = "/lol-match-history/v1/products/lol";
 const OWNED_CHAMPIONS_ENDPOINT: &str = "/lol-champions/v1/owned-champions-minimal";
@@ -230,6 +234,8 @@ impl LcuClient {
         endpoint: &str,
         body: Option<Value>,
     ) -> AgentResult<Value> {
+        let method_label = method.as_str().to_owned();
+        let endpoint_label = safe_endpoint(endpoint);
         let url = lcu_url(self.port, endpoint)?;
         let request = self.authenticate(self.http.request(method, url));
         let request = if let Some(value) = body {
@@ -237,7 +243,7 @@ impl LcuClient {
         } else {
             request
         };
-        read_json_response(request, "LCU").await
+        read_json_response(request, "LCU", &method_label, &endpoint_label).await
     }
 
     pub(crate) async fn live_game_request(endpoint: &str) -> AgentResult<Value> {
@@ -249,7 +255,13 @@ impl LcuClient {
             .timeout(LIVE_CLIENT_REQUEST_TIMEOUT)
             .build()
             .map_err(|_| AgentError::Lcu("Live Client Data HTTP client 생성 실패".into()))?;
-        read_json_response(http.get(url), "Live Client Data").await
+        read_json_response(
+            http.get(url),
+            "Live Client Data",
+            "GET",
+            &safe_endpoint(endpoint),
+        )
+        .await
     }
 
     pub(crate) async fn probe_live_game() -> AgentResult<()> {
@@ -273,15 +285,33 @@ impl LcuClient {
     }
 
     pub(crate) async fn current_summoner(&self) -> AgentResult<Value> {
-        self.request(Method::GET, CURRENT_SUMMONER_ENDPOINT, None).await
+        self.request(Method::GET, CURRENT_SUMMONER_ENDPOINT, None)
+            .await
     }
 
     pub(crate) async fn gameflow_session(&self) -> AgentResult<Value> {
-        self.request(Method::GET, GAMEFLOW_SESSION_ENDPOINT, None).await
+        self.request(Method::GET, GAMEFLOW_SESSION_ENDPOINT, None)
+            .await
+    }
+
+    pub(crate) async fn gameflow_watch_phase(&self) -> AgentResult<Option<String>> {
+        let value = self
+            .request(Method::GET, GAMEFLOW_WATCH_ENDPOINT, None)
+            .await?;
+        if let Some(phase) = value.as_str() {
+            return Ok(Some(phase.to_owned()));
+        }
+        for key in ["phase", "state", "watchPhase"] {
+            if let Some(phase) = value.get(key).and_then(Value::as_str) {
+                return Ok(Some(phase.to_owned()));
+            }
+        }
+        Ok(None)
     }
 
     pub(crate) async fn champion_summary(&self) -> AgentResult<Value> {
-        self.request(Method::GET, CHAMPION_SUMMARY_ENDPOINT, None).await
+        self.request(Method::GET, CHAMPION_SUMMARY_ENDPOINT, None)
+            .await
     }
 
     pub(crate) async fn recent_match_verification(&self) -> AgentResult<Value> {
@@ -484,11 +514,16 @@ fn validate_lcu_process(_: &Path, _: u32) -> AgentResult<()> {
     Ok(())
 }
 
-async fn read_json_response(request: RequestBuilder, service: &str) -> AgentResult<Value> {
+async fn read_json_response(
+    request: RequestBuilder,
+    service: &str,
+    method: &str,
+    endpoint: &str,
+) -> AgentResult<Value> {
     let response = request.send().await.map_err(|error| {
         AgentError::Lcu(format!(
-            "{service} 요청 실패 ({})",
-            reqwest_error_kind(&error)
+            "{service} 요청 실패 (method={method} endpoint={endpoint} {})",
+            transport_detail(&error)
         ))
     })?;
     let status = response.status();
@@ -497,7 +532,9 @@ async fn read_json_response(request: RequestBuilder, service: &str) -> AgentResu
         .is_some_and(|length| length > MAX_LCU_RESPONSE_BYTES as u64)
     {
         return Err(AgentError::Lcu(format!(
-            "{service} 응답이 너무 큽니다. (HTTP {status})"
+            "{service} 응답이 너무 큽니다. (method={method} endpoint={endpoint} {} content_length={})",
+            status_detail(status),
+            response.content_length().unwrap_or_default()
         )));
     }
     let mut body = Vec::new();
@@ -505,55 +542,45 @@ async fn read_json_response(request: RequestBuilder, service: &str) -> AgentResu
     while let Some(chunk) = chunks.next().await {
         let chunk = chunk.map_err(|error| {
             AgentError::Lcu(format!(
-                "{service} 응답 읽기 실패 (HTTP {status}, {})",
-                reqwest_error_kind(&error)
+                "{service} 응답 읽기 실패 (method={method} endpoint={endpoint} {} {})",
+                status_detail(status),
+                transport_detail(&error)
             ))
         })?;
         if body.len().saturating_add(chunk.len()) > MAX_LCU_RESPONSE_BYTES {
             return Err(AgentError::Lcu(format!(
-                "{service} 응답이 너무 큽니다. (HTTP {status})"
+                "{service} 응답이 너무 큽니다. (method={method} endpoint={endpoint} {} received_bytes>{MAX_LCU_RESPONSE_BYTES})",
+                status_detail(status)
             )));
         }
         body.extend_from_slice(&chunk);
     }
     if !status.is_success() {
-        let detail = compact_lcu_error_detail(&body)
-            .map(|detail| format!(", {detail}"))
-            .unwrap_or_default();
         return Err(AgentError::Lcu(format!(
-            "{service} 요청 실패 (HTTP {status}{detail})"
+            "{service} 요청 실패 (method={method} endpoint={endpoint} {})",
+            response_detail(status, &body)
         )));
     }
     if body.is_empty() {
         return Ok(Value::Null);
     }
-    let value: Value = serde_json::from_slice(&body)
-        .map_err(|_| AgentError::Lcu(format!("{service} 응답 형식 오류 (HTTP {status})")))?;
+    let value: Value = serde_json::from_slice(&body).map_err(|error| {
+        AgentError::Lcu(format!(
+            "{service} 응답 형식 오류 (method={method} endpoint={endpoint} {} decode_reason={})",
+            status_detail(status),
+            sanitize_lcu_error_text(&error.to_string())
+        ))
+    })?;
     if is_lcu_error_envelope(&value) {
         let detail = compact_lcu_error_detail(&body)
-            .map(|detail| format!(": {detail}"))
+            .map(|detail| format!(" {detail}"))
             .unwrap_or_default();
         return Err(AgentError::Lcu(format!(
-            "{service} 요청 실패 (LCU 오류 응답){detail}"
+            "{service} 오류 응답 (method={method} endpoint={endpoint} {}{detail})",
+            status_detail(status)
         )));
     }
     Ok(value)
-}
-
-fn reqwest_error_kind(error: &reqwest::Error) -> &'static str {
-    if error.is_timeout() {
-        "timeout"
-    } else if error.is_connect() {
-        "connect"
-    } else if error.is_request() {
-        "request"
-    } else if error.is_body() {
-        "body"
-    } else if error.is_decode() {
-        "decode"
-    } else {
-        "transport"
-    }
 }
 
 fn compact_lcu_error_detail(body: &[u8]) -> Option<String> {

@@ -13,16 +13,17 @@ use tokio::{
     task::JoinHandle,
     time::{interval, interval_at, sleep, timeout, Instant, MissedTickBehavior},
 };
-use tokio_util::io::ReaderStream;
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{protocol::WebSocketConfig, Message},
 };
+use tokio_util::io::ReaderStream;
 
 use crate::{
     error::{AgentError, AgentResult},
+    http_diagnostics::{safe_url, status_detail, transport_detail},
     lcu::{lockfile_path, LcuClient, LcuEventPoller},
-    platform::{launch_league_client, open_login_url},
+    platform::{launch_league_client, league_game_process_ids, open_login_url},
     session,
     state::{AgentEvent, AppState, DiscordJoinResolution, DiscordPresenceMatchContext},
 };
@@ -47,6 +48,8 @@ const MAX_DURABLE_REPLAY_EVENTS: usize = 64;
 const DURABLE_REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 const MAX_REPLAY_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
+const REPLAY_LOCAL_DELETE_DELAY: Duration = Duration::from_secs(5 * 60);
+const REPLAY_LOCAL_DELETE_MONITOR_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 struct SerializedAgentEvent {
@@ -923,8 +926,23 @@ async fn connect_once(
                                     &upload,
                                 ).await {
                                     Ok(ReplayUploadOutcome::Uploaded) => {
-                                        upload_state.record_flight("rofl_upload", format!("uploaded game_id={} bytes={}", upload.game_id, upload.file_size)).await;
+                                        upload_state.record_flight("rofl_upload", format!("uploaded game_id={} bytes={} auto_cleanup={}", upload.game_id, upload.file_size, upload.delete_after_upload)).await;
                                         upload_state.log(&upload_app, format!("ROFL 원본 서버 업로드 완료: game_id={} bytes={}", upload.game_id, upload.file_size)).await;
+                                        if upload.delete_after_upload {
+                                            match delete_uploaded_auto_replay(&upload_config, &upload).await {
+                                                Ok(true) => {
+                                                    upload_state.record_flight("rofl_cleanup", format!("deleted_auto_download game_id={}", upload.game_id)).await;
+                                                    upload_state.log(&upload_app, format!("Yummi 자동 다운로드 ROFL 로컬 정리 완료: game_id={}", upload.game_id)).await;
+                                                }
+                                                Ok(false) => {
+                                                    upload_state.record_flight("rofl_cleanup", format!("preserved_or_already_missing game_id={}", upload.game_id)).await;
+                                                }
+                                                Err(error) => {
+                                                    upload_state.record_flight("rofl_cleanup", format!("preserved game_id={} reason={}", upload.game_id, error)).await;
+                                                    upload_state.log(&upload_app, format!("ROFL 로컬 파일 보존: game_id={} reason={}", upload.game_id, error)).await;
+                                                }
+                                            }
+                                        }
                                     }
                                     Ok(ReplayUploadOutcome::NotNeeded) => {
                                         upload_state.record_flight("rofl_upload", format!("skipped_not_yummi_match game_id={}", upload.game_id)).await;
@@ -1064,11 +1082,19 @@ where
                     }
                 }
             };
+            let result_detail = result
+                .message()
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(1_200)
+                .collect::<String>();
             state
                 .record_flight(
                     "command",
                     format!(
-                        "action={action_label} result={}",
+                        "action={action_label} result={} detail={result_detail}",
                         if result.is_ok() { "ok" } else { "error" }
                     ),
                 )
@@ -1080,7 +1106,10 @@ where
             if !parsed_action.is_some_and(Action::is_background) {
                 let result_label = if result.is_ok() { "성공" } else { "실패" };
                 state
-                    .log(app, format!("명령 완료: {action_label} ({result_label})"))
+                    .log(
+                        app,
+                        format!("명령 완료: {action_label} ({result_label}) — {result_detail}"),
+                    )
                     .await;
             }
         }
@@ -1194,6 +1223,9 @@ struct ReplayUploadRequest {
     path: PathBuf,
     file_name: String,
     file_size: u64,
+    file_modified_at_ms: Option<u64>,
+    delete_after_upload: bool,
+    baseline_league_process_ids: Vec<u32>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1206,7 +1238,9 @@ fn replay_upload_request(data: &Value) -> Option<ReplayUploadRequest> {
     let game_id = data.get("gameId")?.as_str()?.trim().to_owned();
     if game_id.is_empty()
         || game_id.len() > 64
-        || !game_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        || !game_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         return None;
     }
@@ -1241,7 +1275,141 @@ fn replay_upload_request(data: &Value) -> Option<ReplayUploadRequest> {
     if file_size == 0 || file_size > MAX_REPLAY_UPLOAD_BYTES {
         return None;
     }
-    Some(ReplayUploadRequest { game_id, path, file_name, file_size })
+    let file_modified_at_ms = data.get("fileModifiedAtMs").and_then(Value::as_u64);
+    let path_matches_game_id = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.contains(&game_id));
+    let delete_after_upload = data
+        .get("deleteAfterUpload")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && path_matches_game_id
+        && file_modified_at_ms.is_some();
+    Some(ReplayUploadRequest {
+        game_id,
+        path,
+        file_name,
+        file_size,
+        file_modified_at_ms,
+        delete_after_upload,
+        baseline_league_process_ids: league_game_process_ids(),
+    })
+}
+
+fn metadata_accessed_at_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .accessed()
+        .ok()
+        .and_then(|accessed| accessed.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+fn metadata_modified_at_ms(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+}
+
+async fn delete_uploaded_auto_replay(
+    config: &crate::config::Config,
+    upload: &ReplayUploadRequest,
+) -> Result<bool, String> {
+    if !upload.delete_after_upload {
+        return Ok(false);
+    }
+    let Some(expected_modified_at_ms) = upload.file_modified_at_ms else {
+        return Ok(false);
+    };
+
+    let baseline_process_ids = &upload.baseline_league_process_ids;
+    let baseline_accessed_at_ms = tokio::fs::symlink_metadata(&upload.path)
+        .await
+        .ok()
+        .and_then(|metadata| metadata_accessed_at_ms(&metadata));
+    let monitoring_started = Instant::now();
+    while monitoring_started.elapsed() < REPLAY_LOCAL_DELETE_DELAY {
+        sleep(REPLAY_LOCAL_DELETE_MONITOR_INTERVAL).await;
+        if let Some(lockfile) = lockfile_path(config) {
+            if let Ok(client) = LcuClient::from_lockfile(&lockfile)
+                .or_else(|_| LcuClient::from_lockfile_legacy(&lockfile))
+            {
+                if let Ok(Some(watch_phase)) = client.gameflow_watch_phase().await {
+                    if !watch_phase.eq_ignore_ascii_case("none") && !watch_phase.trim().is_empty() {
+                        return Err(format!(
+                            "ROFL 삭제 생략: League Client 재생 상태 감지 (watch_phase={watch_phase})"
+                        ));
+                    }
+                }
+            }
+        }
+
+        let process_ids = league_game_process_ids();
+        if process_ids
+            .iter()
+            .any(|process_id| !baseline_process_ids.contains(process_id))
+        {
+            return Err(format!(
+                "ROFL 삭제 생략: 업로드 후 새 League of Legends 프로세스가 실행됨 (재생/새 게임 가능성, pid={})",
+                process_ids
+                    .iter()
+                    .find(|process_id| !baseline_process_ids.contains(process_id))
+                    .copied()
+                    .unwrap_or_default()
+            ));
+        }
+    }
+
+    let metadata = match tokio::fs::symlink_metadata(&upload.path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(format!("ROFL 삭제 전 파일 상태 확인 실패: {error}")),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("ROFL 삭제 생략: 일반 파일이 아니거나 심볼릭 링크입니다.".into());
+    }
+    if metadata.len() != upload.file_size {
+        return Err(format!(
+            "ROFL 삭제 생략: 업로드 후 파일 크기가 변경됨 (before={} after={})",
+            upload.file_size,
+            metadata.len()
+        ));
+    }
+    if let (Some(before_accessed_at_ms), Some(after_accessed_at_ms)) =
+        (baseline_accessed_at_ms, metadata_accessed_at_ms(&metadata))
+    {
+        if after_accessed_at_ms > before_accessed_at_ms {
+            return Err(format!(
+                "ROFL 삭제 생략: 업로드 후 파일 접근 시각이 변경됨 (재생/사용 가능성, before_atime={} after_atime={})",
+                before_accessed_at_ms, after_accessed_at_ms
+            ));
+        }
+    }
+
+    let Some(current_modified_at_ms) = metadata_modified_at_ms(&metadata) else {
+        return Err("ROFL 삭제 생략: 수정 시각을 확인할 수 없습니다.".into());
+    };
+    if current_modified_at_ms != expected_modified_at_ms {
+        return Err(format!(
+            "ROFL 삭제 생략: 업로드 후 파일이 변경되거나 다시 다운로드됨 (before_mtime={} after_mtime={})",
+            expected_modified_at_ms, current_modified_at_ms
+        ));
+    }
+    let path_matches_game_id = upload
+        .path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .is_some_and(|name| name.contains(&upload.game_id));
+    if !path_matches_game_id {
+        return Err("ROFL 삭제 생략: 파일명이 gameId와 일치하지 않습니다.".into());
+    }
+
+    tokio::fs::remove_file(&upload.path)
+        .await
+        .map_err(|error| format!("ROFL 로컬 파일 삭제 실패: {error}"))?;
+    Ok(true)
 }
 
 async fn upload_replay_file(
@@ -1253,11 +1421,18 @@ async fn upload_replay_file(
     let metadata = tokio::fs::symlink_metadata(&upload.path)
         .await
         .map_err(|_| AgentError::Relay("ROFL 원본 파일을 열 수 없습니다.".into()))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() != upload.file_size {
-        return Err(AgentError::Relay("ROFL 원본 파일 상태가 변경되었습니다.".into()));
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != upload.file_size
+    {
+        return Err(AgentError::Relay(
+            "ROFL 원본 파일 상태가 변경되었습니다.".into(),
+        ));
     }
     if metadata.len() == 0 || metadata.len() > MAX_REPLAY_UPLOAD_BYTES {
-        return Err(AgentError::Relay("ROFL 원본 파일 크기가 허용 범위를 벗어났습니다.".into()));
+        return Err(AgentError::Relay(
+            "ROFL 원본 파일 크기가 허용 범위를 벗어났습니다.".into(),
+        ));
     }
 
     let client = reqwest::Client::builder()
@@ -1267,6 +1442,8 @@ async fn upload_replay_file(
         .map_err(|_| AgentError::Relay("ROFL 업로드 클라이언트 생성 실패".into()))?;
     let target_url = config.replay_upload_target_url(session_id, &upload.game_id)?;
     let upload_url = config.replay_upload_url(session_id, &upload.game_id)?;
+    let target_url_label = safe_url(&target_url);
+    let upload_url_label = safe_url(&upload_url);
     let mut last_error = "ROFL 원본 업로드 실패".to_owned();
 
     for attempt in 1..=REPLAY_UPLOAD_ATTEMPTS {
@@ -1276,30 +1453,43 @@ async fn upload_replay_file(
             .send()
             .await;
         match target {
-            Ok(response) if response.status().is_success() => {
-                match response.json::<Value>().await {
-                    Ok(body) if body.get("upload").and_then(Value::as_bool) == Some(true) => {
-                        last_error.clear();
-                    }
-                    Ok(_) => {
-                        // EndOfGame and the local ROFL file can become ready before
-                        // the matching tournament/guild-match state reaches the API.
-                        // Give that short propagation race time to settle instead of
-                        // permanently discarding the replay on the first upload:false.
-                        if attempt < REPLAY_UPLOAD_ATTEMPTS {
-                            sleep(Duration::from_secs(u64::from(attempt.min(6)) * 2)).await;
-                            continue;
+            Ok(response) => {
+                let status = response.status();
+                if status.is_success() {
+                    match response.json::<Value>().await {
+                        Ok(body) if body.get("upload").and_then(Value::as_bool) == Some(true) => {
+                            last_error.clear();
                         }
-                        return Ok(ReplayUploadOutcome::NotNeeded);
+                        Ok(_) => {
+                            // EndOfGame and the local ROFL file can become ready before
+                            // the matching tournament/guild-match state reaches the API.
+                            // Give that short propagation race time to settle instead of
+                            // permanently discarding the replay on the first upload:false.
+                            if attempt < REPLAY_UPLOAD_ATTEMPTS {
+                                sleep(Duration::from_secs(u64::from(attempt.min(6)) * 2)).await;
+                                continue;
+                            }
+                            return Ok(ReplayUploadOutcome::NotNeeded);
+                        }
+                        Err(error) => {
+                            last_error = format!(
+                                "ROFL 업로드 대상 응답 형식 오류 (method=GET endpoint={target_url_label} {} decode_reason={error})",
+                                status_detail(status)
+                            );
+                        }
                     }
-                    Err(_) => last_error = "ROFL 업로드 대상 응답 형식 오류".into(),
+                } else {
+                    last_error = format!(
+                        "ROFL 업로드 대상 확인 실패 (method=GET endpoint={target_url_label} {})",
+                        status_detail(status)
+                    );
                 }
             }
-            Ok(response) => {
-                last_error = format!("ROFL 업로드 대상 확인 HTTP {}", response.status());
-            }
-            Err(_) => {
-                last_error = "ROFL 업로드 대상 확인 네트워크 실패".into();
+            Err(error) => {
+                last_error = format!(
+                    "ROFL 업로드 대상 확인 네트워크 실패 (method=GET endpoint={target_url_label} {})",
+                    transport_detail(&error)
+                );
             }
         }
 
@@ -1325,10 +1515,24 @@ async fn upload_replay_file(
             .send()
             .await
         {
-            Ok(response) if response.status().is_success() => return Ok(ReplayUploadOutcome::Uploaded),
-            Ok(response) if response.status().as_u16() == 409 => return Ok(ReplayUploadOutcome::NotNeeded),
-            Ok(response) => last_error = format!("ROFL 원본 업로드 HTTP {}", response.status()),
-            Err(_) => last_error = "ROFL 원본 업로드 네트워크 실패".into(),
+            Ok(response) if response.status().is_success() => {
+                return Ok(ReplayUploadOutcome::Uploaded);
+            }
+            Ok(response) if response.status().as_u16() == 409 => {
+                return Ok(ReplayUploadOutcome::NotNeeded);
+            }
+            Ok(response) => {
+                last_error = format!(
+                    "ROFL 원본 업로드 실패 (method=POST endpoint={upload_url_label} {})",
+                    status_detail(response.status())
+                );
+            }
+            Err(error) => {
+                last_error = format!(
+                    "ROFL 원본 업로드 네트워크 실패 (method=POST endpoint={upload_url_label} {})",
+                    transport_detail(&error)
+                );
+            }
         }
 
         if attempt < REPLAY_UPLOAD_ATTEMPTS {
@@ -1599,6 +1803,53 @@ mod tests {
         assert_eq!(replay.snapshot().len(), 1);
         assert!(replay.ack("event-1"));
         assert!(replay.snapshot().is_empty());
+    }
+
+    #[test]
+    fn replay_cleanup_requires_explicit_owned_file_metadata() {
+        let eligible = replay_upload_request(&json!({
+            "gameId": "8393991955",
+            "path": "C:/Users/test/Documents/League of Legends/Replays/KR-8393991955.rofl",
+            "fileName": "KR-8393991955.rofl",
+            "fileSize": 16_210_841,
+            "fileModifiedAtMs": 1_790_000_000_000_u64,
+            "deleteAfterUpload": true,
+        }))
+        .expect("valid replay upload");
+        assert!(eligible.delete_after_upload);
+        assert_eq!(eligible.file_modified_at_ms, Some(1_790_000_000_000));
+
+        let preexisting = replay_upload_request(&json!({
+            "gameId": "8393991955",
+            "path": "C:/Users/test/Documents/League of Legends/Replays/KR-8393991955.rofl",
+            "fileName": "KR-8393991955.rofl",
+            "fileSize": 16_210_841,
+            "fileModifiedAtMs": 1_790_000_000_000_u64,
+            "deleteAfterUpload": false,
+        }))
+        .expect("valid replay upload");
+        assert!(!preexisting.delete_after_upload);
+
+        let unrelated_path = replay_upload_request(&json!({
+            "gameId": "8393991955",
+            "path": "C:/Users/test/Documents/League of Legends/Replays/manual-copy.rofl",
+            "fileName": "manual-copy.rofl",
+            "fileSize": 16_210_841,
+            "fileModifiedAtMs": 1_790_000_000_000_u64,
+            "deleteAfterUpload": true,
+        }))
+        .expect("valid replay upload");
+        assert!(!unrelated_path.delete_after_upload);
+
+        let missing_mtime = replay_upload_request(&json!({
+            "gameId": "8393991955",
+            "path": "C:/Users/test/Documents/League of Legends/Replays/KR-8393991955.rofl",
+            "fileName": "KR-8393991955.rofl",
+            "fileSize": 16_210_841,
+            "deleteAfterUpload": true,
+        }))
+        .expect("valid replay upload");
+        assert!(!missing_mtime.delete_after_upload);
     }
 
     #[test]

@@ -86,40 +86,47 @@ impl LcuClient {
         queue: QueueKind,
         start_search: bool,
     ) -> AgentResult<ActionOutcome> {
+        let mut last_error = None;
         for attempt in 1..=LOBBY_RETRY_COUNT {
             let _ = self.request(Method::DELETE, MATCHMAKING_SEARCH, None).await;
             let _ = self.request(Method::DELETE, LOBBY, None).await;
-            if self
+            match self
                 .request(Method::POST, LOBBY, Some(json!({"queueId": queue.id()})))
                 .await
-                .is_ok()
             {
-                if !start_search {
+                Ok(_) if !start_search => {
                     return Ok(ActionOutcome::success(format!(
                         "{} 로비 생성",
                         queue.label()
                     )));
                 }
-                sleep(LOBBY_SETTLE_DELAY).await;
-                if self
-                    .request(Method::POST, MATCHMAKING_SEARCH, None)
-                    .await
-                    .is_ok()
-                {
-                    return Ok(ActionOutcome::success(format!(
-                        "{} 매칭 시작",
-                        queue.label()
-                    )));
+                Ok(_) => {
+                    sleep(LOBBY_SETTLE_DELAY).await;
+                    match self.request(Method::POST, MATCHMAKING_SEARCH, None).await {
+                        Ok(_) => {
+                            return Ok(ActionOutcome::success(format!(
+                                "{} 매칭 시작",
+                                queue.label()
+                            )));
+                        }
+                        Err(error) => {
+                            last_error = Some(format!("매칭 시작 요청 실패: {error}"));
+                        }
+                    }
+                }
+                Err(error) => {
+                    last_error = Some(format!("로비 생성 요청 실패: {error}"));
                 }
             }
             if attempt < LOBBY_RETRY_COUNT {
                 sleep(LOBBY_RETRY_DELAY).await;
             }
         }
+        let detail = last_error.unwrap_or_else(|| "HTTP 요청 결과를 확인할 수 없음".into());
         Err(AgentError::Lcu(if start_search {
-            "매칭 시작 실패".into()
+            format!("매칭 시작 실패: {detail}")
         } else {
-            format!("로비 생성 실패 (queue {})", queue.id())
+            format!("로비 생성 실패 (queue {}): {detail}", queue.id())
         }))
     }
 
@@ -210,15 +217,10 @@ impl LcuClient {
     }
 
     async fn dodge(&self, config: &Config) -> AgentResult<ActionOutcome> {
-        if self
-            .request(Method::POST, GAMEFLOW_DODGE, None)
-            .await
-            .is_err()
-        {
-            return Ok(ActionOutcome::failure("닷지 실패"));
-        }
+        self.request(Method::POST, GAMEFLOW_DODGE, None).await?;
         if config.prevent_queue_after_dodge {
-            let _ = self.request(Method::DELETE, MATCHMAKING_SEARCH, None).await;
+            self.request(Method::DELETE, MATCHMAKING_SEARCH, None)
+                .await?;
             Ok(ActionOutcome::success("닷지 + 매칭 중지"))
         } else {
             Ok(ActionOutcome::success("닷지 완료"))

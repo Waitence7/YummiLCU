@@ -259,6 +259,10 @@ impl CommandResult {
         self.ok
     }
 
+    pub(crate) fn message(&self) -> &str {
+        &self.message
+    }
+
     pub(crate) fn from_parts(
         request_id: String,
         ok: bool,

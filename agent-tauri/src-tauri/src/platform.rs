@@ -49,6 +49,54 @@ pub(crate) fn sync_windows_startup(_: bool) -> AgentResult<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub(crate) fn league_game_process_ids() -> Vec<u32> {
+    use std::mem::size_of;
+    use windows::Win32::{
+        Foundation::CloseHandle,
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    let Ok(snapshot) = (unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }) else {
+        return Vec::new();
+    };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut process_ids = Vec::new();
+
+    if unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok() {
+        loop {
+            let name_len = entry
+                .szExeFile
+                .iter()
+                .position(|character| *character == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let process_name = String::from_utf16_lossy(&entry.szExeFile[..name_len]);
+            if process_name.eq_ignore_ascii_case("League of Legends.exe") {
+                process_ids.push(entry.th32ProcessID);
+            }
+            if unsafe { Process32NextW(snapshot, &mut entry) }.is_err() {
+                break;
+            }
+        }
+    }
+
+    let _ = unsafe { CloseHandle(snapshot) };
+    process_ids.sort_unstable();
+    process_ids.dedup();
+    process_ids
+}
+
+#[cfg(not(windows))]
+pub(crate) fn league_game_process_ids() -> Vec<u32> {
+    Vec::new()
+}
+
 pub(crate) fn open_login_url(app: &AppHandle, url: &str) -> AgentResult<()> {
     app.opener()
         .open_url(url, None::<&str>)

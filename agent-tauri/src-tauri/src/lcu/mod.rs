@@ -9,7 +9,9 @@ mod rofl;
 pub(crate) use client::{LcuClient, LcuIdentity};
 pub(crate) use events::LcuEventPoller;
 pub(crate) use lockfile::{discover_lockfile, lockfile_path, LockfileDiscovery};
-pub(crate) use rofl::{collect_replay_bundle, collect_replay_file, RoflMatchHint};
+pub(crate) use rofl::{
+    collect_replay_bundle, collect_replay_file, find_existing_replay_path, RoflMatchHint,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LcuConnectionState {
