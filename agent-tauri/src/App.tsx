@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 
 import {
   completeTrayHide,
@@ -23,6 +24,47 @@ import {
   updateWindowMotionVisual,
   type WindowMotionPayload,
 } from './windowMotion';
+
+type ResizeDirection =
+  | 'East'
+  | 'North'
+  | 'NorthEast'
+  | 'NorthWest'
+  | 'South'
+  | 'SouthEast'
+  | 'SouthWest'
+  | 'West';
+
+const RESIZE_HANDLES: { direction: ResizeDirection; className: string }[] = [
+  { direction: 'North', className: 'yummi-resize-north' },
+  { direction: 'South', className: 'yummi-resize-south' },
+  { direction: 'East', className: 'yummi-resize-east' },
+  { direction: 'West', className: 'yummi-resize-west' },
+  { direction: 'NorthEast', className: 'yummi-resize-northeast' },
+  { direction: 'NorthWest', className: 'yummi-resize-northwest' },
+  { direction: 'SouthEast', className: 'yummi-resize-southeast' },
+  { direction: 'SouthWest', className: 'yummi-resize-southwest' },
+];
+
+function WindowResizeHandles() {
+  if (useMockBridge) return null;
+  return (
+    <>
+      {RESIZE_HANDLES.map(({ direction, className }) => (
+        <div
+          key={direction}
+          aria-hidden
+          className={`yummi-resize-handle ${className}`}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            void getCurrentWindow().startResizeDragging(direction).catch(() => undefined);
+          }}
+        />
+      ))}
+    </>
+  );
+}
 
 type TabId = 'guild' | 'settings' | 'voice' | 'logs' | 'patchNotes';
 
@@ -112,6 +154,7 @@ export function App() {
         void stabilizeMainWindowRotation().catch(() => undefined);
       }}
     >
+      <WindowResizeHandles />
       <div data-yummi-app-surface className="yummi-window-surface relative isolate flex flex-col overflow-hidden bg-white text-slate-800">
       <div aria-hidden className="yummi-motion-ghost yummi-motion-ghost-1" />
       <div aria-hidden className="yummi-motion-ghost yummi-motion-ghost-2" />

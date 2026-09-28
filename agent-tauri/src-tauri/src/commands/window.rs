@@ -1,5 +1,5 @@
 use std::sync::{
-    atomic::{AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
     Arc,
 };
 
@@ -9,10 +9,23 @@ use crate::{state::AppState, tray};
 
 static WINDOW_MOTION_GENERATION: AtomicU64 = AtomicU64::new(0);
 static WINDOW_ROTATION_BITS: AtomicU64 = AtomicU64::new(0.0f64.to_bits());
+static WINDOW_ROTATION_HOST_EXPANDED: AtomicBool = AtomicBool::new(false);
+static WINDOW_BASE_WIDTH_BITS: AtomicU64 = AtomicU64::new(640.0f64.to_bits());
+static WINDOW_BASE_HEIGHT_BITS: AtomicU64 = AtomicU64::new(620.0f64.to_bits());
 
-const MAIN_CONTENT_WIDTH_LOGICAL: f64 = 640.0;
-const MAIN_CONTENT_HEIGHT_LOGICAL: f64 = 620.0;
-const ROTATION_HOST_SIZE_LOGICAL: f64 = 912.0;
+const ROTATION_HOST_PADDING_LOGICAL: f64 = 20.0;
+
+fn base_window_logical_size() -> (f64, f64) {
+    (
+        f64::from_bits(WINDOW_BASE_WIDTH_BITS.load(Ordering::SeqCst)),
+        f64::from_bits(WINDOW_BASE_HEIGHT_BITS.load(Ordering::SeqCst)),
+    )
+}
+
+fn store_base_window_logical_size(width: f64, height: f64) {
+    WINDOW_BASE_WIDTH_BITS.store(width.max(1.0).to_bits(), Ordering::SeqCst);
+    WINDOW_BASE_HEIGHT_BITS.store(height.max(1.0).to_bits(), Ordering::SeqCst);
+}
 
 fn cancel_window_motion() {
     WINDOW_MOTION_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -26,12 +39,17 @@ fn store_rotation_angle(angle: f64) {
     WINDOW_ROTATION_BITS.store(angle.to_bits(), Ordering::SeqCst);
 }
 
+fn current_motion_generation() -> u64 {
+    WINDOW_MOTION_GENERATION.load(Ordering::SeqCst)
+}
+
 #[tauri::command]
 pub(crate) fn hide_main_window(app: AppHandle) {
     cancel_window_motion();
     store_rotation_angle(0.0);
     #[cfg(windows)]
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_ignore_cursor_events(false);
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
         let _ = set_rotation_host_expanded(&window, false);
     }
@@ -58,6 +76,7 @@ pub(crate) fn minimize_main_window(app: AppHandle) -> Result<(), String> {
         .ok_or_else(|| "메인 창을 찾을 수 없습니다.".to_string())?;
     #[cfg(windows)]
     {
+        let _ = window.set_ignore_cursor_events(false);
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
         set_rotation_host_expanded(&window, false)?;
     }
@@ -125,6 +144,7 @@ pub(crate) async fn sync_main_window_rotation_mode(
     #[cfg(windows)]
     {
         let _ = enabled;
+        let _ = window.set_ignore_cursor_events(false);
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
         set_rotation_host_expanded(&window, false)?;
     }
@@ -142,7 +162,12 @@ pub(crate) fn freeze_main_window_motion(app: AppHandle) {
     cancel_window_motion();
     #[cfg(windows)]
     if let Some(window) = app.get_webview_window("main") {
-        emit_motion_visual(&window, 0.0, 0.0, current_rotation_angle(), 0.0, "stop");
+        let angle = current_rotation_angle();
+        emit_motion_visual(&window, 0.0, 0.0, angle, 0.0, "stop");
+        if WINDOW_ROTATION_HOST_EXPANDED.load(Ordering::SeqCst) && distance_to_upright(angle) > 0.08
+        {
+            spawn_rotated_hit_test(window, current_motion_generation());
+        }
     }
 }
 
@@ -156,8 +181,10 @@ pub(crate) fn stabilize_main_window_rotation(app: AppHandle) -> Result<(), Strin
 
     #[cfg(windows)]
     {
+        let _ = window.set_ignore_cursor_events(false);
         set_rotation_now(&window, 0.0)?;
         set_rotation_host_expanded(&window, false)?;
+        emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
     }
 
     Ok(())
@@ -222,6 +249,9 @@ struct WindowMotionVisual {
     angle: f64,
     angular_velocity: f64,
     phase: &'static str,
+    content_width: f64,
+    content_height: f64,
+    host_expanded: bool,
 }
 
 #[cfg(windows)]
@@ -235,6 +265,7 @@ fn emit_motion_visual(
 ) {
     use tauri::Emitter;
 
+    let (content_width, content_height) = base_window_logical_size();
     let _ = window.emit(
         "yummi://window-motion",
         WindowMotionVisual {
@@ -244,6 +275,9 @@ fn emit_motion_visual(
             angle,
             angular_velocity,
             phase,
+            content_width,
+            content_height,
+            host_expanded: WINDOW_ROTATION_HOST_EXPANDED.load(Ordering::SeqCst),
         },
     );
 }
@@ -290,8 +324,8 @@ fn run_windows_physics_drag(
     const ROTATION_PRESENT_INTERVAL: Duration = Duration::from_millis(33);
     const VISUAL_INTERVAL: Duration = Duration::from_millis(16);
     const VELOCITY_SAMPLE_WINDOW: Duration = Duration::from_millis(64);
-    const FRICTION_PER_60HZ_FRAME: f64 = 0.965;
-    const ANGULAR_FRICTION_PER_60HZ_FRAME: f64 = 0.985;
+    const LINEAR_DRAG_PER_SEC: f64 = 2.14;
+    const ANGULAR_DRAG_PER_SEC: f64 = 0.91;
     const BOUNCE: f64 = 0.68;
     const STOP_SPEED_PX_S: f64 = 22.0;
     const STOP_ANGULAR_SPEED_DEG_S: f64 = 7.0;
@@ -300,7 +334,7 @@ fn run_windows_physics_drag(
     const THROW_SOFT_KNEE_PX_S: f64 = 3600.0;
     const THROW_SOFT_SPAN_PX_S: f64 = 5400.0;
     const MAX_ANGULAR_SPEED_DEG_S: f64 = 1800.0;
-    const ANGULAR_TORQUE_SCALE: f64 = 0.34;
+    const COLLISION_SPIN_COUPLING: f64 = 0.32;
 
     if !motion_is_current(generation) || !left_button_down() {
         return;
@@ -326,10 +360,19 @@ fn run_windows_physics_drag(
     let offset_y = initial_position.y - initial_cursor.y;
     let window_center_x = initial_position.x as f64 + initial_size.width as f64 * 0.5;
     let window_center_y = initial_position.y as f64 + initial_size.height as f64 * 0.5;
-    let grab_x = (initial_cursor.x as f64 - window_center_x)
-        / (MAIN_CONTENT_WIDTH_LOGICAL * scale * 0.5).max(1.0);
-    let grab_y = (initial_cursor.y as f64 - window_center_y)
-        / (MAIN_CONTENT_HEIGHT_LOGICAL * scale * 0.5).max(1.0);
+    let grab_x = initial_cursor.x as f64 - window_center_x;
+    let grab_y = initial_cursor.y as f64 - window_center_y;
+    let (content_width, content_height) = if WINDOW_ROTATION_HOST_EXPANDED.load(Ordering::SeqCst) {
+        let (width, height) = base_window_logical_size();
+        (width * scale, height * scale)
+    } else {
+        (initial_size.width as f64, initial_size.height as f64)
+    };
+    let starting_angle = if free_rotation {
+        current_rotation_angle()
+    } else {
+        0.0
+    };
 
     let initial_now = Instant::now();
     let mut samples = VecDeque::with_capacity(16);
@@ -356,7 +399,7 @@ fn run_windows_physics_drag(
 
         if now.saturating_duration_since(last_visual_emit) >= VISUAL_INTERVAL {
             let (vx, vy) = release_velocity(&samples);
-            emit_motion_visual(&window, vx, vy, 0.0, 0.0, "drag");
+            emit_motion_visual(&window, vx, vy, starting_angle, 0.0, "drag");
             last_visual_emit = now;
         }
 
@@ -390,8 +433,15 @@ fn run_windows_physics_drag(
     );
 
     let mut angular_velocity = if free_rotation {
-        ((grab_x * raw_velocity.1 - grab_y * raw_velocity.0) * ANGULAR_TORQUE_SCALE)
-            .clamp(-MAX_ANGULAR_SPEED_DEG_S, MAX_ANGULAR_SPEED_DEG_S)
+        angular_velocity_from_release(
+            grab_x,
+            grab_y,
+            raw_velocity.0,
+            raw_velocity.1,
+            content_width,
+            content_height,
+        )
+        .clamp(-MAX_ANGULAR_SPEED_DEG_S, MAX_ANGULAR_SPEED_DEG_S)
     } else {
         0.0
     };
@@ -409,7 +459,8 @@ fn run_windows_physics_drag(
         angular_velocity = 0.0;
     }
 
-    let rotation_motion = free_rotation && angular_velocity != 0.0;
+    let rotation_motion =
+        free_rotation && (angular_velocity != 0.0 || distance_to_upright(starting_angle) > 0.08);
     if set_rotation_host_expanded(&window, rotation_motion).is_err() {
         return;
     }
@@ -426,13 +477,17 @@ fn run_windows_physics_drag(
     let host_height = size.height as f64;
 
     if vx == 0.0 && vy == 0.0 && angular_velocity == 0.0 {
-        if rotation_motion {
+        emit_motion_visual(&window, 0.0, 0.0, starting_angle, 0.0, "stop");
+        if rotation_motion && distance_to_upright(starting_angle) > 0.08 {
+            store_rotation_angle(starting_angle);
+            spawn_rotated_hit_test(window.clone(), generation);
+        } else if rotation_motion {
             let _ = set_rotation_host_expanded(&window, false);
         }
         return;
     }
 
-    let mut angle = 0.0;
+    let mut angle = starting_angle;
     store_rotation_angle(angle);
     let mut previous = Instant::now();
     let mut last_window_move = previous - DRAG_INTERVAL;
@@ -454,8 +509,16 @@ fn run_windows_physics_drag(
         angle += angular_velocity * dt;
         store_rotation_angle(angle);
 
-        let (visual_width, visual_height) =
-            rotated_visual_bounds(scale, if rotation_motion { angle } else { 0.0 });
+        let (base_width_logical, base_height_logical) = base_window_logical_size();
+        let base_width = base_width_logical * scale;
+        let base_height = base_height_logical * scale;
+        let (visual_width, visual_height) = rotated_visual_bounds(
+            base_width,
+            base_height,
+            if rotation_motion { angle } else { 0.0 },
+        );
+        let before_collision_vx = vx;
+        let before_collision_vy = vy;
         resolve_desktop_collisions(
             &mut x,
             &mut y,
@@ -467,6 +530,17 @@ fn run_windows_physics_drag(
             &mut vy,
             BOUNCE,
         );
+        if free_rotation {
+            let delta_vx = vx - before_collision_vx;
+            let delta_vy = vy - before_collision_vy;
+            if delta_vx.abs() > 0.5 || delta_vy.abs() > 0.5 {
+                angular_velocity +=
+                    collision_angular_impulse(base_width, base_height, angle, delta_vx, delta_vy)
+                        * COLLISION_SPIN_COUPLING;
+                angular_velocity =
+                    angular_velocity.clamp(-MAX_ANGULAR_SPEED_DEG_S, MAX_ANGULAR_SPEED_DEG_S);
+            }
+        }
 
         let move_interval = if rotation_motion {
             ROTATION_PRESENT_INTERVAL
@@ -487,14 +561,13 @@ fn run_windows_physics_drag(
         }
 
         if let Some(strength) = glide_strength {
-            let friction = FRICTION_PER_60HZ_FRAME.powf(dt / (1.0 / 60.0) / strength.max(0.001));
-            vx *= friction;
-            vy *= friction;
+            let damping = (-LINEAR_DRAG_PER_SEC * dt / strength.max(0.001)).exp();
+            vx *= damping;
+            vy *= damping;
         }
 
         if free_rotation {
-            let angular_friction = ANGULAR_FRICTION_PER_60HZ_FRAME.powf(dt / (1.0 / 60.0));
-            angular_velocity *= angular_friction;
+            angular_velocity *= (-ANGULAR_DRAG_PER_SEC * dt).exp();
         } else {
             angular_velocity = 0.0;
             angle = 0.0;
@@ -523,6 +596,8 @@ fn run_windows_physics_drag(
             emit_motion_visual(&window, 0.0, 0.0, angle, 0.0, "stop");
             if rotation_motion && distance_to_upright(angle) <= 0.08 {
                 let _ = set_rotation_host_expanded(&window, false);
+            } else if rotation_motion {
+                spawn_rotated_hit_test(window.clone(), generation);
             }
             return;
         }
@@ -652,6 +727,60 @@ fn soften_throw_velocity(vx: f64, vy: f64, knee: f64, span: f64) -> (f64, f64) {
 }
 
 #[cfg(windows)]
+fn angular_velocity_from_release(
+    grab_x: f64,
+    grab_y: f64,
+    vx: f64,
+    vy: f64,
+    width: f64,
+    height: f64,
+) -> f64 {
+    // Thin rectangular plate: I / m = (w² + h²) / 12.
+    // The release impulse contributes angular momentum L / m = r × v.
+    let inertia_per_mass = (width * width + height * height).max(1.0) / 12.0;
+    let omega_rad_s = (grab_x * vy - grab_y * vx) / inertia_per_mass;
+    omega_rad_s.to_degrees() * 0.72
+}
+
+#[cfg(windows)]
+fn collision_angular_impulse(
+    width: f64,
+    height: f64,
+    angle: f64,
+    delta_vx: f64,
+    delta_vy: f64,
+) -> f64 {
+    let impulse = delta_vx.hypot(delta_vy);
+    if impulse <= f64::EPSILON {
+        return 0.0;
+    }
+
+    // The wall impulse acts at the support corner facing the wall.
+    let nx = -delta_vx / impulse;
+    let ny = -delta_vy / impulse;
+    let radians = angle.to_radians();
+    let cos = radians.cos();
+    let sin = radians.sin();
+    let local_nx = cos * nx + sin * ny;
+    let local_ny = -sin * nx + cos * ny;
+    let local_x = if local_nx >= 0.0 {
+        width * 0.5
+    } else {
+        -width * 0.5
+    };
+    let local_y = if local_ny >= 0.0 {
+        height * 0.5
+    } else {
+        -height * 0.5
+    };
+    let contact_x = cos * local_x - sin * local_y;
+    let contact_y = sin * local_x + cos * local_y;
+
+    let inertia_per_mass = (width * width + height * height).max(1.0) / 12.0;
+    ((contact_x * delta_vy - contact_y * delta_vx) / inertia_per_mass).to_degrees()
+}
+
+#[cfg(windows)]
 fn nearest_upright_angle(angle: f64) -> f64 {
     (angle / 360.0).round() * 360.0
 }
@@ -662,13 +791,77 @@ fn distance_to_upright(angle: f64) -> f64 {
 }
 
 #[cfg(windows)]
-fn rotated_visual_bounds(scale: f64, angle: f64) -> (f64, f64) {
-    let width = MAIN_CONTENT_WIDTH_LOGICAL * scale;
-    let height = MAIN_CONTENT_HEIGHT_LOGICAL * scale;
+fn rotated_visual_bounds(width: f64, height: f64, angle: f64) -> (f64, f64) {
     let radians = angle.to_radians();
     let cos = radians.cos().abs();
     let sin = radians.sin().abs();
     (width * cos + height * sin, width * sin + height * cos)
+}
+
+#[cfg(windows)]
+fn point_inside_rotated_rect(
+    cursor_x: i32,
+    cursor_y: i32,
+    center_x: f64,
+    center_y: f64,
+    width: f64,
+    height: f64,
+    angle: f64,
+) -> bool {
+    let dx = cursor_x as f64 - center_x;
+    let dy = cursor_y as f64 - center_y;
+    let radians = (-angle).to_radians();
+    let local_x = dx * radians.cos() - dy * radians.sin();
+    let local_y = dx * radians.sin() + dy * radians.cos();
+    local_x.abs() <= width * 0.5 && local_y.abs() <= height * 0.5
+}
+
+#[cfg(windows)]
+fn spawn_rotated_hit_test(window: tauri::WebviewWindow, generation: u64) {
+    let _ = std::thread::Builder::new()
+        .name("yummi-window-hit-test".into())
+        .spawn(move || {
+            use std::{thread, time::Duration};
+
+            let Ok(position) = window.outer_position() else {
+                return;
+            };
+            let Ok(size) = window.outer_size() else {
+                return;
+            };
+            let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
+            let (base_width, base_height) = base_window_logical_size();
+            let center_x = position.x as f64 + size.width as f64 * 0.5;
+            let center_y = position.y as f64 + size.height as f64 * 0.5;
+            let content_width = base_width * scale;
+            let content_height = base_height * scale;
+            let angle = current_rotation_angle();
+            let mut last_ignore = None;
+
+            while motion_is_current(generation)
+                && WINDOW_ROTATION_HOST_EXPANDED.load(Ordering::SeqCst)
+                && distance_to_upright(current_rotation_angle()) > 0.08
+            {
+                let Some(cursor) = cursor_position() else {
+                    break;
+                };
+                let ignore = !point_inside_rotated_rect(
+                    cursor.x,
+                    cursor.y,
+                    center_x,
+                    center_y,
+                    content_width,
+                    content_height,
+                    angle,
+                );
+                if last_ignore != Some(ignore) {
+                    let _ = window.set_ignore_cursor_events(ignore);
+                    last_ignore = Some(ignore);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            let _ = window.set_ignore_cursor_events(false);
+        });
 }
 
 #[cfg(windows)]
@@ -701,33 +894,40 @@ fn set_rotation_host_expanded(window: &tauri::WebviewWindow, expanded: bool) -> 
         UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOZORDER},
     };
 
-    let old_position = window.outer_position().map_err(|error| error.to_string())?;
-    let old_size = window.outer_size().map_err(|error| error.to_string())?;
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let target_width = if expanded {
-        ROTATION_HOST_SIZE_LOGICAL
-    } else {
-        MAIN_CONTENT_WIDTH_LOGICAL
-    };
-    let target_height = if expanded {
-        ROTATION_HOST_SIZE_LOGICAL
-    } else {
-        MAIN_CONTENT_HEIGHT_LOGICAL
-    };
-    let target_physical_width = (target_width * scale).round() as i32;
-    let target_physical_height = (target_height * scale).round() as i32;
-    if (old_size.width as i32 - target_physical_width).abs() <= 2
-        && (old_size.height as i32 - target_physical_height).abs() <= 2
-    {
+    let currently_expanded = WINDOW_ROTATION_HOST_EXPANDED.load(Ordering::SeqCst);
+    if currently_expanded == expanded {
         return Ok(());
     }
 
+    let old_position = window.outer_position().map_err(|error| error.to_string())?;
+    let old_size = window.outer_size().map_err(|error| error.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
+
+    let (target_width_logical, target_height_logical) = if expanded {
+        let base_width = old_size.width as f64 / scale;
+        let base_height = old_size.height as f64 / scale;
+        store_base_window_logical_size(base_width, base_height);
+        let side = base_width.hypot(base_height) + ROTATION_HOST_PADDING_LOGICAL;
+
+        // Freeze the WebView content at the current user-selected size before
+        // enlarging the transparent host, avoiding a one-frame content stretch.
+        WINDOW_ROTATION_HOST_EXPANDED.store(true, Ordering::SeqCst);
+        emit_motion_visual(window, 0.0, 0.0, current_rotation_angle(), 0.0, "stop");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        (side, side)
+    } else {
+        base_window_logical_size()
+    };
+
+    let target_physical_width = (target_width_logical * scale).round().max(1.0) as i32;
+    let target_physical_height = (target_height_logical * scale).round().max(1.0) as i32;
     let center_x = old_position.x as f64 + old_size.width as f64 * 0.5;
     let center_y = old_position.y as f64 + old_size.height as f64 * 0.5;
     let x = (center_x - target_physical_width as f64 * 0.5).round() as i32;
     let y = (center_y - target_physical_height as f64 * 0.5).round() as i32;
     let native = window.hwnd().map_err(|error| error.to_string())?;
-    unsafe {
+
+    if let Err(error) = unsafe {
         SetWindowPos(
             HWND(native.0),
             None,
@@ -737,8 +937,19 @@ fn set_rotation_host_expanded(window: &tauri::WebviewWindow, expanded: bool) -> 
             target_physical_height,
             SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
         )
+    } {
+        if expanded {
+            WINDOW_ROTATION_HOST_EXPANDED.store(false, Ordering::SeqCst);
+            emit_motion_visual(window, 0.0, 0.0, current_rotation_angle(), 0.0, "stop");
+        }
+        return Err(error.to_string());
     }
-    .map_err(|error| error.to_string())
+
+    WINDOW_ROTATION_HOST_EXPANDED.store(expanded, Ordering::SeqCst);
+    if !expanded {
+        emit_motion_visual(window, 0.0, 0.0, current_rotation_angle(), 0.0, "stop");
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -871,8 +1082,8 @@ fn resolve_desktop_collisions(
 #[cfg(all(test, windows))]
 mod tests {
     use super::{
-        nearest_upright_angle, release_velocity, rotated_visual_bounds, soften_throw_velocity,
-        ROTATION_HOST_SIZE_LOGICAL,
+        angular_velocity_from_release, nearest_upright_angle, release_velocity,
+        rotated_visual_bounds, soften_throw_velocity,
     };
     use std::{
         collections::VecDeque,
@@ -938,11 +1149,17 @@ mod tests {
     }
 
     #[test]
-    fn rotation_host_covers_full_scale_rotation() {
-        let diagonal = (640.0_f64.powi(2) + 620.0_f64.powi(2)).sqrt();
-        assert!(ROTATION_HOST_SIZE_LOGICAL > diagonal + 16.0);
-        let (width, height) = rotated_visual_bounds(1.0, 45.0);
-        assert!(width < ROTATION_HOST_SIZE_LOGICAL);
-        assert!(height < ROTATION_HOST_SIZE_LOGICAL);
+    fn rotated_bounds_match_rectangle_geometry() {
+        let (width, height) = rotated_visual_bounds(640.0, 620.0, 45.0);
+        assert!(width > 890.0 && width < 892.0);
+        assert!(height > 890.0 && height < 892.0);
+    }
+
+    #[test]
+    fn release_spin_uses_grab_offset_and_moment_of_inertia() {
+        let centered = angular_velocity_from_release(0.0, 0.0, 0.0, 2_000.0, 640.0, 620.0);
+        let edge = angular_velocity_from_release(300.0, 0.0, 0.0, 2_000.0, 640.0, 620.0);
+        assert!(centered.abs() < 0.001);
+        assert!(edge > 300.0);
     }
 }

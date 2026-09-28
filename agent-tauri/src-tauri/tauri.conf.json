@@ -15,13 +15,17 @@
         "title": "Yummi LCU Agent",
         "width": 640,
         "height": 620,
-        "resizable": false,
+        "resizable": true,
         "visible": false,
         "focus": false,
         "skipTaskbar": true,
         "decorations": false,
         "transparent": true,
-        "shadow": false
+        "shadow": false,
+        "minWidth": 520,
+        "minHeight": 500,
+        "maxWidth": 900,
+        "maxHeight": 860
       }
     ],
     "security": {

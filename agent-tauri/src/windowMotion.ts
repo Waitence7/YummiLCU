@@ -5,6 +5,9 @@ export type WindowMotionPayload = {
   angle: number;
   angularVelocity: number;
   phase: 'drag' | 'glide' | 'settle' | 'stop';
+  contentWidth: number;
+  contentHeight: number;
+  hostExpanded: boolean;
 };
 
 const INFINITY_SLIDER_POSITION = 100;
@@ -55,6 +58,13 @@ function setRotationActive(active: boolean) {
 export function updateWindowMotionVisual(payload: WindowMotionPayload) {
   const root = motionSurface();
   root.style.setProperty('--window-rotation-angle', `${payload.angle.toFixed(3)}deg`);
+  if (payload.hostExpanded) {
+    root.style.setProperty('--window-content-width', `${payload.contentWidth.toFixed(2)}px`);
+    root.style.setProperty('--window-content-height', `${payload.contentHeight.toFixed(2)}px`);
+  } else {
+    root.style.setProperty('--window-content-width', '100%');
+    root.style.setProperty('--window-content-height', '100%');
+  }
 
   const rotating =
     rotationDeviation(payload.angle) > 0.1 ||
@@ -134,4 +144,6 @@ export function resetWindowMotionVisual() {
   root.style.setProperty('--window-motion-opacity3', '0');
   root.style.setProperty('--window-motion-streak-opacity', '0');
   root.style.setProperty('--window-rotation-angle', '0deg');
+  root.style.setProperty('--window-content-width', '100%');
+  root.style.setProperty('--window-content-height', '100%');
 }
