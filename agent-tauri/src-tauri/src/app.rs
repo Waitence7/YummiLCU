@@ -82,6 +82,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::lcu::recent_match,
             crate::commands::update::get_beta_release_info,
             crate::commands::update::open_beta_download,
+            crate::commands::update::apply_beta_update_now,
             crate::commands::window::hide_main_window,
             crate::commands::window::complete_tray_hide,
             crate::commands::window::minimize_main_window,

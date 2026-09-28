@@ -843,7 +843,7 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
     }
 }
 
-async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, state: &AppState) {
+pub(crate) async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, state: &AppState) {
     state.report_update_diagnostic("update_check", "scheduled", None).await;
     let parsed = match Url::parse(url) {
         Ok(parsed) => parsed,

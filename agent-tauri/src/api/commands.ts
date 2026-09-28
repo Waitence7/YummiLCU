@@ -44,6 +44,7 @@ export const stabilizeMainWindowRotation = () =>
   useMockBridge ? Promise.resolve() : call<void>('stabilize_main_window_rotation');
 export const getBetaReleaseInfo = () => call<BetaReleaseInfo>('get_beta_release_info');
 export const openBetaDownload = () => call<void>('open_beta_download');
+export const applyBetaUpdateNow = () => call<void>('apply_beta_update_now');
 
 export const getDiagnosticBundle = () => call<string>('get_diagnostic_bundle');
 export const exportDiagnosticBundle = () => call<string>('export_diagnostic_bundle');

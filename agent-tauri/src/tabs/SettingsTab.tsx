@@ -106,6 +106,8 @@ function BetaDownloadCard({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [opening, setOpening] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyStarted, setApplyStarted] = useState(false);
 
   const refresh = async () => {
     setLoading(true);
@@ -136,6 +138,26 @@ function BetaDownloadCard({
     }
   };
 
+
+  const applyBeta = async () => {
+    setApplying(true);
+    setApplyStarted(false);
+    setError(null);
+    try {
+      await api.applyBetaUpdateNow();
+      setApplyStarted(true);
+    } catch {
+      setError('beta 채널 전환 또는 즉시 업데이트 시작에 실패했습니다.');
+    } finally {
+      setApplying(false);
+    }
+  };
+
+  const betaAlreadyInstalled =
+    currentReleaseChannel === 'beta' &&
+    Boolean(release?.releaseLabel) &&
+    currentReleaseLabel === release?.releaseLabel;
+
   return (
     <Card
       title="베타 다운로드"
@@ -156,9 +178,25 @@ function BetaDownloadCard({
           </div>
           <div className="rounded-lg border border-indigo-100 bg-indigo-50/60 px-3 py-2">
             <span className="block text-indigo-600">최신 beta</span>
-            <strong className="mt-0.5 block truncate text-indigo-900">
-              {loading ? '확인 중…' : release?.releaseLabel ?? '확인 실패'}
-            </strong>
+            <div className="mt-0.5 flex min-w-0 items-center gap-2">
+              <strong className="min-w-0 flex-1 truncate text-indigo-900">
+                {loading ? '확인 중…' : release?.releaseLabel ?? '확인 실패'}
+              </strong>
+              <Button
+                variant="primary"
+                className="px-2 py-1 text-[10px]"
+                disabled={loading || !release || applying || betaAlreadyInstalled || applyStarted}
+                onClick={() => void applyBeta()}
+              >
+                {betaAlreadyInstalled
+                  ? '베타 사용 중'
+                  : applying
+                    ? '적용 중…'
+                    : applyStarted
+                      ? '적용 시작됨'
+                      : '베타 적용하기'}
+              </Button>
+            </div>
             <span className="text-[10px] text-indigo-700/80">
               {release ? `build ${release.buildId}` : '서명된 manifest 기준'}
             </span>
@@ -169,7 +207,7 @@ function BetaDownloadCard({
             {opening ? '여는 중…' : '베타 설치 파일 다운로드'}
           </Button>
           <span className="text-[10px] leading-snug text-slate-500">
-            업데이트 채널 설정은 바꾸지 않습니다. 설치 후 beta를 계속 받으려면 채널을 beta로 설정하세요.
+            직접 다운로드는 채널을 바꾸지 않습니다. ‘베타 적용하기’는 채널을 beta로 저장한 뒤 최신 beta 확인·설치를 즉시 시작합니다.
           </span>
         </div>
         {error && <p className="text-[10px] text-rose-600">{error}</p>}
