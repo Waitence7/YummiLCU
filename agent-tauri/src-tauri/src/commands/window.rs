@@ -12,7 +12,8 @@ static WINDOW_ROTATION_BITS: AtomicU64 = AtomicU64::new(0.0f64.to_bits());
 
 const MAIN_CONTENT_WIDTH_LOGICAL: f64 = 640.0;
 const MAIN_CONTENT_HEIGHT_LOGICAL: f64 = 620.0;
-const ROTATION_HOST_SIZE_LOGICAL: f64 = 920.0;
+const ROTATION_HOST_SIZE_LOGICAL: f64 = 1024.0;
+const ROTATION_REGION_PADDING_LOGICAL: f64 = 36.0;
 
 fn cancel_window_motion() {
     WINDOW_MOTION_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -141,19 +142,15 @@ pub(crate) fn stabilize_main_window_rotation(app: AppHandle) -> Result<(), Strin
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
     };
-    let previous_angle = current_rotation_angle();
     cancel_window_motion();
     store_rotation_angle(0.0);
 
     #[cfg(windows)]
     {
-        // This command is invoked only after a click has fully dispatched.
-        // Avoid touching the HWND region at all when it is already upright.
-        if distance_to_upright(previous_angle) > 0.08 {
-            set_rotation_now(&window, 0.0)?;
-        } else {
-            emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
-        }
+        // This runs after the click has fully dispatched, so one native region
+        // update is safe. Always restore the compact upright region in case the
+        // cancelled spin was using the larger fixed rotation envelope.
+        set_rotation_now(&window, 0.0)?;
     }
 
     Ok(())
@@ -381,16 +378,6 @@ fn run_windows_physics_drag(
         trim_motion_samples(&mut samples, now, VELOCITY_SAMPLE_WINDOW);
     }
 
-    // The button is up now, so it is safe to realign the native hit region.
-    // During the drag we only move the HWND and leave its existing region alone.
-    if free_rotation {
-        store_rotation_angle(0.0);
-        if apply_rotation_region(&window, 0.0).is_err() {
-            return;
-        }
-        emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "drag");
-    }
-
     let Ok(position) = window.outer_position() else {
         return;
     };
@@ -430,6 +417,16 @@ fn run_windows_physics_drag(
     if angular_velocity.abs() < MIN_THROW_ANGULAR_SPEED_DEG_S {
         angular_velocity = 0.0;
     }
+
+    // Switch once to a rotation-safe envelope before angular motion starts.
+    // Unlike the old implementation, the native HWND region stays fixed for
+    // the entire spin instead of being recreated every visual frame.
+    if free_rotation && angular_velocity != 0.0 {
+        if apply_rotation_envelope_region(&window).is_err() {
+            return;
+        }
+    }
+
     if vx == 0.0 && vy == 0.0 && angular_velocity == 0.0 {
         return;
     }
@@ -441,6 +438,7 @@ fn run_windows_physics_drag(
     let mut settle_target = 0.0;
     let mut cursor_history: VecDeque<(Instant, i32, i32)> = VecDeque::with_capacity(24);
     let mut previous_cursor_inside = false;
+    let mut idle_region_applied = false;
 
     loop {
         if !motion_is_current(generation) {
@@ -465,7 +463,7 @@ fn run_windows_physics_drag(
             if delta.abs() <= 0.08 {
                 angle = settle_target;
                 store_rotation_angle(angle);
-                let _ = apply_rotation_region(&window, angle);
+                let _ = apply_upright_region(&window);
                 emit_motion_visual(&window, 0.0, 0.0, angle, 0.0, "stop");
                 return;
             }
@@ -560,9 +558,6 @@ fn run_windows_physics_drag(
         }
 
         if now.saturating_duration_since(last_visual_emit) >= VISUAL_INTERVAL {
-            if free_rotation {
-                let _ = apply_rotation_region(&window, angle);
-            }
             emit_motion_visual(
                 &window,
                 vx,
@@ -581,7 +576,19 @@ fn run_windows_physics_drag(
             && angular_velocity == 0.0
             && distance_to_upright(angle) > 0.08;
 
+        if idle_rotated && !idle_region_applied {
+            // Motion is fully stopped, so one final tight polygon is cheap and
+            // reduces the transparent hit area while the tilted window idles.
+            let _ = apply_rotation_region(&window, angle);
+            idle_region_applied = true;
+        } else if !idle_rotated {
+            idle_region_applied = false;
+        }
+
         if !idle_rotated && !settling && vx == 0.0 && vy == 0.0 && angular_velocity == 0.0 {
+            if free_rotation {
+                let _ = apply_upright_region(&window);
+            }
             return;
         }
 
@@ -803,7 +810,11 @@ fn left_button_down() -> bool {
 #[cfg(windows)]
 fn set_rotation_now(window: &tauri::WebviewWindow, angle: f64) -> Result<(), String> {
     store_rotation_angle(angle);
-    apply_rotation_region(window, angle)?;
+    if distance_to_upright(angle) <= 0.08 {
+        apply_upright_region(window)?;
+    } else {
+        apply_rotation_region(window, angle)?;
+    }
     emit_motion_visual(window, 0.0, 0.0, angle, 0.0, "stop");
     Ok(())
 }
@@ -840,9 +851,78 @@ fn apply_free_rotation_mode(window: &tauri::WebviewWindow, enabled: bool) -> Res
         .map_err(|error| error.to_string())?;
 
     if enabled {
-        apply_rotation_region(window, 0.0)?;
+        apply_upright_region(window)?;
     } else {
         clear_window_region(window)?;
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_upright_region(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::HWND,
+        Graphics::Gdi::{CreateRectRgn, DeleteObject, SetWindowRgn, HGDIOBJ},
+    };
+
+    let native = window.hwnd().map_err(|error| error.to_string())?;
+    let hwnd = HWND(native.0);
+    let inner = window.inner_size().map_err(|error| error.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let center_x = inner.width as f64 * 0.5;
+    let center_y = inner.height as f64 * 0.5;
+    let half_width = (MAIN_CONTENT_WIDTH_LOGICAL * 0.5 + ROTATION_REGION_PADDING_LOGICAL) * scale;
+    let half_height = (MAIN_CONTENT_HEIGHT_LOGICAL * 0.5 + ROTATION_REGION_PADDING_LOGICAL) * scale;
+
+    let region = unsafe {
+        CreateRectRgn(
+            (center_x - half_width).floor() as i32,
+            (center_y - half_height).floor() as i32,
+            (center_x + half_width).ceil() as i32,
+            (center_y + half_height).ceil() as i32,
+        )
+    };
+    if region.0.is_null() {
+        return Err("정방향 창 영역 생성에 실패했습니다.".into());
+    }
+    if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
+        let _ = unsafe { DeleteObject(HGDIOBJ(region.0)) };
+        return Err("정방향 창 영역 적용에 실패했습니다.".into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_rotation_envelope_region(window: &tauri::WebviewWindow) -> Result<(), String> {
+    use windows::Win32::{
+        Foundation::HWND,
+        Graphics::Gdi::{CreateEllipticRgn, DeleteObject, SetWindowRgn, HGDIOBJ},
+    };
+
+    let native = window.hwnd().map_err(|error| error.to_string())?;
+    let hwnd = HWND(native.0);
+    let inner = window.inner_size().map_err(|error| error.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let center_x = inner.width as f64 * 0.5;
+    let center_y = inner.height as f64 * 0.5;
+    let half_width = MAIN_CONTENT_WIDTH_LOGICAL * scale * 0.5;
+    let half_height = MAIN_CONTENT_HEIGHT_LOGICAL * scale * 0.5;
+    let radius = half_width.hypot(half_height) + ROTATION_REGION_PADDING_LOGICAL * scale;
+
+    let region = unsafe {
+        CreateEllipticRgn(
+            (center_x - radius).floor() as i32,
+            (center_y - radius).floor() as i32,
+            (center_x + radius).ceil() as i32,
+            (center_y + radius).ceil() as i32,
+        )
+    };
+    if region.0.is_null() {
+        return Err("회전 안전 영역 생성에 실패했습니다.".into());
+    }
+    if unsafe { SetWindowRgn(hwnd, Some(region), true) } == 0 {
+        let _ = unsafe { DeleteObject(HGDIOBJ(region.0)) };
+        return Err("회전 안전 영역 적용에 실패했습니다.".into());
     }
     Ok(())
 }
@@ -860,8 +940,8 @@ fn apply_rotation_region(window: &tauri::WebviewWindow, angle: f64) -> Result<()
     let scale = window.scale_factor().unwrap_or(1.0);
     let center_x = inner.width as f64 * 0.5;
     let center_y = inner.height as f64 * 0.5;
-    let half_width = MAIN_CONTENT_WIDTH_LOGICAL * scale * 0.5;
-    let half_height = MAIN_CONTENT_HEIGHT_LOGICAL * scale * 0.5;
+    let half_width = (MAIN_CONTENT_WIDTH_LOGICAL * 0.5 + ROTATION_REGION_PADDING_LOGICAL) * scale;
+    let half_height = (MAIN_CONTENT_HEIGHT_LOGICAL * 0.5 + ROTATION_REGION_PADDING_LOGICAL) * scale;
     let radians = angle.to_radians();
     let cos = radians.cos();
     let sin = radians.sin();

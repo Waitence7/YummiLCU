@@ -28,6 +28,10 @@ on:
           - stable
           - beta
           - dev
+      beta_number:
+        description: "beta 번호 (beta 채널에서 beta.1, beta.2 ...)"
+        required: false
+        default: "1"
       rollout_percent:
         description: "rollout percent (0-100)"
         required: false
@@ -110,10 +114,12 @@ jobs:
         id: release_meta
         env:
           DISPATCH_CHANNEL: ${{ github.event.inputs.channel }}
+          DISPATCH_BETA_NUMBER: ${{ github.event.inputs.beta_number }}
           COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
           $channel = $env:DISPATCH_CHANNEL
+          $betaNumber = $env:DISPATCH_BETA_NUMBER
           if (-not $channel) {
             if ($env:COMMIT_MESSAGE.StartsWith("release(agent-beta):")) {
               $channel = "beta"
@@ -121,10 +127,32 @@ jobs:
               $channel = "stable"
             }
           }
+
+          if ($channel -eq "beta") {
+            if ("${{ github.event_name }}" -eq "push") {
+              if ($env:COMMIT_MESSAGE -notmatch '^release\(agent-beta\):\s*([0-9]+\.[0-9]+\.[0-9]+)-beta\.([1-9][0-9]*)\s*$') {
+                throw "Beta release commit must be: release(agent-beta): <version>-beta.<number>"
+              }
+              if ($Matches[1] -ne $version) {
+                throw "Beta release commit version $($Matches[1]) does not match source version $version"
+              }
+              $betaNumber = $Matches[2]
+            }
+            if ($betaNumber -notmatch '^[1-9][0-9]*$') {
+              throw "beta_number must be a positive integer"
+            }
+          }
+
           $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
           $buildId = "$date.$env:GITHUB_RUN_NUMBER"
           $shortSha = $env:GITHUB_SHA.Substring(0, 7)
-          $releaseLabel = if ($channel -eq "stable") { $version } else { "$version-$channel.$env:GITHUB_RUN_NUMBER" }
+          if ($channel -eq "stable") {
+            $releaseLabel = $version
+          } elseif ($channel -eq "beta") {
+            $releaseLabel = "$version-beta.$betaNumber"
+          } else {
+            $releaseLabel = "$version-$channel.$env:GITHUB_RUN_NUMBER"
+          }
           "YUMMI_AGENT_RELEASE_CHANNEL=$channel" >> $env:GITHUB_ENV
           "YUMMI_AGENT_RELEASE_LABEL=$releaseLabel" >> $env:GITHUB_ENV
           "YUMMI_AGENT_BUILD_ID=$buildId" >> $env:GITHUB_ENV
