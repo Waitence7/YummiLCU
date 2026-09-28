@@ -99,7 +99,9 @@ export function App() {
     <div
       className="yummi-window-host"
       onPointerDownCapture={(event) => {
-        if (useMockBridge || !state.config.WindowFreeRotation) return;
+        if (useMockBridge) return;
+        // Title-bar presses start a new drag, and start_main_window_drag already
+        // invalidates any previous inertia. Everything else freezes immediately.
         if ((event.target as HTMLElement).closest('[data-yummi-drag-handle]')) return;
         void freezeMainWindowMotion().catch(() => undefined);
       }}

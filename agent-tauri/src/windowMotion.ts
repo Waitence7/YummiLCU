@@ -10,6 +10,8 @@ export type WindowMotionPayload = {
 const INFINITY_SLIDER_POSITION = 100;
 const MOTION_EFFECT_THRESHOLD_PX_S = 1_400;
 const MOTION_EFFECT_FULL_PX_S = 6_400;
+const ROTATION_CONTENT_WIDTH = 640;
+const ROTATION_CONTENT_HEIGHT = 620;
 
 export function glideStrengthToSlider(strength: number | null): number {
   if (strength === null) return INFINITY_SLIDER_POSITION;
@@ -33,6 +35,25 @@ export function formatGlideStrength(strength: number | null): string {
   return `${Math.round(strength).toLocaleString()}×`;
 }
 
+function rotationFitScale(angle: number): number {
+  const radians = (angle * Math.PI) / 180;
+  const cos = Math.abs(Math.cos(radians));
+  const sin = Math.abs(Math.sin(radians));
+  const rotatedWidth = ROTATION_CONTENT_WIDTH * cos + ROTATION_CONTENT_HEIGHT * sin;
+  const rotatedHeight = ROTATION_CONTENT_WIDTH * sin + ROTATION_CONTENT_HEIGHT * cos;
+  const fit = Math.min(
+    1,
+    ROTATION_CONTENT_WIDTH / Math.max(rotatedWidth, 1),
+    ROTATION_CONTENT_HEIGHT / Math.max(rotatedHeight, 1),
+  );
+  return fit < 0.999 ? fit * 0.985 : 1;
+}
+
+function rotationDeviation(angle: number): number {
+  const normalized = ((angle % 360) + 360) % 360;
+  return Math.min(normalized, 360 - normalized);
+}
+
 function motionSurface(): HTMLElement {
   return (
     document.querySelector<HTMLElement>('[data-yummi-app-surface]') ?? document.documentElement
@@ -49,9 +70,14 @@ function setRotationActive(active: boolean) {
 
 export function updateWindowMotionVisual(payload: WindowMotionPayload) {
   const root = motionSurface();
+  const rotationScale = rotationFitScale(payload.angle);
   root.style.setProperty('--window-rotation-angle', `${payload.angle.toFixed(3)}deg`);
+  root.style.setProperty('--window-rotation-scale', rotationScale.toFixed(4));
 
-  const rotating = Math.abs(payload.angularVelocity) > 0.5 || payload.phase === 'settle';
+  const rotating =
+    rotationDeviation(payload.angle) > 0.1 ||
+    Math.abs(payload.angularVelocity) > 0.5 ||
+    payload.phase === 'settle';
   setRotationActive(rotating);
 
   const effectsAllowed =
@@ -125,4 +151,6 @@ export function resetWindowMotionVisual() {
   root.style.setProperty('--window-motion-opacity2', '0');
   root.style.setProperty('--window-motion-opacity3', '0');
   root.style.setProperty('--window-motion-streak-opacity', '0');
+  root.style.setProperty('--window-rotation-angle', '0deg');
+  root.style.setProperty('--window-rotation-scale', '1');
 }
