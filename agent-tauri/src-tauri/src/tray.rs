@@ -208,7 +208,9 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
             WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
                 .title("Yummi LCU Agent")
                 .inner_size(640.0, 620.0)
-                .resizable(false)
+                .min_inner_size(520.0, 500.0)
+                .max_inner_size(900.0, 860.0)
+                .resizable(true)
                 .decorations(false)
                 .transparent(true)
                 .shadow(false);
@@ -262,8 +264,7 @@ pub(crate) fn request_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::{
-        html_canvas_experiment_enabled_for_channel, tray_hide_watchdog_ms,
-        HTML_CANVAS_BROWSER_ARGS,
+        html_canvas_experiment_enabled_for_channel, tray_hide_watchdog_ms, HTML_CANVAS_BROWSER_ARGS,
     };
 
     #[test]

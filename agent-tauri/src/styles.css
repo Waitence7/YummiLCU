@@ -133,9 +133,10 @@ body {
 }
 
 .yummi-window-rotating .yummi-window-surface {
+  contain: layout paint;
   box-shadow: none;
-  transform: rotate(var(--window-rotation-angle, 0deg)) translateZ(0);
-  transition: transform 34ms linear;
+  transform: rotate(var(--window-rotation-angle, 0deg));
+  transition: none;
   will-change: transform;
 }
 

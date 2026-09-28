@@ -320,13 +320,15 @@ fn run_windows_physics_drag(
     use tauri::{PhysicalPosition, Position};
 
     const DRAG_INTERVAL: Duration = Duration::from_millis(8);
-    const ROTATION_PHYSICS_INTERVAL: Duration = Duration::from_millis(16);
-    const ROTATION_PRESENT_INTERVAL: Duration = Duration::from_millis(33);
+    const ROTATION_PHYSICS_INTERVAL: Duration = Duration::from_micros(8_333);
+    const ROTATION_PRESENT_INTERVAL: Duration = Duration::from_micros(16_667);
     const VISUAL_INTERVAL: Duration = Duration::from_millis(16);
     const VELOCITY_SAMPLE_WINDOW: Duration = Duration::from_millis(64);
     const LINEAR_DRAG_PER_SEC: f64 = 2.14;
     const ANGULAR_DRAG_PER_SEC: f64 = 0.91;
-    const BOUNCE: f64 = 0.68;
+    const BOUNCE: f64 = 0.62;
+    const WALL_TANGENTIAL_RETENTION: f64 = 0.86;
+    const WALL_ANGULAR_RETENTION: f64 = 0.94;
     const STOP_SPEED_PX_S: f64 = 22.0;
     const STOP_ANGULAR_SPEED_DEG_S: f64 = 7.0;
     const MIN_THROW_SPEED_PX_S: f64 = 55.0;
@@ -334,7 +336,8 @@ fn run_windows_physics_drag(
     const THROW_SOFT_KNEE_PX_S: f64 = 3600.0;
     const THROW_SOFT_SPAN_PX_S: f64 = 5400.0;
     const MAX_ANGULAR_SPEED_DEG_S: f64 = 1800.0;
-    const COLLISION_SPIN_COUPLING: f64 = 0.32;
+    const RELEASE_SPIN_TRANSFER: f64 = 0.72;
+    const COLLISION_SPIN_COUPLING: f64 = 0.42;
 
     if !motion_is_current(generation) || !left_button_down() {
         return;
@@ -440,6 +443,7 @@ fn run_windows_physics_drag(
             raw_velocity.1,
             content_width,
             content_height,
+            RELEASE_SPIN_TRANSFER,
         )
         .clamp(-MAX_ANGULAR_SPEED_DEG_S, MAX_ANGULAR_SPEED_DEG_S)
     } else {
@@ -533,7 +537,20 @@ fn run_windows_physics_drag(
         if free_rotation {
             let delta_vx = vx - before_collision_vx;
             let delta_vy = vy - before_collision_vy;
-            if delta_vx.abs() > 0.5 || delta_vy.abs() > 0.5 {
+            let hit_vertical_wall = delta_vx.abs() > 0.5;
+            let hit_horizontal_wall = delta_vy.abs() > 0.5;
+            if hit_vertical_wall || hit_horizontal_wall {
+                // A wall impulse reverses the normal component, while contact
+                // friction bleeds some tangential velocity and spin. This keeps
+                // glancing impacts from looking like perfectly elastic pinball
+                // bounces and gives corner hits a more rigid-body feel.
+                if hit_vertical_wall {
+                    vy *= WALL_TANGENTIAL_RETENTION;
+                }
+                if hit_horizontal_wall {
+                    vx *= WALL_TANGENTIAL_RETENTION;
+                }
+                angular_velocity *= WALL_ANGULAR_RETENTION;
                 angular_velocity +=
                     collision_angular_impulse(base_width, base_height, angle, delta_vx, delta_vy)
                         * COLLISION_SPIN_COUPLING;
@@ -734,12 +751,13 @@ fn angular_velocity_from_release(
     vy: f64,
     width: f64,
     height: f64,
+    transfer: f64,
 ) -> f64 {
     // Thin rectangular plate: I / m = (w² + h²) / 12.
     // The release impulse contributes angular momentum L / m = r × v.
     let inertia_per_mass = (width * width + height * height).max(1.0) / 12.0;
     let omega_rad_s = (grab_x * vy - grab_y * vx) / inertia_per_mass;
-    omega_rad_s.to_degrees() * 0.72
+    omega_rad_s.to_degrees() * transfer.clamp(0.0, 1.0)
 }
 
 #[cfg(windows)]
@@ -858,7 +876,7 @@ fn spawn_rotated_hit_test(window: tauri::WebviewWindow, generation: u64) {
                     let _ = window.set_ignore_cursor_events(ignore);
                     last_ignore = Some(ignore);
                 }
-                thread::sleep(Duration::from_millis(20));
+                thread::sleep(Duration::from_millis(10));
             }
             let _ = window.set_ignore_cursor_events(false);
         });
@@ -1157,8 +1175,8 @@ mod tests {
 
     #[test]
     fn release_spin_uses_grab_offset_and_moment_of_inertia() {
-        let centered = angular_velocity_from_release(0.0, 0.0, 0.0, 2_000.0, 640.0, 620.0);
-        let edge = angular_velocity_from_release(300.0, 0.0, 0.0, 2_000.0, 640.0, 620.0);
+        let centered = angular_velocity_from_release(0.0, 0.0, 0.0, 2_000.0, 640.0, 620.0, 0.72);
+        let edge = angular_velocity_from_release(300.0, 0.0, 0.0, 2_000.0, 640.0, 620.0, 0.72);
         assert!(centered.abs() < 0.001);
         assert!(edge > 300.0);
     }
