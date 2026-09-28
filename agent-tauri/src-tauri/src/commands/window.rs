@@ -12,6 +12,7 @@ static WINDOW_ROTATION_BITS: AtomicU64 = AtomicU64::new(0.0f64.to_bits());
 
 const MAIN_CONTENT_WIDTH_LOGICAL: f64 = 640.0;
 const MAIN_CONTENT_HEIGHT_LOGICAL: f64 = 620.0;
+const ROTATION_HOST_SIZE_LOGICAL: f64 = 912.0;
 
 fn cancel_window_motion() {
     WINDOW_MOTION_GENERATION.fetch_add(1, Ordering::SeqCst);
@@ -32,6 +33,7 @@ pub(crate) fn hide_main_window(app: AppHandle) {
     #[cfg(windows)]
     if let Some(window) = app.get_webview_window("main") {
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
+        let _ = set_rotation_host_expanded(&window, false);
     }
     tray::hide_main_window(&app);
 }
@@ -55,7 +57,10 @@ pub(crate) fn minimize_main_window(app: AppHandle) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or_else(|| "메인 창을 찾을 수 없습니다.".to_string())?;
     #[cfg(windows)]
-    emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
+    {
+        emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
+        set_rotation_host_expanded(&window, false)?;
+    }
     window.minimize().map_err(|error| error.to_string())
 }
 
@@ -121,6 +126,7 @@ pub(crate) async fn sync_main_window_rotation_mode(
     {
         let _ = enabled;
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
+        set_rotation_host_expanded(&window, false)?;
     }
 
     #[cfg(not(windows))]
@@ -149,6 +155,7 @@ pub(crate) fn stabilize_main_window_rotation(app: AppHandle) -> Result<(), Strin
     #[cfg(windows)]
     {
         set_rotation_now(&window, 0.0)?;
+        set_rotation_host_expanded(&window, false)?;
     }
 
     Ok(())
@@ -407,6 +414,9 @@ fn run_windows_physics_drag(
     }
 
     let rotation_motion = free_rotation && angular_velocity != 0.0;
+    if set_rotation_host_expanded(&window, rotation_motion).is_err() {
+        return;
+    }
 
     let Ok(position) = window.outer_position() else {
         return;
@@ -420,6 +430,9 @@ fn run_windows_physics_drag(
     let host_height = size.height as f64;
 
     if vx == 0.0 && vy == 0.0 && angular_velocity == 0.0 {
+        if rotation_motion {
+            let _ = set_rotation_host_expanded(&window, false);
+        }
         return;
     }
 
@@ -457,6 +470,7 @@ fn run_windows_physics_drag(
                 angle = settle_target;
                 store_rotation_angle(angle);
                 emit_motion_visual(&window, 0.0, 0.0, angle, 0.0, "stop");
+                let _ = set_rotation_host_expanded(&window, false);
                 return;
             }
         } else {
@@ -465,13 +479,15 @@ fn run_windows_physics_drag(
             angle += angular_velocity * dt;
             store_rotation_angle(angle);
 
+            let (visual_width, visual_height) =
+                rotated_visual_bounds(scale, if rotation_motion { angle } else { 0.0 });
             resolve_desktop_collisions(
                 &mut x,
                 &mut y,
                 host_width,
                 host_height,
-                host_width,
-                host_height,
+                visual_width,
+                visual_height,
                 &mut vx,
                 &mut vy,
                 BOUNCE,
@@ -588,6 +604,9 @@ fn run_windows_physics_drag(
         }
 
         if !idle_rotated && !settling && vx == 0.0 && vy == 0.0 && angular_velocity == 0.0 {
+            if rotation_motion {
+                let _ = set_rotation_host_expanded(&window, false);
+            }
             return;
         }
 
@@ -728,6 +747,16 @@ fn distance_to_upright(angle: f64) -> f64 {
 }
 
 #[cfg(windows)]
+fn rotated_visual_bounds(scale: f64, angle: f64) -> (f64, f64) {
+    let width = MAIN_CONTENT_WIDTH_LOGICAL * scale;
+    let height = MAIN_CONTENT_HEIGHT_LOGICAL * scale;
+    let radians = angle.to_radians();
+    let cos = radians.cos().abs();
+    let sin = radians.sin().abs();
+    (width * cos + height * sin, width * sin + height * cos)
+}
+
+#[cfg(windows)]
 fn cursor_approached_window(
     history: &std::collections::VecDeque<(std::time::Instant, i32, i32)>,
     center_x: f64,
@@ -776,28 +805,10 @@ fn point_inside_rotated_surface(
     let sin = radians.sin();
     let local_x = cos * dx + sin * dy;
     let local_y = -sin * dx + cos * dy;
-    let fit = rotation_fit_scale(angle);
-    let half_width = MAIN_CONTENT_WIDTH_LOGICAL * scale * fit * 0.5;
-    let half_height = MAIN_CONTENT_HEIGHT_LOGICAL * scale * fit * 0.5;
+    let half_width = MAIN_CONTENT_WIDTH_LOGICAL * scale * 0.5;
+    let half_height = MAIN_CONTENT_HEIGHT_LOGICAL * scale * 0.5;
 
     local_x.abs() <= half_width && local_y.abs() <= half_height
-}
-
-#[cfg(windows)]
-fn rotation_fit_scale(angle: f64) -> f64 {
-    let radians = angle.to_radians();
-    let cos = radians.cos().abs();
-    let sin = radians.sin().abs();
-    let rotated_width = MAIN_CONTENT_WIDTH_LOGICAL * cos + MAIN_CONTENT_HEIGHT_LOGICAL * sin;
-    let rotated_height = MAIN_CONTENT_WIDTH_LOGICAL * sin + MAIN_CONTENT_HEIGHT_LOGICAL * cos;
-    let fit = (MAIN_CONTENT_WIDTH_LOGICAL / rotated_width.max(1.0))
-        .min(MAIN_CONTENT_HEIGHT_LOGICAL / rotated_height.max(1.0))
-        .min(1.0);
-    if fit < 0.999 {
-        fit * 0.985
-    } else {
-        1.0
-    }
 }
 
 #[cfg(windows)]
@@ -821,6 +832,45 @@ fn set_rotation_now(window: &tauri::WebviewWindow, angle: f64) -> Result<(), Str
     store_rotation_angle(angle);
     emit_motion_visual(window, 0.0, 0.0, angle, 0.0, "stop");
     Ok(())
+}
+
+#[cfg(windows)]
+fn set_rotation_host_expanded(window: &tauri::WebviewWindow, expanded: bool) -> Result<(), String> {
+    use tauri::{LogicalSize, PhysicalPosition, Position};
+
+    let old_position = window.outer_position().map_err(|error| error.to_string())?;
+    let old_size = window.outer_size().map_err(|error| error.to_string())?;
+    let scale = window.scale_factor().unwrap_or(1.0);
+    let target_width = if expanded {
+        ROTATION_HOST_SIZE_LOGICAL
+    } else {
+        MAIN_CONTENT_WIDTH_LOGICAL
+    };
+    let target_height = if expanded {
+        ROTATION_HOST_SIZE_LOGICAL
+    } else {
+        MAIN_CONTENT_HEIGHT_LOGICAL
+    };
+    let target_physical_width = target_width * scale;
+    let target_physical_height = target_height * scale;
+    if (old_size.width as f64 - target_physical_width).abs() <= 2.0
+        && (old_size.height as f64 - target_physical_height).abs() <= 2.0
+    {
+        return Ok(());
+    }
+
+    let center_x = old_position.x as f64 + old_size.width as f64 * 0.5;
+    let center_y = old_position.y as f64 + old_size.height as f64 * 0.5;
+    window
+        .set_size(LogicalSize::new(target_width, target_height))
+        .map_err(|error| error.to_string())?;
+    let new_size = window.outer_size().map_err(|error| error.to_string())?;
+    window
+        .set_position(Position::Physical(PhysicalPosition::new(
+            (center_x - new_size.width as f64 * 0.5).round() as i32,
+            (center_y - new_size.height as f64 * 0.5).round() as i32,
+        )))
+        .map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
@@ -953,8 +1003,8 @@ fn resolve_desktop_collisions(
 #[cfg(all(test, windows))]
 mod tests {
     use super::{
-        cursor_approached_window, nearest_upright_angle, release_velocity, rotation_fit_scale,
-        soften_throw_velocity,
+        cursor_approached_window, nearest_upright_angle, release_velocity, rotated_visual_bounds,
+        soften_throw_velocity, ROTATION_HOST_SIZE_LOGICAL,
     };
     use std::{
         collections::VecDeque,
@@ -1020,18 +1070,12 @@ mod tests {
     }
 
     #[test]
-    fn rotation_fit_scale_keeps_diagonal_inside_fixed_host() {
-        assert!((rotation_fit_scale(0.0) - 1.0).abs() < 0.001);
-        let diagonal = rotation_fit_scale(45.0);
-        assert!(
-            diagonal > 0.67 && diagonal < 0.70,
-            "unexpected scale {diagonal}"
-        );
-        let quarter = rotation_fit_scale(90.0);
-        assert!(
-            quarter > 0.94 && quarter < 0.97,
-            "unexpected scale {quarter}"
-        );
+    fn rotation_host_covers_full_scale_rotation() {
+        let diagonal = (640.0_f64.powi(2) + 620.0_f64.powi(2)).sqrt();
+        assert!(ROTATION_HOST_SIZE_LOGICAL > diagonal + 16.0);
+        let (width, height) = rotated_visual_bounds(1.0, 45.0);
+        assert!(width < ROTATION_HOST_SIZE_LOGICAL);
+        assert!(height < ROTATION_HOST_SIZE_LOGICAL);
     }
 
     #[test]
