@@ -90,6 +90,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::window::show_window_glide_hint,
             crate::commands::window::close_window_glide_hint,
             crate::commands::window::sync_main_window_rotation_mode,
+            crate::commands::window::freeze_main_window_motion,
             crate::commands::window::stabilize_main_window_rotation
         ])
         .setup(move |app| {

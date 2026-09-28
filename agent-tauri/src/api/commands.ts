@@ -38,6 +38,8 @@ export const setWindowGlideStrength = (strength: number | null) =>
   call<void>('set_window_glide_strength', { strength });
 export const syncMainWindowRotationMode = () =>
   useMockBridge ? Promise.resolve() : call<void>('sync_main_window_rotation_mode');
+export const freezeMainWindowMotion = () =>
+  useMockBridge ? Promise.resolve() : call<void>('freeze_main_window_motion');
 export const stabilizeMainWindowRotation = () =>
   useMockBridge ? Promise.resolve() : call<void>('stabilize_main_window_rotation');
 export const getBetaReleaseInfo = () => call<BetaReleaseInfo>('get_beta_release_info');

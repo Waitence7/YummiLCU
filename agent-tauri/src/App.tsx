@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 
 import {
   completeTrayHide,
+  freezeMainWindowMotion,
   stabilizeMainWindowRotation,
   syncMainWindowRotationMode,
   useMockBridge,
@@ -100,7 +101,14 @@ export function App() {
       onPointerDownCapture={(event) => {
         if (useMockBridge || !state.config.WindowFreeRotation) return;
         if ((event.target as HTMLElement).closest('[data-yummi-drag-handle]')) return;
-        void stabilizeMainWindowRotation().catch(() => undefined);
+        void freezeMainWindowMotion().catch(() => undefined);
+      }}
+      onClickCapture={(event) => {
+        if (useMockBridge || !state.config.WindowFreeRotation) return;
+        if ((event.target as HTMLElement).closest('[data-yummi-drag-handle]')) return;
+        queueMicrotask(() => {
+          void stabilizeMainWindowRotation().catch(() => undefined);
+        });
       }}
     >
       <div data-yummi-app-surface className="yummi-window-surface relative isolate flex flex-col overflow-hidden bg-white text-slate-800">

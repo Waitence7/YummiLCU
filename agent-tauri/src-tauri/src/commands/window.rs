@@ -77,10 +77,9 @@ pub(crate) async fn start_main_window_drag(
             .fetch_add(1, Ordering::SeqCst)
             .wrapping_add(1);
 
-        if config.window_free_rotation {
-            set_rotation_now(&window, 0.0)?;
-        }
-
+        // Do not call SetWindowRgn while the left button is down. Changing the
+        // top-level HWND region in the middle of a WebView2 pointer sequence can
+        // cancel the matching mouse-up/click and make the custom drag look dead.
         std::thread::Builder::new()
             .name("yummi-window-physics".into())
             .spawn(move || {
@@ -131,17 +130,30 @@ pub(crate) async fn sync_main_window_rotation_mode(
 }
 
 #[tauri::command]
+pub(crate) fn freeze_main_window_motion() {
+    // Safe during pointer-down: only invalidate the physics generation.
+    // The current rotated HWND region stays untouched until click completes.
+    cancel_window_motion();
+}
+
+#[tauri::command]
 pub(crate) fn stabilize_main_window_rotation(app: AppHandle) -> Result<(), String> {
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
     };
+    let previous_angle = current_rotation_angle();
     cancel_window_motion();
     store_rotation_angle(0.0);
 
     #[cfg(windows)]
     {
-        set_rotation_now(&window, 0.0)?;
-        emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
+        // This command is invoked only after a click has fully dispatched.
+        // Avoid touching the HWND region at all when it is already upright.
+        if distance_to_upright(previous_angle) > 0.08 {
+            set_rotation_now(&window, 0.0)?;
+        } else {
+            emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
+        }
     }
 
     Ok(())
@@ -367,6 +379,16 @@ fn run_windows_physics_drag(
         }
         samples.push_back((now, x, y));
         trim_motion_samples(&mut samples, now, VELOCITY_SAMPLE_WINDOW);
+    }
+
+    // The button is up now, so it is safe to realign the native hit region.
+    // During the drag we only move the HWND and leave its existing region alone.
+    if free_rotation {
+        store_rotation_angle(0.0);
+        if apply_rotation_region(&window, 0.0).is_err() {
+            return;
+        }
+        emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "drag");
     }
 
     let Ok(position) = window.outer_position() else {
