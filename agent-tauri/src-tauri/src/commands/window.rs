@@ -138,10 +138,12 @@ pub(crate) async fn sync_main_window_rotation_mode(
 }
 
 #[tauri::command]
-pub(crate) fn freeze_main_window_motion() {
-    // Safe during pointer-down: only invalidate the physics generation.
-    // The current rotated HWND region stays untouched until click completes.
+pub(crate) fn freeze_main_window_motion(app: AppHandle) {
     cancel_window_motion();
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        emit_motion_visual(&window, 0.0, 0.0, current_rotation_angle(), 0.0, "stop");
+    }
 }
 
 #[tauri::command]
@@ -286,10 +288,8 @@ fn run_windows_physics_drag(
     const DRAG_INTERVAL: Duration = Duration::from_millis(8);
     const ROTATION_PHYSICS_INTERVAL: Duration = Duration::from_millis(16);
     const ROTATION_PRESENT_INTERVAL: Duration = Duration::from_millis(33);
-    const IDLE_ROTATION_INTERVAL: Duration = Duration::from_millis(100);
     const VISUAL_INTERVAL: Duration = Duration::from_millis(16);
     const VELOCITY_SAMPLE_WINDOW: Duration = Duration::from_millis(64);
-    const CURSOR_HISTORY_WINDOW: Duration = Duration::from_millis(120);
     const FRICTION_PER_60HZ_FRAME: f64 = 0.965;
     const ANGULAR_FRICTION_PER_60HZ_FRAME: f64 = 0.985;
     const BOUNCE: f64 = 0.68;
@@ -297,14 +297,10 @@ fn run_windows_physics_drag(
     const STOP_ANGULAR_SPEED_DEG_S: f64 = 7.0;
     const MIN_THROW_SPEED_PX_S: f64 = 55.0;
     const MIN_THROW_ANGULAR_SPEED_DEG_S: f64 = 18.0;
-    const LOW_SPEED_HOVER_PX_S: f64 = 90.0;
-    const LOW_SPEED_HOVER_ANGULAR_DEG_S: f64 = 80.0;
-    const HOVER_CURSOR_TRAVEL_PX: f64 = 4.0;
     const THROW_SOFT_KNEE_PX_S: f64 = 3600.0;
     const THROW_SOFT_SPAN_PX_S: f64 = 5400.0;
     const MAX_ANGULAR_SPEED_DEG_S: f64 = 1800.0;
     const ANGULAR_TORQUE_SCALE: f64 = 0.34;
-    const SETTLE_RATE: f64 = 15.0;
 
     if !motion_is_current(generation) || !left_button_down() {
         return;
@@ -440,11 +436,6 @@ fn run_windows_physics_drag(
     store_rotation_angle(angle);
     let mut previous = Instant::now();
     let mut last_window_move = previous - DRAG_INTERVAL;
-    let mut settling = false;
-    let mut settle_target = 0.0;
-    let mut cursor_history: VecDeque<(Instant, i32, i32)> = VecDeque::with_capacity(24);
-    let mut previous_cursor_inside = false;
-    let mut idle_visual_synced = false;
 
     loop {
         if !motion_is_current(generation) {
@@ -458,117 +449,63 @@ fn run_windows_physics_drag(
             .clamp(0.001, 0.050);
         previous = now;
 
-        if settling {
-            vx = 0.0;
-            vy = 0.0;
-            angular_velocity = 0.0;
-            let delta = settle_target - angle;
-            let amount = 1.0 - (-SETTLE_RATE * dt).exp();
-            angle += delta * amount;
+        x += vx * dt;
+        y += vy * dt;
+        angle += angular_velocity * dt;
+        store_rotation_angle(angle);
 
-            if delta.abs() <= 0.08 {
-                angle = settle_target;
-                store_rotation_angle(angle);
-                emit_motion_visual(&window, 0.0, 0.0, angle, 0.0, "stop");
-                let _ = set_rotation_host_expanded(&window, false);
+        let (visual_width, visual_height) =
+            rotated_visual_bounds(scale, if rotation_motion { angle } else { 0.0 });
+        resolve_desktop_collisions(
+            &mut x,
+            &mut y,
+            host_width,
+            host_height,
+            visual_width,
+            visual_height,
+            &mut vx,
+            &mut vy,
+            BOUNCE,
+        );
+
+        let move_interval = if rotation_motion {
+            ROTATION_PRESENT_INTERVAL
+        } else {
+            DRAG_INTERVAL
+        };
+        if now.saturating_duration_since(last_window_move) >= move_interval {
+            if window
+                .set_position(Position::Physical(PhysicalPosition::new(
+                    x.round() as i32,
+                    y.round() as i32,
+                )))
+                .is_err()
+            {
                 return;
             }
+            last_window_move = now;
+        }
+
+        if let Some(strength) = glide_strength {
+            let friction = FRICTION_PER_60HZ_FRAME.powf(dt / (1.0 / 60.0) / strength.max(0.001));
+            vx *= friction;
+            vy *= friction;
+        }
+
+        if free_rotation {
+            let angular_friction = ANGULAR_FRICTION_PER_60HZ_FRAME.powf(dt / (1.0 / 60.0));
+            angular_velocity *= angular_friction;
         } else {
-            x += vx * dt;
-            y += vy * dt;
-            angle += angular_velocity * dt;
-            store_rotation_angle(angle);
+            angular_velocity = 0.0;
+            angle = 0.0;
+        }
 
-            let (visual_width, visual_height) =
-                rotated_visual_bounds(scale, if rotation_motion { angle } else { 0.0 });
-            resolve_desktop_collisions(
-                &mut x,
-                &mut y,
-                host_width,
-                host_height,
-                visual_width,
-                visual_height,
-                &mut vx,
-                &mut vy,
-                BOUNCE,
-            );
-
-            let move_interval = if rotation_motion {
-                ROTATION_PRESENT_INTERVAL
-            } else {
-                DRAG_INTERVAL
-            };
-            if now.saturating_duration_since(last_window_move) >= move_interval {
-                if window
-                    .set_position(Position::Physical(PhysicalPosition::new(
-                        x.round() as i32,
-                        y.round() as i32,
-                    )))
-                    .is_err()
-                {
-                    return;
-                }
-                last_window_move = now;
-            }
-
-            if let Some(strength) = glide_strength {
-                let friction =
-                    FRICTION_PER_60HZ_FRAME.powf(dt / (1.0 / 60.0) / strength.max(0.001));
-                vx *= friction;
-                vy *= friction;
-            }
-
-            if free_rotation {
-                let angular_friction = ANGULAR_FRICTION_PER_60HZ_FRAME.powf(dt / (1.0 / 60.0));
-                angular_velocity *= angular_friction;
-            } else {
-                angular_velocity = 0.0;
-                angle = 0.0;
-            }
-
-            if vx.hypot(vy) < STOP_SPEED_PX_S {
-                vx = 0.0;
-                vy = 0.0;
-            }
-            if angular_velocity.abs() < STOP_ANGULAR_SPEED_DEG_S {
-                angular_velocity = 0.0;
-            }
-
-            if free_rotation {
-                if let Some(cursor) = cursor_position() {
-                    cursor_history.push_back((now, cursor.x, cursor.y));
-                    while cursor_history
-                        .front()
-                        .map(|(time, _, _)| {
-                            now.saturating_duration_since(*time) > CURSOR_HISTORY_WINDOW
-                        })
-                        .unwrap_or(false)
-                    {
-                        cursor_history.pop_front();
-                    }
-
-                    let inside =
-                        point_inside_rotated_surface(&window, cursor.x, cursor.y, angle, scale);
-
-                    if vx.hypot(vy) <= LOW_SPEED_HOVER_PX_S
-                        && angular_velocity.abs() <= LOW_SPEED_HOVER_ANGULAR_DEG_S
-                        && inside
-                        && !previous_cursor_inside
-                        && cursor_approached_window(
-                            &cursor_history,
-                            x + host_width * 0.5,
-                            y + host_height * 0.5,
-                            HOVER_CURSOR_TRAVEL_PX,
-                        )
-                    {
-                        settling = true;
-                        settle_target = nearest_upright_angle(angle);
-                        vx = 0.0;
-                        vy = 0.0;
-                    }
-                    previous_cursor_inside = inside;
-                }
-            }
+        if vx.hypot(vy) < STOP_SPEED_PX_S {
+            vx = 0.0;
+            vy = 0.0;
+        }
+        if angular_velocity.abs() < STOP_ANGULAR_SPEED_DEG_S {
+            angular_velocity = 0.0;
         }
 
         let visual_interval = if rotation_motion {
@@ -576,43 +513,21 @@ fn run_windows_physics_drag(
         } else {
             VISUAL_INTERVAL
         };
-        let has_active_motion = settling || vx != 0.0 || vy != 0.0 || angular_velocity != 0.0;
+        let has_active_motion = vx != 0.0 || vy != 0.0 || angular_velocity != 0.0;
         if has_active_motion && now.saturating_duration_since(last_visual_emit) >= visual_interval {
-            emit_motion_visual(
-                &window,
-                vx,
-                vy,
-                angle,
-                angular_velocity,
-                if settling { "settle" } else { "glide" },
-            );
+            emit_motion_visual(&window, vx, vy, angle, angular_velocity, "glide");
             last_visual_emit = now;
         }
 
-        let idle_rotated = free_rotation
-            && !settling
-            && vx == 0.0
-            && vy == 0.0
-            && angular_velocity == 0.0
-            && distance_to_upright(angle) > 0.08;
-
-        if idle_rotated && !idle_visual_synced {
+        if !has_active_motion {
             emit_motion_visual(&window, 0.0, 0.0, angle, 0.0, "stop");
-            idle_visual_synced = true;
-        } else if !idle_rotated {
-            idle_visual_synced = false;
-        }
-
-        if !idle_rotated && !settling && vx == 0.0 && vy == 0.0 && angular_velocity == 0.0 {
-            if rotation_motion {
+            if rotation_motion && distance_to_upright(angle) <= 0.08 {
                 let _ = set_rotation_host_expanded(&window, false);
             }
             return;
         }
 
-        let interval = if idle_rotated {
-            IDLE_ROTATION_INTERVAL
-        } else if rotation_motion {
+        let interval = if rotation_motion {
             ROTATION_PHYSICS_INTERVAL
         } else {
             DRAG_INTERVAL
@@ -757,61 +672,6 @@ fn rotated_visual_bounds(scale: f64, angle: f64) -> (f64, f64) {
 }
 
 #[cfg(windows)]
-fn cursor_approached_window(
-    history: &std::collections::VecDeque<(std::time::Instant, i32, i32)>,
-    center_x: f64,
-    center_y: f64,
-    min_travel: f64,
-) -> bool {
-    let Some((_, first_x, first_y)) = history.front().copied() else {
-        return false;
-    };
-    let Some((_, last_x, last_y)) = history.back().copied() else {
-        return false;
-    };
-
-    let dx = (last_x - first_x) as f64;
-    let dy = (last_y - first_y) as f64;
-    if dx.hypot(dy) < min_travel {
-        return false;
-    }
-
-    let toward_x = center_x - first_x as f64;
-    let toward_y = center_y - first_y as f64;
-    dx * toward_x + dy * toward_y > 0.0
-}
-
-#[cfg(windows)]
-fn point_inside_rotated_surface(
-    window: &tauri::WebviewWindow,
-    cursor_x: i32,
-    cursor_y: i32,
-    angle: f64,
-    scale: f64,
-) -> bool {
-    let Ok(position) = window.outer_position() else {
-        return false;
-    };
-    let Ok(size) = window.outer_size() else {
-        return false;
-    };
-
-    let center_x = position.x as f64 + size.width as f64 * 0.5;
-    let center_y = position.y as f64 + size.height as f64 * 0.5;
-    let dx = cursor_x as f64 - center_x;
-    let dy = cursor_y as f64 - center_y;
-    let radians = angle.to_radians();
-    let cos = radians.cos();
-    let sin = radians.sin();
-    let local_x = cos * dx + sin * dy;
-    let local_y = -sin * dx + cos * dy;
-    let half_width = MAIN_CONTENT_WIDTH_LOGICAL * scale * 0.5;
-    let half_height = MAIN_CONTENT_HEIGHT_LOGICAL * scale * 0.5;
-
-    local_x.abs() <= half_width && local_y.abs() <= half_height
-}
-
-#[cfg(windows)]
 fn cursor_position() -> Option<windows::Win32::Foundation::POINT> {
     use windows::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
 
@@ -836,7 +696,10 @@ fn set_rotation_now(window: &tauri::WebviewWindow, angle: f64) -> Result<(), Str
 
 #[cfg(windows)]
 fn set_rotation_host_expanded(window: &tauri::WebviewWindow, expanded: bool) -> Result<(), String> {
-    use tauri::{LogicalSize, PhysicalPosition, Position};
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{SetWindowPos, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOZORDER},
+    };
 
     let old_position = window.outer_position().map_err(|error| error.to_string())?;
     let old_size = window.outer_size().map_err(|error| error.to_string())?;
@@ -851,26 +714,31 @@ fn set_rotation_host_expanded(window: &tauri::WebviewWindow, expanded: bool) -> 
     } else {
         MAIN_CONTENT_HEIGHT_LOGICAL
     };
-    let target_physical_width = target_width * scale;
-    let target_physical_height = target_height * scale;
-    if (old_size.width as f64 - target_physical_width).abs() <= 2.0
-        && (old_size.height as f64 - target_physical_height).abs() <= 2.0
+    let target_physical_width = (target_width * scale).round() as i32;
+    let target_physical_height = (target_height * scale).round() as i32;
+    if (old_size.width as i32 - target_physical_width).abs() <= 2
+        && (old_size.height as i32 - target_physical_height).abs() <= 2
     {
         return Ok(());
     }
 
     let center_x = old_position.x as f64 + old_size.width as f64 * 0.5;
     let center_y = old_position.y as f64 + old_size.height as f64 * 0.5;
-    window
-        .set_size(LogicalSize::new(target_width, target_height))
-        .map_err(|error| error.to_string())?;
-    let new_size = window.outer_size().map_err(|error| error.to_string())?;
-    window
-        .set_position(Position::Physical(PhysicalPosition::new(
-            (center_x - new_size.width as f64 * 0.5).round() as i32,
-            (center_y - new_size.height as f64 * 0.5).round() as i32,
-        )))
-        .map_err(|error| error.to_string())
+    let x = (center_x - target_physical_width as f64 * 0.5).round() as i32;
+    let y = (center_y - target_physical_height as f64 * 0.5).round() as i32;
+    let native = window.hwnd().map_err(|error| error.to_string())?;
+    unsafe {
+        SetWindowPos(
+            HWND(native.0),
+            None,
+            x,
+            y,
+            target_physical_width,
+            target_physical_height,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+        )
+    }
+    .map_err(|error| error.to_string())
 }
 
 #[cfg(windows)]
@@ -1003,8 +871,8 @@ fn resolve_desktop_collisions(
 #[cfg(all(test, windows))]
 mod tests {
     use super::{
-        cursor_approached_window, nearest_upright_angle, release_velocity, rotated_visual_bounds,
-        soften_throw_velocity, ROTATION_HOST_SIZE_LOGICAL,
+        nearest_upright_angle, release_velocity, rotated_visual_bounds, soften_throw_velocity,
+        ROTATION_HOST_SIZE_LOGICAL,
     };
     use std::{
         collections::VecDeque,
@@ -1076,21 +944,5 @@ mod tests {
         let (width, height) = rotated_visual_bounds(1.0, 45.0);
         assert!(width < ROTATION_HOST_SIZE_LOGICAL);
         assert!(height < ROTATION_HOST_SIZE_LOGICAL);
-    }
-
-    #[test]
-    fn hover_approach_requires_cursor_motion_toward_window() {
-        let start = Instant::now();
-        let history = VecDeque::from([
-            (start, 100, 100),
-            (start + Duration::from_millis(100), 112, 108),
-        ]);
-        assert!(cursor_approached_window(&history, 300.0, 300.0, 4.0));
-
-        let stationary = VecDeque::from([
-            (start, 100, 100),
-            (start + Duration::from_millis(100), 101, 100),
-        ]);
-        assert!(!cursor_approached_window(&stationary, 300.0, 300.0, 4.0));
     }
 }

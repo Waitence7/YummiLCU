@@ -105,12 +105,11 @@ export function App() {
         if ((event.target as HTMLElement).closest('[data-yummi-drag-handle]')) return;
         void freezeMainWindowMotion().catch(() => undefined);
       }}
-      onClickCapture={(event) => {
+      onContextMenu={(event) => {
         if (useMockBridge || !state.config.WindowFreeRotation) return;
-        if ((event.target as HTMLElement).closest('[data-yummi-drag-handle]')) return;
-        queueMicrotask(() => {
-          void stabilizeMainWindowRotation().catch(() => undefined);
-        });
+        if (!(event.target as HTMLElement).closest('[data-yummi-app-surface]')) return;
+        event.preventDefault();
+        void stabilizeMainWindowRotation().catch(() => undefined);
       }}
     >
       <div data-yummi-app-surface className="yummi-window-surface relative isolate flex flex-col overflow-hidden bg-white text-slate-800">
