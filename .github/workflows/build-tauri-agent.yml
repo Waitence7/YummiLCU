@@ -108,9 +108,19 @@ jobs:
 
       - name: Configure release metadata
         id: release_meta
+        env:
+          DISPATCH_CHANNEL: ${{ github.event.inputs.channel }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
-          $channel = "${{ github.event.inputs.channel || 'stable' }}"
+          $channel = $env:DISPATCH_CHANNEL
+          if (-not $channel) {
+            if ($env:COMMIT_MESSAGE.StartsWith("release(agent-beta):")) {
+              $channel = "beta"
+            } else {
+              $channel = "stable"
+            }
+          }
           $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
           $buildId = "$date.$env:GITHUB_RUN_NUMBER"
           $shortSha = $env:GITHUB_SHA.Substring(0, 7)
@@ -245,7 +255,7 @@ jobs:
         env:
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
           RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
-          CHANNEL: ${{ github.event.inputs.channel || 'stable' }}
+          CHANNEL: ${{ steps.release_meta.outputs.channel }}
           ROLLOUT_PERCENT: ${{ github.event.inputs.rollout_percent || '100' }}
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
@@ -299,7 +309,7 @@ jobs:
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release(agent):'))
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.event.head_commit.message, 'release(agent):') || startsWith(github.event.head_commit.message, 'release(agent-beta):')))
         with:
           name: agent-release
           path: |
@@ -311,7 +321,7 @@ jobs:
   publish-github-release:
     name: Publish GitHub release
     needs: build
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release(agent):'))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.event.head_commit.message, 'release(agent):') || startsWith(github.event.head_commit.message, 'release(agent-beta):')))
     runs-on: ubuntu-latest
     permissions:
       actions: read
@@ -365,7 +375,7 @@ jobs:
   deploy:
     name: Deploy agent update files
     needs: build
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release(agent):'))
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.event.head_commit.message, 'release(agent):') || startsWith(github.event.head_commit.message, 'release(agent-beta):')))
     runs-on: ubuntu-latest
     permissions:
       contents: read
