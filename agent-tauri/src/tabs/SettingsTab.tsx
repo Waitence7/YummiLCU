@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import * as api from '../api/commands';
+import { WindowGlideSlider } from '../components/WindowGlideSlider';
 import { Button, Card, TextInput, Toggle } from '../components/ui';
 import type { BetaReleaseInfo, Config, TrayHideEffect } from '../state/types';
 import { playTrayHideEffect, TRAY_HIDE_EFFECT_OPTIONS } from '../trayEffects';
@@ -43,6 +44,8 @@ export function SettingsTab({
         </div>
       </Card>
 
+      <WindowMotionCard config={config} onPatchConfig={onPatchConfig} />
+
       <TrayEffectCard config={config} onPatchConfig={onPatchConfig} />
 
       <BetaDownloadCard
@@ -53,6 +56,39 @@ export function SettingsTab({
 
       <AdvancedCard config={config} onPatchConfig={onPatchConfig} />
     </div>
+  );
+}
+
+
+function WindowMotionCard({
+  config,
+  onPatchConfig,
+}: {
+  config: Config;
+  onPatchConfig(patch: Partial<Config>): Promise<boolean>;
+}) {
+  return (
+    <Card title="창 미끄러짐">
+      <div className="space-y-2.5">
+        <WindowGlideSlider
+          value={config.WindowGlideStrength}
+          onCommit={(value) => onPatchConfig({ WindowGlideStrength: value })}
+        />
+        <div className="rounded-lg border border-slate-200 bg-slate-50 px-3">
+          <Toggle
+            checked={config.WindowFreeRotation}
+            onChange={(next) => void onPatchConfig({ WindowFreeRotation: next })}
+            label="360°+ 자유 회전"
+            description="창을 가장자리에서 빠르게 던지면 잡은 위치와 속도에 따라 여러 바퀴 회전할 수 있습니다."
+          />
+        </div>
+        <p className="text-[10px] leading-relaxed text-slate-500">
+          0은 놓는 즉시 정지하고, 1×는 기본 관성, ∞는 이동 중 마찰이 없습니다. 자유 회전은
+          기본적으로 꺼져 있습니다. 켜면 클릭 시 즉시 정방향으로 돌아오며, hover 정렬은 창이
+          매우 느릴 때 사용자가 실제로 마우스를 움직여 창 안으로 들어온 경우에만 작동합니다.
+        </p>
+      </div>
+    </Card>
   );
 }
 

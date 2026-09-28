@@ -39,6 +39,8 @@ export type Config = {
   RunAtWindowsStartup: boolean;
   TrayHideEffect: TrayHideEffect;
   TrayEffectPlaybackRate: number;
+  WindowGlideStrength: number | null;
+  WindowFreeRotation: boolean;
   UiTestMode: boolean;
 };
 
@@ -98,6 +100,8 @@ export const initialState: AgentState = {
     RunAtWindowsStartup: true,
     TrayHideEffect: 'book-return-v2',
     TrayEffectPlaybackRate: 1,
+    WindowGlideStrength: 1,
+    WindowFreeRotation: false,
     UiTestMode: false,
   },
 };

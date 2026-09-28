@@ -91,3 +91,31 @@ pub(crate) async fn save_config(
     }
     Ok(())
 }
+
+#[tauri::command]
+pub(crate) async fn set_window_glide_strength(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    strength: Option<f64>,
+) -> Result<(), String> {
+    let _guard = state.command_lock.lock().await;
+    let mut config = state.config.read().await.clone();
+    config.window_glide_strength = strength;
+    config.normalize();
+    if let Err(error) = config.validate() {
+        return Err(error.to_string());
+    }
+    config.save().map_err(|error| error.to_string())?;
+    state.update_config(config).await;
+    state
+        .record_flight(
+            "window_glide",
+            match strength {
+                None => "strength=inf".to_string(),
+                Some(value) => format!("strength={value:.3}"),
+            },
+        )
+        .await;
+    state.emit(&app).await;
+    Ok(())
+}

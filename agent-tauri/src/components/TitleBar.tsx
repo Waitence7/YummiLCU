@@ -2,13 +2,30 @@ import * as api from '../api/commands';
 import { startCloseSound } from '../closeSound';
 import appIcon from '../../src-tauri/icons/icon.ico';
 
+const WINDOW_GLIDE_HINT_KEY = 'yummi-window-glide-hint-v1';
+
+function maybeShowWindowGlideHint() {
+  if (api.useMockBridge) return;
+  try {
+    if (localStorage.getItem(WINDOW_GLIDE_HINT_KEY) === '1') return;
+    localStorage.setItem(WINDOW_GLIDE_HINT_KEY, '1');
+    void api.showWindowGlideHint().catch(() => {
+      localStorage.removeItem(WINDOW_GLIDE_HINT_KEY);
+    });
+  } catch {
+    void api.showWindowGlideHint().catch(() => undefined);
+  }
+}
+
 export function TitleBar() {
   return (
     <div
+      data-yummi-drag-handle
       className="flex h-10 shrink-0 cursor-move items-center border-b border-white/10 bg-[#2b2b2b] text-slate-100"
       onMouseDown={(event) => {
         if (event.button !== 0 || (event.target as HTMLElement).closest('button')) return;
         event.preventDefault();
+        maybeShowWindowGlideHint();
         void api.startMainWindowDrag().catch((error) => {
           console.warn('[window] 창 드래그를 시작하지 못했습니다.', error);
         });

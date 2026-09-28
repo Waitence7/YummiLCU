@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react';
 
-import { completeTrayHide, useMockBridge } from './api/commands';
+import {
+  completeTrayHide,
+  stabilizeMainWindowRotation,
+  syncMainWindowRotationMode,
+  useMockBridge,
+} from './api/commands';
 import { Banners } from './components/Banners';
 import { Header } from './components/Header';
 import { TitleBar } from './components/TitleBar';
@@ -12,6 +17,11 @@ import { SettingsTab } from './tabs/SettingsTab';
 import { VoiceTab } from './tabs/VoiceTab';
 import { playTrayHideEffect } from './trayEffects';
 import { waitForCloseSound } from './closeSound';
+import {
+  resetWindowMotionVisual,
+  updateWindowMotionVisual,
+  type WindowMotionPayload,
+} from './windowMotion';
 
 type TabId = 'guild' | 'settings' | 'voice' | 'logs' | 'patchNotes';
 
@@ -55,8 +65,49 @@ export function App() {
     };
   }, [state.config.TrayHideEffect, state.config.TrayEffectPlaybackRate]);
 
+  useEffect(() => {
+    if (useMockBridge) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen<WindowMotionPayload>('yummi://window-motion', ({ payload }) => {
+          updateWindowMotionVisual(payload);
+        }),
+      )
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      })
+      .catch(() => undefined);
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      resetWindowMotionVisual();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (useMockBridge) return;
+    void syncMainWindowRotationMode().catch(() => undefined);
+  }, [state.config.WindowFreeRotation]);
+
   return (
-    <div data-yummi-app-surface className="yummi-window-surface flex h-full flex-col overflow-hidden bg-white text-slate-800">
+    <div
+      className="yummi-window-host"
+      onPointerDownCapture={(event) => {
+        if (useMockBridge || !state.config.WindowFreeRotation) return;
+        if ((event.target as HTMLElement).closest('[data-yummi-drag-handle]')) return;
+        void stabilizeMainWindowRotation().catch(() => undefined);
+      }}
+    >
+      <div data-yummi-app-surface className="yummi-window-surface relative isolate flex flex-col overflow-hidden bg-white text-slate-800">
+      <div aria-hidden className="yummi-motion-ghost yummi-motion-ghost-1" />
+      <div aria-hidden className="yummi-motion-ghost yummi-motion-ghost-2" />
+      <div aria-hidden className="yummi-motion-ghost yummi-motion-ghost-3" />
+      <div aria-hidden className="yummi-motion-streaks" />
       <TitleBar />
       <Header
         state={state}
@@ -129,6 +180,7 @@ export function App() {
             : '—'}
         </span>
       </footer>
+      </div>
     </div>
   );
 }

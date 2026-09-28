@@ -69,6 +69,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
         .invoke_handler(tauri::generate_handler![
             crate::commands::config::load_config,
             crate::commands::config::save_config,
+            crate::commands::config::set_window_glide_strength,
             crate::commands::agent::start_agent,
             crate::commands::agent::stop_agent,
             crate::commands::agent::relogin,
@@ -85,7 +86,11 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::window::complete_tray_hide,
             crate::commands::window::minimize_main_window,
             crate::commands::window::request_tray_hide,
-            crate::commands::window::start_main_window_drag
+            crate::commands::window::start_main_window_drag,
+            crate::commands::window::show_window_glide_hint,
+            crate::commands::window::close_window_glide_hint,
+            crate::commands::window::sync_main_window_rotation_mode,
+            crate::commands::window::stabilize_main_window_rotation
         ])
         .setup(move |app| {
             // The installer only launches this argument when it observed an

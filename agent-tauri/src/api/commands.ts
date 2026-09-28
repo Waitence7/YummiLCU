@@ -32,6 +32,14 @@ export const minimizeMainWindow = () => call<void>('minimize_main_window');
 export const requestTrayHide = () => call<void>('request_tray_hide');
 export const startMainWindowDrag = () =>
   useMockBridge ? Promise.resolve() : call<void>('start_main_window_drag');
+export const showWindowGlideHint = () => call<void>('show_window_glide_hint');
+export const closeWindowGlideHint = () => call<void>('close_window_glide_hint');
+export const setWindowGlideStrength = (strength: number | null) =>
+  call<void>('set_window_glide_strength', { strength });
+export const syncMainWindowRotationMode = () =>
+  useMockBridge ? Promise.resolve() : call<void>('sync_main_window_rotation_mode');
+export const stabilizeMainWindowRotation = () =>
+  useMockBridge ? Promise.resolve() : call<void>('stabilize_main_window_rotation');
 export const getBetaReleaseInfo = () => call<BetaReleaseInfo>('get_beta_release_info');
 export const openBetaDownload = () => call<void>('open_beta_download');
 
