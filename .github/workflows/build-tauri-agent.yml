@@ -4,11 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - "agent-tauri/package.json"
-      - "agent-tauri/package-lock.json"
-      - "agent-tauri/src-tauri/Cargo.toml"
-      - "agent-tauri/src-tauri/Cargo.lock"
-      - "agent-tauri/src-tauri/tauri.conf.json"
+      - "agent-tauri/**"
+      - ".github/workflows/build-tauri-agent.yml"
   workflow_dispatch:
     inputs:
       version:
@@ -136,7 +133,14 @@ jobs:
               if ($Matches[1] -ne $version) {
                 throw "Beta release commit version $($Matches[1]) does not match source version $version"
               }
-              $betaNumber = $Matches[2]
+              $betaMeta = Get-Content agent-tauri/beta-release.json -Raw | ConvertFrom-Json
+              if ($betaMeta.version -ne $version) {
+                throw "beta-release.json version $($betaMeta.version) does not match source version $version"
+              }
+              if ([string]$betaMeta.number -ne $Matches[2]) {
+                throw "beta-release.json number $($betaMeta.number) does not match commit beta.$($Matches[2])"
+              }
+              $betaNumber = [string]$betaMeta.number
             }
             if ($betaNumber -notmatch '^[1-9][0-9]*$') {
               throw "beta_number must be a positive integer"

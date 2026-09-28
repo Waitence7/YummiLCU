@@ -74,12 +74,28 @@ body {
 
 .yummi-motion-ghost,
 .yummi-motion-streaks {
+  display: none;
   position: absolute;
   inset: 0;
   z-index: 80;
   pointer-events: none;
   border-radius: inherit;
   transition: opacity 70ms linear;
+}
+
+.yummi-motion-effects-active .yummi-motion-ghost,
+.yummi-motion-effects-active .yummi-motion-streaks {
+  display: block;
+}
+
+.yummi-window-rotating .yummi-window-surface {
+  box-shadow: none;
+  transition: transform 34ms linear;
+}
+
+.yummi-window-rotating .yummi-motion-ghost,
+.yummi-window-rotating .yummi-motion-streaks {
+  display: none;
 }
 
 .yummi-motion-ghost {
@@ -89,7 +105,7 @@ body {
     linear-gradient(315deg, rgb(56 189 248 / 0.05), transparent 36%);
   opacity: var(--window-motion-opacity);
   filter: blur(var(--window-motion-blur));
-  will-change: transform, opacity, filter;
+  will-change: transform, opacity;
 }
 
 .yummi-motion-ghost-1 {

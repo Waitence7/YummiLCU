@@ -33,16 +33,39 @@ export function formatGlideStrength(strength: number | null): string {
   return `${Math.round(strength).toLocaleString()}×`;
 }
 
+function motionSurface(): HTMLElement {
+  return (
+    document.querySelector<HTMLElement>('[data-yummi-app-surface]') ?? document.documentElement
+  );
+}
+
+function setMotionEffectsActive(active: boolean) {
+  document.documentElement.classList.toggle('yummi-motion-effects-active', active);
+}
+
+function setRotationActive(active: boolean) {
+  document.documentElement.classList.toggle('yummi-window-rotating', active);
+}
+
 export function updateWindowMotionVisual(payload: WindowMotionPayload) {
-  const root = document.documentElement;
+  const root = motionSurface();
   root.style.setProperty('--window-rotation-angle', `${payload.angle.toFixed(3)}deg`);
 
-  if (
-    payload.phase === 'stop' ||
-    payload.speed < MOTION_EFFECT_THRESHOLD_PX_S ||
-    window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
-  ) {
-    resetWindowMotionVisual();
+  const rotating = Math.abs(payload.angularVelocity) > 0.5 || payload.phase === 'settle';
+  setRotationActive(rotating);
+
+  const effectsAllowed =
+    !rotating &&
+    payload.phase !== 'stop' &&
+    payload.speed >= MOTION_EFFECT_THRESHOLD_PX_S &&
+    !window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+  setMotionEffectsActive(effectsAllowed);
+  if (!effectsAllowed) {
+    root.style.setProperty('--window-motion-opacity', '0');
+    root.style.setProperty('--window-motion-opacity2', '0');
+    root.style.setProperty('--window-motion-opacity3', '0');
+    root.style.setProperty('--window-motion-streak-opacity', '0');
     return;
   }
 
@@ -95,7 +118,9 @@ export function updateWindowMotionVisual(payload: WindowMotionPayload) {
 }
 
 export function resetWindowMotionVisual() {
-  const root = document.documentElement;
+  const root = motionSurface();
+  setMotionEffectsActive(false);
+  setRotationActive(false);
   root.style.setProperty('--window-motion-opacity', '0');
   root.style.setProperty('--window-motion-opacity2', '0');
   root.style.setProperty('--window-motion-opacity3', '0');
