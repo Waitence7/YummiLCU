@@ -32,12 +32,15 @@ pub(crate) async fn report_unexpected_error(
     code: String,
     summary: String,
 ) -> Result<(), String> {
-    let code = match code.as_str() {
-        "uncaught_error" => "uncaught_error",
-        "unhandled_rejection" => "unhandled_rejection",
+    let (component, code) = match code.as_str() {
+        "uncaught_error" => ("ui", "uncaught_error"),
+        "unhandled_rejection" => ("ui", "unhandled_rejection"),
+        "window_command_failed" => ("window", "command_failed"),
         _ => return Err("지원하지 않는 UI 오류 코드입니다.".into()),
     };
-    state.report_unexpected_error("ui", code, summary).await;
+    state
+        .report_unexpected_error(component, code, summary)
+        .await;
     Ok(())
 }
 

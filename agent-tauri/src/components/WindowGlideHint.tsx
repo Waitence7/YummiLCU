@@ -4,9 +4,10 @@ import * as api from '../api/commands';
 import type { Config } from '../state/types';
 import { WindowGlideSlider } from './WindowGlideSlider';
 
-export function WindowGlideHint() {
+export function WindowGlideHint({ onClose }: { onClose?: () => void }) {
   const [strength, setStrength] = useState<number | null>(1);
   const [loaded, setLoaded] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let disposed = false;
@@ -14,6 +15,10 @@ export function WindowGlideHint() {
       .loadConfig()
       .then((config: Config) => {
         if (!disposed) setStrength(config.WindowGlideStrength);
+      })
+      .catch((reason) => {
+        if (!disposed) setError('설정을 불러오지 못했습니다.');
+        void api.reportWindowFailure('hint_load_config', reason);
       })
       .finally(() => {
         if (!disposed) setLoaded(true);
@@ -24,8 +29,16 @@ export function WindowGlideHint() {
   }, []);
 
   const saveStrength = async (next: number | null) => {
+    const previous = strength;
     setStrength(next);
-    await api.setWindowGlideStrength(next);
+    setError(null);
+    try {
+      await api.setWindowGlideStrength(next);
+    } catch (reason) {
+      setStrength(previous);
+      setError('미끄러짐 설정을 저장하지 못했습니다.');
+      void api.reportWindowFailure('hint_save_strength', reason);
+    }
   };
 
   return (
@@ -41,7 +54,10 @@ export function WindowGlideHint() {
               type="button"
               className="grid size-7 shrink-0 place-items-center rounded-lg text-slate-400 transition hover:bg-white/10 hover:text-white"
               aria-label="닫기"
-              onClick={() => void api.closeWindowGlideHint()}
+              onClick={() => {
+                if (onClose) onClose();
+                else void api.closeWindowGlideHint().catch((reason) => api.reportWindowFailure('hint_close', reason));
+              }}
             >
               ×
             </button>
@@ -63,6 +79,7 @@ export function WindowGlideHint() {
           ∞는 이동 중 마찰만 없앱니다. 화면 가장자리 충돌과 다시 잡기·최소화·트레이 이동은
           그대로 동작합니다.
         </p>
+        {error && <p role="alert" className="mt-1 text-[10px] text-rose-300">{error}</p>}
       </div>
     </div>
   );

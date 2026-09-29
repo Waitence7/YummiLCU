@@ -28,6 +28,25 @@ class AgentHelloTests(unittest.TestCase):
         _agent_error_last_by_discord.clear()
         _agent_error_recent.clear()
 
+    def test_window_failures_and_ui_stalls_are_accepted(self) -> None:
+        report = {
+            "report_id": "123e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 1,
+            "component": "window",
+            "code": "command_failed",
+            "summary": "drag_set_position: failed",
+            "app_version": "0.7.16",
+            "release_label": "0.7.16",
+            "release_channel": "stable",
+            "build_id": "build-1",
+            "git_commit": "abc123",
+        }
+        self.assertIsNotNone(_agent_error_report(report))
+        report["code"] = "ui_stall"
+        self.assertIsNotNone(_agent_error_report(report))
+        report["code"] = "unexpected_window_code"
+        self.assertIsNone(_agent_error_report(report))
+
     def test_non_ascii_secret_comparison_fails_closed(self) -> None:
         self.assertFalse(_safe_compare_digest("１２３４５６", "１２３４５６"))
 

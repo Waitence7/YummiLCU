@@ -31,6 +31,7 @@ export const minimizeMainWindow = () => call<void>('minimize_main_window');
 export const requestTrayHide = () => call<void>('request_tray_hide');
 export const startMainWindowDrag = () =>
   useMockBridge ? Promise.resolve() : call<void>('start_main_window_drag');
+export const windowUiHeartbeat = () => call<void>('window_ui_heartbeat');
 export const showWindowGlideHint = () => call<void>('show_window_glide_hint');
 export const closeWindowGlideHint = () => call<void>('close_window_glide_hint');
 export const setWindowGlideStrength = (strength: number | null) =>
@@ -47,7 +48,14 @@ export const applyBetaUpdateNow = () => call<void>('apply_beta_update_now');
 
 export const getDiagnosticBundle = () => call<string>('get_diagnostic_bundle');
 export const exportDiagnosticBundle = () => call<string>('export_diagnostic_bundle');
-export const reportUnexpectedError = (code: 'uncaught_error' | 'unhandled_rejection', summary: string) =>
+export const reportUnexpectedError = (code: 'uncaught_error' | 'unhandled_rejection' | 'window_command_failed', summary: string) =>
   call<void>('report_unexpected_error', { code, summary });
+export const reportWindowFailure = (operation: string, error: unknown): Promise<void> => {
+  const summary = `${operation}: ${String(error)}`;
+  console.warn('[window]', summary);
+  return reportUnexpectedError('window_command_failed', summary).catch((reportError) => {
+    console.warn('[window] 오류 보고에 실패했습니다.', reportError);
+  });
+};
 export const reportTrayEffectDiagnostic = (code: string, detail: string) =>
   call<void>('report_tray_effect_diagnostic', { code, detail });

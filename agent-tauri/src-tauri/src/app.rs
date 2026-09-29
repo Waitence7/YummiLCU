@@ -87,6 +87,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::window::minimize_main_window,
             crate::commands::window::request_tray_hide,
             crate::commands::window::start_main_window_drag,
+            crate::commands::window::window_ui_heartbeat,
             crate::commands::window::show_window_glide_hint,
             crate::commands::window::close_window_glide_hint,
             crate::commands::window::sync_main_window_rotation_mode,
@@ -159,6 +160,10 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             });
 
             tray::setup(app)?;
+            crate::commands::window::start_window_ui_watchdog(
+                app.handle().clone(),
+                update_state.clone(),
+            );
             // Tauri creates the configured main window before setup. Recreate it through
             // our builder so beta/dev builds can opt into HTML-in-Canvas WebView2 flags,
             // and background startup does not keep an unused WebView alive.

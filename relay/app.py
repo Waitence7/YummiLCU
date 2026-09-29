@@ -92,6 +92,7 @@ _AGENT_ERROR_COMPONENTS = frozenset({
     "startup",
     "config",
     "session",
+    "window",
 })
 _AGENT_ERROR_CODES = frozenset({
     "task_panicked",
@@ -113,6 +114,9 @@ _AGENT_ERROR_CODES = frozenset({
     "window_hide_failed",
     "tray_hide_event_emit_failed",
     "window_destroy_failed",
+    "window_pointer_restore_failed",
+    "command_failed",
+    "ui_stall",
     "uncaught_error",
     "unhandled_rejection",
 })

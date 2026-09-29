@@ -12,8 +12,86 @@ static WINDOW_ROTATION_BITS: AtomicU64 = AtomicU64::new(0.0f64.to_bits());
 static WINDOW_ROTATION_HOST_EXPANDED: AtomicBool = AtomicBool::new(false);
 static WINDOW_BASE_WIDTH_BITS: AtomicU64 = AtomicU64::new(640.0f64.to_bits());
 static WINDOW_BASE_HEIGHT_BITS: AtomicU64 = AtomicU64::new(620.0f64.to_bits());
+static WINDOW_UI_HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
 
 const ROTATION_HOST_PADDING_LOGICAL: f64 = 20.0;
+const WINDOW_UI_STALL_MS: u64 = 15_000;
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+#[tauri::command]
+pub(crate) fn window_ui_heartbeat() {
+    WINDOW_UI_HEARTBEAT_MS.store(now_ms(), Ordering::SeqCst);
+}
+
+pub(crate) fn start_window_ui_watchdog(app: AppHandle, state: Arc<AppState>) {
+    tauri::async_runtime::spawn(async move {
+        let mut visible_since = None;
+        let mut reported = false;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let visible = app
+                .get_webview_window("main")
+                .and_then(|window| {
+                    window
+                        .is_visible()
+                        .ok()
+                        .zip(window.is_minimized().ok())
+                        .map(|(shown, minimized)| shown && !minimized)
+                })
+                .unwrap_or(false);
+            if !visible {
+                visible_since = None;
+                reported = false;
+                continue;
+            }
+
+            let now = now_ms();
+            let first_seen = *visible_since.get_or_insert(now);
+            let last = WINDOW_UI_HEARTBEAT_MS.load(Ordering::SeqCst);
+            let age = now.saturating_sub(last.max(first_seen));
+            if age >= WINDOW_UI_STALL_MS && !reported {
+                state
+                    .report_unexpected_error(
+                        "window",
+                        "ui_stall",
+                        format!(
+                            "heartbeat_age_ms={age} rotation_deg={:.1} host_expanded={}",
+                            current_rotation_angle(),
+                            WINDOW_ROTATION_HOST_EXPANDED.load(Ordering::SeqCst)
+                        ),
+                    )
+                    .await;
+                reported = true;
+            } else if now.saturating_sub(last) < 5_000 {
+                reported = false;
+            }
+        }
+    });
+}
+
+#[cfg(windows)]
+fn report_window_failure(
+    window: &tauri::WebviewWindow,
+    operation: &'static str,
+    error: impl ToString,
+) {
+    let app = window.app_handle().clone();
+    if let Some(state) = app.try_state::<Arc<AppState>>() {
+        let state = state.inner().clone();
+        let summary = format!("{operation}: {}", error.to_string());
+        tauri::async_runtime::spawn(async move {
+            state
+                .report_unexpected_error("window", "command_failed", summary)
+                .await;
+        });
+    }
+}
 
 fn base_window_logical_size() -> (f64, f64) {
     (
@@ -49,7 +127,9 @@ pub(crate) fn hide_main_window(app: AppHandle) {
     store_rotation_angle(0.0);
     #[cfg(windows)]
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_ignore_cursor_events(false);
+        if let Err(error) = window.set_ignore_cursor_events(false) {
+            report_window_failure(&window, "hide_restore_pointer", error);
+        }
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
         let _ = set_rotation_host_expanded(&window, false);
     }
@@ -76,7 +156,9 @@ pub(crate) fn minimize_main_window(app: AppHandle) -> Result<(), String> {
         .ok_or_else(|| "메인 창을 찾을 수 없습니다.".to_string())?;
     #[cfg(windows)]
     {
-        let _ = window.set_ignore_cursor_events(false);
+        if let Err(error) = window.set_ignore_cursor_events(false) {
+            report_window_failure(&window, "minimize_restore_pointer", error);
+        }
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
         set_rotation_host_expanded(&window, false)?;
     }
@@ -144,7 +226,9 @@ pub(crate) async fn sync_main_window_rotation_mode(
     #[cfg(windows)]
     {
         let _ = enabled;
-        let _ = window.set_ignore_cursor_events(false);
+        if let Err(error) = window.set_ignore_cursor_events(false) {
+            report_window_failure(&window, "sync_restore_pointer", error);
+        }
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
         set_rotation_host_expanded(&window, false)?;
     }
@@ -181,7 +265,9 @@ pub(crate) fn stabilize_main_window_rotation(app: AppHandle) -> Result<(), Strin
 
     #[cfg(windows)]
     {
-        let _ = window.set_ignore_cursor_events(false);
+        if let Err(error) = window.set_ignore_cursor_events(false) {
+            report_window_failure(&window, "stabilize_restore_pointer", error);
+        }
         set_rotation_now(&window, 0.0)?;
         set_rotation_host_expanded(&window, false)?;
         emit_motion_visual(&window, 0.0, 0.0, 0.0, 0.0, "stop");
@@ -344,13 +430,22 @@ fn run_windows_physics_drag(
     }
 
     let Some(initial_cursor) = cursor_position() else {
+        report_window_failure(&window, "drag_cursor", "GetCursorPos failed");
         return;
     };
-    let Ok(initial_position) = window.outer_position() else {
-        return;
+    let initial_position = match window.outer_position() {
+        Ok(position) => position,
+        Err(error) => {
+            report_window_failure(&window, "drag_outer_position", error);
+            return;
+        }
     };
-    let Ok(initial_size) = window.outer_size() else {
-        return;
+    let initial_size = match window.outer_size() {
+        Ok(size) => size,
+        Err(error) => {
+            report_window_failure(&window, "drag_outer_size", error);
+            return;
+        }
     };
     let scale = window.scale_factor().unwrap_or(1.0);
 
@@ -390,10 +485,10 @@ fn run_windows_physics_drag(
         let x = cursor.x.saturating_add(offset_x);
         let y = cursor.y.saturating_add(offset_y);
 
-        if window
-            .set_position(Position::Physical(PhysicalPosition::new(x, y)))
-            .is_err()
-        {
+        if let Err(error) = window.set_position(Position::Physical(PhysicalPosition::new(x, y))) {
+            if motion_is_current(generation) {
+                report_window_failure(&window, "drag_set_position", error);
+            }
             return;
         }
 
@@ -417,10 +512,10 @@ fn run_windows_physics_drag(
         let now = Instant::now();
         let x = cursor.x.saturating_add(offset_x);
         let y = cursor.y.saturating_add(offset_y);
-        if window
-            .set_position(Position::Physical(PhysicalPosition::new(x, y)))
-            .is_err()
-        {
+        if let Err(error) = window.set_position(Position::Physical(PhysicalPosition::new(x, y))) {
+            if motion_is_current(generation) {
+                report_window_failure(&window, "release_set_position", error);
+            }
             return;
         }
         samples.push_back((now, x, y));
@@ -465,7 +560,8 @@ fn run_windows_physics_drag(
 
     let rotation_motion =
         free_rotation && (angular_velocity != 0.0 || distance_to_upright(starting_angle) > 0.08);
-    if set_rotation_host_expanded(&window, rotation_motion).is_err() {
+    if let Err(error) = set_rotation_host_expanded(&window, rotation_motion) {
+        report_window_failure(&window, "expand_rotation_host", error);
         return;
     }
 
@@ -565,13 +661,13 @@ fn run_windows_physics_drag(
             DRAG_INTERVAL
         };
         if now.saturating_duration_since(last_window_move) >= move_interval {
-            if window
-                .set_position(Position::Physical(PhysicalPosition::new(
-                    x.round() as i32,
-                    y.round() as i32,
-                )))
-                .is_err()
-            {
+            if let Err(error) = window.set_position(Position::Physical(PhysicalPosition::new(
+                x.round() as i32,
+                y.round() as i32,
+            ))) {
+                if motion_is_current(generation) {
+                    report_window_failure(&window, "glide_set_position", error);
+                }
                 return;
             }
             last_window_move = now;
@@ -824,7 +920,9 @@ fn spawn_rotated_hit_test(window: tauri::WebviewWindow, generation: u64) {
     // Windows can strand the title bar and close button in an unclickable
     // state. Keeping the transparent host interactive is a safer trade-off;
     // right-click restore and subsequent drags remain recoverable.
-    let _ = window.set_ignore_cursor_events(false);
+    if let Err(error) = window.set_ignore_cursor_events(false) {
+        report_window_failure(&window, "rotated_restore_pointer", error);
+    }
 }
 
 #[cfg(windows)]

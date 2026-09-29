@@ -76,7 +76,9 @@ pub(crate) fn request_main_window(app: &AppHandle) {
         {
             // A previous rotated-window hit test must never leave the reopened
             // UI click-through. Always restore normal pointer input first.
-            let _ = window.set_ignore_cursor_events(false);
+            if let Err(error) = window.set_ignore_cursor_events(false) {
+                report_ui_error(app, "window_pointer_restore_failed", error);
+            }
         }
         if let Err(error) = window.unminimize() {
             report_ui_error(app, "window_unminimize_failed", error);
@@ -232,7 +234,9 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     {
         // New/recreated windows should always start interactive even if the
         // previous WebView was destroyed while native hit testing was active.
-        let _ = window.set_ignore_cursor_events(false);
+        if let Err(error) = window.set_ignore_cursor_events(false) {
+            report_ui_error(app, "window_pointer_restore_failed", error);
+        }
     }
     window.set_skip_taskbar(false)?;
     window.show()?;

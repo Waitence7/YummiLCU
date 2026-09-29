@@ -4,9 +4,11 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   completeTrayHide,
   freezeMainWindowMotion,
+  reportWindowFailure,
   stabilizeMainWindowRotation,
   syncMainWindowRotationMode,
   useMockBridge,
+  windowUiHeartbeat,
 } from './api/commands';
 import { Banners } from './components/Banners';
 import { Header } from './components/Header';
@@ -60,7 +62,7 @@ function WindowResizeHandles() {
           onPointerDown={(event) => {
             if (event.button !== 0) return;
             event.preventDefault();
-            void getCurrentWindow().startResizeDragging(direction).catch(() => undefined);
+            void getCurrentWindow().startResizeDragging(direction).catch((error) => reportWindowFailure('resize_drag', error));
           }}
         />
       ))}
@@ -82,6 +84,15 @@ export function App() {
 
   useEffect(() => {
     if (useMockBridge) return;
+    void windowUiHeartbeat().catch((error) => reportWindowFailure('ui_heartbeat', error));
+    const timer = window.setInterval(() => {
+      void windowUiHeartbeat().catch((error) => reportWindowFailure('ui_heartbeat', error));
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (useMockBridge) return;
     let disposed = false;
     let unlisten: (() => void) | undefined;
 
@@ -93,14 +104,17 @@ export function App() {
             await completeTrayHide();
           }, {
             playbackRate: state.config.TrayEffectPlaybackRate,
-          }).catch(() => completeTrayHide().catch(() => undefined));
+          }).catch((error) => {
+            void reportWindowFailure('tray_effect', error);
+            return completeTrayHide().catch((hideError) => reportWindowFailure('complete_tray_hide', hideError));
+          });
         }),
       )
       .then((dispose) => {
         if (disposed) dispose();
         else unlisten = dispose;
       })
-      .catch(() => undefined);
+      .catch((error) => void reportWindowFailure('tray_hide_listener', error));
 
     return () => {
       disposed = true;
@@ -123,7 +137,7 @@ export function App() {
         if (disposed) dispose();
         else unlisten = dispose;
       })
-      .catch(() => undefined);
+      .catch((error) => void reportWindowFailure('window_motion_listener', error));
 
     return () => {
       disposed = true;
@@ -134,7 +148,7 @@ export function App() {
 
   useEffect(() => {
     if (useMockBridge) return;
-    void syncMainWindowRotationMode().catch(() => undefined);
+    void syncMainWindowRotationMode().catch((error) => reportWindowFailure('sync_rotation', error));
   }, [state.config.WindowFreeRotation]);
 
   return (
@@ -144,14 +158,15 @@ export function App() {
         if (useMockBridge) return;
         // Title-bar presses start a new drag, and start_main_window_drag already
         // invalidates any previous inertia. Everything else freezes immediately.
-        if ((event.target as HTMLElement).closest('[data-yummi-drag-handle]')) return;
-        void freezeMainWindowMotion().catch(() => undefined);
+        if ((event.target as HTMLElement).closest('[data-yummi-drag-handle]') &&
+            !(event.target as HTMLElement).closest('[data-yummi-no-drag]')) return;
+        void freezeMainWindowMotion().catch((error) => reportWindowFailure('freeze_motion', error));
       }}
       onContextMenu={(event) => {
         if (useMockBridge || !state.config.WindowFreeRotation) return;
         if (!(event.target as HTMLElement).closest('[data-yummi-app-surface]')) return;
         event.preventDefault();
-        void stabilizeMainWindowRotation().catch(() => undefined);
+        void stabilizeMainWindowRotation().catch((error) => reportWindowFailure('stabilize_rotation', error));
       }}
     >
       <WindowResizeHandles />
