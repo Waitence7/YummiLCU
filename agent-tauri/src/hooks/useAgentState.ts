@@ -15,8 +15,7 @@ export type RecentState = {
 export type AgentActions = {
   start(): Promise<boolean>;
   stop(): Promise<boolean>;
-  relogin(): Promise<boolean>;
-  submitOAuth(code: string): Promise<boolean>;
+  logout(): Promise<boolean>;
   saveConfig(config: Config): Promise<boolean>;
   patchConfig(patch: Partial<Config>): Promise<boolean>;
   refreshRecent(): Promise<void>;
@@ -114,11 +113,7 @@ export function useAgentState(): {
   const actions: AgentActions = {
     start: useCallback(() => run(api.startAgent), [run]),
     stop: useCallback(() => run(api.stopAgent), [run]),
-    relogin: useCallback(() => run(api.relogin), [run]),
-    submitOAuth: useCallback(
-      (code: string) => run(() => api.submitOAuthCode(code)),
-      [run],
-    ),
+    logout: useCallback(() => run(api.logout), [run]),
     saveConfig,
     patchConfig: useCallback(
       (patch: Partial<Config>) => saveConfig({ ...stateRef.current.config, ...patch }),

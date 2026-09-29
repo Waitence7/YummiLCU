@@ -5,12 +5,12 @@ export function Header({
   state,
   onStart,
   onStop,
-  onRelogin,
+  onLogout,
 }: {
   state: AgentState;
   onStart(): void;
   onStop(): void;
-  onRelogin(): void;
+  onLogout(): void;
 }) {
   const running = state.relay || state.lcu;
   return (
@@ -33,8 +33,8 @@ export function Header({
         <Button onClick={onStop} disabled={!running}>
           중지
         </Button>
-        <Button variant="ghost" onClick={onRelogin}>
-          Discord 재로그인
+        <Button variant="ghost" onClick={onLogout} disabled={state.discord_id == null}>
+          Discord 로그아웃
         </Button>
         <div className="ml-auto flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 px-2.5 py-1.5 text-[11px] text-slate-600">
           <span className="flex items-center gap-1.5">

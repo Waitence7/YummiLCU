@@ -165,9 +165,9 @@ export function App() {
         state={state}
         onStart={() => void actions.start()}
         onStop={() => void actions.stop()}
-        onRelogin={() => void actions.relogin()}
+        onLogout={() => void actions.logout()}
       />
-      <Banners state={state} onSubmitOAuth={actions.submitOAuth} />
+      <Banners state={state} />
 
       <nav className="flex gap-1 border-b border-slate-200 bg-white px-3 pt-2">
         {TABS.map(({ id, label, badge }) => (

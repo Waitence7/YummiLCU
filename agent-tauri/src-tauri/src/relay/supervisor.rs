@@ -31,9 +31,9 @@ use crate::{
 use super::{
     command_auth,
     protocol::{
-        Action, AgentEventMessage, AgentHelloMessage, AuthMessage, CommandResult, IncomingMessage,
-        OAuthCodeMessage, PongMessage, UnexpectedErrorReport, UpdateDiagnosticReport,
-        MAX_RELAY_MESSAGE_BYTES,
+        Action, AgentDiagnosticReport, AgentEventMessage, AgentHelloMessage, AuthMessage,
+        CommandResult, IncomingMessage, OAuthCodeMessage, PongMessage, UnexpectedErrorReport,
+        UpdateDiagnosticReport, MAX_RELAY_MESSAGE_BYTES,
     },
 };
 
@@ -612,6 +612,7 @@ async fn connect_once(
     let mut durable_replay_enabled = false;
     let mut unexpected_error_reports_enabled = false;
     let mut update_diagnostics_enabled = false;
+    let mut diagnostic_reports_enabled = false;
     let (lcu_poll_worker, mut lcu_poll_rx) = LcuPollWorker::start(Arc::clone(state));
     let mut lcu_socket_watch: Option<LcuSocketWatch> = None;
 
@@ -666,14 +667,17 @@ async fn connect_once(
                                     && capabilities.get("unexpected_error_reports") == Some(&true);
                                 update_diagnostics_enabled = *protocol_version >= 1
                                     && capabilities.get("update_diagnostics") == Some(&true);
+                                diagnostic_reports_enabled = *protocol_version >= 1
+                                    && capabilities.get("diagnostic_reports") == Some(&true);
                                 state
                                     .record_flight(
                                         "protocol",
                                         format!(
-                                            "server_protocol={} durable_replay={} error_reports={}",
+                                            "server_protocol={} durable_replay={} error_reports={} diagnostics={}",
                                             protocol_version,
                                             durable_replay_enabled,
                                             unexpected_error_reports_enabled,
+                                            diagnostic_reports_enabled,
                                         ),
                                     )
                                     .await;
@@ -981,11 +985,47 @@ async fn connect_once(
                 }
                 for diagnostic in batch.diagnostics {
                     state.record_flight("lcu_diagnostic", diagnostic.clone()).await;
+                    if diagnostic_reports_enabled {
+                        let report = AgentDiagnosticReport::new(
+                            "lcu",
+                            "poll",
+                            bounded_diagnostic_detail(&diagnostic),
+                        );
+                        let message = serde_json::to_string(&report)?;
+                        websocket
+                            .send(Message::Text(message.into()))
+                            .await
+                            .map_err(|_| AgentError::Relay("LCU 진단 전송 실패".into()))?;
+                        state
+                            .record_flight("lcu_diagnostic", "automatic_report_sent")
+                            .await;
+                    }
                     state.log(app, format!("LCU 진단: {diagnostic}")).await;
                 }
             }
         }
     }
+}
+
+fn bounded_diagnostic_detail(value: &str) -> String {
+    value
+        .split_whitespace()
+        .map(|part| {
+            let lower = part.to_ascii_lowercase();
+            if lower.starts_with("file=")
+                || lower.contains(":\\users\\")
+                || lower.contains(":/users/")
+            {
+                "<redacted-path>"
+            } else {
+                part
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(512)
+        .collect()
 }
 
 async fn receive_oauth_code(receiver: &mut mpsc::Receiver<String>) -> String {

@@ -10,6 +10,7 @@ from relay.app import (
     MAX_WS_AUTH_MESSAGE_BYTES,
     _agent_hello_info,
     _agent_error_report,
+    _agent_diagnostic_report,
     _agent_update_report,
     _agent_error_last_by_discord,
     _agent_error_recent,
@@ -47,6 +48,7 @@ class AgentHelloTests(unittest.TestCase):
                     "event_ack": True,
                     "durable_event_replay": True,
                     "unexpected_error_reports": True,
+                    "diagnostic_reports": True,
                     "unknown_future_feature": True,
                     "heartbeat": False,
                 },
@@ -59,6 +61,7 @@ class AgentHelloTests(unittest.TestCase):
                 "durable_event_replay": True,
                 "event_ack": True,
                 "unexpected_error_reports": True,
+                "diagnostic_reports": True,
             },
         )
 
@@ -78,6 +81,32 @@ class AgentHelloTests(unittest.TestCase):
         self.assertFalse(info["lcu_ready"])
         self.assertEqual(info["protocol_version"], 0)
         self.assertEqual(info["capabilities"], {"runes": True})
+
+    def test_agent_diagnostic_report_is_bounded_and_redacted(self) -> None:
+        report = _agent_diagnostic_report({
+            "type": "agent_diagnostic_report",
+            "report_id": "123e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 1,
+            "category": "lcu",
+            "code": "poll",
+            "detail": "Live Client Data API 응답 없음 token=secret",
+            "app_version": "0.7.15",
+            "release_label": "0.7.15",
+            "release_channel": "stable",
+            "build_id": "build-1",
+            "git_commit": "abc123",
+        })
+        self.assertIsNotNone(report)
+        self.assertEqual(report["category"], "lcu")
+        self.assertEqual(report["code"], "poll")
+        self.assertNotIn("secret", report["detail"])
+        self.assertIsNone(_agent_diagnostic_report({
+            "report_id": "123e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 1,
+            "category": "unknown",
+            "code": "bad code!",
+            "detail": "x",
+        }))
 
     def test_agent_update_report_is_bounded_and_redacted(self) -> None:
         report = _agent_update_report({
@@ -247,6 +276,37 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("component=ui", logs.output[0])
         self.assertNotIn("discord_id", logs.output[0])
+
+    async def test_bound_agent_diagnostic_is_stored_and_logged(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+
+        with patch("relay.app._remember_agent_diagnostic", new=AsyncMock()) as remember, self.assertLogs(
+            "yummi_lcu.relay", level="INFO"
+        ) as logs:
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "agent_diagnostic_report",
+                    "report_id": "123e4567-e89b-42d3-a456-426614174000",
+                    "occurred_at_ms": 1,
+                    "category": "lcu",
+                    "code": "poll",
+                    "detail": "lockfile fallback",
+                    "app_version": "0.7.15",
+                    "release_label": "0.7.15",
+                    "release_channel": "stable",
+                    "build_id": "build-1",
+                    "git_commit": "abc123",
+                }),
+            )
+
+        remember.assert_awaited_once()
+        self.assertIn("category=lcu", logs.output[0])
+        self.assertIn("discord_id=42", logs.output[0])
 
     async def test_durable_eog_is_acked_only_after_forward_succeeds(self) -> None:
         manager = ConnectionManager()

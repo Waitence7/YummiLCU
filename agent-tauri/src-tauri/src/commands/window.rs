@@ -817,69 +817,14 @@ fn rotated_visual_bounds(width: f64, height: f64, angle: f64) -> (f64, f64) {
 }
 
 #[cfg(windows)]
-fn point_inside_rotated_rect(
-    cursor_x: i32,
-    cursor_y: i32,
-    center_x: f64,
-    center_y: f64,
-    width: f64,
-    height: f64,
-    angle: f64,
-) -> bool {
-    let dx = cursor_x as f64 - center_x;
-    let dy = cursor_y as f64 - center_y;
-    let radians = (-angle).to_radians();
-    let local_x = dx * radians.cos() - dy * radians.sin();
-    let local_y = dx * radians.sin() + dy * radians.cos();
-    local_x.abs() <= width * 0.5 && local_y.abs() <= height * 0.5
-}
-
-#[cfg(windows)]
 fn spawn_rotated_hit_test(window: tauri::WebviewWindow, generation: u64) {
-    let _ = std::thread::Builder::new()
-        .name("yummi-window-hit-test".into())
-        .spawn(move || {
-            use std::{thread, time::Duration};
-
-            let Ok(position) = window.outer_position() else {
-                return;
-            };
-            let Ok(size) = window.outer_size() else {
-                return;
-            };
-            let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
-            let (base_width, base_height) = base_window_logical_size();
-            let center_x = position.x as f64 + size.width as f64 * 0.5;
-            let center_y = position.y as f64 + size.height as f64 * 0.5;
-            let content_width = base_width * scale;
-            let content_height = base_height * scale;
-            let angle = current_rotation_angle();
-            let mut last_ignore = None;
-
-            while motion_is_current(generation)
-                && WINDOW_ROTATION_HOST_EXPANDED.load(Ordering::SeqCst)
-                && distance_to_upright(current_rotation_angle()) > 0.08
-            {
-                let Some(cursor) = cursor_position() else {
-                    break;
-                };
-                let ignore = !point_inside_rotated_rect(
-                    cursor.x,
-                    cursor.y,
-                    center_x,
-                    center_y,
-                    content_width,
-                    content_height,
-                    angle,
-                );
-                if last_ignore != Some(ignore) {
-                    let _ = window.set_ignore_cursor_events(ignore);
-                    last_ignore = Some(ignore);
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            let _ = window.set_ignore_cursor_events(false);
-        });
+    let _ = generation;
+    // Do not switch the whole native window into click-through mode while it
+    // remains rotated. If WebView/native hit-test state gets out of sync,
+    // Windows can strand the title bar and close button in an unclickable
+    // state. Keeping the transparent host interactive is a safer trade-off;
+    // right-click restore and subsequent drags remain recoverable.
+    let _ = window.set_ignore_cursor_events(false);
 }
 
 #[cfg(windows)]

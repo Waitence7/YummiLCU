@@ -75,6 +75,7 @@ _SERVER_CAPABILITIES = frozenset({
     "live_game_events",
     "unexpected_error_reports",
     "update_diagnostics",
+    "diagnostic_reports",
 })
 
 _AGENT_ERROR_COMPONENTS = frozenset({
@@ -98,6 +99,10 @@ _AGENT_ERROR_DUPLICATE_COOLDOWN_SEC = 5 * 60.0
 _agent_error_last_by_discord: dict[int, float] = {}
 _agent_error_recent: dict[str, float] = {}
 
+_AGENT_DIAGNOSTIC_CATEGORIES = frozenset({"lcu"})
+_AGENT_DIAGNOSTIC_TTL_SEC = 7 * 24 * 60 * 60
+_AGENT_DIAGNOSTIC_MAX_ENTRIES = 200
+
 _INTERNAL_AUTH_MAX_FAILS = 20
 _INTERNAL_AUTH_WINDOW_SEC = 60.0
 _INTERNAL_AUTH_REDIS_KEY = "relay:internal_auth_fail:{ip}"
@@ -108,6 +113,10 @@ _OAUTH_LINK_ATTEMPT_REDIS_KEY = "relay:oauth_link_attempt:{session_id}"
 
 _LIVE_GAME_WEB_INGEST_MIN_INTERVAL_SEC = 10.0
 _live_game_web_ingest_at: dict[int, float] = {}
+
+
+def _agent_diagnostics_redis_key(discord_id: int) -> str:
+    return f"relay:agent_diagnostics:{discord_id}"
 
 
 def _safe_compare_digest(left: str, right: str) -> bool:
@@ -653,25 +662,37 @@ async def auth_callback(
         return HTMLResponse("<h1>Discord 사용자 ID 조회 실패</h1>", status_code=502)
 
     ttl = config.relay_session_ttl_sec()
-    link_code = _generate_link_code()
-    pending = json.dumps({
-        "discord_id": discord_id,
-        "code": link_code,
-        "profile": _discord_profile(user or {}, discord_id),
-    })
-    await r.set(_oauth_link_pending_redis_key(session_id), pending, ex=OAUTH_LINK_CODE_TTL_SEC)
-    await r.set(_status_redis_key(session_id), "link_pending", ex=ttl)
-    logger.info("OAuth 대기(링크 코드) discord_id=%s session=%s", discord_id, session_id[:8])
-    safe_code = html.escape(link_code, quote=True)
+    profile = _discord_profile(user or {}, discord_id)
+    await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
+    await r.set(_discord_profile_redis_key(session_id), json.dumps(profile), ex=ttl)
+    await r.set(_status_redis_key(session_id), "ok", ex=ttl)
+    # 자동 바인딩 성공 후 예전 수동 코드 상태는 재사용할 수 없게 정리한다.
+    await r.delete(
+        _oauth_link_pending_redis_key(session_id),
+        _oauth_link_attempt_redis_key(session_id),
+    )
+    bound = await _try_bind_discord(conn, r, session_id, discord_id)
+    logger.info(
+        "OAuth 자동 연결 완료 discord_id=%s session=%s bound_ws=%s",
+        discord_id,
+        session_id[:8],
+        bound,
+    )
+    connection_message = (
+        "Yummi LCU Agent에 자동으로 연결했습니다."
+        if bound
+        else "Discord 로그인은 완료되었습니다. Agent가 다시 연결되면 자동으로 적용됩니다."
+    )
     return HTMLResponse(
-        "<h1>Discord 로그인 완료</h1>"
-        f"<p>아래 <strong>6자리 코드</strong>를 복사해 에이전트에서 '붙여넣기'를 누르세요.</p>"
-        f"<p style='font-size:2rem;letter-spacing:0.3em;font-family:monospace'>{safe_code}</p>"
-        # link_code는 숫자(0-9)만 생성되므로 JS 문자열에 그대로 넣어도 안전하다.
-        f"<button type='button' style='font-size:1rem;padding:0.4em 1em;cursor:pointer' "
-        f"onclick=\"navigator.clipboard.writeText('{safe_code}').then(function(){{this.textContent='복사됨!';}}.bind(this)).catch(function(){{}});\">"
-        "코드 복사</button>"
-        "<p>코드는 10분간 유효합니다. 이 창은 닫아도 됩니다.</p>",
+        "<!doctype html><html lang='ko'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<title>Yummi Discord 로그인 완료</title></head>"
+        "<body style='font-family:system-ui,-apple-system,sans-serif;max-width:520px;"
+        "margin:64px auto;padding:0 20px;color:#1e293b'>"
+        "<h1 style='font-size:1.5rem'>Discord 로그인 완료</h1>"
+        f"<p>{connection_message}</p>"
+        "<p style='color:#64748b'>이 창을 닫고 앱으로 돌아가세요.</p>"
+        "</body></html>",
         status_code=200,
     )
 
@@ -1466,6 +1487,67 @@ def _agent_error_report(data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _agent_diagnostic_report(data: dict[str, Any]) -> dict[str, Any] | None:
+    report_id = data.get("report_id")
+    occurred_at_ms = data.get("occurred_at_ms")
+    category = data.get("category")
+    code = data.get("code")
+    detail = data.get("detail")
+    if (
+        not isinstance(report_id, str)
+        or not isinstance(occurred_at_ms, int)
+        or isinstance(occurred_at_ms, bool)
+        or occurred_at_ms <= 0
+        or category not in _AGENT_DIAGNOSTIC_CATEGORIES
+        or not isinstance(code, str)
+        or not re.fullmatch(r"[a-z0-9_.-]{1,64}", code)
+        or not isinstance(detail, str)
+        or not detail.strip()
+        or len(detail) > 512
+    ):
+        return None
+    try:
+        report_id = str(uuid.UUID(report_id))
+    except ValueError:
+        return None
+
+    metadata: dict[str, str] = {}
+    for field, limit in {
+        "app_version": 64,
+        "release_label": 128,
+        "release_channel": 32,
+        "build_id": 128,
+        "git_commit": 128,
+    }.items():
+        value = data.get(field)
+        if not isinstance(value, str) or not value or len(value) > limit or not value.isascii():
+            return None
+        metadata[field] = value
+
+    return {
+        "report_id": report_id,
+        "occurred_at_ms": occurred_at_ms,
+        "category": category,
+        "code": code,
+        "detail": redact_log_text(" ".join(detail.split())),
+        **metadata,
+    }
+
+
+async def _remember_agent_diagnostic(
+    r: redis.Redis,
+    discord_id: int,
+    report: dict[str, Any],
+) -> None:
+    key = _agent_diagnostics_redis_key(discord_id)
+    encoded = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+    pipe = r.pipeline()
+    pipe.lpush(key, encoded)
+    pipe.ltrim(key, 0, _AGENT_DIAGNOSTIC_MAX_ENTRIES - 1)
+    pipe.expire(key, _AGENT_DIAGNOSTIC_TTL_SEC)
+    await pipe.execute()
+
+
 _AGENT_UPDATE_STAGES = frozenset({
     "update_check",
     "update_available",
@@ -1564,6 +1646,29 @@ async def _handle_agent_message(
             and (msg_type != "participant_status_update" or payload.get("lcu_ready") is True)
         ):
             await _remember_recent_lcu_data(websocket.app.state.redis, discord_id)
+
+    if msg_type == "agent_diagnostic_report":
+        discord_id = conn.discord_id_for_ws(websocket)
+        report = _agent_diagnostic_report(data)
+        if discord_id is None or report is None:
+            return
+        await _remember_agent_diagnostic(websocket.app.state.redis, discord_id, report)
+        logger.info(
+            "Agent diagnostic discord_id=%s category=%s code=%s version=%s release=%s "
+            "channel=%s build=%s commit=%s report_id=%s occurred_at_ms=%s detail=%s",
+            discord_id,
+            report["category"],
+            report["code"],
+            report["app_version"],
+            report["release_label"],
+            report["release_channel"],
+            report["build_id"],
+            report["git_commit"],
+            report["report_id"],
+            report["occurred_at_ms"],
+            report["detail"],
+        )
+        return
 
     if msg_type == "agent_update_report":
         discord_id = conn.discord_id_for_ws(websocket)
@@ -2225,6 +2330,28 @@ async def internal_online(
         if agent:
             body["agent"] = agent
     return JSONResponse(body)
+
+
+@app.get("/internal/diagnostics/{discord_id}")
+async def internal_agent_diagnostics(
+    request: Request,
+    discord_id: int,
+    limit: int = Query(50, ge=1, le=200),
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    """최근 Agent LCU 진단. 민감값은 Relay redaction을 거쳐 저장된다."""
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    r: redis.Redis = request.app.state.redis
+    rows = await r.lrange(_agent_diagnostics_redis_key(discord_id), 0, limit - 1)
+    diagnostics: list[dict[str, Any]] = []
+    for raw in rows:
+        try:
+            item = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(item, dict):
+            diagnostics.append(item)
+    return JSONResponse({"discord_id": discord_id, "diagnostics": diagnostics})
 
 
 @app.get("/internal/live-game/{discord_id}")

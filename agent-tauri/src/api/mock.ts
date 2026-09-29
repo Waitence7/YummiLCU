@@ -55,9 +55,23 @@ export async function mockInvoke<T>(
       later(500, () => {
         state.relay = true;
         state.oauth_pending = true;
-        state.status = '브라우저에서 Discord 로그인 후 코드를 입력하세요.';
+        state.status = '브라우저에서 Discord 로그인을 완료하면 자동 연결됩니다.';
         log('Relay 연결됨 — Discord OAuth 대기');
         emit();
+        later(900, () => {
+          state.oauth_pending = false;
+          state.discord_id = 123456789012345678;
+          state.discord_name = 'Waitence';
+          state.status = 'Discord 연결 완료 — LCU 확인 중…';
+          log('Discord OAuth 자동 연결 완료');
+          emit();
+          later(700, () => {
+            state.lcu = true;
+            state.status = '연결됨 — 내전 결과 자동 보고 활성';
+            log('League Client 감지됨 (lockfile)');
+            emit();
+          });
+        });
       });
       return undefined as T;
     }
@@ -70,31 +84,16 @@ export async function mockInvoke<T>(
       emit();
       return undefined as T;
     }
-    case 'relogin': {
+    case 'logout': {
+      state.relay = false;
+      state.lcu = false;
+      state.oauth_pending = false;
       state.discord_id = null;
       state.discord_name = null;
       state.discord_avatar = null;
-      state.oauth_pending = true;
-      state.status = '브라우저에서 Discord 로그인 후 코드를 입력하세요.';
-      log('세션 초기화 — 재로그인 필요');
+      state.status = 'Discord 로그아웃됨 — 연결 시작을 눌러 로그인하세요.';
+      log('Discord 로그아웃 완료');
       emit();
-      return undefined as T;
-    }
-    case 'submit_oauth_code': {
-      const code = String(args?.code ?? '');
-      if (!/^\d{6}$/.test(code.trim())) throw new Error('6자리 숫자 코드를 입력하세요.');
-      state.oauth_pending = false;
-      state.discord_id = 123456789012345678;
-      state.discord_name = 'Waitence';
-      state.status = 'Discord 연결 완료 — LCU 확인 중…';
-      log('Discord 연결 완료');
-      emit();
-      later(700, () => {
-        state.lcu = true;
-        state.status = '연결됨 — 내전 결과 자동 보고 활성';
-        log('League Client 감지됨 (lockfile)');
-        emit();
-      });
       return undefined as T;
     }
     case 'hide_main_window':

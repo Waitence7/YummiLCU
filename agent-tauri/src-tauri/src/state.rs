@@ -399,6 +399,21 @@ impl AppState {
         *self.lcu_state.write().await = LcuConnectionState::ClientStopped;
         self.emit(app).await;
     }
+
+    pub(crate) async fn mark_logged_out(&self, app: &AppHandle) {
+        {
+            let mut ui = self.ui.lock().await;
+            ui.relay = false;
+            ui.lcu = false;
+            ui.oauth_pending = false;
+            ui.discord_id = None;
+            ui.discord_name = None;
+            ui.discord_avatar = None;
+            ui.status = "Discord 로그아웃됨 — 연결 시작을 눌러 로그인하세요.".into();
+        }
+        *self.discord_presence_match.write().await = None;
+        self.emit(app).await;
+    }
 }
 
 fn build_diagnostic_bundle(ui: &UiState, flight: &[crate::diagnostics::FlightRecord]) -> String {

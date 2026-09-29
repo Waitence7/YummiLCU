@@ -327,6 +327,7 @@ pub(crate) struct AgentCapabilities {
     live_game_events: bool,
     unexpected_error_reports: bool,
     update_diagnostics: bool,
+    diagnostic_reports: bool,
 }
 
 impl AgentCapabilities {
@@ -354,6 +355,7 @@ impl AgentCapabilities {
             live_game_events: true,
             unexpected_error_reports: true,
             update_diagnostics: true,
+            diagnostic_reports: true,
         }
     }
 }
@@ -372,6 +374,45 @@ pub(crate) struct UnexpectedErrorReport {
     release_channel: &'static str,
     build_id: &'static str,
     git_commit: &'static str,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AgentDiagnosticReport {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    report_id: String,
+    occurred_at_ms: u64,
+    category: &'static str,
+    code: &'static str,
+    detail: String,
+    app_version: &'static str,
+    release_label: &'static str,
+    release_channel: &'static str,
+    build_id: &'static str,
+    git_commit: &'static str,
+}
+
+impl AgentDiagnosticReport {
+    pub(crate) fn new(category: &'static str, code: &'static str, detail: String) -> Self {
+        let occurred_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self {
+            message_type: "agent_diagnostic_report",
+            report_id: Uuid::new_v4().to_string(),
+            occurred_at_ms,
+            category,
+            code,
+            detail,
+            app_version: env!("CARGO_PKG_VERSION"),
+            release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL")
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
+            release_channel: option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable"),
+            build_id: option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
+            git_commit: option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -404,7 +445,8 @@ impl UpdateDiagnosticReport {
             detail,
             target_version,
             app_version: env!("CARGO_PKG_VERSION"),
-            release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(env!("CARGO_PKG_VERSION")),
+            release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL")
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
             release_channel: option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable"),
             build_id: option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
             git_commit: option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
@@ -695,6 +737,7 @@ mod tests {
         assert_eq!(value["capabilities"]["live_game_events"], true);
         assert_eq!(value["capabilities"]["unexpected_error_reports"], true);
         assert_eq!(value["capabilities"]["update_diagnostics"], true);
+        assert_eq!(value["capabilities"]["diagnostic_reports"], true);
     }
 
     #[test]
