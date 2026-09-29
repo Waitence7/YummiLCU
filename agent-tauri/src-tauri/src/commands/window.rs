@@ -1011,7 +1011,8 @@ unsafe extern "system" fn rotated_hit_test_subclass(
 #[cfg(windows)]
 fn ensure_rotated_hit_test_hook(window: &tauri::WebviewWindow) -> Result<(), String> {
     let window = window.clone();
-    window
+    let dispatcher = window.clone();
+    dispatcher
         .run_on_main_thread(move || {
             use windows::Win32::{Foundation::HWND, UI::Shell::SetWindowSubclass};
 
