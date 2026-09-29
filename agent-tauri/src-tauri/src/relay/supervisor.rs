@@ -304,6 +304,30 @@ impl DurableReplayBuffer {
         self.pending.iter().cloned().collect()
     }
 
+    fn pending_summary(&self) -> String {
+        let mut items = self
+            .pending
+            .iter()
+            .take(4)
+            .map(|event| {
+                let summary = serde_json::from_str::<Value>(&event.text)
+                    .ok()
+                    .map(|message| {
+                        event_summary(
+                            message.get("type").and_then(Value::as_str).unwrap_or("unknown"),
+                            message.get("data").unwrap_or(&Value::Null),
+                        )
+                    })
+                    .unwrap_or_else(|| "unknown event".into());
+                format!("{} event_id={}", summary.chars().take(160).collect::<String>(), event.event_id)
+            })
+            .collect::<Vec<_>>();
+        if self.pending.len() > items.len() {
+            items.push(format!("and {} more", self.pending.len() - items.len()));
+        }
+        items.join("; ")
+    }
+
     fn len(&self) -> usize {
         self.pending.len()
     }
@@ -1229,7 +1253,7 @@ async fn connect_once(
             _ = durable_replay_tick.tick(), if session_bound && durable_replay_enabled => {
                 let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
                 if replayed > 0 {
-                    state.log(app, format!("ACK 대기 durable 이벤트 {replayed}건 재전송")).await;
+                    state.log(app, format!("ACK 대기 durable 이벤트 {replayed}건 재전송: {}", durable_replay.pending_summary())).await;
                 }
             }
             _ = diagnostic_heartbeat_tick.tick(), if session_bound && diagnostic_reports_enabled => {
@@ -2184,6 +2208,12 @@ fn event_summary(message_type: &str, data: &Value) -> String {
                 .and_then(Value::as_str)
                 .unwrap_or("none")
         ),
+        "match_rofl" => format!(
+            "match_rofl game_id={} kind={} participants={}",
+            data.get("gameId").map(Value::to_string).unwrap_or_else(|| "unknown".into()),
+            data.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
+            data.get("participants").and_then(Value::as_array).map_or(0, Vec::len),
+        ),
         "ready_check_update" => format!(
             "ready_check_update active={}",
             data.get("active").and_then(Value::as_bool).unwrap_or(false)
@@ -2409,6 +2439,28 @@ mod tests {
         assert_eq!(replay.snapshot().len(), 1);
         assert!(replay.ack("event-1").unwrap());
         assert!(replay.snapshot().is_empty());
+    }
+
+    #[test]
+    fn pending_replay_summary_identifies_event_without_logging_payload() {
+        let mut replay = test_replay_buffer();
+        let event = serialize_agent_event(
+            "match_rofl",
+            serde_json::json!({
+                "gameId": 123,
+                "kind": "summary",
+                "participants": [],
+                "token": "private-value",
+            }),
+        )
+        .unwrap()
+        .unwrap();
+        replay.track(event).unwrap();
+
+        let summary = replay.pending_summary();
+        assert!(summary.contains("match_rofl game_id=123 kind=summary participants=0"));
+        assert!(summary.contains("event_id="));
+        assert!(!summary.contains("private-value"));
     }
 
     #[test]

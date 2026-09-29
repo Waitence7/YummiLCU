@@ -9,6 +9,7 @@ import time
 
 import aiohttp
 
+from relay.http_diagnostics import upstream_error_detail
 from relay.logging_safety import redact_log_text
 
 _WEBHOOK_URL = os.getenv("DISCORD_ERROR_WEBHOOK_URL", "").strip()
@@ -52,7 +53,9 @@ async def notify_error(context: str, error: BaseException | str) -> None:
             async with session.post(_WEBHOOK_URL, json=payload) as response:
                 if response.status >= 400:
                     logging.getLogger("yummi_lcu.error_monitor").warning(
-                        "Discord error webhook failed status=%s", response.status
+                        "Discord error webhook failed status=%s detail=%s",
+                        response.status,
+                        await upstream_error_detail(response),
                     )
     except Exception:
         logging.getLogger("yummi_lcu.error_monitor").warning(
