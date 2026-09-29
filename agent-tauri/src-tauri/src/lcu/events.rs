@@ -3197,7 +3197,7 @@ mod tests {
     }
 
     #[test]
-    fn live_game_fingerprint_normalizes_item_slot_order_and_metadata() {
+    fn live_game_fingerprint_ignores_item_metadata_but_keeps_slot_order() {
         let first = json!({
             "game": {"id": 42},
             "participants": [{
@@ -3208,20 +3208,34 @@ mod tests {
                 ]
             }]
         });
-        let second = json!({
+        let metadata_changed = json!({
             "game": {"id": 42},
             "participants": [{
                 "riot_id": "Player#KR1",
                 "items": [
-                    {"id": 2003, "item_id": 2003, "count": 2, "slot": 5, "name": "Changed", "price": 999, "can_use": false},
-                    {"id": 1056, "item_id": 1056, "count": 1, "slot": 3, "name": "Changed", "price": 0, "can_use": true}
+                    {"id": 1056, "item_id": 9999, "count": 1, "slot": 5, "name": "Changed", "price": 0, "can_use": true},
+                    {"id": 2003, "item_id": 9999, "count": 2, "slot": 3, "name": "Changed", "price": 999, "can_use": false}
+                ]
+            }]
+        });
+        let swapped = json!({
+            "game": {"id": 42},
+            "participants": [{
+                "riot_id": "Player#KR1",
+                "items": [
+                    {"id": 2003, "item_id": 2003, "count": 2, "slot": 0},
+                    {"id": 1056, "item_id": 1056, "count": 1, "slot": 1}
                 ]
             }]
         });
 
         assert_eq!(
             live_game_fingerprint(&first, &mut HashMap::new()),
-            live_game_fingerprint(&second, &mut HashMap::new())
+            live_game_fingerprint(&metadata_changed, &mut HashMap::new())
+        );
+        assert_ne!(
+            live_game_fingerprint(&first, &mut HashMap::new()),
+            live_game_fingerprint(&swapped, &mut HashMap::new())
         );
     }
 
