@@ -35,6 +35,8 @@ type ResizeDirection =
   | 'SouthWest'
   | 'West';
 
+type TabId = 'guild' | 'settings' | 'voice' | 'logs' | 'patchNotes';
+
 const RESIZE_HANDLES: { direction: ResizeDirection; className: string }[] = [
   { direction: 'North', className: 'yummi-resize-north' },
   { direction: 'South', className: 'yummi-resize-south' },
@@ -66,8 +68,6 @@ function WindowResizeHandles() {
   );
 }
 
-type TabId = 'guild' | 'settings' | 'voice' | 'logs' | 'patchNotes';
-
 const TABS: { id: TabId; label: string; badge?: string }[] = [
   { id: 'guild', label: '내전' },
   { id: 'settings', label: '편의기능' },
@@ -77,7 +77,7 @@ const TABS: { id: TabId; label: string; badge?: string }[] = [
 ];
 
 export function App() {
-  const { state, recent, actions } = useAgentState();
+  const { state, recent, actionError, actions } = useAgentState();
   const [tab, setTab] = useState<TabId>('guild');
 
   useEffect(() => {
@@ -166,6 +166,7 @@ export function App() {
         onStart={() => void actions.start()}
         onStop={() => void actions.stop()}
         onLogout={() => void actions.logout()}
+        actionError={actionError?.startsWith('설정 저장 실패:') ? null : actionError}
       />
       <Banners state={state} />
 
@@ -207,6 +208,7 @@ export function App() {
             currentBuildId={state.build_id ?? '—'}
             currentReleaseChannel={state.release_channel ?? state.config.UpdateChannel}
             onPatchConfig={actions.patchConfig}
+            actionError={actionError?.startsWith('설정 저장 실패:') ? actionError : null}
           />
         )}
         {tab === 'voice' && <VoiceTab />}

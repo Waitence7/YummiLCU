@@ -10,8 +10,10 @@ use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
 const MAX_UI_LOGS: usize = 2_000;
 const ERROR_REPORT_QUEUE_CAPACITY: usize = 32;
+const DIAGNOSTIC_REPORT_QUEUE_CAPACITY: usize = 128;
 const DISCORD_JOIN_REQUEST_QUEUE_CAPACITY: usize = 64;
 const ERROR_REPORT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const DIAGNOSTIC_REPORT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_ERROR_SUMMARY_CHARS: usize = 512;
 
 use crate::{
@@ -19,7 +21,7 @@ use crate::{
     diagnostics::FlightRecorder,
     lcu::LcuConnectionState,
     relay::{
-        protocol::{UnexpectedErrorReport, UpdateDiagnosticReport},
+        protocol::{AgentDiagnosticReport, UnexpectedErrorReport, UpdateDiagnosticReport},
         supervisor::{RelayConnectionState, RelaySupervisor},
     },
 };
@@ -121,11 +123,13 @@ pub(crate) struct AppState {
     shutdown: watch::Sender<bool>,
     unexpected_errors: broadcast::Sender<UnexpectedErrorReport>,
     update_diagnostics: broadcast::Sender<UpdateDiagnosticReport>,
+    diagnostic_reports: broadcast::Sender<AgentDiagnosticReport>,
     discord_join_requests: broadcast::Sender<u64>,
     discord_join_resolutions: broadcast::Sender<DiscordJoinResolution>,
     discord_presence_context_requests: broadcast::Sender<()>,
     discord_presence_match: RwLock<Option<DiscordPresenceMatchContext>>,
     recent_unexpected_errors: Mutex<HashMap<String, Instant>>,
+    recent_diagnostics: Mutex<HashMap<String, Instant>>,
 }
 
 impl AppState {
@@ -133,6 +137,7 @@ impl AppState {
         let (shutdown, _) = watch::channel(false);
         let (unexpected_errors, _) = broadcast::channel(ERROR_REPORT_QUEUE_CAPACITY);
         let (update_diagnostics, _) = broadcast::channel(ERROR_REPORT_QUEUE_CAPACITY);
+        let (diagnostic_reports, _) = broadcast::channel(DIAGNOSTIC_REPORT_QUEUE_CAPACITY);
         let (discord_join_requests, _) =
             broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
         let (discord_join_resolutions, _) =
@@ -149,11 +154,13 @@ impl AppState {
             shutdown,
             unexpected_errors,
             update_diagnostics,
+            diagnostic_reports,
             discord_join_requests,
             discord_join_resolutions,
             discord_presence_context_requests,
             discord_presence_match: RwLock::new(None),
             recent_unexpected_errors: Mutex::new(HashMap::new()),
+            recent_diagnostics: Mutex::new(HashMap::new()),
         }
     }
 
@@ -256,6 +263,7 @@ impl AppState {
                 if changed {
                     let label = lcu_state_label(next);
                     self.record_flight("lcu_state", label).await;
+                    self.report_diagnostic("lcu", "state_changed", label).await;
                     {
                         let mut ui = self.ui.lock().await;
                         ui.lcu = next.is_ready();
@@ -265,6 +273,7 @@ impl AppState {
                     }
                     self.emit(app).await;
                     self.log(app, format!("LCU 상태 변경: {label}")).await;
+                    self.report_diagnostic("lcu", "state", label).await;
                 }
             }
             AgentEvent::RelayStateChanged(next) => {
@@ -272,13 +281,17 @@ impl AppState {
                     next,
                     RelayConnectionState::Authenticating | RelayConnectionState::Connected
                 );
-                self.record_flight("relay_state", relay_state_flight_label(next))
-                    .await;
+                let label = relay_state_flight_label(next);
+                self.record_flight("relay_state", label).await;
+                self.report_diagnostic("relay", "state_changed", label).await;
                 self.ui.lock().await.relay = relay_ready;
                 if !relay_ready {
                     *self.discord_presence_match.write().await = None;
                 }
                 self.emit(app).await;
+                self
+                    .report_diagnostic("relay", "state", relay_state_flight_label(next))
+                    .await;
             }
         }
     }
@@ -301,6 +314,37 @@ impl AppState {
 
     pub(crate) fn update_diagnostic_receiver(&self) -> broadcast::Receiver<UpdateDiagnosticReport> {
         self.update_diagnostics.subscribe()
+    }
+
+    pub(crate) fn diagnostic_report_receiver(&self) -> broadcast::Receiver<AgentDiagnosticReport> {
+        self.diagnostic_reports.subscribe()
+    }
+
+    pub(crate) async fn report_diagnostic(
+        &self,
+        category: &'static str,
+        code: &'static str,
+        detail: impl AsRef<str>,
+    ) {
+        let detail = sanitize_error_summary(detail.as_ref());
+        if detail.trim().is_empty() {
+            return;
+        }
+        let fingerprint = format!("{category}|{code}|{detail}");
+        let now = Instant::now();
+        let mut recent = self.recent_diagnostics.lock().await;
+        recent.retain(|_, seen_at| now.duration_since(*seen_at) < DIAGNOSTIC_REPORT_COOLDOWN);
+        if recent.contains_key(&fingerprint) {
+            return;
+        }
+        recent.insert(fingerprint, now);
+        drop(recent);
+
+        self.record_flight("server_diagnostic", format!("{category}:{code}: {detail}"))
+            .await;
+        let _ = self
+            .diagnostic_reports
+            .send(AgentDiagnosticReport::new(category, code, detail));
     }
 
     pub(crate) async fn report_update_diagnostic(
@@ -451,6 +495,13 @@ fn build_diagnostic_bundle(ui: &UiState, flight: &[crate::diagnostics::FlightRec
         let _ = writeln!(out);
         let _ = writeln!(out, "--- Bootstrap Errors ---");
         for line in bootstrap.lines() {
+            let _ = writeln!(out, "{}", sanitize_diagnostic_line(line));
+        }
+    }
+    if let Some(persistent) = crate::diagnostics::persistent_flight_log_snapshot() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "--- Persistent Flight Log ---");
+        for line in persistent.lines() {
             let _ = writeln!(out, "{}", sanitize_diagnostic_line(line));
         }
     }

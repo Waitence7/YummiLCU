@@ -21,7 +21,7 @@ function OAuthBanner() {
     <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5">
       <p className="text-[12px] font-medium text-amber-800">Discord 로그인 대기 중</p>
       <p className="mt-0.5 text-[11px] text-amber-700">
-        브라우저에서 Discord 로그인을 완료하면 자동으로 연결됩니다.
+        브라우저에서 Discord 로그인을 완료하면 자동으로 연결됩니다. 코드를 입력할 필요가 없습니다.
       </p>
     </div>
   );

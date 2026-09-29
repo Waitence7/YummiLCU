@@ -26,6 +26,7 @@ export type AgentActions = {
 export function useAgentState(): {
   state: AgentState;
   recent: RecentState;
+  actionError: string | null;
   actions: AgentActions;
 } {
   const [state, setState] = useState<AgentState>(initialState);
@@ -34,6 +35,7 @@ export function useAgentState(): {
     loading: false,
     error: null,
   });
+  const [actionError, setActionError] = useState<string | null>(null);
   const recentRequest = useRef(0);
   const stateRef = useRef(state);
   stateRef.current = state;
@@ -76,12 +78,15 @@ export function useAgentState(): {
   }, [addLog]);
 
   const run = useCallback(
-    async (operation: () => Promise<unknown>): Promise<boolean> => {
+    async (operation: () => Promise<unknown>, label: string): Promise<boolean> => {
+      setActionError(null);
       try {
         await operation();
         return true;
       } catch (error) {
-        addLog(String(error));
+        const detail = String(error);
+        addLog(detail);
+        setActionError(`${label} 실패: ${detail}`);
         return false;
       }
     },
@@ -89,7 +94,7 @@ export function useAgentState(): {
   );
 
   const saveConfig = useCallback(
-    (config: Config) => run(() => api.saveConfig(config)),
+    (config: Config) => run(() => api.saveConfig(config), '설정 저장'),
     [run],
   );
 
@@ -111,9 +116,9 @@ export function useAgentState(): {
   }, []);
 
   const actions: AgentActions = {
-    start: useCallback(() => run(api.startAgent), [run]),
-    stop: useCallback(() => run(api.stopAgent), [run]),
-    logout: useCallback(() => run(api.logout), [run]),
+    start: useCallback(() => run(api.startAgent, '연결 시작'), [run]),
+    stop: useCallback(() => run(api.stopAgent, '연결 중지'), [run]),
+    logout: useCallback(() => run(api.logout, 'Discord 로그아웃'), [run]),
     saveConfig,
     patchConfig: useCallback(
       (patch: Partial<Config>) => saveConfig({ ...stateRef.current.config, ...patch }),
@@ -124,5 +129,5 @@ export function useAgentState(): {
     exportDiagnostics: api.exportDiagnosticBundle,
   };
 
-  return { state, recent, actions };
+  return { state, recent, actionError, actions };
 }

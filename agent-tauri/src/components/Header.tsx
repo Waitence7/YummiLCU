@@ -6,11 +6,13 @@ export function Header({
   onStart,
   onStop,
   onLogout,
+  actionError,
 }: {
   state: AgentState;
   onStart(): void;
   onStop(): void;
   onLogout(): void;
+  actionError?: string | null;
 }) {
   const running = state.relay || state.lcu;
   return (
@@ -45,6 +47,11 @@ export function Header({
           </span>
         </div>
       </div>
+      {actionError && (
+        <p role="alert" className="mt-2 rounded-md border border-rose-200 bg-rose-50 px-2.5 py-1.5 text-[11px] text-rose-700">
+          {actionError} · 잠시 후 다시 시도하거나 로그 탭의 진단 정보를 확인하세요.
+        </p>
+      )}
     </header>
   );
 }

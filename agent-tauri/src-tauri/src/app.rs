@@ -458,10 +458,30 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
             .await;
     }
 
-    let Ok(client) =
-        LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
-    else {
-        return LcuConnectionState::Error;
+    let client = match LcuClient::from_lockfile(&path) {
+        Ok(client) => client,
+        Err(strict_error) => match LcuClient::from_lockfile_legacy(&path) {
+            Ok(client) => {
+                state
+                    .report_diagnostic(
+                        "lcu",
+                        "lockfile_legacy_fallback",
+                        format!("strict={strict_error}"),
+                    )
+                    .await;
+                client
+            }
+            Err(legacy_error) => {
+                state
+                    .report_diagnostic(
+                        "lcu",
+                        "lockfile_auth_failed",
+                        format!("strict={strict_error}; legacy={legacy_error}"),
+                    )
+                    .await;
+                return LcuConnectionState::Error;
+            }
+        },
     };
     if current != LcuConnectionState::LoggedIn {
         state
@@ -473,9 +493,27 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
     }
     match client.probe_logged_in().await {
         Ok(()) => LcuConnectionState::LoggedIn,
-        Err(_) => match LcuClient::probe_live_game().await {
-            Ok(()) => LcuConnectionState::LoggedIn,
-            Err(_) => LcuConnectionState::Error,
+        Err(auth_error) => match LcuClient::probe_live_game().await {
+            Ok(()) => {
+                state
+                    .report_diagnostic(
+                        "lcu",
+                        "authenticated_via_live_client",
+                        format!("lcu_auth={auth_error}"),
+                    )
+                    .await;
+                LcuConnectionState::LoggedIn
+            }
+            Err(live_error) => {
+                state
+                    .report_diagnostic(
+                        "lcu",
+                        "authentication_failed",
+                        format!("lcu_auth={auth_error}; live_client={live_error}"),
+                    )
+                    .await;
+                LcuConnectionState::Error
+            }
         },
     }
 }

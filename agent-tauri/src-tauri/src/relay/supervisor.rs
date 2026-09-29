@@ -1,11 +1,15 @@
 use std::{
     collections::VecDeque,
+    fs,
+    io::Write,
+    panic::AssertUnwindSafe,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tauri::AppHandle;
 use tokio::{
@@ -31,8 +35,8 @@ use crate::{
 use super::{
     command_auth,
     protocol::{
-        Action, AgentDiagnosticReport, AgentEventMessage, AgentHelloMessage, AuthMessage,
-        CommandResult, IncomingMessage, OAuthCodeMessage, PongMessage, UnexpectedErrorReport,
+        Action, AgentEventMessage, AgentHelloMessage, AuthMessage, CommandResult, IncomingMessage,
+        AgentDiagnosticReport, OAuthCodeMessage, PongMessage, UnexpectedErrorReport,
         UpdateDiagnosticReport, MAX_RELAY_MESSAGE_BYTES,
     },
 };
@@ -44,33 +48,232 @@ const SESSION_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
 const LCU_WORKER_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const LCU_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(8);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
-const MAX_DURABLE_REPLAY_EVENTS: usize = 64;
+const MAX_DURABLE_REPLAY_EVENTS: usize = 4096;
+const MAX_LIVE_PENDING_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const DURABLE_REPLAY_INTERVAL: Duration = Duration::from_secs(30);
+const DIAGNOSTIC_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const MAX_REPLAY_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
 const REPLAY_LOCAL_DELETE_DELAY: Duration = Duration::from_secs(5 * 60);
 const REPLAY_LOCAL_DELETE_MONITOR_INTERVAL: Duration = Duration::from_secs(2);
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SerializedAgentEvent {
     event_id: String,
     text: String,
+    live_stream_id: Option<String>,
+    live_seq: Option<u64>,
 }
 
-#[derive(Default)]
 struct DurableReplayBuffer {
     pending: VecDeque<SerializedAgentEvent>,
+    live_pending_path: PathBuf,
+    load_issue: Option<String>,
+    needs_live_resync: bool,
+}
+
+fn quarantine_live_pending(path: &std::path::Path) -> String {
+    if !path.exists() {
+        return "missing".into();
+    }
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let quarantine = path.with_file_name(format!("live-delta-pending.corrupt-{suffix}.json"));
+    match fs::rename(path, &quarantine) {
+        Ok(()) => quarantine
+            .file_name()
+            .and_then(|value| value.to_str())
+            .unwrap_or("quarantined")
+            .to_owned(),
+        Err(error) => format!("rename_failed:{error}"),
+    }
+}
+
+impl Default for DurableReplayBuffer {
+    fn default() -> Self {
+        Self::load()
+    }
 }
 
 impl DurableReplayBuffer {
-    fn track(&mut self, event: SerializedAgentEvent) -> bool {
+    fn live_pending_path() -> PathBuf {
+        dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("YummiAgent")
+            .join("live-delta-pending.json")
+    }
+
+    fn load() -> Self {
+        Self::load_from_path(Self::live_pending_path())
+    }
+
+    fn load_from_path(path: PathBuf) -> Self {
+        let mut load_issue = None;
+        let mut needs_live_resync = false;
+
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let recovered = fs::read_dir(parent)
+                    .ok()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Result::ok)
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .to_string_lossy()
+                            .starts_with(".live-delta-pending-")
+                    })
+                    .filter_map(|entry| {
+                        let metadata = entry.metadata().ok()?;
+                        if !metadata.is_file() || metadata.len() > MAX_LIVE_PENDING_FILE_BYTES {
+                            return None;
+                        }
+                        Some((metadata.modified().ok()?, entry.path()))
+                    })
+                    .max_by_key(|(modified, _)| *modified)
+                    .map(|(_, path)| path);
+                if let Some(recovered) = recovered {
+                    match fs::rename(&recovered, &path) {
+                        Ok(()) => {
+                            load_issue = Some("recovered interrupted live-delta pending write".into());
+                        }
+                        Err(error) => {
+                            load_issue = Some(format!("pending temp recovery failed: {error}"));
+                            needs_live_resync = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut pending = VecDeque::new();
+        if path.exists() {
+            let load_result = (|| -> Result<Vec<SerializedAgentEvent>, String> {
+                let metadata = fs::symlink_metadata(&path)
+                    .map_err(|error| format!("metadata: {error}"))?;
+                if metadata.file_type().is_symlink() {
+                    return Err("pending path is a symlink".into());
+                }
+                if !metadata.is_file() {
+                    return Err("pending path is not a regular file".into());
+                }
+                if metadata.len() > MAX_LIVE_PENDING_FILE_BYTES {
+                    return Err(format!("pending file too large: {} bytes", metadata.len()));
+                }
+                let raw = fs::read(&path).map_err(|error| format!("read: {error}"))?;
+                serde_json::from_slice::<Vec<SerializedAgentEvent>>(&raw)
+                    .map_err(|error| format!("json: {error}"))
+            })();
+
+            match load_result {
+                Ok(events) => {
+                    let mut invalid = 0usize;
+                    for event in events.into_iter().take(MAX_DURABLE_REPLAY_EVENTS) {
+                        if event.live_stream_id.is_none()
+                            || event.live_seq.is_none()
+                            || uuid::Uuid::parse_str(&event.event_id).is_err()
+                            || event
+                                .live_stream_id
+                                .as_deref()
+                                .is_none_or(|value| uuid::Uuid::parse_str(value).is_err())
+                            || event.text.len() > MAX_RELAY_MESSAGE_BYTES
+                        {
+                            invalid = invalid.saturating_add(1);
+                            continue;
+                        }
+                        pending.push_back(event);
+                    }
+                    if invalid > 0 {
+                        let preserved = quarantine_live_pending(&path);
+                        pending.clear();
+                        needs_live_resync = true;
+                        load_issue = Some(format!(
+                            "invalid live-delta pending events: count={invalid}; preserved={preserved}"
+                        ));
+                    }
+                }
+                Err(error) => {
+                    let preserved = quarantine_live_pending(&path);
+                    needs_live_resync = true;
+                    load_issue = Some(format!(
+                        "live-delta pending load failed: {error}; preserved={preserved}"
+                    ));
+                }
+            }
+        }
+
+        Self {
+            pending,
+            live_pending_path: path,
+            load_issue,
+            needs_live_resync,
+        }
+    }
+
+    fn take_load_issue(&mut self) -> Option<String> {
+        self.load_issue.take()
+    }
+
+    fn take_needs_live_resync(&mut self) -> bool {
+        std::mem::take(&mut self.needs_live_resync)
+    }
+
+    fn persist_live_pending(&self) -> Result<(), String> {
+        if fs::symlink_metadata(&self.live_pending_path)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Err("live delta pending path is a symlink".into());
+        }
+        let live_events = self
+            .pending
+            .iter()
+            .filter(|event| event.live_stream_id.is_some() && event.live_seq.is_some())
+            .collect::<Vec<_>>();
+        let serialized =
+            serde_json::to_vec(&live_events).map_err(|error| format!("serialize: {error}"))?;
+        if serialized.len() as u64 > MAX_LIVE_PENDING_FILE_BYTES {
+            return Err("live delta pending file exceeds size limit".into());
+        }
+        let Some(parent) = self.live_pending_path.parent() else {
+            return Err("live delta pending parent missing".into());
+        };
+        fs::create_dir_all(parent).map_err(|error| format!("mkdir: {error}"))?;
+        let temporary = parent.join(format!(".live-delta-pending-{}.tmp", uuid::Uuid::new_v4()));
+        let result = (|| -> std::io::Result<()> {
+            let mut file = fs::File::options()
+                .write(true)
+                .create_new(true)
+                .open(&temporary)?;
+            file.write_all(&serialized)?;
+            file.sync_all()?;
+            match fs::remove_file(&self.live_pending_path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+            fs::rename(&temporary, &self.live_pending_path)
+        })();
+        if let Err(error) = result {
+            if self.live_pending_path.exists() {
+                let _ = fs::remove_file(&temporary);
+            }
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+
+    fn track(&mut self, event: SerializedAgentEvent) -> Result<bool, String> {
         if self
             .pending
             .iter()
             .any(|pending| pending.event_id == event.event_id)
         {
-            return false;
+            return Ok(false);
         }
+        let live_changed = event.live_stream_id.is_some() && event.live_seq.is_some();
         let dropped = if self.pending.len() >= MAX_DURABLE_REPLAY_EVENTS {
             self.pending.pop_front();
             true
@@ -78,17 +281,55 @@ impl DurableReplayBuffer {
             false
         };
         self.pending.push_back(event);
-        dropped
+        if live_changed || dropped {
+            self.persist_live_pending()?;
+        }
+        Ok(dropped)
     }
 
-    fn ack(&mut self, event_id: &str) -> bool {
+    fn ack(&mut self, event_id: &str) -> Result<bool, String> {
+        let live_changed = self.pending.iter().any(|event| {
+            event.event_id == event_id && event.live_stream_id.is_some() && event.live_seq.is_some()
+        });
         let before = self.pending.len();
         self.pending.retain(|event| event.event_id != event_id);
-        self.pending.len() != before
+        let changed = self.pending.len() != before;
+        if changed && live_changed {
+            self.persist_live_pending()?;
+        }
+        Ok(changed)
     }
 
     fn snapshot(&self) -> Vec<SerializedAgentEvent> {
         self.pending.iter().cloned().collect()
+    }
+
+    fn len(&self) -> usize {
+        self.pending.len()
+    }
+
+    fn live_range(&self, stream_id: &str, from_seq: u64, to_seq: u64) -> Vec<SerializedAgentEvent> {
+        self.pending
+            .iter()
+            .filter(|event| {
+                event.live_stream_id.as_deref() == Some(stream_id)
+                    && event
+                        .live_seq
+                        .is_some_and(|seq| seq >= from_seq && seq <= to_seq)
+            })
+            .cloned()
+            .collect()
+    }
+
+    fn drop_live_stream(&mut self, stream_id: &str) -> Result<usize, String> {
+        let before = self.pending.len();
+        self.pending
+            .retain(|event| event.live_stream_id.as_deref() != Some(stream_id));
+        let removed = before.saturating_sub(self.pending.len());
+        if removed > 0 {
+            self.persist_live_pending()?;
+        }
+        Ok(removed)
     }
 }
 
@@ -113,6 +354,8 @@ struct LcuPollWorker {
     stop: watch::Sender<bool>,
     trigger: mpsc::Sender<()>,
     live_game_polling: watch::Sender<bool>,
+    live_game_delta_enabled: watch::Sender<bool>,
+    live_game_resync: mpsc::Sender<()>,
     task: JoinHandle<()>,
 }
 
@@ -121,6 +364,8 @@ impl LcuPollWorker {
         let (batch_tx, batch_rx) = mpsc::channel(8);
         let (trigger_tx, mut trigger_rx) = mpsc::channel(8);
         let (live_game_polling_tx, mut live_game_polling_rx) = watch::channel(true);
+        let (live_game_delta_enabled_tx, mut live_game_delta_enabled_rx) = watch::channel(false);
+        let (live_game_resync_tx, mut live_game_resync_rx) = mpsc::channel(4);
         let (stop_tx, mut stop_rx) = watch::channel(false);
 
         let task = tokio::spawn(async move {
@@ -144,6 +389,17 @@ impl LcuPollWorker {
                         }
                         poller.set_live_game_polling(*live_game_polling_rx.borrow());
                         continue;
+                    }
+                    changed = live_game_delta_enabled_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                        poller.set_live_game_delta_enabled(*live_game_delta_enabled_rx.borrow());
+                        continue;
+                    }
+                    Some(()) = live_game_resync_rx.recv() => {
+                        poller.force_live_game_resync();
+                        true
                     }
                     _ = poll_tick.tick() => {
                         last_lcu_poll.is_none_or(|last| last.elapsed() >= LCU_RECOVERY_POLL_INTERVAL)
@@ -180,6 +436,8 @@ impl LcuPollWorker {
                 stop: stop_tx,
                 trigger: trigger_tx,
                 live_game_polling: live_game_polling_tx,
+                live_game_delta_enabled: live_game_delta_enabled_tx,
+                live_game_resync: live_game_resync_tx,
                 task,
             },
             batch_rx,
@@ -267,22 +525,68 @@ impl RelaySupervisor {
 
         let task_state = state.clone();
         let task_app = app.clone();
-        let error_reports = state.unexpected_error_receiver();
-        let update_reports = state.update_diagnostic_receiver();
-        let discord_join_requests = state.discord_join_request_receiver();
-        let discord_presence_context_requests = state.discord_presence_context_request_receiver();
         let task = tokio::spawn(async move {
-            run_supervisor(
-                task_app.clone(),
-                task_state.clone(),
-                generation,
-                stop_rx,
-                error_reports,
-                update_reports,
-                discord_join_requests,
-                discord_presence_context_requests,
-            )
-            .await;
+            let mut pending_panic_summary: Option<String> = None;
+            loop {
+                if *stop_rx.borrow() {
+                    break;
+                }
+
+                let error_reports = task_state.unexpected_error_receiver();
+                let update_reports = task_state.update_diagnostic_receiver();
+                let diagnostic_reports = task_state.diagnostic_report_receiver();
+                let discord_join_requests = task_state.discord_join_request_receiver();
+                let discord_presence_context_requests =
+                    task_state.discord_presence_context_request_receiver();
+
+                if let Some(summary) = pending_panic_summary.take() {
+                    task_state
+                        .report_unexpected_error("relay", "task_panicked", &summary)
+                        .await;
+                    task_state
+                        .report_diagnostic("relay", "supervisor_recovered", &summary)
+                        .await;
+                }
+
+                let result = AssertUnwindSafe(run_supervisor(
+                    task_app.clone(),
+                    task_state.clone(),
+                    generation,
+                    stop_rx.clone(),
+                    error_reports,
+                    update_reports,
+                    diagnostic_reports,
+                    discord_join_requests,
+                    discord_presence_context_requests,
+                ))
+                .catch_unwind()
+                .await;
+
+                match result {
+                    Ok(()) => break,
+                    Err(payload) => {
+                        let summary = payload
+                            .downcast_ref::<&str>()
+                            .map(|value| (*value).to_owned())
+                            .or_else(|| payload.downcast_ref::<String>().cloned())
+                            .unwrap_or_else(|| "relay supervisor panicked".into());
+                        task_state
+                            .record_flight("relay_error", format!("task_panicked: {summary}"))
+                            .await;
+                        task_state
+                            .log(
+                                &task_app,
+                                format!("Relay supervisor panic 감지 — 자동 복구: {summary}"),
+                            )
+                            .await;
+                        pending_panic_summary = Some(summary);
+                        let mut retry_stop_rx = stop_rx.clone();
+                        if !wait_for_retry(&mut retry_stop_rx, Duration::from_secs(1)).await {
+                            break;
+                        }
+                    }
+                }
+            }
             task_state
                 .relay
                 .finish(&task_app, &task_state, generation)
@@ -408,6 +712,7 @@ async fn run_supervisor(
     mut stop_rx: watch::Receiver<bool>,
     mut error_reports: broadcast::Receiver<UnexpectedErrorReport>,
     mut update_reports: broadcast::Receiver<UpdateDiagnosticReport>,
+    mut diagnostic_reports: broadcast::Receiver<AgentDiagnosticReport>,
     mut discord_join_requests: broadcast::Receiver<u64>,
     mut discord_presence_context_requests: broadcast::Receiver<()>,
 ) {
@@ -427,6 +732,11 @@ async fn run_supervisor(
     let mut session = saved_session.unwrap_or_else(|| session::create(&config));
     let mut attempt = 0_u32;
     let mut durable_replay = DurableReplayBuffer::default();
+    if let Some(issue) = durable_replay.take_load_issue() {
+        state
+            .report_diagnostic("live_delta", "pending_load_issue", issue)
+            .await;
+    }
 
     loop {
         if *stop_rx.borrow() {
@@ -437,7 +747,7 @@ async fn run_supervisor(
             .set_connection_state(&app, &state, generation, RelayConnectionState::Connecting)
             .await;
 
-        match connect_once(
+        let connection_result = AssertUnwindSafe(connect_once(
             &app,
             &state,
             generation,
@@ -448,25 +758,56 @@ async fn run_supervisor(
             &mut durable_replay,
             &mut error_reports,
             &mut update_reports,
+            &mut diagnostic_reports,
             &mut discord_join_requests,
             &mut discord_presence_context_requests,
-        )
-        .await
-        {
-            Ok(ConnectionEnd::Stopped) => break,
-            Ok(ConnectionEnd::Closed { authenticated }) => {
+        ))
+        .catch_unwind()
+        .await;
+
+        match connection_result {
+            Ok(Ok(ConnectionEnd::Stopped)) => break,
+            Ok(Ok(ConnectionEnd::Closed { authenticated })) => {
                 if authenticated {
                     attempt = 0;
                 }
                 state.log(&app, "Relay 연결 종료 — 재연결 대기").await;
+                state
+                    .report_diagnostic(
+                        "relay",
+                        "connection_closed",
+                        format!("authenticated={authenticated}"),
+                    )
+                    .await;
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 state
                     .relay
                     .set_connection_state(&app, &state, generation, RelayConnectionState::Failed)
                     .await;
                 state.record_flight("relay_error", error.to_string()).await;
+                state
+                    .report_diagnostic("relay", "connection_error", error.to_string())
+                    .await;
                 state.log(&app, format!("Relay 오류: {error}")).await;
+            }
+            Err(payload) => {
+                let summary = payload
+                    .downcast_ref::<&str>()
+                    .map(|value| (*value).to_owned())
+                    .or_else(|| payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "relay connection task panicked".into());
+                state
+                    .relay
+                    .set_connection_state(&app, &state, generation, RelayConnectionState::Failed)
+                    .await;
+                state
+                    .report_diagnostic("relay", "connection_panicked", &summary)
+                    .await;
+                state
+                    .report_unexpected_error("relay", "task_panicked", &summary)
+                    .await;
+                state.log(&app, format!("Relay 연결 처리 panic — 자동 재연결: {summary}")).await;
             }
         }
         state.relay.set_oauth_sender(generation, None).await;
@@ -502,6 +843,7 @@ async fn connect_once(
     durable_replay: &mut DurableReplayBuffer,
     error_reports: &mut broadcast::Receiver<UnexpectedErrorReport>,
     update_reports: &mut broadcast::Receiver<UpdateDiagnosticReport>,
+    diagnostic_reports: &mut broadcast::Receiver<AgentDiagnosticReport>,
     discord_join_requests: &mut broadcast::Receiver<u64>,
     discord_presence_context_requests: &mut broadcast::Receiver<()>,
 ) -> AgentResult<ConnectionEnd> {
@@ -606,6 +948,11 @@ async fn connect_once(
         DURABLE_REPLAY_INTERVAL,
     );
     durable_replay_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut diagnostic_heartbeat_tick = interval_at(
+        Instant::now() + DIAGNOSTIC_HEARTBEAT_INTERVAL,
+        DIAGNOSTIC_HEARTBEAT_INTERVAL,
+    );
+    diagnostic_heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut awaiting_pong: Option<Instant> = None;
     let mut live_game_announced = false;
     let mut session_bound = false;
@@ -655,9 +1002,68 @@ async fn connect_once(
                                 }
                             }
                             IncomingMessage::EventAck { event_id } => {
-                                if durable_replay.ack(event_id) {
-                                    state.record_flight("relay_ack", format!("event_id={event_id}")).await;
+                                match durable_replay.ack(event_id) {
+                                    Ok(true) => {
+                                        state.record_flight("relay_ack", format!("event_id={event_id}")).await;
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => {
+                                        state.record_flight(
+                                            "live_delta_persist_error",
+                                            format!("ack event_id={event_id} error={error}"),
+                                        ).await;
+                                        state.log(app, format!("live delta pending 저장 실패: {error}")).await;
+                                    }
                                 }
+                            }
+                            IncomingMessage::LiveDeltaResend {
+                                stream_id,
+                                from_seq,
+                                to_seq,
+                            } => {
+                                let replayed = replay_live_delta_range(
+                                    &mut websocket,
+                                    durable_replay,
+                                    stream_id,
+                                    *from_seq,
+                                    *to_seq,
+                                ).await?;
+                                let expected = to_seq.saturating_sub(*from_seq).saturating_add(1) as usize;
+                                state
+                                    .record_flight(
+                                        "live_delta_resend",
+                                        format!(
+                                            "stream={} from={} to={} replayed={} expected={}",
+                                            stream_id, from_seq, to_seq, replayed, expected
+                                        ),
+                                    )
+                                    .await;
+                                if replayed < expected {
+                                    let removed = durable_replay.drop_live_stream(stream_id).unwrap_or(0);
+                                    state
+                                        .record_flight(
+                                            "live_delta_resync",
+                                            format!(
+                                                "stream={} reason=missing_pending_range replayed={} expected={} dropped={}",
+                                                stream_id, replayed, expected, removed
+                                            ),
+                                        )
+                                        .await;
+                                    let _ = lcu_poll_worker.live_game_resync.send(()).await;
+                                }
+                            }
+                            IncomingMessage::LiveDeltaResync { stream_id } => {
+                                let removed = durable_replay.drop_live_stream(stream_id).unwrap_or(0);
+                                state
+                                    .record_flight(
+                                        "live_delta_resync",
+                                        format!(
+                                            "stream={} reason=relay_requested dropped={}",
+                                            stream_id, removed
+                                        ),
+                                    )
+                                    .await;
+                                let _ = lcu_poll_worker.live_game_resync.send(()).await;
                             }
                             IncomingMessage::ServerHello { protocol_version, capabilities } => {
                                 durable_replay_enabled = *protocol_version >= 1
@@ -669,13 +1075,19 @@ async fn connect_once(
                                     && capabilities.get("update_diagnostics") == Some(&true);
                                 diagnostic_reports_enabled = *protocol_version >= 1
                                     && capabilities.get("diagnostic_reports") == Some(&true);
+                                let live_delta_enabled = *protocol_version >= 1
+                                    && capabilities.get("live_game_delta_v1") == Some(&true);
+                                let _ = lcu_poll_worker
+                                    .live_game_delta_enabled
+                                    .send(live_delta_enabled);
                                 state
                                     .record_flight(
                                         "protocol",
                                         format!(
-                                            "server_protocol={} durable_replay={} error_reports={} diagnostics={}",
+                                            "server_protocol={} durable_replay={} live_delta={} error_reports={} diagnostics={}",
                                             protocol_version,
                                             durable_replay_enabled,
+                                            live_delta_enabled,
                                             unexpected_error_reports_enabled,
                                             diagnostic_reports_enabled,
                                         ),
@@ -734,6 +1146,16 @@ async fn connect_once(
                                         state.log(app, format!("미확인 durable 이벤트 {replayed}건 재전송")).await;
                                     }
                                 }
+                                if durable_replay.take_needs_live_resync() {
+                                    let _ = lcu_poll_worker.live_game_resync.send(()).await;
+                                    state
+                                        .report_diagnostic(
+                                            "live_delta",
+                                            "forced_resync_after_pending_load_failure",
+                                            "discarded untrusted pending replay state and requested a full live snapshot",
+                                        )
+                                        .await;
+                                }
                                 state.log(app, "Relay 세션 인증 완료 — LCU 이벤트 감시 시작").await;
                                 state.relay.set_oauth_sender(generation, None).await;
                                 if lcu_socket_watch.is_none() {
@@ -776,12 +1198,29 @@ async fn connect_once(
                                 .await;
                         }
                     }
-                    Some(Ok(Message::Close(_))) | None => {
+                    Some(Ok(Message::Close(frame))) => {
+                        let detail = frame
+                            .as_ref()
+                            .map(|frame| format!("code={:?} reason={}", frame.code, frame.reason))
+                            .unwrap_or_else(|| "code=none reason=none".into());
+                        state
+                            .report_diagnostic("relay", "websocket_close", detail)
+                            .await;
+                        state.relay.set_oauth_sender(generation, None).await;
+                        return Ok(ConnectionEnd::Closed { authenticated: session_bound });
+                    }
+                    None => {
+                        state
+                            .report_diagnostic("relay", "websocket_eof", "stream ended without close frame")
+                            .await;
                         state.relay.set_oauth_sender(generation, None).await;
                         return Ok(ConnectionEnd::Closed { authenticated: session_bound });
                     }
                     Some(Ok(_)) => {}
-                    Some(Err(_)) => {
+                    Some(Err(error)) => {
+                        state
+                            .report_diagnostic("relay", "websocket_receive_failed", error.to_string())
+                            .await;
                         state.relay.set_oauth_sender(generation, None).await;
                         return Err(AgentError::Relay("Relay 메시지 수신 실패".into()));
                     }
@@ -792,6 +1231,22 @@ async fn connect_once(
                 if replayed > 0 {
                     state.log(app, format!("ACK 대기 durable 이벤트 {replayed}건 재전송")).await;
                 }
+            }
+            _ = diagnostic_heartbeat_tick.tick(), if session_bound && diagnostic_reports_enabled => {
+                let report = AgentDiagnosticReport::new(
+                    "lifecycle",
+                    "health_snapshot",
+                    format!(
+                        "lcu_state={:?} durable_pending={} durable_replay={} live_delta={}",
+                        state.lcu_state().await,
+                        durable_replay.len(),
+                        durable_replay_enabled,
+                        *lcu_poll_worker.live_game_delta_enabled.borrow(),
+                    ),
+                );
+                let message = serde_json::to_string(&report)?;
+                websocket.send(Message::Text(message.into())).await
+                    .map_err(|_| AgentError::Relay("운영 상태 스냅샷 전송 실패".into()))?;
             }
             report = update_reports.recv(), if session_bound && update_diagnostics_enabled => {
                 match report {
@@ -805,6 +1260,24 @@ async fn connect_once(
                     }
                     Err(broadcast::error::RecvError::Closed) => {
                         return Err(AgentError::Relay("업데이트 진단 큐가 종료되었습니다.".into()));
+                    }
+                }
+            }
+            report = diagnostic_reports.recv(), if session_bound && diagnostic_reports_enabled => {
+                match report {
+                    Ok(report) => {
+                        let message = serde_json::to_string(&report)?;
+                        websocket.send(Message::Text(message.into())).await
+                            .map_err(|_| AgentError::Relay("운영 진단 전송 실패".into()))?;
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        state.record_flight(
+                            "server_diagnostic",
+                            format!("queue_lagged skipped={skipped}"),
+                        ).await;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err(AgentError::Relay("운영 진단 큐가 종료되었습니다.".into()));
                     }
                 }
             }
@@ -964,15 +1437,30 @@ async fn connect_once(
                     }
                     let event_log = event_summary(message_type, &data);
                     state.record_flight("lcu_event", event_log.clone()).await;
-                    let live_participant_count = (message_type == "live_game_update" && !live_game_announced)
-                        .then(|| data.get("participants").and_then(Value::as_array).map_or(0, Vec::len));
+                    let live_participant_count =
+                        (message_type == "live_game_update" && !live_game_announced).then(|| {
+                            data.get("participants")
+                                .and_then(Value::as_array)
+                                .or_else(|| data.pointer("/state/participants").and_then(Value::as_array))
+                                .map_or(0, Vec::len)
+                        });
                     let Some(event) = serialize_agent_event(message_type, data)? else {
                         state.log(app, "LCU 이벤트가 Relay 크기 제한을 초과해 생략됨").await;
                         continue;
                     };
-                    if durable_replay_enabled && is_durable_event(message_type) {
-                        if durable_replay.track(event.clone()) {
-                            state.log(app, "durable replay buffer가 가득 차 가장 오래된 이벤트를 제거함").await;
+                    if durable_replay_enabled && is_durable_event(message_type, &event) {
+                        match durable_replay.track(event.clone()) {
+                            Ok(true) => {
+                                state.log(app, "durable replay buffer가 가득 차 가장 오래된 이벤트를 제거함").await;
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                state.record_flight(
+                                    "live_delta_persist_error",
+                                    format!("track error={error}"),
+                                ).await;
+                                state.log(app, format!("live delta pending 저장 실패: {error}")).await;
+                            }
                         }
                     }
                     websocket.send(Message::Text(event.text.into())).await
@@ -985,47 +1473,14 @@ async fn connect_once(
                 }
                 for diagnostic in batch.diagnostics {
                     state.record_flight("lcu_diagnostic", diagnostic.clone()).await;
-                    if diagnostic_reports_enabled {
-                        let report = AgentDiagnosticReport::new(
-                            "lcu",
-                            "poll",
-                            bounded_diagnostic_detail(&diagnostic),
-                        );
-                        let message = serde_json::to_string(&report)?;
-                        websocket
-                            .send(Message::Text(message.into()))
-                            .await
-                            .map_err(|_| AgentError::Relay("LCU 진단 전송 실패".into()))?;
-                        state
-                            .record_flight("lcu_diagnostic", "automatic_report_sent")
-                            .await;
-                    }
+                    state
+                        .report_diagnostic("lcu", "poll", &diagnostic)
+                        .await;
                     state.log(app, format!("LCU 진단: {diagnostic}")).await;
                 }
             }
         }
     }
-}
-
-fn bounded_diagnostic_detail(value: &str) -> String {
-    value
-        .split_whitespace()
-        .map(|part| {
-            let lower = part.to_ascii_lowercase();
-            if lower.starts_with("file=")
-                || lower.contains(":\\users\\")
-                || lower.contains(":/users/")
-            {
-                "<redacted-path>"
-            } else {
-                part
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-        .chars()
-        .take(512)
-        .collect()
 }
 
 async fn receive_oauth_code(receiver: &mut mpsc::Receiver<String>) -> String {
@@ -1238,6 +1693,8 @@ where
         IncomingMessage::Pong
         | IncomingMessage::ServerHello { .. }
         | IncomingMessage::EventAck { .. }
+        | IncomingMessage::LiveDeltaResend { .. }
+        | IncomingMessage::LiveDeltaResync { .. }
         | IncomingMessage::Unknown => {}
     }
     Ok(())
@@ -1591,14 +2048,34 @@ fn serialize_agent_event(
     message_type: &'static str,
     data: Value,
 ) -> AgentResult<Option<SerializedAgentEvent>> {
+    let live_stream_id = (message_type == "live_game_update")
+        .then(|| {
+            data.get("stream_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .flatten();
+    let live_seq = (message_type == "live_game_update")
+        .then(|| data.get("seq").and_then(Value::as_u64))
+        .flatten();
     let message = AgentEventMessage::new(message_type, data);
     let event_id = message.event_id().to_owned();
     let text = serde_json::to_string(&message)?;
-    Ok((text.len() <= MAX_RELAY_MESSAGE_BYTES).then_some(SerializedAgentEvent { event_id, text }))
+    Ok(
+        (text.len() <= MAX_RELAY_MESSAGE_BYTES).then_some(SerializedAgentEvent {
+            event_id,
+            text,
+            live_stream_id,
+            live_seq,
+        }),
+    )
 }
 
-fn is_durable_event(message_type: &str) -> bool {
+fn is_durable_event(message_type: &str, event: &SerializedAgentEvent) -> bool {
     matches!(message_type, "match_eog" | "guild_match_eog" | "match_rofl")
+        || (message_type == "live_game_update"
+            && event.live_stream_id.is_some()
+            && event.live_seq.is_some())
 }
 
 async fn replay_durable_events<S>(
@@ -1619,6 +2096,31 @@ where
     Ok(events.len())
 }
 
+async fn replay_live_delta_range<S>(
+    websocket: &mut S,
+    replay: &DurableReplayBuffer,
+    stream_id: &str,
+    from_seq: u64,
+    to_seq: u64,
+) -> AgentResult<usize>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let events = replay.live_range(stream_id, from_seq, to_seq);
+    let expected = to_seq.saturating_sub(from_seq).saturating_add(1) as usize;
+    if events.len() != expected {
+        return Ok(0);
+    }
+    for event in &events {
+        websocket
+            .send(Message::Text(event.text.clone().into()))
+            .await
+            .map_err(|_| AgentError::Relay("live delta 재전송 실패".into()))?;
+    }
+    Ok(events.len())
+}
+
 fn relay_state_label(state: RelayConnectionState) -> &'static str {
     match state {
         RelayConnectionState::Stopped => "중지됨",
@@ -1632,6 +2134,24 @@ fn relay_state_label(state: RelayConnectionState) -> &'static str {
 
 fn event_summary(message_type: &str, data: &Value) -> String {
     match message_type {
+        "live_game_update"
+            if data.get("format").and_then(Value::as_str) == Some("live-delta-v1") =>
+        {
+            format!(
+                "live_game_update delta stream={} seq={} base_seq={} kind={} ops={}",
+                data.get("stream_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                data.get("seq").and_then(Value::as_u64).unwrap_or(0),
+                data.get("base_seq").and_then(Value::as_u64).unwrap_or(0),
+                data.get("kind")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown"),
+                data.get("ops")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len),
+            )
+        }
         "live_game_update" => format!(
             "live_game_update game_id={} participants={} events={} active_player={}",
             data.pointer("/game/id")
@@ -1727,6 +2247,46 @@ async fn wait_for_retry(stop_rx: &mut watch::Receiver<bool>, delay: Duration) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_replay_buffer() -> DurableReplayBuffer {
+        DurableReplayBuffer {
+            pending: VecDeque::new(),
+            live_pending_path: std::env::temp_dir().join(format!(
+                "yummi-live-pending-test-{}.json",
+                uuid::Uuid::new_v4()
+            )),
+            load_issue: None,
+            needs_live_resync: false,
+        }
+    }
+
+    #[test]
+    fn corrupt_live_pending_is_preserved_and_forces_resync() {
+        let dir = std::env::temp_dir().join(format!(
+            "yummi-live-pending-corrupt-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("live-delta-pending.json");
+        fs::write(&path, b"{not-json").unwrap();
+
+        let mut replay = DurableReplayBuffer::load_from_path(path.clone());
+
+        assert!(replay.pending.is_empty());
+        assert!(replay.take_needs_live_resync());
+        let issue = replay.take_load_issue().unwrap();
+        assert!(issue.contains("pending load failed"));
+        assert!(!path.exists());
+        assert!(fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("live-delta-pending.corrupt-")));
+
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[tokio::test]
     async fn closed_oauth_channel_stays_pending_across_select_iterations() {
@@ -1837,16 +2397,51 @@ mod tests {
 
     #[test]
     fn durable_replay_buffer_deduplicates_and_acks() {
-        let mut replay = DurableReplayBuffer::default();
+        let mut replay = test_replay_buffer();
         let event = SerializedAgentEvent {
             event_id: "event-1".into(),
             text: "payload".into(),
+            live_stream_id: None,
+            live_seq: None,
         };
-        assert!(!replay.track(event.clone()));
-        assert!(!replay.track(event));
+        assert!(!replay.track(event.clone()).unwrap());
+        assert!(!replay.track(event).unwrap());
         assert_eq!(replay.snapshot().len(), 1);
-        assert!(replay.ack("event-1"));
+        assert!(replay.ack("event-1").unwrap());
         assert!(replay.snapshot().is_empty());
+    }
+
+    #[test]
+    fn durable_replay_selects_requested_live_sequence_range() {
+        let mut replay = test_replay_buffer();
+        for seq in 20..=22 {
+            assert!(!replay
+                .track(SerializedAgentEvent {
+                    event_id: uuid::Uuid::new_v4().to_string(),
+                    text: format!("payload-{seq}"),
+                    live_stream_id: Some("123e4567-e89b-42d3-a456-426614174000".into()),
+                    live_seq: Some(seq),
+                })
+                .unwrap());
+        }
+        let events = replay.live_range("123e4567-e89b-42d3-a456-426614174000", 20, 21);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].live_seq, Some(20));
+        assert_eq!(events[1].live_seq, Some(21));
+        assert!(replay.live_pending_path.exists());
+        let persisted: Vec<SerializedAgentEvent> =
+            serde_json::from_slice(&fs::read(&replay.live_pending_path).unwrap()).unwrap();
+        assert_eq!(persisted.len(), 3);
+        assert_eq!(
+            replay
+                .drop_live_stream("123e4567-e89b-42d3-a456-426614174000")
+                .unwrap(),
+            3
+        );
+        assert!(replay
+            .live_range("123e4567-e89b-42d3-a456-426614174000", 20, 22)
+            .is_empty());
+        let _ = fs::remove_file(&replay.live_pending_path);
     }
 
     #[test]

@@ -48,6 +48,10 @@ MAX_WS_AUTH_MESSAGE_BYTES = 4 * 1024
 MAX_AGENT_MESSAGE_BYTES = 256 * 1024
 MAX_REPLAY_UPLOAD_BYTES = 128 * 1024 * 1024
 BOT_EOG_PERSIST_ACK_TIMEOUT_SEC = 8.0
+LIVE_DELTA_STATE_TTL_SEC = 2 * 60 * 60
+LIVE_DELTA_API_BLOCK_TTL_SEC = 30
+MAX_LIVE_DELTA_OPS = 4096
+MAX_LIVE_DELTA_PATH_DEPTH = 24
 _SERVER_PROTOCOL_VERSION = 1
 _LCU_DATA_MESSAGE_TYPES = frozenset({
     "party_lobby_update",
@@ -73,6 +77,7 @@ _SERVER_CAPABILITIES = frozenset({
     "eog_events",
     "rofl_events",
     "live_game_events",
+    "live_game_delta_v1",
     "unexpected_error_reports",
     "update_diagnostics",
     "diagnostic_reports",
@@ -84,24 +89,49 @@ _AGENT_ERROR_COMPONENTS = frozenset({
     "discord_presence",
     "relay",
     "ui",
+    "startup",
+    "config",
+    "session",
 })
 _AGENT_ERROR_CODES = frozenset({
     "task_panicked",
     "startup_failed",
+    "manifest_url_invalid",
+    "manifest_url_rejected",
+    "http_client_build_failed",
     "manifest_verification_failed",
     "apply_failed",
+    "windows_startup_registration_failed",
+    "save_failed",
+    "restart_after_config_failed",
     "window_creation_failed",
+    "window_unminimize_failed",
+    "window_taskbar_restore_failed",
+    "window_show_failed",
+    "window_focus_failed",
+    "window_taskbar_hide_failed",
+    "window_hide_failed",
+    "tray_hide_event_emit_failed",
+    "window_destroy_failed",
     "uncaught_error",
     "unhandled_rejection",
 })
+_AGENT_DIAGNOSTIC_CATEGORIES = frozenset({
+    "lcu",
+    "relay",
+    "command",
+    "live_delta",
+    "lifecycle",
+    "session",
+    "updater",
+})
+_AGENT_DIAGNOSTIC_TTL_SEC = 7 * 24 * 60 * 60
+_AGENT_DIAGNOSTIC_MAX_ENTRIES = 200
+
 _AGENT_ERROR_MIN_INTERVAL_SEC = 30.0
 _AGENT_ERROR_DUPLICATE_COOLDOWN_SEC = 5 * 60.0
 _agent_error_last_by_discord: dict[int, float] = {}
 _agent_error_recent: dict[str, float] = {}
-
-_AGENT_DIAGNOSTIC_CATEGORIES = frozenset({"lcu"})
-_AGENT_DIAGNOSTIC_TTL_SEC = 7 * 24 * 60 * 60
-_AGENT_DIAGNOSTIC_MAX_ENTRIES = 200
 
 _INTERNAL_AUTH_MAX_FAILS = 20
 _INTERNAL_AUTH_WINDOW_SEC = 60.0
@@ -111,8 +141,6 @@ _INTERNAL_AUTH_REDIS_KEY = "relay:internal_auth_fail:{ip}"
 OAUTH_LINK_MAX_ATTEMPTS = 5
 _OAUTH_LINK_ATTEMPT_REDIS_KEY = "relay:oauth_link_attempt:{session_id}"
 
-_LIVE_GAME_WEB_INGEST_MIN_INTERVAL_SEC = 10.0
-_live_game_web_ingest_at: dict[int, float] = {}
 
 
 def _agent_diagnostics_redis_key(discord_id: int) -> str:
@@ -636,7 +664,7 @@ async def auth_callback(
     state: str | None = None,
     error: str | None = None,
 ) -> HTMLResponse:
-    """Discord redirect — session_id(state)에 discord_id 저장. `/auth/discord/callback` 별칭 포함."""
+    """Discord redirect — 일회성 state로 Agent session을 찾아 Discord 계정을 자동 바인딩."""
     if error:
         safe = html.escape(error, quote=True)
         return HTMLResponse(f"<h1>로그인 취소됨</h1><p>{safe}</p>", status_code=400)
@@ -666,7 +694,7 @@ async def auth_callback(
     await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
     await r.set(_discord_profile_redis_key(session_id), json.dumps(profile), ex=ttl)
     await r.set(_status_redis_key(session_id), "ok", ex=ttl)
-    # 자동 바인딩 성공 후 예전 수동 코드 상태는 재사용할 수 없게 정리한다.
+    # 이전 수동 링크 코드가 남아 있더라도 자동 바인딩 성공 이후에는 재사용할 수 없게 정리한다.
     await r.delete(
         _oauth_link_pending_redis_key(session_id),
         _oauth_link_attempt_redis_key(session_id),
@@ -1191,23 +1219,17 @@ def _guild_match_live_ingest_matched(outcome: Any) -> bool:
     return isinstance(outcome, dict) and outcome.get("matched") is True
 
 
-async def _forward_guild_match_live(
+async def _deliver_guild_match_live(
     http: aiohttp.ClientSession,
     discord_id: int,
     payload: dict[str, Any],
     event_id: str | None = None,
-) -> bool:
-    """관전자 Agent의 라이브 스냅샷도 웹 공개 경기 화면에서 사용할 수 있게 저장한다."""
-    now = time.monotonic()
-    previous = _live_game_web_ingest_at.get(int(discord_id), 0.0)
-    if now - previous < _LIVE_GAME_WEB_INGEST_MIN_INTERVAL_SEC:
-        return False
-    _live_game_web_ingest_at[int(discord_id)] = now
-
+) -> tuple[bool, bool]:
+    """Return (handled, matched). A valid 2xx unmatched response is terminal/handled."""
     api_base = config.tournament_api_base_url()
     token = config.tournament_bot_internal_token()
     if not token:
-        return False
+        return False, False
     url = f"{api_base}/api/bot/guild-match/lcu-live-ingest"
     headers = {
         "content-type": "application/json",
@@ -1224,19 +1246,24 @@ async def _forward_guild_match_live(
                     discord_id,
                     res.status,
                 )
-                return False
+                return False, False
             try:
                 outcome = await res.json(content_type=None)
             except Exception:
                 outcome = None
-            if not _guild_match_live_ingest_matched(outcome):
-                reason = outcome.get("reason") if isinstance(outcome, dict) else "invalid_response"
+            if not isinstance(outcome, dict):
                 logger.warning(
-                    "내전 라이브 LCU ingest 미매칭 discord_id=%s reason=%s",
+                    "내전 라이브 LCU ingest 응답 형식 오류 discord_id=%s",
                     discord_id,
-                    reason,
                 )
-                return False
+                return False, False
+            if not _guild_match_live_ingest_matched(outcome):
+                logger.warning(
+                    "내전 라이브 LCU ingest 미매칭 terminal discord_id=%s reason=%s",
+                    discord_id,
+                    outcome.get("reason") or "unmatched",
+                )
+                return True, False
             logger.info(
                 "내전 라이브 LCU ingest OK discord_id=%s match_id=%s overlap=%s promoted=%s",
                 discord_id,
@@ -1244,10 +1271,21 @@ async def _forward_guild_match_live(
                 outcome.get("overlap"),
                 outcome.get("promotedFromLive") is True,
             )
-            return True
+            return True, True
     except Exception:
         logger.exception("내전 라이브 LCU ingest 요청 실패 discord_id=%s", discord_id)
-        return False
+        return False, False
+
+
+async def _forward_guild_match_live(
+    http: aiohttp.ClientSession,
+    discord_id: int,
+    payload: dict[str, Any],
+    event_id: str | None = None,
+) -> bool:
+    """Compatibility helper used by tests/callers that only care about matching."""
+    _, matched = await _deliver_guild_match_live(http, discord_id, payload, event_id)
+    return matched
 
 
 async def _forward_match_eog(
@@ -1419,6 +1457,422 @@ def _server_hello(info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _live_delta_state_key(discord_id: int, stream_id: str) -> str:
+    return f"relay:live_delta:{int(discord_id)}:{stream_id}"
+
+
+def _live_delta_api_block_key(discord_id: int, stream_id: str) -> str:
+    return f"relay:live_delta_api_block:{int(discord_id)}:{stream_id}"
+
+
+async def _request_live_delta_resend(
+    websocket: WebSocket,
+    r: redis.Redis,
+    discord_id: int,
+    stream_id: str,
+    from_seq: int,
+    to_seq: int,
+) -> bool:
+    # API가 막혀 expected seq를 저장하지 못한 상태에서 higher seq마다 replay를
+    # 요청하면 pending 전체를 반복 재전송하는 증폭 루프가 생긴다. 막힌 seq는
+    # Agent의 30초 durable replay가 재시도하므로 그동안 gap request를 억제한다.
+    if await r.get(_live_delta_api_block_key(discord_id, stream_id)) is not None:
+        return False
+    await websocket.send_json(
+        {
+            "type": "live_delta_resend",
+            "stream_id": stream_id,
+            "from_seq": from_seq,
+            "to_seq": to_seq,
+        }
+    )
+    return True
+
+
+def _validated_live_delta_frame(payload: dict[str, Any]) -> dict[str, Any] | None:
+    if payload.get("format") != "live-delta-v1":
+        return None
+
+    stream_id = payload.get("stream_id")
+    seq = payload.get("seq")
+    base_seq = payload.get("base_seq")
+    kind = payload.get("kind")
+    if (
+        not isinstance(stream_id, str)
+        or len(stream_id) > 64
+        or not isinstance(seq, int)
+        or isinstance(seq, bool)
+        or seq <= 0
+        or not isinstance(base_seq, int)
+        or isinstance(base_seq, bool)
+        or base_seq < 0
+        or kind not in {"full", "delta"}
+    ):
+        raise ValueError("invalid live delta frame")
+    try:
+        stream_id = str(uuid.UUID(stream_id))
+    except ValueError as error:
+        raise ValueError("invalid live delta stream") from error
+
+    if kind == "full":
+        state = payload.get("state")
+        if base_seq != 0 or not isinstance(state, dict):
+            raise ValueError("invalid live delta full frame")
+        return {
+            "kind": kind,
+            "stream_id": stream_id,
+            "seq": seq,
+            "base_seq": base_seq,
+            "state": state,
+        }
+
+    ops = payload.get("ops")
+    if (
+        base_seq <= 0
+        or seq != base_seq + 1
+        or not isinstance(ops, list)
+        or len(ops) > MAX_LIVE_DELTA_OPS
+    ):
+        raise ValueError("invalid live delta operation frame")
+    return {
+        "kind": kind,
+        "stream_id": stream_id,
+        "seq": seq,
+        "base_seq": base_seq,
+        "ops": ops,
+    }
+
+
+def _live_delta_path(raw: Any) -> list[str | int]:
+    if not isinstance(raw, list) or len(raw) > MAX_LIVE_DELTA_PATH_DEPTH:
+        raise ValueError("invalid live delta path")
+    path: list[str | int] = []
+    for part in raw:
+        if isinstance(part, bool):
+            raise ValueError("invalid live delta path segment")
+        if isinstance(part, int):
+            if part < 0 or part > 4096:
+                raise ValueError("invalid live delta array index")
+            path.append(part)
+        elif isinstance(part, str):
+            if not part or len(part) > 128:
+                raise ValueError("invalid live delta object key")
+            path.append(part)
+        else:
+            raise ValueError("invalid live delta path segment")
+    return path
+
+
+def _live_delta_parent(root: Any, path: list[str | int]) -> tuple[Any, str | int]:
+    if not path:
+        raise ValueError("root operation has no parent")
+    current = root
+    for segment in path[:-1]:
+        if isinstance(segment, int):
+            if not isinstance(current, list) or segment >= len(current):
+                raise ValueError("invalid live delta array path")
+            current = current[segment]
+        else:
+            if not isinstance(current, dict) or segment not in current:
+                raise ValueError("invalid live delta object path")
+            current = current[segment]
+    return current, path[-1]
+
+
+def _live_delta_target(root: Any, path: list[str | int]) -> Any:
+    current = root
+    for segment in path:
+        if isinstance(segment, int):
+            if not isinstance(current, list) or segment >= len(current):
+                raise ValueError("invalid live delta array target")
+            current = current[segment]
+        else:
+            if not isinstance(current, dict) or segment not in current:
+                raise ValueError("invalid live delta object target")
+            current = current[segment]
+    return current
+
+
+def _live_item_index(value: Any, *, maximum: int, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0 or value > maximum:
+        raise ValueError(f"invalid live item {label}")
+    return value
+
+
+def _live_item_slots(root: Any, participant_index: int) -> list[Any]:
+    if not isinstance(root, dict):
+        raise ValueError("invalid live item root")
+    participants = root.get("participants")
+    if not isinstance(participants, list) or participant_index >= len(participants):
+        raise ValueError("invalid live item participant")
+    participant = participants[participant_index]
+    if not isinstance(participant, dict):
+        raise ValueError("invalid live item participant state")
+    items = participant.get("items")
+    if not isinstance(items, list) or len(items) != 7:
+        raise ValueError("invalid live item slot state")
+    return items
+
+
+def _apply_live_item_op(root: Any, raw_op: list[Any]) -> bool:
+    kind = raw_op[0] if raw_op else None
+    if kind not in {"ia", "ic", "is", "ir"}:
+        return False
+
+    if kind == "ia":
+        if len(raw_op) != 6:
+            raise ValueError("invalid live item add")
+        participant_index = _live_item_index(raw_op[1], maximum=9, label="participant")
+        slot = _live_item_index(raw_op[2], maximum=6, label="slot")
+        item_id, name, count = raw_op[3], raw_op[4], raw_op[5]
+        if (
+            not isinstance(item_id, int)
+            or isinstance(item_id, bool)
+            or item_id <= 0
+            or item_id > 1_000_000
+            or not isinstance(name, str)
+            or len(name) > 256
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count <= 0
+            or count > 999
+        ):
+            raise ValueError("invalid live item add payload")
+        items = _live_item_slots(root, participant_index)
+        items[slot] = {"id": item_id, "name": name, "count": count}
+        return True
+
+    if kind == "ic":
+        if len(raw_op) != 4:
+            raise ValueError("invalid live item count")
+        participant_index = _live_item_index(raw_op[1], maximum=9, label="participant")
+        slot = _live_item_index(raw_op[2], maximum=6, label="slot")
+        delta = raw_op[3]
+        if (
+            not isinstance(delta, int)
+            or isinstance(delta, bool)
+            or delta == 0
+            or abs(delta) > 999
+        ):
+            raise ValueError("invalid live item count delta")
+        items = _live_item_slots(root, participant_index)
+        item = items[slot]
+        if not isinstance(item, dict):
+            raise ValueError("live item count target is empty")
+        count = item.get("count")
+        if not isinstance(count, int) or isinstance(count, bool):
+            raise ValueError("invalid live item count state")
+        next_count = count + delta
+        if next_count <= 0 or next_count > 999:
+            raise ValueError("invalid live item resulting count")
+        item["count"] = next_count
+        return True
+
+    if kind == "is":
+        if len(raw_op) != 4:
+            raise ValueError("invalid live item swap")
+        participant_index = _live_item_index(raw_op[1], maximum=9, label="participant")
+        left = _live_item_index(raw_op[2], maximum=6, label="slot")
+        right = _live_item_index(raw_op[3], maximum=6, label="slot")
+        if left == right:
+            raise ValueError("live item swap slots must differ")
+        items = _live_item_slots(root, participant_index)
+        items[left], items[right] = items[right], items[left]
+        return True
+
+    if len(raw_op) != 3:
+        raise ValueError("invalid live item remove")
+    participant_index = _live_item_index(raw_op[1], maximum=9, label="participant")
+    slot = _live_item_index(raw_op[2], maximum=6, label="slot")
+    items = _live_item_slots(root, participant_index)
+    items[slot] = None
+    return True
+
+
+def _apply_live_delta_ops(base: dict[str, Any], ops: list[Any]) -> dict[str, Any]:
+    root: Any = json.loads(json.dumps(base))
+    for raw_op in ops:
+        if not isinstance(raw_op, list) or len(raw_op) < 2:
+            raise ValueError("invalid live delta op")
+        kind = raw_op[0]
+
+        if _apply_live_item_op(root, raw_op):
+            continue
+
+        path = _live_delta_path(raw_op[1])
+        if kind == "s":
+            if len(raw_op) != 3:
+                raise ValueError("invalid live delta set")
+            value = json.loads(json.dumps(raw_op[2]))
+            if not path:
+                if not isinstance(value, dict):
+                    raise ValueError("live root state must stay an object")
+                root = value
+                continue
+            parent, key = _live_delta_parent(root, path)
+            if isinstance(key, int):
+                if not isinstance(parent, list) or key >= len(parent):
+                    raise ValueError("invalid live delta set index")
+                parent[key] = value
+            else:
+                if not isinstance(parent, dict):
+                    raise ValueError("invalid live delta set object")
+                parent[key] = value
+            continue
+
+        if kind == "d":
+            if len(raw_op) != 2 or not path:
+                raise ValueError("invalid live delta delete")
+            parent, key = _live_delta_parent(root, path)
+            if isinstance(key, int):
+                if not isinstance(parent, list) or key >= len(parent):
+                    raise ValueError("invalid live delta delete index")
+                del parent[key]
+            else:
+                if not isinstance(parent, dict) or key not in parent:
+                    raise ValueError("invalid live delta delete key")
+                del parent[key]
+            continue
+
+        if kind == "a":
+            if len(raw_op) != 3 or not isinstance(raw_op[2], list):
+                raise ValueError("invalid live delta append")
+            target = _live_delta_target(root, path)
+            if not isinstance(target, list):
+                raise ValueError("invalid live delta append target")
+            target.extend(json.loads(json.dumps(raw_op[2])))
+            continue
+
+        if kind == "t":
+            if (
+                len(raw_op) != 3
+                or not isinstance(raw_op[2], int)
+                or isinstance(raw_op[2], bool)
+                or raw_op[2] < 0
+            ):
+                raise ValueError("invalid live delta truncate")
+            target = _live_delta_target(root, path)
+            if not isinstance(target, list) or raw_op[2] > len(target):
+                raise ValueError("invalid live delta truncate target")
+            del target[raw_op[2]:]
+            continue
+
+        raise ValueError("unknown live delta operation")
+
+    if not isinstance(root, dict):
+        raise ValueError("live delta result must be an object")
+    return root
+
+
+async def _load_live_delta_state(
+    r: redis.Redis,
+    discord_id: int,
+    stream_id: str,
+) -> tuple[int, dict[str, Any]] | None:
+    raw = await r.get(_live_delta_state_key(discord_id, stream_id))
+    if raw is None:
+        return None
+    try:
+        decoded = json.loads(raw)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    seq = decoded.get("seq")
+    state = decoded.get("state")
+    if (
+        not isinstance(seq, int)
+        or isinstance(seq, bool)
+        or seq <= 0
+        or not isinstance(state, dict)
+    ):
+        return None
+    return seq, state
+
+
+async def _commit_live_delta_state(
+    r: redis.Redis,
+    discord_id: int,
+    stream_id: str,
+    seq: int,
+    state: dict[str, Any],
+) -> None:
+    await r.set(
+        _live_delta_state_key(discord_id, stream_id),
+        json.dumps({"seq": seq, "state": state}, separators=(",", ":")),
+        ex=LIVE_DELTA_STATE_TTL_SEC,
+    )
+
+
+async def _prepare_live_game_frame(
+    r: redis.Redis,
+    discord_id: int,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    frame = _validated_live_delta_frame(payload)
+    if frame is None:
+        return {"status": "ready", "state": payload, "legacy": True}
+
+    stream_id = frame["stream_id"]
+    seq = frame["seq"]
+    stored = await _load_live_delta_state(r, discord_id, stream_id)
+
+    if frame["kind"] == "full":
+        if stored is not None and seq <= stored[0]:
+            return {
+                "status": "duplicate",
+                "stream_id": stream_id,
+                "seq": seq,
+            }
+        return {
+            "status": "ready",
+            "state": frame["state"],
+            "stream_id": stream_id,
+            "seq": seq,
+            "legacy": False,
+        }
+
+    if stored is None:
+        if seq <= 1024:
+            return {
+                "status": "gap",
+                "stream_id": stream_id,
+                "from_seq": 1,
+                "to_seq": seq,
+            }
+        return {
+            "status": "resync",
+            "stream_id": stream_id,
+            "seq": seq,
+        }
+
+    current_seq, current_state = stored
+    if seq <= current_seq:
+        return {
+            "status": "duplicate",
+            "stream_id": stream_id,
+            "seq": seq,
+        }
+
+    expected_seq = current_seq + 1
+    if frame["base_seq"] != current_seq or seq != expected_seq:
+        return {
+            "status": "gap",
+            "stream_id": stream_id,
+            "from_seq": expected_seq,
+            "to_seq": seq,
+        }
+
+    state = _apply_live_delta_ops(current_state, frame["ops"])
+    return {
+        "status": "ready",
+        "state": state,
+        "stream_id": stream_id,
+        "seq": seq,
+        "legacy": False,
+    }
+
+
 async def _ack_agent_event(websocket: WebSocket, event_id: str | None) -> None:
     if event_id is not None:
         await websocket.send_json({"type": "event_ack", "event_id": event_id})
@@ -1510,8 +1964,7 @@ def _agent_diagnostic_report(data: dict[str, Any]) -> dict[str, Any] | None:
         report_id = str(uuid.UUID(report_id))
     except ValueError:
         return None
-
-    metadata: dict[str, str] = {}
+    metadata = {}
     for field, limit in {
         "app_version": 64,
         "release_label": 128,
@@ -1523,7 +1976,6 @@ def _agent_diagnostic_report(data: dict[str, Any]) -> dict[str, Any] | None:
         if not isinstance(value, str) or not value or len(value) > limit or not value.isascii():
             return None
         metadata[field] = value
-
     return {
         "report_id": report_id,
         "occurred_at_ms": occurred_at_ms,
@@ -1965,10 +2417,115 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         event_id = _relay_event_id(data)
-        await conn.forward_live_game_update(discord_id, payload)
-        await _forward_guild_match_live(websocket.app.state.http, discord_id, payload, event_id)
+        r: redis.Redis = websocket.app.state.redis
+
+        try:
+            prepared = await _prepare_live_game_frame(r, discord_id, payload)
+        except ValueError as error:
+            stream_id = payload.get("stream_id")
+            logger.warning(
+                "live delta 형식 오류 discord_id=%s stream=%s error=%s",
+                discord_id,
+                stream_id,
+                error,
+            )
+            if isinstance(stream_id, str):
+                await websocket.send_json(
+                    {"type": "live_delta_resync", "stream_id": stream_id}
+                )
+            return
+
+        status = prepared["status"]
+        if status == "duplicate":
+            await _ack_agent_event(websocket, event_id)
+            logger.info(
+                "live delta 중복 ACK discord_id=%s stream=%s seq=%s",
+                discord_id,
+                prepared.get("stream_id"),
+                prepared.get("seq"),
+            )
+            return
+
+        if status == "gap":
+            requested = await _request_live_delta_resend(
+                websocket,
+                r,
+                discord_id,
+                prepared["stream_id"],
+                prepared["from_seq"],
+                prepared["to_seq"],
+            )
+            logger.warning(
+                "live delta gap 감지 discord_id=%s stream=%s missing=%s..%s resend=%s",
+                discord_id,
+                prepared["stream_id"],
+                prepared["from_seq"],
+                prepared["to_seq"],
+                "requested" if requested else "api_blocked",
+            )
+            return
+
+        if status == "resync":
+            await websocket.send_json(
+                {
+                    "type": "live_delta_resync",
+                    "stream_id": prepared["stream_id"],
+                }
+            )
+            logger.warning(
+                "live delta base 없음 discord_id=%s stream=%s seq=%s resync 요청",
+                discord_id,
+                prepared["stream_id"],
+                prepared["seq"],
+            )
+            return
+
+        full_state = prepared.get("state")
+        if not isinstance(full_state, dict):
+            return
+
+        handled, matched = await _deliver_guild_match_live(
+            websocket.app.state.http,
+            discord_id,
+            full_state,
+            event_id,
+        )
+        if not handled:
+            if prepared.get("legacy") is not True:
+                await r.set(
+                    _live_delta_api_block_key(discord_id, prepared["stream_id"]),
+                    str(prepared["seq"]),
+                    ex=LIVE_DELTA_API_BLOCK_TTL_SEC,
+                )
+            logger.warning(
+                "live delta ACK 보류 discord_id=%s stream=%s seq=%s 사유=API 미처리",
+                discord_id,
+                prepared.get("stream_id"),
+                prepared.get("seq"),
+            )
+            return
+
+        if prepared.get("legacy") is not True:
+            await _commit_live_delta_state(
+                r,
+                discord_id,
+                prepared["stream_id"],
+                prepared["seq"],
+                full_state,
+            )
+            await r.delete(_live_delta_api_block_key(discord_id, prepared["stream_id"]))
+
+        await conn.forward_live_game_update(discord_id, full_state)
         await _forward_tournament_broadcast_lcu(
-            websocket.app.state.http, discord_id, "live_game", payload
+            websocket.app.state.http, discord_id, "live_game", full_state
+        )
+        await _ack_agent_event(websocket, event_id)
+        logger.info(
+            "live delta 처리 완료 discord_id=%s stream=%s seq=%s matched=%s",
+            discord_id,
+            prepared.get("stream_id") or "legacy",
+            prepared.get("seq") or 0,
+            matched,
         )
         return
 
@@ -2057,8 +2614,37 @@ async def ws_agent(
                 await websocket.send_json({"type": "pong"})
                 continue
             await _handle_agent_message(websocket, conn, msg)
-    except WebSocketDisconnect:
-        pass
+    except WebSocketDisconnect as exc:
+        discord_id = conn.discord_id_for_ws(websocket)
+        reason = redact_log_text(str(getattr(exc, "reason", "") or ""))[:160]
+        code = getattr(exc, "code", None)
+        if discord_id is not None:
+            info = conn.agent_info(discord_id) or {}
+            try:
+                await _remember_agent_diagnostic(
+                    r,
+                    discord_id,
+                    {
+                        "report_id": str(uuid.uuid4()),
+                        "occurred_at_ms": int(time.time() * 1000),
+                        "category": "relay",
+                        "code": "server_disconnect",
+                        "detail": f"code={code if code is not None else 'unknown'} reason={reason or '-'}",
+                        "source": "relay",
+                        "app_version": str(info.get("version") or "unknown")[:64],
+                    },
+                )
+            except Exception:
+                logger.exception(
+                    "Agent disconnect diagnostic 저장 실패 discord_id=%s",
+                    discord_id,
+                )
+        logger.info(
+            "Agent websocket disconnected discord_id=%s code=%s reason=%s",
+            discord_id if discord_id is not None else "-",
+            code,
+            reason or "-",
+        )
     finally:
         offline = await conn.unregister_ws(websocket)
         if offline is not None:
@@ -2339,7 +2925,7 @@ async def internal_agent_diagnostics(
     limit: int = Query(50, ge=1, le=200),
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
-    """최근 Agent LCU 진단. 민감값은 Relay redaction을 거쳐 저장된다."""
+    """최근 Agent 운영 진단. 민감값은 Agent/Relay 양쪽에서 redaction된다."""
     await _verify_internal_secret(request, x_relay_internal_secret)
     r: redis.Redis = request.app.state.redis
     rows = await r.lrange(_agent_diagnostics_redis_key(discord_id), 0, limit - 1)

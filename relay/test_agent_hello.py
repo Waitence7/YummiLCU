@@ -47,6 +47,7 @@ class AgentHelloTests(unittest.TestCase):
                 "capabilities": {
                     "event_ack": True,
                     "durable_event_replay": True,
+                    "live_game_delta_v1": True,
                     "unexpected_error_reports": True,
                     "diagnostic_reports": True,
                     "unknown_future_feature": True,
@@ -60,6 +61,7 @@ class AgentHelloTests(unittest.TestCase):
             {
                 "durable_event_replay": True,
                 "event_ack": True,
+                "live_game_delta_v1": True,
                 "unexpected_error_reports": True,
                 "diagnostic_reports": True,
             },
@@ -88,17 +90,17 @@ class AgentHelloTests(unittest.TestCase):
             "report_id": "123e4567-e89b-42d3-a456-426614174000",
             "occurred_at_ms": 1,
             "category": "lcu",
-            "code": "poll",
-            "detail": "Live Client Data API 응답 없음 token=secret",
-            "app_version": "0.7.15",
-            "release_label": "0.7.15",
+            "code": "authentication_failed",
+            "detail": "password=secret endpoint=/lol-summoner/v1/current-summoner",
+            "app_version": "0.7.14",
+            "release_label": "0.7.14",
             "release_channel": "stable",
             "build_id": "build-1",
             "git_commit": "abc123",
         })
         self.assertIsNotNone(report)
         self.assertEqual(report["category"], "lcu")
-        self.assertEqual(report["code"], "poll")
+        self.assertEqual(report["code"], "authentication_failed")
         self.assertNotIn("secret", report["detail"])
         self.assertIsNone(_agent_diagnostic_report({
             "report_id": "123e4567-e89b-42d3-a456-426614174000",
@@ -293,11 +295,11 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
                     "type": "agent_diagnostic_report",
                     "report_id": "123e4567-e89b-42d3-a456-426614174000",
                     "occurred_at_ms": 1,
-                    "category": "lcu",
-                    "code": "poll",
-                    "detail": "lockfile fallback",
-                    "app_version": "0.7.15",
-                    "release_label": "0.7.15",
+                    "category": "relay",
+                    "code": "connection_closed",
+                    "detail": "authenticated=true",
+                    "app_version": "0.7.14",
+                    "release_label": "0.7.14",
                     "release_channel": "stable",
                     "build_id": "build-1",
                     "git_commit": "abc123",
@@ -305,7 +307,7 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
             )
 
         remember.assert_awaited_once()
-        self.assertIn("category=lcu", logs.output[0])
+        self.assertIn("category=relay", logs.output[0])
         self.assertIn("discord_id=42", logs.output[0])
 
     async def test_durable_eog_is_acked_only_after_forward_succeeds(self) -> None:

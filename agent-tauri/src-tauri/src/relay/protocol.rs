@@ -40,6 +40,14 @@ pub(crate) enum IncomingMessage {
     },
     #[serde(rename = "event_ack")]
     EventAck { event_id: String },
+    #[serde(rename = "live_delta_resend")]
+    LiveDeltaResend {
+        stream_id: String,
+        from_seq: u64,
+        to_seq: u64,
+    },
+    #[serde(rename = "live_delta_resync")]
+    LiveDeltaResync { stream_id: String },
     #[serde(rename = "discord_join_request_resolved")]
     DiscordJoinRequestResolved {
         requester_discord_id: u64,
@@ -78,6 +86,20 @@ impl IncomingMessage {
             }
             Self::EventAck { event_id } if Uuid::parse_str(event_id).is_err() => {
                 Err("invalid Relay event ack")
+            }
+            Self::LiveDeltaResend {
+                stream_id,
+                from_seq,
+                to_seq,
+            } if Uuid::parse_str(stream_id).is_err()
+                || *from_seq == 0
+                || *to_seq < *from_seq
+                || to_seq.saturating_sub(*from_seq) > 1024 =>
+            {
+                Err("invalid live delta resend request")
+            }
+            Self::LiveDeltaResync { stream_id } if Uuid::parse_str(stream_id).is_err() => {
+                Err("invalid live delta resync request")
             }
             Self::DiscordJoinRequestResolved {
                 requester_discord_id,
@@ -325,6 +347,7 @@ pub(crate) struct AgentCapabilities {
     eog_events: bool,
     rofl_events: bool,
     live_game_events: bool,
+    live_game_delta_v1: bool,
     unexpected_error_reports: bool,
     update_diagnostics: bool,
     diagnostic_reports: bool,
@@ -353,6 +376,7 @@ impl AgentCapabilities {
             eog_events: true,
             rofl_events: true,
             live_game_events: true,
+            live_game_delta_v1: true,
             unexpected_error_reports: true,
             update_diagnostics: true,
             diagnostic_reports: true,
@@ -662,6 +686,29 @@ mod tests {
     }
 
     #[test]
+    fn live_delta_retransmit_controls_deserialize() {
+        let stream_id = Uuid::new_v4().to_string();
+        assert_eq!(
+            IncomingMessage::parse(&format!(
+                r#"{{"type":"live_delta_resend","stream_id":"{stream_id}","from_seq":20,"to_seq":21}}"#
+            ))
+            .unwrap(),
+            IncomingMessage::LiveDeltaResend {
+                stream_id: stream_id.clone(),
+                from_seq: 20,
+                to_seq: 21,
+            }
+        );
+        assert_eq!(
+            IncomingMessage::parse(&format!(
+                r#"{{"type":"live_delta_resync","stream_id":"{stream_id}"}}"#
+            ))
+            .unwrap(),
+            IncomingMessage::LiveDeltaResync { stream_id }
+        );
+    }
+
+    #[test]
     fn live_game_polling_control_deserializes() {
         assert_eq!(
             IncomingMessage::parse(r#"{"type":"live_game_polling","enabled":false}"#).unwrap(),
@@ -735,6 +782,7 @@ mod tests {
         assert_eq!(value["capabilities"]["gameflow_events"], true);
         assert_eq!(value["capabilities"]["party_events"], true);
         assert_eq!(value["capabilities"]["live_game_events"], true);
+        assert_eq!(value["capabilities"]["live_game_delta_v1"], true);
         assert_eq!(value["capabilities"]["unexpected_error_reports"], true);
         assert_eq!(value["capabilities"]["update_diagnostics"], true);
         assert_eq!(value["capabilities"]["diagnostic_reports"], true);

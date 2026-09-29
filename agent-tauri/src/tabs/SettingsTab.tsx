@@ -12,15 +12,25 @@ export function SettingsTab({
   currentBuildId,
   currentReleaseChannel,
   onPatchConfig,
+  actionError,
 }: {
   config: Config;
   currentReleaseLabel: string;
   currentBuildId: string;
   currentReleaseChannel: string;
   onPatchConfig(patch: Partial<Config>): Promise<boolean>;
+  actionError?: string | null;
 }) {
   return (
     <div className="space-y-3">
+      {actionError && (
+        <p
+          role="alert"
+          className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700"
+        >
+          {actionError} · 변경 내용을 확인한 뒤 다시 시도하거나 로그 탭의 진단 정보를 확인하세요.
+        </p>
+      )}
       <Card title="편의 기능">
         <div className="divide-y divide-slate-100">
           <Toggle

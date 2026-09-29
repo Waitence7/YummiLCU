@@ -14,6 +14,7 @@ use tokio_tungstenite::{
     },
     Connector,
 };
+use uuid::Uuid;
 
 use crate::{config::Config, error::AgentError};
 
@@ -55,10 +56,14 @@ pub(crate) struct LcuEventPoller {
     party: Option<String>,
     participant: Option<String>,
     live_game: Option<String>,
+    live_game_state: Option<Value>,
+    live_stream_id: Option<String>,
+    live_seq: u64,
     live_respawn_samples: HashMap<String, u8>,
     last_live_game_poll: Option<Instant>,
     // None keeps legacy agents compatible until Relay sends the first control message.
     live_game_polling: Option<bool>,
+    live_game_delta_enabled: bool,
     eog_sent: bool,
     last_eog_attempt: Option<Instant>,
     eog_recovery_started_at: Option<Instant>,
@@ -172,9 +177,28 @@ impl LcuEventPoller {
             self.last_live_game_poll = None;
             if !enabled {
                 self.live_game = None;
+                self.live_game_state = None;
+                self.live_stream_id = None;
+                self.live_seq = 0;
                 self.live_game_id = None;
                 self.live_respawn_samples.clear();
             }
+        }
+    }
+
+    pub(crate) fn force_live_game_resync(&mut self) {
+        self.live_game = None;
+        self.live_game_state = None;
+        self.live_stream_id = None;
+        self.live_seq = 0;
+        self.live_respawn_samples.clear();
+        self.last_live_game_poll = None;
+    }
+
+    pub(crate) fn set_live_game_delta_enabled(&mut self, enabled: bool) {
+        if self.live_game_delta_enabled != enabled {
+            self.live_game_delta_enabled = enabled;
+            self.force_live_game_resync();
         }
     }
 
@@ -339,9 +363,13 @@ impl LcuEventPoller {
                                 .map(Value::to_string)
                                 .unwrap_or_else(|| "unknown".into());
                             if self.live_game_id.as_deref() != Some(game_id.as_str()) {
+                                self.live_game = None;
+                                self.live_game_state = None;
+                                self.live_stream_id = None;
+                                self.live_seq = 0;
                                 self.live_respawn_samples.clear();
                                 self.diagnostic(format!(
-                                    "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건, active_player={}",
+                                    "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건",
                                     payload
                                         .get("participants")
                                         .and_then(Value::as_array)
@@ -350,23 +378,24 @@ impl LcuEventPoller {
                                         .get("events")
                                         .and_then(Value::as_array)
                                         .map_or(0, Vec::len),
-                                    if payload.get("active_player").is_some_and(|v| !v.is_null()) {
-                                        "yes"
-                                    } else {
-                                        "no (관전자)"
-                                    }
                                 ));
                                 self.live_game_id = Some(game_id);
                             }
-                            push_changed(
+                            push_live_game_changed(
                                 &mut self.live_game,
+                                &mut self.live_game_state,
+                                &mut self.live_stream_id,
+                                &mut self.live_seq,
+                                self.live_game_delta_enabled,
                                 live_game_fingerprint(&payload, &mut self.live_respawn_samples),
-                                "live_game_update",
                                 payload,
                                 &mut events,
                             );
                         } else {
                             self.live_game = None;
+                            self.live_game_state = None;
+                            self.live_stream_id = None;
+                            self.live_seq = 0;
                             self.live_respawn_samples.clear();
                         }
                     }
@@ -377,6 +406,9 @@ impl LcuEventPoller {
                         self.live_client_available = Some(false);
                         self.live_game_id = None;
                         self.live_game = None;
+                        self.live_game_state = None;
+                        self.live_stream_id = None;
+                        self.live_seq = 0;
                     }
                 }
             }
@@ -1445,6 +1477,145 @@ fn fingerprint(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_default()
 }
 
+fn delta_path(path: &[Value]) -> Value {
+    Value::Array(path.to_vec())
+}
+
+fn push_set_delta(ops: &mut Vec<Value>, path: &[Value], value: &Value) {
+    ops.push(json!(["s", delta_path(path), value]));
+}
+
+fn json_delta_ops(previous: &Value, next: &Value, path: &mut Vec<Value>, ops: &mut Vec<Value>) {
+    if previous == next {
+        return;
+    }
+
+    match (previous, next) {
+        (Value::Object(previous), Value::Object(next)) => {
+            let mut keys = previous
+                .keys()
+                .chain(next.keys())
+                .cloned()
+                .collect::<Vec<_>>();
+            keys.sort();
+            keys.dedup();
+
+            for key in keys {
+                path.push(Value::String(key.clone()));
+                match (previous.get(&key), next.get(&key)) {
+                    (Some(before), Some(after)) => json_delta_ops(before, after, path, ops),
+                    (None, Some(after)) => push_set_delta(ops, path, after),
+                    (Some(_), None) => ops.push(json!(["d", delta_path(path)])),
+                    (None, None) => {}
+                }
+                path.pop();
+            }
+        }
+        (Value::Array(previous), Value::Array(next)) => {
+            if let Some(participant_index) = live_items_participant_index(path) {
+                if push_live_item_delta_ops(participant_index, previous, next, ops) {
+                    return;
+                }
+            }
+            let common = previous.len().min(next.len());
+            for index in 0..common {
+                path.push(json!(index));
+                json_delta_ops(&previous[index], &next[index], path, ops);
+                path.pop();
+            }
+            if next.len() > previous.len() {
+                ops.push(json!([
+                    "a",
+                    delta_path(path),
+                    next[previous.len()..].to_vec()
+                ]));
+            } else if next.len() < previous.len() {
+                ops.push(json!(["t", delta_path(path), next.len()]));
+            }
+        }
+        _ => push_set_delta(ops, path, next),
+    }
+}
+
+fn live_game_delta_frame(
+    previous: Option<&Value>,
+    payload: &Value,
+    stream_id: &str,
+    seq: u64,
+) -> Value {
+    let game_id = payload
+        .pointer("/game/id")
+        .cloned()
+        .or_else(|| payload.pointer("/game/game_id").cloned())
+        .unwrap_or(Value::Null);
+    let captured_at_ms = payload
+        .get("captured_at_ms")
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    let Some(previous) = previous else {
+        return json!({
+            "format": "live-delta-v1",
+            "stream_id": stream_id,
+            "seq": seq,
+            "base_seq": 0,
+            "kind": "full",
+            "game_id": game_id,
+            "captured_at_ms": captured_at_ms,
+            "state": payload
+        });
+    };
+
+    let mut ops = Vec::new();
+    json_delta_ops(previous, payload, &mut Vec::new(), &mut ops);
+    json!({
+        "format": "live-delta-v1",
+        "stream_id": stream_id,
+        "seq": seq,
+        "base_seq": seq.saturating_sub(1),
+        "kind": "delta",
+        "game_id": game_id,
+        "captured_at_ms": captured_at_ms,
+        "ops": ops
+    })
+}
+
+fn push_live_game_changed(
+    previous_fingerprint: &mut Option<String>,
+    previous_state: &mut Option<Value>,
+    stream_id: &mut Option<String>,
+    seq: &mut u64,
+    delta_enabled: bool,
+    next_fingerprint: String,
+    payload: Value,
+    events: &mut Vec<(&'static str, Value)>,
+) {
+    if previous_fingerprint.as_deref() == Some(next_fingerprint.as_str()) {
+        return;
+    }
+
+    let frame = if delta_enabled {
+        if stream_id.is_none() {
+            *stream_id = Some(Uuid::new_v4().to_string());
+            *seq = 0;
+        }
+        *seq = seq.saturating_add(1);
+        live_game_delta_frame(
+            previous_state.as_ref(),
+            &payload,
+            stream_id.as_deref().expect("live stream id initialized"),
+            *seq,
+        )
+    } else {
+        *stream_id = None;
+        *seq = 0;
+        payload.clone()
+    };
+    *previous_fingerprint = Some(next_fingerprint);
+    *previous_state = Some(payload);
+    events.push(("live_game_update", frame));
+}
+
 fn champ_select_fingerprint(value: &Value) -> String {
     let mut stable = value.clone();
     if let Some(object) = stable.as_object_mut() {
@@ -1473,14 +1644,8 @@ fn live_game_fingerprint(value: &Value, respawn_samples: &mut HashMap<String, u8
         object.remove("captured_at_ms");
         object.remove("match_created_at_ms");
 
-        // active_player is local-Agent-only data (not shared match state), and its
-        // continuously changing current_gold would otherwise force an update almost
-        // every poll. Keep it in the transmitted payload, but ignore it for dedupe.
-        object.remove("active_player");
-
         if let Some(game) = object.get_mut("game").and_then(Value::as_object_mut) {
             game.remove("time_seconds");
-            game.remove("game_time");
         }
 
         if let Some(participants) = object.get_mut("participants").and_then(Value::as_array_mut) {
@@ -1494,8 +1659,8 @@ fn live_game_fingerprint(value: &Value, respawn_samples: &mut HashMap<String, u8
 
                 // ward_score and creep_score remain in emitted payloads, but changes
                 // to either value alone are too noisy to trigger a network update.
-                // Item slot/order/metadata changes are also ignored for dedupe; only
-                // the item id + count multiset is fingerprinted.
+                // Keep slot positions meaningful so swaps emit compact item-slot ops.
+                // Item display names are ignored for dedupe; id + count per slot drive changes.
                 row.remove("ward_score");
                 row.remove("creep_score");
                 normalize_live_items(row);
@@ -1543,31 +1708,119 @@ fn normalize_live_items(participant: &mut serde_json::Map<String, Value>) {
         return;
     };
 
-    let mut normalized = items
-        .iter()
-        .map(|item| {
-            let id = item
-                .get("item_id")
-                .filter(|value| !value.is_null())
-                .or_else(|| item.get("id"))
-                .cloned()
-                .unwrap_or(Value::Null);
-            let count = item.get("count").cloned().unwrap_or_else(|| Value::from(1));
-            json!({"id": id, "count": count})
-        })
-        .collect::<Vec<_>>();
+    // Keep the seven LCU inventory slots stable (0..=6) so slot swaps trigger
+    // an item event. Ignore display-name metadata for dedupe; id + count are
+    // enough to detect meaningful inventory changes.
+    for item in items.iter_mut() {
+        let Some(record) = item.as_object() else {
+            continue;
+        };
+        let id = record.get("id").cloned().unwrap_or(Value::Null);
+        let count = record
+            .get("count")
+            .cloned()
+            .unwrap_or_else(|| Value::from(1));
+        *item = json!({"id": id, "count": count});
+    }
+}
 
-    normalized.sort_by_cached_key(|item| {
-        (
-            item.get("id")
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-            item.get("count")
-                .map(|value| value.to_string())
-                .unwrap_or_default(),
-        )
-    });
-    *items = normalized;
+fn live_items_participant_index(path: &[Value]) -> Option<usize> {
+    if path.len() != 3
+        || path[0].as_str() != Some("participants")
+        || path[2].as_str() != Some("items")
+    {
+        return None;
+    }
+    path[1]
+        .as_u64()
+        .filter(|index| *index < LIVE_GAME_PARTICIPANT_COUNT as u64)
+        .map(|index| index as usize)
+}
+
+fn live_item_identity(value: &Value) -> Option<(&Value, Option<&str>)> {
+    let row = value.as_object()?;
+    Some((row.get("id")?, row.get("name").and_then(Value::as_str)))
+}
+
+fn live_item_count(value: &Value) -> Option<i64> {
+    value.as_object()?.get("count").and_then(Value::as_i64)
+}
+
+fn push_live_item_delta_ops(
+    participant_index: usize,
+    previous: &[Value],
+    next: &[Value],
+    ops: &mut Vec<Value>,
+) -> bool {
+    if previous.len() != 7 || next.len() != 7 {
+        return false;
+    }
+
+    let mut working = previous.to_vec();
+    for slot in 0..7 {
+        if working[slot] == next[slot] {
+            continue;
+        }
+
+        // Prefer one swap/move op when the exact desired item currently lives in
+        // another slot. Swapping with null also represents a move to an empty slot.
+        if !next[slot].is_null() {
+            if let Some(source_slot) = (0..7).find(|source_slot| {
+                *source_slot != slot
+                    && working[*source_slot] == next[slot]
+                    && working[*source_slot] != next[*source_slot]
+            }) {
+                ops.push(json!(["is", participant_index, slot, source_slot]));
+                working.swap(slot, source_slot);
+                if working[slot] == next[slot] {
+                    continue;
+                }
+            }
+        }
+
+        let same_identity = match (
+            live_item_identity(&working[slot]),
+            live_item_identity(&next[slot]),
+        ) {
+            (Some((before_id, before_name)), Some((after_id, after_name))) => {
+                before_id == after_id && before_name == after_name
+            }
+            _ => false,
+        };
+        if same_identity {
+            if let (Some(before_count), Some(after_count)) = (
+                live_item_count(&working[slot]),
+                live_item_count(&next[slot]),
+            ) {
+                let delta = after_count - before_count;
+                if delta != 0 {
+                    ops.push(json!(["ic", participant_index, slot, delta]));
+                    working[slot] = next[slot].clone();
+                    continue;
+                }
+            }
+        }
+
+        if next[slot].is_null() {
+            ops.push(json!(["ir", participant_index, slot]));
+            working[slot] = Value::Null;
+            continue;
+        }
+
+        let Some(item) = next[slot].as_object() else {
+            return false;
+        };
+        let Some(id) = item.get("id") else {
+            return false;
+        };
+        let name = item.get("name").cloned().unwrap_or(Value::Null);
+        let count = item.get("count").cloned().unwrap_or_else(|| Value::from(1));
+        ops.push(json!(["ia", participant_index, slot, id, name, count]));
+        working[slot] = next[slot].clone();
+    }
+
+    debug_assert_eq!(working, next);
+    true
 }
 
 fn ready_check_payload(value: &Value) -> Value {
@@ -1924,6 +2177,23 @@ fn unix_now_ms() -> u64 {
         .as_millis() as u64
 }
 
+fn rounded_live_number(value: Option<&Value>) -> Value {
+    let Some(value) = value else {
+        return Value::Null;
+    };
+    if value.as_i64().is_some() || value.as_u64().is_some() {
+        return value.clone();
+    }
+    let Some(number) = value.as_f64() else {
+        return value.clone();
+    };
+    if !number.is_finite() {
+        return Value::Null;
+    }
+    let rounded = (number * 1_000.0).round() / 1_000.0;
+    json!(rounded)
+}
+
 fn live_game_payload_at(
     value: &Value,
     events: Option<&Value>,
@@ -1959,10 +2229,8 @@ fn live_game_payload_at(
             "map_name": game_data.get("mapName").cloned().unwrap_or(Value::Null),
             "map_number": game_data.get("mapNumber").cloned().unwrap_or(Value::Null),
             "terrain": game_data.get("mapTerrain").cloned().unwrap_or(Value::Null),
-            "time_seconds": game_data.get("gameTime").cloned().unwrap_or(Value::Null),
-            "game_time": game_data.get("gameTime").cloned().unwrap_or(Value::Null)
+            "time_seconds": rounded_live_number(game_data.get("gameTime"))
         },
-        "active_player": active_player_payload(value.get("activePlayer")),
         "participants": participants,
         "events": live_events_payload(events),
     }))
@@ -1987,6 +2255,12 @@ fn live_client_mode(value: Option<&Value>) -> &'static str {
     }
 }
 
+fn insert_non_null(target: &mut serde_json::Map<String, Value>, key: &str, value: Option<&Value>) {
+    if let Some(value) = value.filter(|value| !value.is_null()) {
+        target.insert(key.to_string(), value.clone());
+    }
+}
+
 fn live_events_payload(value: Option<&Value>) -> Vec<Value> {
     let Some(events) = value
         .and_then(|value| value.get("Events").or_else(|| value.get("events")))
@@ -2008,50 +2282,124 @@ fn live_events_payload(value: Option<&Value>) -> Vec<Value> {
                 .and_then(Value::as_array)
                 .map(|values| values.iter().filter_map(Value::as_str).collect::<Vec<_>>())
                 .unwrap_or_default();
-            Some(json!({
-                "id": event.get("EventID").or_else(|| event.get("eventId")).cloned().unwrap_or(Value::Null),
-                "name": name,
-                "time_seconds": event.get("EventTime").or_else(|| event.get("eventTime")).cloned().unwrap_or(Value::Null),
-                "killer_name": event.get("KillerName").or_else(|| event.get("killerName")).cloned().unwrap_or(Value::Null),
-                "victim_name": event.get("VictimName").or_else(|| event.get("victimName")).cloned().unwrap_or(Value::Null),
-                "killer_team": event.get("KillerTeam").or_else(|| event.get("killerTeam")).cloned().unwrap_or(Value::Null),
-                "victim_team": event.get("VictimTeam").or_else(|| event.get("victimTeam")).cloned().unwrap_or(Value::Null),
-                "team": event.get("Team").or_else(|| event.get("team")).cloned().unwrap_or(Value::Null),
-                "killer_champion": event.get("KillerChampion").or_else(|| event.get("killerChampion")).cloned().unwrap_or(Value::Null),
-                "victim_champion": event.get("VictimChampion").or_else(|| event.get("victimChampion")).cloned().unwrap_or(Value::Null),
-                "multi_kill": event.get("MultiKill").or_else(|| event.get("multiKill")).or_else(|| event.get("Multikill")).cloned().unwrap_or(Value::Null),
-                "assisters": assisters,
-                "dragon_type": event.get("DragonType").or_else(|| event.get("dragonType")).cloned().unwrap_or(Value::Null),
-                "turret_killed": event.get("TurretKilled").or_else(|| event.get("turretKilled")).cloned().unwrap_or(Value::Null),
-                "inhibitor_killed": event.get("InhibKilled").or_else(|| event.get("inhibKilled")).cloned().unwrap_or(Value::Null),
-                "monster_type": event.get("MonsterType").or_else(|| event.get("monsterType")).cloned().unwrap_or(Value::Null)
-            }))
+
+            let mut row = serde_json::Map::new();
+            insert_non_null(
+                &mut row,
+                "id",
+                event.get("EventID").or_else(|| event.get("eventId")),
+            );
+            row.insert("name".into(), Value::String(name.to_string()));
+            let time_seconds =
+                rounded_live_number(event.get("EventTime").or_else(|| event.get("eventTime")));
+            if !time_seconds.is_null() {
+                row.insert("time_seconds".into(), time_seconds);
+            }
+            insert_non_null(
+                &mut row,
+                "killer_name",
+                event.get("KillerName").or_else(|| event.get("killerName")),
+            );
+            insert_non_null(
+                &mut row,
+                "victim_name",
+                event.get("VictimName").or_else(|| event.get("victimName")),
+            );
+            insert_non_null(
+                &mut row,
+                "killer_team",
+                event.get("KillerTeam").or_else(|| event.get("killerTeam")),
+            );
+            insert_non_null(
+                &mut row,
+                "victim_team",
+                event.get("VictimTeam").or_else(|| event.get("victimTeam")),
+            );
+            insert_non_null(
+                &mut row,
+                "team",
+                event.get("Team").or_else(|| event.get("team")),
+            );
+            insert_non_null(
+                &mut row,
+                "killer_champion",
+                event
+                    .get("KillerChampion")
+                    .or_else(|| event.get("killerChampion")),
+            );
+            insert_non_null(
+                &mut row,
+                "victim_champion",
+                event
+                    .get("VictimChampion")
+                    .or_else(|| event.get("victimChampion")),
+            );
+            insert_non_null(
+                &mut row,
+                "multi_kill",
+                event
+                    .get("MultiKill")
+                    .or_else(|| event.get("multiKill"))
+                    .or_else(|| event.get("Multikill")),
+            );
+            if !assisters.is_empty() {
+                row.insert("assisters".into(), json!(assisters));
+            }
+            insert_non_null(
+                &mut row,
+                "dragon_type",
+                event.get("DragonType").or_else(|| event.get("dragonType")),
+            );
+            insert_non_null(
+                &mut row,
+                "turret_killed",
+                event
+                    .get("TurretKilled")
+                    .or_else(|| event.get("turretKilled")),
+            );
+            insert_non_null(
+                &mut row,
+                "inhibitor_killed",
+                event
+                    .get("InhibKilled")
+                    .or_else(|| event.get("inhibKilled")),
+            );
+            insert_non_null(
+                &mut row,
+                "monster_type",
+                event
+                    .get("MonsterType")
+                    .or_else(|| event.get("monsterType")),
+            );
+            Some(Value::Object(row))
         })
         .collect()
 }
 
 fn live_player_payload(player: &Value) -> Value {
     let scores = player.get("scores");
-    let items = player
-        .get("items")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .take(7)
-        .map(|item| {
-            json!({
+    let mut items = vec![Value::Null; 7];
+    if let Some(raw_items) = player.get("items").and_then(Value::as_array) {
+        for item in raw_items {
+            let Some(slot) = item
+                .get("slot")
+                .and_then(Value::as_u64)
+                .filter(|slot| *slot <= 6)
+                .map(|slot| slot as usize)
+            else {
+                continue;
+            };
+            items[slot] = json!({
                 "id": item.get("itemID").or_else(|| item.get("id")).cloned().unwrap_or(Value::Null),
-                "item_id": item.get("itemID").or_else(|| item.get("id")).cloned().unwrap_or(Value::Null),
-                "name": item.get("displayName").or_else(|| item.get("name")).cloned().unwrap_or(Value::Null),
-                "display_name": item.get("displayName").or_else(|| item.get("name")).cloned().unwrap_or(Value::Null),
-                "count": item.get("count").cloned().unwrap_or(Value::from(1)),
-                "can_use": item.get("canUse").cloned().unwrap_or(Value::Null),
-                "consumable": item.get("consumable").cloned().unwrap_or(Value::Null),
-                "price": item.get("price").cloned().unwrap_or(Value::Null),
-                "slot": item.get("slot").cloned().unwrap_or(Value::Null)
-            })
-        })
-        .collect::<Vec<_>>();
+                "name": item
+                    .get("displayName")
+                    .or_else(|| item.get("name"))
+                    .cloned()
+                    .unwrap_or_else(|| Value::String(String::new())),
+                "count": item.get("count").cloned().unwrap_or(Value::from(1))
+            });
+        }
+    }
     json!({
         "summoner_name": player.get("summonerName").cloned().unwrap_or(Value::Null),
         "riot_id": player.get("riotId").or_else(|| player.get("riot_id")).cloned().unwrap_or(Value::Null),
@@ -2063,38 +2411,21 @@ fn live_player_payload(player: &Value) -> Value {
         "position": player.get("position").cloned().unwrap_or(Value::Null),
         "is_bot": player.get("isBot").cloned().unwrap_or(Value::Bool(false)),
         "is_dead": player.get("isDead").cloned().unwrap_or(Value::Bool(false)),
-        "respawn_timer": player.get("respawnTimer").cloned().unwrap_or(Value::Null),
+        "respawn_timer": rounded_live_number(player.get("respawnTimer")),
         "level": player.get("level").cloned().unwrap_or(Value::Null),
         "skin_id": player.get("skinID").cloned().unwrap_or(Value::Null),
-        "gold": player.get("gold").or_else(|| player.get("currentGold")).cloned().unwrap_or(Value::Null),
+        "gold": rounded_live_number(player.get("gold").or_else(|| player.get("currentGold"))),
         "kills": scores.and_then(|value| value.get("kills")).cloned().unwrap_or(Value::from(0)),
         "deaths": scores.and_then(|value| value.get("deaths")).cloned().unwrap_or(Value::from(0)),
         "assists": scores.and_then(|value| value.get("assists")).cloned().unwrap_or(Value::from(0)),
-        "creep_score": scores.and_then(|value| value.get("creepScore")).cloned().unwrap_or(Value::from(0)),
-        "ward_score": scores.and_then(|value| value.get("wardScore")).cloned().unwrap_or(Value::from(0)),
+        "creep_score": scores
+            .map(|value| rounded_live_number(value.get("creepScore")))
+            .unwrap_or(Value::from(0)),
+        "ward_score": scores
+            .map(|value| rounded_live_number(value.get("wardScore")))
+            .unwrap_or(Value::from(0)),
         "runes": player.get("runes").cloned().unwrap_or(Value::Null),
         "items": items,
-        "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null)
-    })
-}
-
-fn active_player_payload(value: Option<&Value>) -> Value {
-    let Some(player) = value else {
-        return Value::Null;
-    };
-    let scores = player.get("scores");
-    json!({
-        "summoner_name": player.get("summonerName").cloned().unwrap_or(Value::Null),
-        "riot_id": player.get("riotId").or_else(|| player.get("riot_id")).cloned().unwrap_or(Value::Null),
-        "riot_id_game_name": player.get("riotIdGameName").or_else(|| player.get("gameName")).cloned().unwrap_or(Value::Null),
-        "riot_id_tag_line": player.get("riotIdTagLine").or_else(|| player.get("tagLine")).cloned().unwrap_or(Value::Null),
-        "level": player.get("level").cloned().unwrap_or(Value::Null),
-        "current_gold": player.get("currentGold").cloned().unwrap_or(Value::Null),
-        "kills": scores.and_then(|value| value.get("kills")).cloned().unwrap_or(Value::from(0)),
-        "deaths": scores.and_then(|value| value.get("deaths")).cloned().unwrap_or(Value::from(0)),
-        "assists": scores.and_then(|value| value.get("assists")).cloned().unwrap_or(Value::from(0)),
-        "creep_score": scores.and_then(|value| value.get("creepScore")).cloned().unwrap_or(Value::from(0)),
-        "ward_score": scores.and_then(|value| value.get("wardScore")).cloned().unwrap_or(Value::from(0)),
         "summoner_spells": player.get("summonerSpells").cloned().unwrap_or(Value::Null)
     })
 }
@@ -2460,14 +2791,18 @@ mod tests {
     #[test]
     fn live_game_payload_includes_participant_kda_and_items_without_raw_objects() {
         let payload = live_game_payload_at(&json!({
-            "gameData": {"gameId": 42, "gameMode": "CLASSIC", "gameTime": 120.5, "futureSecret": "do-not-forward"},
+            "gameData": {"gameId": 42, "gameMode": "CLASSIC", "gameTime": 120.123456789, "futureSecret": "do-not-forward"},
             "activePlayer": {"summonerName": "Me", "scores": {"kills": 2, "deaths": 1, "assists": 3}, "futureSecret": "do-not-forward"},
             "allPlayers": [{
                 "summonerName": "Me", "riotId": "Me#KR1", "riotIdGameName": "Me", "riotIdTagLine": "KR1",
                 "championName": "Ahri", "rawChampionName": "game_character_displayname_Ahri", "team": "ORDER",
-                "position": "MIDDLE", "respawnTimer": 0.0, "skinID": 123, "runes": {"keystone": {"id": 8112}},
-                "scores": {"kills": 2, "deaths": 1, "assists": 3, "creepScore": 80},
-                "items": [{"itemID": 1056, "displayName": "Doran's Ring", "count": 1, "slot": 0, "canUse": true, "futureSecret": "do-not-forward"}],
+                "position": "MIDDLE", "respawnTimer": 12.3456789, "skinID": 123, "runes": {"keystone": {"id": 8112}},
+                "currentGold": 1525.69970703125,
+                "scores": {"kills": 2, "deaths": 1, "assists": 3, "creepScore": 80.123456, "wardScore": 0.3717992901802063},
+                "items": [
+                    {"itemID": 1056, "displayName": "Doran's Ring", "count": 1, "slot": 0, "canUse": true, "futureSecret": "do-not-forward"},
+                    {"itemID": 3340, "displayName": "Warding Totem", "count": 1, "slot": 6}
+                ],
                 "futureSecret": "do-not-forward"
             },
             {"summonerName":"P2"},{"summonerName":"P3"},{"summonerName":"P4"},{"summonerName":"P5"},
@@ -2477,14 +2812,45 @@ mod tests {
         assert_eq!(payload["client_mode"], "player");
         assert_eq!(payload["game"]["id"], 42);
         assert_eq!(payload["captured_at_ms"], 1_000_000);
-        assert_eq!(payload["match_created_at_ms"], 879_500);
+        assert_eq!(payload["match_created_at_ms"], 879_877);
+        assert_eq!(payload["game"]["time_seconds"], 120.123);
+        assert!(payload["game"].get("game_time").is_none());
+        assert_eq!(payload["participants"][0]["respawn_timer"], 12.346);
+        assert_eq!(payload["participants"][0]["gold"], 1525.7);
+        assert_eq!(payload["participants"][0]["creep_score"], 80.123);
+        assert_eq!(payload["participants"][0]["ward_score"], 0.372);
         assert_eq!(payload["participants"][0]["kills"], 2);
         assert_eq!(payload["participants"][0]["deaths"], 1);
         assert_eq!(payload["participants"][0]["assists"], 3);
+        assert_eq!(
+            payload["participants"][0]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7
+        );
         assert_eq!(payload["participants"][0]["items"][0]["id"], 1056);
+        assert_eq!(
+            payload["participants"][0]["items"][0]["name"],
+            "Doran's Ring"
+        );
+        assert_eq!(payload["participants"][0]["items"][0]["count"], 1);
+        assert_eq!(
+            payload["participants"][0]["items"][0]
+                .as_object()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert!(payload["participants"][0]["items"][1].is_null());
+        assert_eq!(payload["participants"][0]["items"][6]["id"], 3340);
+        assert_eq!(
+            payload["participants"][0]["items"][6]["name"],
+            "Warding Totem"
+        );
+        assert_eq!(payload["participants"][0]["items"][6]["count"], 1);
         assert_eq!(payload["participants"][0]["riot_id"], "Me#KR1");
         assert_eq!(payload["participants"][0]["position"], "MIDDLE");
-        assert_eq!(payload["participants"][0]["items"][0]["slot"], 0);
         assert!(payload["game"].get("raw").is_none());
         assert!(payload["participants"][0].get("raw").is_none());
         assert!(payload["participants"][0]["items"][0].get("raw").is_none());
@@ -2504,16 +2870,19 @@ mod tests {
             }),
             Some(&json!({"Events": [
                 {"EventID": 1, "EventName": "ChampionKill", "EventTime": 61.2, "KillerName": "Me", "VictimName": "Enemy", "MultiKill": 2, "Assisters": ["Ally"], "futureSecret": "do-not-forward"},
-                {"EventID": 2, "EventName": "DragonKill", "EventTime": 90.0, "DragonType": "EarthDragon"}
+                {"EventID": 2, "EventName": "DragonKill", "EventTime": 90.123456789, "DragonType": "EarthDragon"}
             ]})),
         )
         .unwrap();
         assert_eq!(payload["events"][0]["killer_name"], "Me");
         assert_eq!(payload["events"][0]["victim_name"], "Enemy");
         assert_eq!(payload["events"][0]["multi_kill"], 2);
+        assert!(payload["events"][0].get("team").is_none());
+        assert!(payload["events"][0].get("dragon_type").is_none());
         assert!(payload["events"][0].get("raw").is_none());
         assert!(payload["events"][0].get("futureSecret").is_none());
         assert_eq!(payload["events"][1]["dragon_type"], "EarthDragon");
+        assert_eq!(payload["events"][1]["time_seconds"], 90.123);
     }
 
     #[test]
@@ -2600,7 +2969,7 @@ mod tests {
     }
 
     #[test]
-    fn spectator_live_game_payload_does_not_require_active_player() {
+    fn spectator_live_game_payload_omits_active_player() {
         let payload = live_game_payload(
             &json!({
                 "gameData": {"gameId": 84, "gameMode": "CLASSIC", "gameTime": 300.0},
@@ -2617,7 +2986,7 @@ mod tests {
 
         assert_eq!(payload["client_mode"], "spectator");
         assert_eq!(payload["game"]["id"], 84);
-        assert!(payload["active_player"].is_null());
+        assert!(payload.get("active_player").is_none());
         assert_eq!(payload["participants"].as_array().unwrap().len(), 10);
     }
 
@@ -2634,18 +3003,111 @@ mod tests {
     }
 
     #[test]
+    fn live_game_delta_frame_uses_full_base_then_only_changed_paths() {
+        let stream = "123e4567-e89b-42d3-a456-426614174000";
+        let first = json!({
+            "captured_at_ms": 1_000,
+            "game": {"id": 42, "time_seconds": 10.0},
+            "participants": [{"kills": 0, "items": []}],
+            "events": [{"id": 1}]
+        });
+        let full = live_game_delta_frame(None, &first, stream, 1);
+        assert_eq!(full["format"], "live-delta-v1");
+        assert_eq!(full["stream_id"], stream);
+        assert_eq!(full["seq"], 1);
+        assert_eq!(full["base_seq"], 0);
+        assert_eq!(full["kind"], "full");
+        assert_eq!(full["state"], first);
+
+        let second = json!({
+            "captured_at_ms": 2_000,
+            "game": {"id": 42, "time_seconds": 11.0},
+            "participants": [{"kills": 1, "items": [{"id": 2003, "count": 1}]}],
+            "events": [{"id": 1}, {"id": 2}]
+        });
+        let delta = live_game_delta_frame(Some(&first), &second, stream, 2);
+        assert_eq!(delta["seq"], 2);
+        assert_eq!(delta["base_seq"], 1);
+        assert_eq!(delta["kind"], "delta");
+        let ops = delta["ops"].as_array().unwrap();
+        assert!(ops
+            .iter()
+            .any(|op| op == &json!(["s", ["participants", 0, "kills"], 1])));
+        assert!(ops.iter().any(|op| {
+            op == &json!(["a", ["participants", 0, "items"], [{"id": 2003, "count": 1}]])
+        }));
+        assert!(ops
+            .iter()
+            .any(|op| op == &json!(["a", ["events"], [{"id": 2}]])));
+    }
+
+    #[test]
+    fn live_game_delta_frame_uses_zero_based_item_slot_events() {
+        let empty = || vec![Value::Null; 7];
+        let item = |id, name: &str, count| json!({"id": id, "name": name, "count": count});
+
+        let mut previous_participants = Vec::new();
+        let mut next_participants = Vec::new();
+
+        let p0_before = empty();
+        let mut p0_after = empty();
+        p0_after[1] = item(2003, "Health Potion", 2);
+        previous_participants.push(json!({"items": p0_before}));
+        next_participants.push(json!({"items": p0_after}));
+
+        let mut p1_before = empty();
+        p1_before[2] = item(2003, "Health Potion", 2);
+        let mut p1_after = p1_before.clone();
+        p1_after[2] = item(2003, "Health Potion", 1);
+        previous_participants.push(json!({"items": p1_before}));
+        next_participants.push(json!({"items": p1_after}));
+
+        let mut p2_before = empty();
+        p2_before[0] = item(1056, "Doran's Ring", 1);
+        p2_before[3] = item(1001, "Boots", 1);
+        let mut p2_after = p2_before.clone();
+        p2_after.swap(0, 3);
+        previous_participants.push(json!({"items": p2_before}));
+        next_participants.push(json!({"items": p2_after}));
+
+        let mut p3_before = empty();
+        p3_before[5] = item(2055, "Control Ward", 1);
+        let p3_after = empty();
+        previous_participants.push(json!({"items": p3_before}));
+        next_participants.push(json!({"items": p3_after}));
+
+        let previous = json!({"game": {"id": 42}, "participants": previous_participants});
+        let next = json!({"game": {"id": 42}, "participants": next_participants});
+        let frame = live_game_delta_frame(
+            Some(&previous),
+            &next,
+            "123e4567-e89b-42d3-a456-426614174000",
+            2,
+        );
+        let ops = frame["ops"].as_array().unwrap();
+
+        assert!(ops.contains(&json!(["ia", 0, 1, 2003, "Health Potion", 2])));
+        assert!(ops.contains(&json!(["ic", 1, 2, -1])));
+        assert!(ops.contains(&json!(["is", 2, 0, 3])));
+        assert!(ops.contains(&json!(["ir", 3, 5])));
+        assert!(ops
+            .iter()
+            .all(|op| { op.get(1) != Some(&json!(["participants", 0, "items"])) }));
+    }
+
+    #[test]
     fn live_game_fingerprint_ignores_only_advancing_clock_fields() {
         let first = json!({
             "captured_at_ms": 1_000,
             "match_created_at_ms": 500,
-            "game": {"id": 42, "time_seconds": 500.1, "game_time": 500.1},
+            "game": {"id": 42, "time_seconds": 500.1},
             "participants": [{"kills": 1, "deaths": 0, "assists": 2, "gold": 4200}],
             "events": [{"id": 7, "name": "ChampionKill", "time_seconds": 499.9}]
         });
         let second = json!({
             "captured_at_ms": 2_000,
             "match_created_at_ms": 501,
-            "game": {"id": 42, "time_seconds": 501.1, "game_time": 501.1},
+            "game": {"id": 42, "time_seconds": 501.1},
             "participants": [{"kills": 1, "deaths": 0, "assists": 2, "gold": 4200}],
             "events": [{"id": 7, "name": "ChampionKill", "time_seconds": 499.9}]
         });
@@ -2684,25 +3146,6 @@ mod tests {
             live_game_fingerprint(&event_changed, &mut HashMap::new())
         );
     }
-    #[test]
-    fn live_game_fingerprint_ignores_active_player_changes() {
-        let mut samples = HashMap::new();
-        let first = json!({
-            "game": {"id": 42},
-            "active_player": {"current_gold": 100.0, "level": 5},
-            "participants": []
-        });
-        let second = json!({
-            "game": {"id": 42},
-            "active_player": {"current_gold": 123.4, "level": 6},
-            "participants": []
-        });
-        assert_eq!(
-            live_game_fingerprint(&first, &mut samples),
-            live_game_fingerprint(&second, &mut samples)
-        );
-    }
-
     #[test]
     fn live_game_fingerprint_ignores_ward_score_changes() {
         let first = json!({

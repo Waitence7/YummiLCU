@@ -26,6 +26,9 @@ pub(crate) async fn save_config(
         state
             .record_flight("config_error", format!("validation_failed: {summary}"))
             .await;
+        state
+            .report_diagnostic("command", "config_validation_failed", &summary)
+            .await;
         state.log(&app, format!("설정 검증 실패: {summary}")).await;
         return Err(summary);
     }
@@ -36,6 +39,9 @@ pub(crate) async fn save_config(
                 "windows_startup",
                 format!("registration_failed_during_save: {summary}"),
             )
+            .await;
+        state
+            .report_diagnostic("command", "config_startup_registration_failed", &summary)
             .await;
         state
             .log(
@@ -56,6 +62,9 @@ pub(crate) async fn save_config(
         let summary = error.to_string();
         state
             .record_flight("config_error", format!("save_failed: {summary}"))
+            .await;
+        state
+            .report_diagnostic("command", "config_save_failed", &summary)
             .await;
         state.log(&app, format!("설정 파일 저장 실패: {summary}")).await;
         state
