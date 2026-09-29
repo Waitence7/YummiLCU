@@ -70,6 +70,9 @@ pub(crate) struct LcuEventPoller {
     eog_attempt_count: u32,
     eog_expected_game_id: Option<String>,
     rofl_match_hint: Option<RoflMatchHint>,
+    rofl_preflight_requested_game_id: Option<String>,
+    rofl_preflight_resolved_game_id: Option<String>,
+    rofl_upload_authorized_game_id: Option<String>,
     rofl_sent_game_id: Option<String>,
     rofl_file_ready_game_id: Option<String>,
     rofl_recovery_started_at: Option<Instant>,
@@ -106,6 +109,9 @@ impl LcuEventPoller {
         self.eog_attempt_count = 0;
         self.eog_expected_game_id = None;
         self.rofl_match_hint = None;
+        self.rofl_preflight_requested_game_id = None;
+        self.rofl_preflight_resolved_game_id = None;
+        self.rofl_upload_authorized_game_id = None;
         self.rofl_sent_game_id = None;
         self.rofl_file_ready_game_id = None;
         self.rofl_recovery_started_at = None;
@@ -199,6 +205,56 @@ impl LcuEventPoller {
         if self.live_game_delta_enabled != enabled {
             self.live_game_delta_enabled = enabled;
             self.force_live_game_resync();
+        }
+    }
+
+    pub(crate) fn set_rofl_upload_decision(&mut self, game_id: &str, needed: bool) {
+        let current_game_id = self
+            .rofl_match_hint
+            .as_ref()
+            .map(|hint| hint.game_id.as_str());
+        if current_game_id != Some(game_id) {
+            self.diagnostic(format!(
+                "ROFL 선확인 결과 무시 — 현재 게임과 불일치: game_id={game_id} current={}",
+                current_game_id.unwrap_or("none")
+            ));
+            return;
+        }
+
+        self.rofl_preflight_resolved_game_id = Some(game_id.to_owned());
+        if needed {
+            self.rofl_upload_authorized_game_id = Some(game_id.to_owned());
+            self.diagnostic(format!(
+                "ROFL 업로드 필요 확인 완료 — 다운로드 허용: game_id={game_id}"
+            ));
+            return;
+        }
+
+        self.rofl_match_hint = None;
+        self.rofl_preflight_requested_game_id = None;
+        self.rofl_upload_authorized_game_id = None;
+        self.rofl_file_ready_game_id = None;
+        self.rofl_recovery_started_at = None;
+        self.last_rofl_attempt = None;
+        self.rofl_attempt_count = 0;
+        self.rofl_download_requested_game_id = None;
+        self.rofl_auto_download_owned_game_id = None;
+        self.diagnostic(format!(
+            "ROFL 업로드 불필요 확인 완료 — 다운로드 생략: game_id={game_id}"
+        ));
+    }
+
+    pub(crate) fn retry_rofl_upload_check(&mut self, game_id: &str) {
+        if self
+            .rofl_match_hint
+            .as_ref()
+            .is_some_and(|hint| hint.game_id == game_id)
+            && self.rofl_upload_authorized_game_id.as_deref() != Some(game_id)
+        {
+            self.rofl_preflight_requested_game_id = None;
+            self.diagnostic(format!(
+                "ROFL 업로드 필요 여부 재확인 예약: game_id={game_id}"
+            ));
         }
     }
 
@@ -535,6 +591,9 @@ impl LcuEventPoller {
             self.eog_attempt_count = 0;
             self.eog_expected_game_id = None;
             self.rofl_match_hint = None;
+            self.rofl_preflight_requested_game_id = None;
+            self.rofl_preflight_resolved_game_id = None;
+            self.rofl_upload_authorized_game_id = None;
             self.rofl_sent_game_id = None;
             self.rofl_file_ready_game_id = None;
             self.rofl_recovery_started_at = None;
@@ -580,17 +639,19 @@ impl LcuEventPoller {
             if self.eog_expected_game_id.is_none() {
                 self.eog_expected_game_id = json_scalar_id(payload.get("gameId"));
             }
-            // Replay download does not depend on EOG stats becoming complete. The
+            // ROFL target discovery does not depend on EOG stats becoming complete. The
             // gameflow session usually exposes gameId before eog-stats-block is
-            // populated, so seed ROFL recovery as soon as that id is trustworthy
-            // and run result recovery + replay recovery in parallel.
+            // populated, so start the server preflight as soon as that id is trustworthy.
+            // The actual replay download remains blocked until the server authorizes it.
             if let Some(game_id) =
                 json_scalar_id(payload.get("gameId")).or_else(|| self.eog_expected_game_id.clone())
             {
-                let is_new_replay = self
-                    .rofl_match_hint
-                    .as_ref()
-                    .is_none_or(|hint| hint.game_id != game_id);
+                let is_new_replay = self.rofl_preflight_resolved_game_id.as_deref()
+                    != Some(game_id.as_str())
+                    && self
+                        .rofl_match_hint
+                        .as_ref()
+                        .is_none_or(|hint| hint.game_id != game_id);
                 if is_new_replay {
                     let mut hint = RoflMatchHint::from_eog(game_id.clone(), &payload);
                     if let Ok(path_value) = client
@@ -602,13 +663,18 @@ impl LcuEventPoller {
                         }
                     }
                     self.rofl_match_hint = Some(hint);
+                    self.rofl_preflight_requested_game_id = None;
+                    self.rofl_preflight_resolved_game_id = None;
+                    self.rofl_upload_authorized_game_id = None;
                     self.rofl_recovery_started_at = Some(Instant::now());
                     self.last_rofl_attempt = None;
                     self.rofl_attempt_count = 0;
                     self.rofl_download_requested_game_id = None;
                     self.rofl_auto_download_owned_game_id = None;
                     self.rofl_file_ready_game_id = None;
-                    self.diagnostic(format!("ROFL 자동 다운로드 대기 시작: game_id={game_id}"));
+                    self.diagnostic(format!(
+                        "ROFL 서버 필요 여부 확인 대기 시작: game_id={game_id}"
+                    ));
                 }
             }
             let evidence_source = eog_result_evidence_source(&payload);
@@ -697,64 +763,81 @@ impl LcuEventPoller {
 
         if let Some(hint) = self.rofl_match_hint.clone() {
             if self.rofl_sent_game_id.as_deref() != Some(hint.game_id.as_str()) {
-                if self.rofl_download_requested_game_id.as_deref() != Some(hint.game_id.as_str()) {
-                    let precheck_hint = hint.clone();
-                    let preexisting = timeout(
-                        ROFL_PARSE_TIMEOUT,
-                        tokio::task::spawn_blocking(move || {
-                            find_existing_replay_path(&precheck_hint)
-                        }),
-                    )
-                    .await;
+                if self.rofl_upload_authorized_game_id.as_deref() != Some(hint.game_id.as_str()) {
+                    if self.rofl_preflight_requested_game_id.as_deref()
+                        != Some(hint.game_id.as_str())
+                    {
+                        self.rofl_preflight_requested_game_id = Some(hint.game_id.clone());
+                        events.push((
+                            "match_rofl_candidate",
+                            json!({"gameId": hint.game_id.clone()}),
+                        ));
+                        self.diagnostic(format!(
+                            "ROFL 서버 필요 여부 확인 요청: game_id={}",
+                            hint.game_id
+                        ));
+                    }
+                } else {
+                    if self.rofl_download_requested_game_id.as_deref()
+                        != Some(hint.game_id.as_str())
+                    {
+                        let precheck_hint = hint.clone();
+                        let preexisting = timeout(
+                            ROFL_PARSE_TIMEOUT,
+                            tokio::task::spawn_blocking(move || {
+                                find_existing_replay_path(&precheck_hint)
+                            }),
+                        )
+                        .await;
 
-                    let mut safe_auto_delete = false;
-                    let should_request_download = match preexisting {
-                        Ok(Ok(Ok(Some(path)))) => {
-                            self.rofl_download_requested_game_id = Some(hint.game_id.clone());
-                            self.rofl_auto_download_owned_game_id = None;
-                            self.diagnostic(format!(
+                        let mut safe_auto_delete = false;
+                        let should_request_download = match preexisting {
+                            Ok(Ok(Ok(Some(path)))) => {
+                                self.rofl_download_requested_game_id = Some(hint.game_id.clone());
+                                self.rofl_auto_download_owned_game_id = None;
+                                self.diagnostic(format!(
                                 "기존 ROFL 감지 — 사용자 파일 보호, 자동 다운로드/삭제 생략: game_id={} file={}",
                                 hint.game_id,
                                 path.file_name()
                                     .and_then(|value| value.to_str())
                                     .unwrap_or("replay.rofl")
                             ));
-                            false
-                        }
-                        Ok(Ok(Ok(None))) => {
-                            safe_auto_delete = true;
-                            true
-                        }
-                        Ok(Ok(Err(error))) => {
-                            self.diagnostic(format!(
+                                false
+                            }
+                            Ok(Ok(Ok(None))) => {
+                                safe_auto_delete = true;
+                                true
+                            }
+                            Ok(Ok(Err(error))) => {
+                                self.diagnostic(format!(
                                 "ROFL 기존 파일 확인 실패 — 자동 삭제 비활성 상태로 다운로드 계속: game_id={} error={error}",
                                 hint.game_id
                             ));
-                            true
-                        }
-                        Ok(Err(error)) => {
-                            self.diagnostic(format!(
+                                true
+                            }
+                            Ok(Err(error)) => {
+                                self.diagnostic(format!(
                                 "ROFL 기존 파일 확인 worker 실패 — 자동 삭제 비활성 상태로 다운로드 계속: game_id={} error={error}",
                                 hint.game_id
                             ));
-                            true
-                        }
-                        Err(_) => {
-                            self.diagnostic(format!(
+                                true
+                            }
+                            Err(_) => {
+                                self.diagnostic(format!(
                                 "ROFL 기존 파일 확인 시간 초과 — 자동 삭제 비활성 상태로 다운로드 계속: game_id={}",
                                 hint.game_id
                             ));
-                            true
-                        }
-                    };
+                                true
+                            }
+                        };
 
-                    if should_request_download {
-                        let endpoint =
-                            format!("/lol-replays/v1/rofls/{}/download/graceful", hint.game_id);
-                        let context_data = json!({
-                            "componentType": ROFL_DOWNLOAD_COMPONENT_TYPE,
-                        });
-                        match client
+                        if should_request_download {
+                            let endpoint =
+                                format!("/lol-replays/v1/rofls/{}/download/graceful", hint.game_id);
+                            let context_data = json!({
+                                "componentType": ROFL_DOWNLOAD_COMPONENT_TYPE,
+                            });
+                            match client
                             .request(Method::POST, &endpoint, Some(context_data))
                             .await
                         {
@@ -773,91 +856,93 @@ impl LcuEventPoller {
                                 hint.game_id
                             )),
                         }
+                        }
                     }
-                }
 
-                let should_attempt_rofl = self
-                    .last_rofl_attempt
-                    .is_none_or(|last| last.elapsed() >= ROFL_RECOVERY_RETRY_INTERVAL);
-                if should_attempt_rofl {
-                    self.last_rofl_attempt = Some(Instant::now());
-                    self.rofl_attempt_count = self.rofl_attempt_count.saturating_add(1);
-                    let attempt = self.rofl_attempt_count;
-                    let game_id = hint.game_id.clone();
+                    let should_attempt_rofl = self
+                        .last_rofl_attempt
+                        .is_none_or(|last| last.elapsed() >= ROFL_RECOVERY_RETRY_INTERVAL);
+                    if should_attempt_rofl {
+                        self.last_rofl_attempt = Some(Instant::now());
+                        self.rofl_attempt_count = self.rofl_attempt_count.saturating_add(1);
+                        let attempt = self.rofl_attempt_count;
+                        let game_id = hint.game_id.clone();
 
-                    if self.rofl_file_ready_game_id.as_deref() != Some(game_id.as_str()) {
-                        let worker_hint = hint.clone();
-                        let discovered = timeout(
-                            ROFL_PARSE_TIMEOUT,
-                            tokio::task::spawn_blocking(move || collect_replay_file(&worker_hint)),
-                        )
-                        .await;
-                        match discovered {
-                            Ok(Ok(Ok(Some(file)))) => {
-                                let file_name = file
-                                    .path
-                                    .file_name()
-                                    .and_then(|value| value.to_str())
-                                    .unwrap_or("replay.rofl")
-                                    .to_owned();
-                                let file_path = file.path.to_string_lossy().into_owned();
-                                let delete_after_upload =
-                                    self.rofl_auto_download_owned_game_id.as_deref()
-                                        == Some(game_id.as_str())
-                                        && file.modified_at_ms.is_some();
-                                events.push((
-                                    "match_rofl_file_ready",
-                                    json!({
-                                        "gameId": game_id,
-                                        "path": file_path,
-                                        "fileName": file_name,
-                                        "fileSize": file.size,
-                                        "fileModifiedAtMs": file.modified_at_ms,
-                                        "deleteAfterUpload": delete_after_upload,
-                                    }),
-                                ));
-                                self.rofl_file_ready_game_id = Some(game_id.clone());
-                                self.diagnostic(format!(
+                        if self.rofl_file_ready_game_id.as_deref() != Some(game_id.as_str()) {
+                            let worker_hint = hint.clone();
+                            let discovered = timeout(
+                                ROFL_PARSE_TIMEOUT,
+                                tokio::task::spawn_blocking(move || {
+                                    collect_replay_file(&worker_hint)
+                                }),
+                            )
+                            .await;
+                            match discovered {
+                                Ok(Ok(Ok(Some(file)))) => {
+                                    let file_name = file
+                                        .path
+                                        .file_name()
+                                        .and_then(|value| value.to_str())
+                                        .unwrap_or("replay.rofl")
+                                        .to_owned();
+                                    let file_path = file.path.to_string_lossy().into_owned();
+                                    let delete_after_upload =
+                                        self.rofl_auto_download_owned_game_id.as_deref()
+                                            == Some(game_id.as_str())
+                                            && file.modified_at_ms.is_some();
+                                    events.push((
+                                        "match_rofl_file_ready",
+                                        json!({
+                                            "gameId": game_id,
+                                            "path": file_path,
+                                            "fileName": file_name,
+                                            "fileSize": file.size,
+                                            "fileModifiedAtMs": file.modified_at_ms,
+                                            "deleteAfterUpload": delete_after_upload,
+                                        }),
+                                    ));
+                                    self.rofl_file_ready_game_id = Some(game_id.clone());
+                                    self.diagnostic(format!(
                                     "ROFL 원본 준비 완료, 웹 업로드 시작: game_id={game_id} file_bytes={} attempts={attempt}",
                                     file.size
                                 ));
-                            }
-                            Ok(Ok(Ok(None))) => {
-                                if attempt == 1 || attempt % 4 == 0 {
-                                    self.diagnostic(format!(
+                                }
+                                Ok(Ok(Ok(None))) => {
+                                    if attempt == 1 || attempt % 4 == 0 {
+                                        self.diagnostic(format!(
                                         "ROFL 다운로드 파일 대기 중: game_id={game_id} attempt={attempt}"
                                     ));
+                                    }
                                 }
-                            }
-                            Ok(Ok(Err(error))) => {
-                                self.diagnostic(format!(
+                                Ok(Ok(Err(error))) => {
+                                    self.diagnostic(format!(
                                     "ROFL 파일 아직 준비되지 않음: game_id={game_id} attempt={attempt} error={error}"
                                 ));
-                            }
-                            Ok(Err(error)) => {
-                                self.diagnostic(format!(
+                                }
+                                Ok(Err(error)) => {
+                                    self.diagnostic(format!(
                                     "ROFL 파일 탐색 worker 실패: game_id={game_id} attempt={attempt} error={error}"
                                 ));
-                            }
-                            Err(_) => {
-                                self.diagnostic(format!(
+                                }
+                                Err(_) => {
+                                    self.diagnostic(format!(
                                     "ROFL 파일 탐색 시간 초과: game_id={game_id} attempt={attempt}"
                                 ));
+                                }
                             }
-                        }
-                    } else {
-                        // The original file has already been handed to the upload task.
-                        // Agent-side semantic extraction is intentionally secondary so it
-                        // cannot delay the browser's richer ROFL analysis pipeline.
-                        let worker_hint = hint.clone();
-                        let parsed = timeout(
-                            ROFL_PARSE_TIMEOUT,
-                            tokio::task::spawn_blocking(move || {
-                                collect_replay_bundle(&worker_hint)
-                            }),
-                        )
-                        .await;
-                        match parsed {
+                        } else {
+                            // The original file has already been handed to the upload task.
+                            // Agent-side semantic extraction is intentionally secondary so it
+                            // cannot delay the browser's richer ROFL analysis pipeline.
+                            let worker_hint = hint.clone();
+                            let parsed = timeout(
+                                ROFL_PARSE_TIMEOUT,
+                                tokio::task::spawn_blocking(move || {
+                                    collect_replay_bundle(&worker_hint)
+                                }),
+                            )
+                            .await;
+                            match parsed {
                             Ok(Ok(Ok(Some(bundle)))) if !bundle.events.is_empty() => {
                                 let event_count = bundle.events.len();
                                 for payload in bundle.events {
@@ -884,6 +969,7 @@ impl LcuEventPoller {
                                 "ROFL Agent 부가 분석 시간 초과: game_id={game_id} attempt={attempt}"
                             )),
                         }
+                        }
                     }
                 }
 
@@ -899,6 +985,8 @@ impl LcuEventPoller {
                         ROFL_POSTGAME_RECOVERY_GRACE.as_secs()
                     ));
                     self.rofl_match_hint = None;
+                    self.rofl_preflight_requested_game_id = None;
+                    self.rofl_upload_authorized_game_id = None;
                     self.rofl_file_ready_game_id = None;
                     self.rofl_download_requested_game_id = None;
                     self.rofl_auto_download_owned_game_id = None;
@@ -2575,6 +2663,67 @@ mod tests {
             })).collect::<Vec<_>>()
         });
         assert!(!has_usable_eog_result_evidence(&mismatched_expected));
+    }
+
+    #[test]
+    fn rofl_preflight_needed_authorizes_download_without_marking_file_ready() {
+        let mut poller = LcuEventPoller::default();
+        poller.rofl_match_hint = Some(RoflMatchHint::from_eog(
+            "8393991955".into(),
+            &json!({"participants": []}),
+        ));
+        poller.rofl_preflight_requested_game_id = Some("8393991955".into());
+
+        poller.set_rofl_upload_decision("8393991955", true);
+
+        assert_eq!(
+            poller.rofl_upload_authorized_game_id.as_deref(),
+            Some("8393991955")
+        );
+        assert_eq!(
+            poller.rofl_preflight_resolved_game_id.as_deref(),
+            Some("8393991955")
+        );
+        assert!(poller.rofl_match_hint.is_some());
+        assert!(poller.rofl_download_requested_game_id.is_none());
+        assert!(poller.rofl_file_ready_game_id.is_none());
+    }
+
+    #[test]
+    fn rofl_preflight_not_needed_stops_recovery_before_download() {
+        let mut poller = LcuEventPoller::default();
+        poller.rofl_match_hint = Some(RoflMatchHint::from_eog(
+            "8393991955".into(),
+            &json!({"participants": []}),
+        ));
+        poller.rofl_preflight_requested_game_id = Some("8393991955".into());
+        poller.rofl_recovery_started_at = Some(Instant::now());
+
+        poller.set_rofl_upload_decision("8393991955", false);
+
+        assert_eq!(
+            poller.rofl_preflight_resolved_game_id.as_deref(),
+            Some("8393991955")
+        );
+        assert!(poller.rofl_match_hint.is_none());
+        assert!(poller.rofl_upload_authorized_game_id.is_none());
+        assert!(poller.rofl_download_requested_game_id.is_none());
+        assert!(poller.rofl_recovery_started_at.is_none());
+    }
+
+    #[test]
+    fn rofl_preflight_failure_reopens_server_check() {
+        let mut poller = LcuEventPoller::default();
+        poller.rofl_match_hint = Some(RoflMatchHint::from_eog(
+            "8393991955".into(),
+            &json!({"participants": []}),
+        ));
+        poller.rofl_preflight_requested_game_id = Some("8393991955".into());
+
+        poller.retry_rofl_upload_check("8393991955");
+
+        assert!(poller.rofl_preflight_requested_game_id.is_none());
+        assert!(poller.rofl_upload_authorized_game_id.is_none());
     }
 
     #[test]
