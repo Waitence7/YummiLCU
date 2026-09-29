@@ -1,25 +1,86 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import * as api from '../api/commands';
 import { startCloseSound } from '../closeSound';
+import type { WindowMotionPayload } from '../windowMotion';
 import { WindowGlideHint } from './WindowGlideHint';
 import appIcon from '../../src-tauri/icons/icon.ico';
 
 const WINDOW_GLIDE_HINT_KEY = 'yummi-window-glide-hint-v1';
+const WINDOW_GLIDE_HINT_IDLE_DELAY_MS = 250;
 
-function maybeShowWindowGlideHint() {
+function shouldShowWindowGlideHint() {
   if (api.useMockBridge) return false;
   try {
-    if (localStorage.getItem(WINDOW_GLIDE_HINT_KEY) === '1') return false;
-    localStorage.setItem(WINDOW_GLIDE_HINT_KEY, '1');
+    return localStorage.getItem(WINDOW_GLIDE_HINT_KEY) !== '1';
   } catch {
     // Storage can be disabled; still let this session show the hint.
+    return true;
   }
-  return true;
+}
+
+function markWindowGlideHintShown() {
+  try {
+    localStorage.setItem(WINDOW_GLIDE_HINT_KEY, '1');
+  } catch {
+    // Storage can be disabled; showing the hint is still useful for this session.
+  }
 }
 
 export function TitleBar() {
   const [showGlideHint, setShowGlideHint] = useState(false);
+  const pendingGlideHint = useRef(false);
+  const idleTimer = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (api.useMockBridge) return;
+
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    const cancelIdleTimer = () => {
+      if (idleTimer.current !== null) {
+        window.clearTimeout(idleTimer.current);
+        idleTimer.current = null;
+      }
+    };
+
+    void import('@tauri-apps/api/event')
+      .then(({ listen }) =>
+        listen<WindowMotionPayload>('yummi://window-motion', ({ payload }) => {
+          if (!pendingGlideHint.current) return;
+
+          // Never mount the first-use help while the native window is moving.
+          // A short idle delay also filters the transient "stop" emitted while
+          // switching into the expanded rotation host before inertia begins.
+          if (payload.phase !== 'stop') {
+            cancelIdleTimer();
+            return;
+          }
+
+          cancelIdleTimer();
+          idleTimer.current = window.setTimeout(() => {
+            idleTimer.current = null;
+            if (disposed || !pendingGlideHint.current) return;
+            pendingGlideHint.current = false;
+            markWindowGlideHintShown();
+            setShowGlideHint(true);
+          }, WINDOW_GLIDE_HINT_IDLE_DELAY_MS);
+        }),
+      )
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      })
+      .catch((error) => void api.reportWindowFailure('glide_hint_motion_listener', error));
+
+    return () => {
+      disposed = true;
+      cancelIdleTimer();
+      unlisten?.();
+    };
+  }, []);
+
   return (
     <div
       data-yummi-drag-handle
@@ -27,8 +88,17 @@ export function TitleBar() {
       onMouseDown={(event) => {
         if (event.button !== 0 || (event.target as HTMLElement).closest('button, [data-yummi-no-drag]')) return;
         event.preventDefault();
-        if (maybeShowWindowGlideHint()) setShowGlideHint(true);
+
+        // The old first-use path mounted the hint synchronously on mouse-down,
+        // which made React/config work overlap the first native physics drag.
+        // Only reserve the hint here; the motion listener renders it once the
+        // drag/inertia sequence has actually gone idle.
+        if (shouldShowWindowGlideHint()) {
+          pendingGlideHint.current = true;
+        }
+
         void api.startMainWindowDrag().catch((error) => {
+          pendingGlideHint.current = false;
           void api.reportWindowFailure('start_drag', error);
         });
       }}
