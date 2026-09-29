@@ -12,10 +12,20 @@ static WINDOW_ROTATION_BITS: AtomicU64 = AtomicU64::new(0.0f64.to_bits());
 static WINDOW_ROTATION_HOST_EXPANDED: AtomicBool = AtomicBool::new(false);
 static WINDOW_BASE_WIDTH_BITS: AtomicU64 = AtomicU64::new(640.0f64.to_bits());
 static WINDOW_BASE_HEIGHT_BITS: AtomicU64 = AtomicU64::new(620.0f64.to_bits());
+static WINDOW_SCALE_BITS: AtomicU64 = AtomicU64::new(1.0f64.to_bits());
+static WINDOW_LINEAR_SPEED_BITS: AtomicU64 = AtomicU64::new(0.0f64.to_bits());
+static WINDOW_ANGULAR_SPEED_BITS: AtomicU64 = AtomicU64::new(0.0f64.to_bits());
+static WINDOW_HIT_TEST_HWND: AtomicU64 = AtomicU64::new(0);
 static WINDOW_UI_HEARTBEAT_MS: AtomicU64 = AtomicU64::new(0);
 
 const ROTATION_HOST_PADDING_LOGICAL: f64 = 20.0;
 const WINDOW_UI_STALL_MS: u64 = 15_000;
+#[cfg(windows)]
+const HIT_TEST_MAX_LINEAR_SPEED_PX_S: f64 = 1_600.0;
+#[cfg(windows)]
+const HIT_TEST_MAX_ANGULAR_SPEED_DEG_S: f64 = 540.0;
+#[cfg(windows)]
+const ROTATED_HIT_TEST_SUBCLASS_ID: usize = 0x5955_4D4D;
 
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
@@ -351,6 +361,8 @@ fn emit_motion_visual(
 ) {
     use tauri::Emitter;
 
+    WINDOW_LINEAR_SPEED_BITS.store(vx.hypot(vy).to_bits(), Ordering::Relaxed);
+    WINDOW_ANGULAR_SPEED_BITS.store(angular_velocity.abs().to_bits(), Ordering::Relaxed);
     let (content_width, content_height) = base_window_logical_size();
     let _ = window.emit(
         "yummi://window-motion",
@@ -447,7 +459,8 @@ fn run_windows_physics_drag(
             return;
         }
     };
-    let scale = window.scale_factor().unwrap_or(1.0);
+    let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
+    WINDOW_SCALE_BITS.store(scale.to_bits(), Ordering::Relaxed);
 
     let _visual_guard = MotionVisualGuard {
         window: window.clone(),
@@ -913,13 +926,132 @@ fn rotated_visual_bounds(width: f64, height: f64, angle: f64) -> (f64, f64) {
 }
 
 #[cfg(windows)]
+fn hit_test_allowed_at_motion(linear_speed: f64, angular_speed: f64) -> bool {
+    linear_speed < HIT_TEST_MAX_LINEAR_SPEED_PX_S
+        && angular_speed < HIT_TEST_MAX_ANGULAR_SPEED_DEG_S
+}
+
+#[cfg(windows)]
+fn point_inside_rotated_content(
+    screen_x: i32,
+    screen_y: i32,
+    center_x: f64,
+    center_y: f64,
+) -> bool {
+    let scale = f64::from_bits(WINDOW_SCALE_BITS.load(Ordering::Relaxed)).max(0.1);
+    let (width_logical, height_logical) = base_window_logical_size();
+    let width = width_logical * scale;
+    let height = height_logical * scale;
+    let angle = current_rotation_angle();
+    let radians = (-angle).to_radians();
+    let dx = screen_x as f64 - center_x;
+    let dy = screen_y as f64 - center_y;
+    let local_x = dx * radians.cos() - dy * radians.sin();
+    let local_y = dx * radians.sin() + dy * radians.cos();
+    const EDGE_TOLERANCE_PX: f64 = 2.0;
+    local_x.abs() <= width * 0.5 + EDGE_TOLERANCE_PX
+        && local_y.abs() <= height * 0.5 + EDGE_TOLERANCE_PX
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn rotated_hit_test_subclass(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+    _subclass_id: usize,
+    _ref_data: usize,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::{
+        Foundation::{LRESULT, RECT},
+        UI::{
+            Shell::DefSubclassProc,
+            WindowsAndMessaging::{GetWindowRect, HTTRANSPARENT, WM_NCDESTROY, WM_NCHITTEST},
+        },
+    };
+
+    if message == WM_NCDESTROY {
+        let raw = hwnd.0 as usize as u64;
+        let _ = WINDOW_HIT_TEST_HWND.compare_exchange(raw, 0, Ordering::SeqCst, Ordering::SeqCst);
+        return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    }
+
+    if message != WM_NCHITTEST
+        || !WINDOW_ROTATION_HOST_EXPANDED.load(Ordering::Relaxed)
+        || distance_to_upright(current_rotation_angle()) <= 0.08
+    {
+        return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    }
+
+    let linear_speed = f64::from_bits(WINDOW_LINEAR_SPEED_BITS.load(Ordering::Relaxed));
+    let angular_speed = f64::from_bits(WINDOW_ANGULAR_SPEED_BITS.load(Ordering::Relaxed));
+    if !hit_test_allowed_at_motion(linear_speed, angular_speed) {
+        return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    }
+
+    let mut rect = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_err() {
+        return unsafe { DefSubclassProc(hwnd, message, wparam, lparam) };
+    }
+
+    // WM_NCHITTEST packs signed screen coordinates into LPARAM.
+    let packed = lparam.0 as u32;
+    let screen_x = (packed as u16 as i16) as i32;
+    let screen_y = ((packed >> 16) as u16 as i16) as i32;
+    let center_x = (rect.left as f64 + rect.right as f64) * 0.5;
+    let center_y = (rect.top as f64 + rect.bottom as f64) * 0.5;
+
+    if !point_inside_rotated_content(screen_x, screen_y, center_x, center_y) {
+        return LRESULT(HTTRANSPARENT as isize);
+    }
+
+    unsafe { DefSubclassProc(hwnd, message, wparam, lparam) }
+}
+
+#[cfg(windows)]
+fn ensure_rotated_hit_test_hook(window: &tauri::WebviewWindow) -> Result<(), String> {
+    let window = window.clone();
+    window
+        .run_on_main_thread(move || {
+            use windows::Win32::{Foundation::HWND, UI::Shell::SetWindowSubclass};
+
+            let Ok(native) = window.hwnd() else {
+                return;
+            };
+            let hwnd = HWND(native.0);
+            let raw = hwnd.0 as usize as u64;
+            if WINDOW_HIT_TEST_HWND.load(Ordering::SeqCst) == raw {
+                return;
+            }
+
+            let installed = unsafe {
+                SetWindowSubclass(
+                    hwnd,
+                    Some(rotated_hit_test_subclass),
+                    ROTATED_HIT_TEST_SUBCLASS_ID,
+                    0,
+                )
+            }
+            .as_bool();
+            if installed {
+                WINDOW_HIT_TEST_HWND.store(raw, Ordering::SeqCst);
+            } else {
+                report_window_failure(
+                    &window,
+                    "install_rotated_hit_test",
+                    "SetWindowSubclass failed",
+                );
+            }
+        })
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(windows)]
 fn spawn_rotated_hit_test(window: tauri::WebviewWindow, generation: u64) {
     let _ = generation;
-    // Do not switch the whole native window into click-through mode while it
-    // remains rotated. If WebView/native hit-test state gets out of sync,
-    // Windows can strand the title bar and close button in an unclickable
-    // state. Keeping the transparent host interactive is a safer trade-off;
-    // right-click restore and subsequent drags remain recoverable.
+    if let Err(error) = ensure_rotated_hit_test_hook(&window) {
+        report_window_failure(&window, "rotated_hit_test_hook", error);
+    }
     if let Err(error) = window.set_ignore_cursor_events(false) {
         report_window_failure(&window, "rotated_restore_pointer", error);
     }
@@ -963,6 +1095,10 @@ fn set_rotation_host_expanded(window: &tauri::WebviewWindow, expanded: bool) -> 
     let old_position = window.outer_position().map_err(|error| error.to_string())?;
     let old_size = window.outer_size().map_err(|error| error.to_string())?;
     let scale = window.scale_factor().unwrap_or(1.0).max(0.1);
+    WINDOW_SCALE_BITS.store(scale.to_bits(), Ordering::Relaxed);
+    if expanded {
+        ensure_rotated_hit_test_hook(window)?;
+    }
 
     let (target_width_logical, target_height_logical) = if expanded {
         let base_width = old_size.width as f64 / scale;
