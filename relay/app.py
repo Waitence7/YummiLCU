@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field
 from relay import auth, config
 from relay.actions import ALLOWED_ACTIONS, action_policy
 from relay.connections import ConnectionManager
+from relay.http_diagnostics import upstream_error_detail
 from relay.lcu_linked import is_lcu_linked, lcu_linked_map, mark_lcu_linked
 from relay.lcu_recent import mark_recent_lcu_data, recent_lcu_data, recent_lcu_data_map
 from relay.logging_safety import redact_log_text
@@ -543,9 +544,11 @@ async def _agent_latest_prerelease_tag(request: Request, channel: str) -> str:
             allow_redirects=False,
         ) as response:
             if response.status != 200:
+                logger.warning("Agent release index 조회 실패 status=%s detail=%s", response.status, await upstream_error_detail(response))
                 raise HTTPException(502, "agent release index unavailable")
             releases = await response.json()
     except aiohttp.ClientError as exc:
+        logger.warning("Agent release index 요청 실패 error=%s", type(exc).__name__)
         raise HTTPException(502, "agent release index unavailable") from exc
 
     pattern = re.compile(rf"^v{_AGENT_VERSION_RE}-{re.escape(channel)}\.[0-9]+$")
@@ -564,9 +567,11 @@ async def _agent_resolve_upstream(request: Request, upstream: str) -> str:
         try:
             async with http.get(manifest_url, allow_redirects=True) as response:
                 if response.status != 200:
+                    logger.warning("Agent stable manifest 조회 실패 status=%s detail=%s", response.status, await upstream_error_detail(response))
                     raise HTTPException(502, "agent stable manifest unavailable")
                 data = await response.json(content_type=None)
         except aiohttp.ClientError as exc:
+            logger.warning("Agent stable manifest 요청 실패 error=%s", type(exc).__name__)
             raise HTTPException(502, "agent stable manifest unavailable") from exc
         version = str(data.get("version") or "") if isinstance(data, dict) else ""
         if not re.fullmatch(_AGENT_VERSION_RE, version):
@@ -763,7 +768,7 @@ async def _broadcast_replay_target(http: aiohttp.ClientSession, discord_id: int)
     try:
         async with http.get(url, headers=headers) as res:
             if res.status >= 400:
-                logger.warning("대회 ROFL target 조회 실패 discord_id=%s status=%s", discord_id, res.status)
+                logger.warning("대회 ROFL target 조회 실패 discord_id=%s status=%s detail=%s", discord_id, res.status, await upstream_error_detail(res))
                 return {"upload": False}
             body = await res.json(content_type=None)
             return body if isinstance(body, dict) else {"upload": False}
@@ -789,10 +794,11 @@ async def _guild_match_replay_target(
         async with http.get(url, headers=headers, params={"gameId": game_id}) as res:
             if res.status >= 400:
                 logger.warning(
-                    "내전 ROFL target 조회 실패 discord_id=%s game_id=%s status=%s",
+                    "내전 ROFL target 조회 실패 discord_id=%s game_id=%s status=%s detail=%s",
                     discord_id,
                     game_id,
                     res.status,
+                    await upstream_error_detail(res),
                 )
                 return {"upload": False}
             body = await res.json(content_type=None)
@@ -889,13 +895,14 @@ async def agent_replay_upload(
     url = f"{config.tournament_api_base_url()}/api/bot/lcu/replays/file-ingest"
     try:
         async with request.app.state.http.post(url, headers=headers, data=request.stream()) as res:
-            raw = await res.read()
             if res.status >= 400:
                 logger.warning(
-                    "ROFL 원본 전달 실패 discord_id=%s game_id=%s target=%s status=%s",
-                    discord_id, game_id, target.get("targetKind"), res.status
+                    "ROFL 원본 전달 실패 discord_id=%s game_id=%s target=%s status=%s detail=%s",
+                    discord_id, game_id, target.get("targetKind"), res.status,
+                    await upstream_error_detail(res),
                 )
                 raise HTTPException(res.status, "replay upstream rejected")
+            raw = await res.read()
             try:
                 body = json.loads(raw.decode("utf-8"))
             except Exception:
@@ -982,10 +989,11 @@ async def _forward_tournament_broadcast_lcu(
         ) as res:
             if res.status >= 400:
                 logger.warning(
-                    "대회 중계 LCU 전달 실패 discord_id=%s kind=%s status=%s",
+                    "대회 중계 LCU 전달 실패 discord_id=%s kind=%s status=%s detail=%s",
                     discord_id,
                     kind,
                     res.status,
+                    await upstream_error_detail(res),
                 )
                 return False
             try:
@@ -1027,9 +1035,10 @@ async def _resolve_discord_presence_match_context(
         async with http.get(url, headers=headers) as res:
             if res.status >= 400:
                 logger.warning(
-                    "Discord Presence 내전 조회 실패 discord_id=%s status=%s",
+                    "Discord Presence 내전 조회 실패 discord_id=%s status=%s detail=%s",
                     discord_id,
                     res.status,
+                    await upstream_error_detail(res),
                 )
                 return {"active": False, "status": "lookup_failed"}
             try:
@@ -1087,9 +1096,10 @@ async def _resolve_discord_join_riot_id(
                 return "nickname_missing", None
             if res.status >= 400:
                 logger.warning(
-                    "Discord 참가 요청 닉네임 조회 실패 requester_discord_id=%s status=%s",
+                    "Discord 참가 요청 닉네임 조회 실패 requester_discord_id=%s status=%s detail=%s",
                     requester_discord_id,
                     res.status,
+                    await upstream_error_detail(res),
                 )
                 return "lookup_failed", None
             try:
@@ -1178,9 +1188,10 @@ async def _forward_guild_match_eog(
         async with http.post(url, headers=headers, json=body) as res:
             if res.status >= 400:
                 logger.warning(
-                    "내전 LCU ingest 실패 discord_id=%s status=%s context=%s",
+                    "내전 LCU ingest 실패 discord_id=%s status=%s detail=%s context=%s",
                     discord_id,
                     res.status,
+                    await upstream_error_detail(res),
                     _eog_log_json(payload, event_id),
                 )
                 return False
@@ -1242,9 +1253,10 @@ async def _deliver_guild_match_live(
         ) as res:
             if res.status >= 400:
                 logger.warning(
-                    "내전 라이브 LCU ingest 실패 discord_id=%s status=%s",
+                    "내전 라이브 LCU ingest 실패 discord_id=%s status=%s detail=%s",
                     discord_id,
                     res.status,
+                    await upstream_error_detail(res),
                 )
                 return False, False
             try:
@@ -1315,9 +1327,10 @@ async def _forward_match_eog(
         async with http.post(url, headers=headers, json=body) as res:
             if res.status >= 400:
                 logger.warning(
-                    "LCU 종료 매치 저장 실패 discord_id=%s status=%s context=%s",
+                    "LCU 종료 매치 저장 실패 discord_id=%s status=%s detail=%s context=%s",
                     discord_id,
                     res.status,
+                    await upstream_error_detail(res),
                     _eog_log_json(payload, event_id),
                 )
                 return False
@@ -1364,12 +1377,14 @@ async def _forward_match_rofl(
         async with http.post(url, headers=headers, json=body) as res:
             if res.status >= 400:
                 logger.warning(
-                    "ROFL 저장 실패 discord_id=%s status=%s game_id=%s kind=%s event_id=%s",
+                    "ROFL 저장 실패 discord_id=%s status=%s detail=%s game_id=%s kind=%s event_id=%s participants=%s",
                     discord_id,
                     res.status,
+                    await upstream_error_detail(res),
                     payload.get("gameId"),
                     payload.get("kind"),
                     event_id,
+                    len(payload.get("participants")) if isinstance(payload.get("participants"), list) else None,
                 )
                 return False
             logger.info(

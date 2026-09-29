@@ -165,11 +165,13 @@ impl AppState {
     }
 
     pub(crate) async fn log(&self, app: &AppHandle, message: impl Into<String>) {
+        let message = message.into();
         let snapshot = {
             let mut ui = self.ui.lock().await;
-            ui.push_log(message.into());
+            ui.push_log(message.clone());
             ui.clone()
         };
+        self.flight.lock().await.record("ui", message);
         if let Err(error) = app.emit("agent-state", snapshot) {
             self.record_flight("ui_emit_error", error.to_string()).await;
         }
