@@ -2,8 +2,13 @@
  * 브라우저 개발용 목 브리지. Tauri 백엔드 없이 UI 상태 전환(시작 → OAuth → 연결)을
  * 시뮬레이션한다. 프로덕션 번들에는 포함되지 않는다 (DEV 전용 동적 import).
  */
-import { initialState, type AgentState, type Config, type RecentMatch } from '../state/types';
-import { previewHistory, previewReplay } from './mock-matches';
+import {
+  initialState,
+  type AgentState,
+  type Config,
+  type RecentMatch,
+} from "../state/types";
+import { previewHistory, previewReplay } from "./mock-matches";
 
 const MAX_UI_LOGS = 2_000;
 
@@ -17,7 +22,7 @@ function emit() {
 }
 
 function log(message: string) {
-  const time = new Date().toLocaleTimeString('ko-KR', { hour12: false });
+  const time = new Date().toLocaleTimeString("ko-KR", { hour12: false });
   state.logs = [
     ...state.logs.slice(-(MAX_UI_LOGS - 1)),
     `[${time}] ${message}`,
@@ -39,128 +44,148 @@ export async function mockInvoke<T>(
   args?: Record<string, unknown>,
 ): Promise<T> {
   switch (command) {
-    case 'match_history':
-      if (!state.lcu) throw new Error('롤 클라이언트가 연결되지 않았습니다.');
+    case "match_history": {
+      if (!state.lcu) throw new Error("롤 클라이언트가 연결되지 않았습니다.");
       await new Promise((resolve) => setTimeout(resolve, 300));
-      return previewHistory(Number(args?.offset ?? 0)) as T;
-    case 'match_replay':
+      const history = previewHistory(Number(args?.offset ?? 0));
+      const riotId = typeof args?.riotId === "string" ? args.riotId.trim() : "";
+      return {
+        ...history,
+        ...(riotId
+          ? { summoner: riotId, riotId, searched: true }
+          : { searched: false }),
+      } as T;
+    }
+    case "match_replay":
       await new Promise((resolve) => setTimeout(resolve, 450));
       return previewReplay(String(args?.gameId)) as T;
-    case 'match_fights': {
+    case "match_fights": {
       await new Promise((resolve) => setTimeout(resolve, 650));
-      const match = previewHistory(0).matches.find((entry) => entry.id === String(args?.gameId));
-      return { status: 'ready', fights: match?.fights ?? [], analyzedAt: Date.now(), method: 'preview-teamfights', cached: false } as T;
+      const match = previewHistory(0).matches.find(
+        (entry) => entry.id === String(args?.gameId),
+      );
+      return {
+        status: "ready",
+        fights: match?.fights ?? [],
+        analyzedAt: Date.now(),
+        method: "preview-teamfights",
+        cached: false,
+      } as T;
     }
-    case 'download_match_replay':
-      throw new Error('프리뷰에서는 다운로드하지 않습니다. 실제 앱에서 롤 클라이언트에 연결해 주세요.');
-    case 'get_agent_state':
+    case "download_match_replay":
+      throw new Error(
+        "프리뷰에서는 다운로드하지 않습니다. 실제 앱에서 롤 클라이언트에 연결해 주세요.",
+      );
+    case "get_agent_state":
       return structuredClone(state) as T;
-    case 'load_config':
+    case "load_config":
       return structuredClone(state.config) as T;
-    case 'save_config': {
+    case "save_config": {
       state.config = args?.config as Config;
-      log('설정 저장됨');
+      log("설정 저장됨");
       emit();
       return undefined as T;
     }
-    case 'start_agent': {
-      state.status = 'Relay 연결 중…';
-      log('에이전트 시작');
+    case "start_agent": {
+      state.status = "Relay 연결 중…";
+      log("에이전트 시작");
       emit();
       later(500, () => {
         state.relay = true;
         state.oauth_pending = true;
-        state.status = '브라우저에서 Discord 로그인을 완료하면 자동 연결됩니다.';
-        log('Relay 연결됨 — Discord OAuth 대기');
+        state.status =
+          "브라우저에서 Discord 로그인을 완료하면 자동 연결됩니다.";
+        log("Relay 연결됨 — Discord OAuth 대기");
         emit();
         later(900, () => {
           state.oauth_pending = false;
           state.discord_id = 123456789012345678;
-          state.discord_name = 'Waitence';
-          state.status = 'Discord 연결 완료 — LCU 확인 중…';
-          log('Discord OAuth 자동 연결 완료');
+          state.discord_name = "Waitence";
+          state.status = "Discord 연결 완료 — LCU 확인 중…";
+          log("Discord OAuth 자동 연결 완료");
           emit();
           later(700, () => {
             state.lcu = true;
-            state.status = '연결됨 — 내전 결과 자동 보고 활성';
-            log('League Client 감지됨 (lockfile)');
+            state.status = "연결됨 — 내전 결과 자동 보고 활성";
+            log("League Client 감지됨 (lockfile)");
             emit();
           });
         });
       });
       return undefined as T;
     }
-    case 'stop_agent': {
+    case "stop_agent": {
       state.relay = false;
       state.lcu = false;
       state.oauth_pending = false;
-      state.status = '중지됨';
-      log('에이전트 중지');
+      state.status = "중지됨";
+      log("에이전트 중지");
       emit();
       return undefined as T;
     }
-    case 'logout': {
+    case "logout": {
       state.relay = false;
       state.lcu = false;
       state.oauth_pending = false;
       state.discord_id = null;
       state.discord_name = null;
       state.discord_avatar = null;
-      state.status = 'Discord 로그아웃됨 — 연결 시작을 눌러 로그인하세요.';
-      log('Discord 로그아웃 완료');
+      state.status = "Discord 로그아웃됨 — 연결 시작을 눌러 로그인하세요.";
+      log("Discord 로그아웃 완료");
       emit();
       return undefined as T;
     }
-    case 'hide_main_window':
-    case 'complete_tray_hide':
-    case 'minimize_main_window':
-    case 'request_tray_hide': {
+    case "hide_main_window":
+    case "complete_tray_hide":
+    case "minimize_main_window":
+    case "request_tray_hide": {
       return undefined as T;
     }
-    case 'get_beta_release_info': {
+    case "get_beta_release_info": {
       return {
-        version: '0.6.15',
-        releaseLabel: '0.6.15-beta.1',
-        buildId: '20260825.32',
-        commit: 'preview',
-        installerUrl: 'https://yummi.duckdns.org/agent/releases/tauri/beta/latest-setup.exe',
+        version: "0.6.15",
+        releaseLabel: "0.6.15-beta.1",
+        buildId: "20260825.32",
+        commit: "preview",
+        installerUrl:
+          "https://yummi.duckdns.org/agent/releases/tauri/beta/latest-setup.exe",
       } as T;
     }
-    case 'open_beta_download': {
-      log('beta 설치 파일 다운로드 열기');
+    case "open_beta_download": {
+      log("beta 설치 파일 다운로드 열기");
       emit();
       return undefined as T;
     }
-    case 'get_diagnostic_bundle': {
+    case "get_diagnostic_bundle": {
       return [
-        'Yummi LCU Agent Diagnostics',
-        `app_version=${state.app_version ?? 'mock'}`,
+        "Yummi LCU Agent Diagnostics",
+        `app_version=${state.app_version ?? "mock"}`,
         `relay_connected=${state.relay}`,
         `lcu_connected=${state.lcu}`,
         `discord_bound=${state.discord_id != null}`,
-        '',
-        '--- UI Logs ---',
+        "",
+        "--- UI Logs ---",
         ...state.logs,
-      ].join('\n') as T;
+      ].join("\n") as T;
     }
-    case 'export_diagnostic_bundle': {
-      return 'Downloads/yummi-agent-diagnostics-preview.txt' as T;
+    case "export_diagnostic_bundle": {
+      return "Downloads/yummi-agent-diagnostics-preview.txt" as T;
     }
-    case 'report_tray_effect_diagnostic': {
-      const code = String(args?.code ?? 'unknown');
-      const detail = String(args?.detail ?? 'detail unavailable');
+    case "report_tray_effect_diagnostic": {
+      const code = String(args?.code ?? "unknown");
+      const detail = String(args?.detail ?? "detail unavailable");
       log(
-        code === 'ready'
+        code === "ready"
           ? `HTML-in-Canvas 활성화: ${detail}`
           : `HTML-in-Canvas fallback (${code}): ${detail}`,
       );
       emit();
       return undefined as T;
     }
-    case 'recent_match': {
-      if (!state.lcu) throw new Error('League Client가 연결되지 않았습니다.');
+    case "recent_match": {
+      if (!state.lcu) throw new Error("League Client가 연결되지 않았습니다.");
       const recent: RecentMatch = {
-        champion: '아리',
+        champion: "아리",
         champion_id: 103,
         win: true,
         kills: 9,

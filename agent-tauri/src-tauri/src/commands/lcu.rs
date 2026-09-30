@@ -52,15 +52,88 @@ async fn attach_fights_best_effort(state: &Arc<AppState>, page: &mut Value) {
     }
 }
 
+async fn report_match_history_warnings(
+    state: &Arc<AppState>,
+    offset: u32,
+    target: Option<&str>,
+    warnings: &[String],
+) {
+    if warnings.is_empty() {
+        return;
+    }
+    let sample = warnings
+        .iter()
+        .take(5)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let detail = format!(
+        "offset={offset} target={} warning_count={} sample={sample}",
+        if target.is_some() { "searched" } else { "self" },
+        warnings.len()
+    );
+    state
+        .record_flight("match_history_warning", detail.clone())
+        .await;
+    state
+        .report_diagnostic("lcu", "match_history_partial_detail", detail)
+        .await;
+}
+
 #[tauri::command]
 pub(crate) async fn match_history(
     state: State<'_, Arc<AppState>>,
     offset: u32,
+    riot_id: Option<String>,
 ) -> Result<Value, String> {
+    let requested_riot_id = riot_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    // 다른 사람 전적은 현재 사용자의 로컬 캐시를 덮어쓰거나 fallback하지 않는다.
+    if let Some(target) = requested_riot_id.as_deref() {
+        let client = history_client(state.inner()).await.map_err(|error| error)?;
+        return match client.match_history(offset, Some(target)).await {
+            Ok((_account_key, mut page, warnings)) => {
+                report_match_history_warnings(state.inner(), offset, Some(target), &warnings).await;
+                attach_fights_best_effort(state.inner(), &mut page).await;
+                state
+                    .record_flight(
+                        "match_history_search",
+                        format!(
+                            "target={target} offset={offset} matches={}",
+                            page.get("matches")
+                                .and_then(Value::as_array)
+                                .map_or(0, Vec::len)
+                        ),
+                    )
+                    .await;
+                Ok(page)
+            }
+            Err(error) => {
+                let local_detail = format!("target={target} offset={offset} error={error}");
+                state
+                    .record_flight("match_history_search_failed", local_detail)
+                    .await;
+                state
+                    .report_diagnostic(
+                        "lcu",
+                        "match_history_player_search_failed",
+                        format!("offset={offset} error={error}"),
+                    )
+                    .await;
+                Err(error.to_string())
+            }
+        };
+    }
+
     let live_result = match history_client(state.inner()).await {
-        Ok(client) => match client.match_history(offset).await {
-            Ok((account_key, mut page)) => {
-                // A cache write failure must not make a successful LCU history request fail.
+        Ok(client) => match client.match_history(offset, None).await {
+            Ok((account_key, mut page, warnings)) => {
+                report_match_history_warnings(state.inner(), offset, None, &warnings).await;
+                // 내 전적만 로컬 캐시에 저장한다.
                 if let Err(error) = save_match_history_page(&account_key, &page).await {
                     state
                         .report_diagnostic(
@@ -82,7 +155,10 @@ pub(crate) async fn match_history(
         Ok(Some(mut page)) => {
             if let Some(error) = live_result {
                 state
-                    .record_flight("match_history_cache_fallback", error)
+                    .record_flight("match_history_cache_fallback", error.clone())
+                    .await;
+                state
+                    .report_diagnostic("lcu", "match_history_live_failed", error)
                     .await;
             }
             attach_fights_best_effort(state.inner(), &mut page).await;
@@ -98,14 +174,43 @@ async fn local_replay_viewer(
     game_id: &str,
 ) -> Result<(Value, Option<String>), String> {
     let replay_dir = match history_client(state).await {
-        Ok(client) => client.replay_directory().await.ok().flatten(),
-        Err(_) => None,
+        Ok(client) => match client.replay_directory().await {
+            Ok(value) => value,
+            Err(error) => {
+                state
+                    .report_diagnostic(
+                        "lcu",
+                        "replay_directory_lookup_failed",
+                        format!("game_id={game_id} error={error}"),
+                    )
+                    .await;
+                None
+            }
+        },
+        Err(error) => {
+            state
+                .report_diagnostic(
+                    "lcu",
+                    "replay_history_client_unavailable",
+                    format!("game_id={game_id} error={error}"),
+                )
+                .await;
+            None
+        }
     };
     let id = game_id.to_owned();
     let dir = replay_dir.clone();
-    let value = tokio::task::spawn_blocking(move || replay_for_viewer(&id, dir.as_deref()))
-        .await
-        .map_err(|_| "리플레이를 읽는 중 오류가 발생했습니다.".to_owned())??;
+    let value =
+        match tokio::task::spawn_blocking(move || replay_for_viewer(&id, dir.as_deref())).await {
+            Ok(result) => result?,
+            Err(error) => {
+                let detail = format!("game_id={game_id} replay worker failed: {error}");
+                state
+                    .report_diagnostic("lcu", "replay_viewer_worker_failed", &detail)
+                    .await;
+                return Err("리플레이를 읽는 중 오류가 발생했습니다.".to_owned());
+            }
+        };
     Ok((value, replay_dir))
 }
 
@@ -154,7 +259,26 @@ async fn start_remote_for_local_replay(
     }
     let path = match find_replay_path(&hint).await {
         Ok(Some(path)) => path,
-        _ => return base,
+        Ok(None) => {
+            state
+                .report_diagnostic(
+                    "lcu",
+                    "remote_replay_local_file_missing",
+                    format!("game_id={game_id}"),
+                )
+                .await;
+            return base;
+        }
+        Err(error) => {
+            state
+                .report_diagnostic(
+                    "lcu",
+                    "remote_replay_local_file_lookup_failed",
+                    format!("game_id={game_id} error={error}"),
+                )
+                .await;
+            return base;
+        }
     };
     match start_remote_replay_analysis(&config, &saved_session, game_id, &path).await {
         Ok(job)
@@ -166,7 +290,16 @@ async fn start_remote_for_local_replay(
             };
             match remote_replay_analysis_viewer(&config, &saved_session, job_id).await {
                 Ok(viewer) => merge_remote_viewer(base, viewer),
-                Err(_) => processing_replay(&base, &job),
+                Err(error) => {
+                    state
+                        .report_diagnostic(
+                            "lcu",
+                            "remote_replay_viewer_fetch_failed",
+                            format!("game_id={game_id} job_id={job_id} error={error}"),
+                        )
+                        .await;
+                    processing_replay(&base, &job)
+                }
             }
         }
         Ok(job) => processing_replay(&base, &job),
@@ -206,15 +339,30 @@ pub(crate) async fn match_replay_analysis(
     uuid::Uuid::parse_str(&job_id).map_err(|_| "올바른 분석 작업 ID가 아닙니다.".to_owned())?;
     let config = state.config.read().await.clone();
     let saved_session = session::load(&config).ok_or("Yummi Relay 연결 세션이 없습니다.")?;
-    let job = remote_replay_analysis_job(&config, &saved_session, &job_id)
-        .await
-        .map_err(|error| error.to_string())?;
+    let job = match remote_replay_analysis_job(&config, &saved_session, &job_id).await {
+        Ok(job) => job,
+        Err(error) => {
+            let detail = format!("game_id={game_id} job_id={job_id} error={error}");
+            state
+                .report_diagnostic("lcu", "remote_replay_job_fetch_failed", &detail)
+                .await;
+            return Err(error.to_string());
+        }
+    };
     let (mut local, _) = local_replay_viewer(state.inner(), &game_id).await?;
     match job.get("status").and_then(Value::as_str) {
         Some("done") if job.get("resultAvailable").and_then(Value::as_bool) == Some(true) => {
-            let viewer = remote_replay_analysis_viewer(&config, &saved_session, &job_id)
-                .await
-                .map_err(|error| error.to_string())?;
+            let viewer = match remote_replay_analysis_viewer(&config, &saved_session, &job_id).await
+            {
+                Ok(viewer) => viewer,
+                Err(error) => {
+                    let detail = format!("game_id={game_id} job_id={job_id} error={error}");
+                    state
+                        .report_diagnostic("lcu", "remote_replay_viewer_fetch_failed", &detail)
+                        .await;
+                    return Err(error.to_string());
+                }
+            };
             Ok(merge_remote_viewer(local, viewer))
         }
         Some("failed") => {
@@ -237,7 +385,134 @@ async fn find_replay_path(hint: &RoflMatchHint) -> Result<Option<PathBuf>, Strin
     let hint = hint.clone();
     tokio::task::spawn_blocking(move || find_existing_replay_path(&hint))
         .await
-        .map_err(|_| "리플레이 파일을 찾는 중 오류가 발생했습니다.".to_owned())?
+        .map_err(|error| format!("리플레이 파일 탐색 worker 실패: {error}"))?
+}
+
+async fn ensure_replay_downloaded(
+    state: &Arc<AppState>,
+    client: &LcuClient,
+    game_id: &str,
+    hint: &RoflMatchHint,
+    context: &'static str,
+    game_version: Option<&str>,
+) -> Result<PathBuf, String> {
+    let version = game_version
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown");
+
+    match find_replay_path(hint).await {
+        Ok(Some(path)) => {
+            state
+                .record_flight(
+                    "replay_download",
+                    format!(
+                        "existing context={context} game_id={game_id} version={version} file={}",
+                        path.file_name()
+                            .and_then(|value| value.to_str())
+                            .unwrap_or("replay.rofl")
+                    ),
+                )
+                .await;
+            return Ok(path);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let detail = format!(
+                "context={context} game_id={game_id} version={version} phase=initial_path_check error={error}"
+            );
+            state
+                .record_flight("replay_download_error", detail.clone())
+                .await;
+            state
+                .report_diagnostic("lcu", "replay_download_path_check_failed", &detail)
+                .await;
+            return Err(error);
+        }
+    }
+
+    let endpoint = format!("/lol-replays/v1/rofls/{game_id}/download/graceful");
+    state
+        .record_flight(
+            "replay_download",
+            format!(
+                "request context={context} game_id={game_id} version={version} endpoint={endpoint}"
+            ),
+        )
+        .await;
+
+    if let Err(error) = client.download_history_replay(game_id).await {
+        let detail =
+            format!("context={context} game_id={game_id} version={version} endpoint={endpoint} error={error}");
+        state
+            .record_flight("replay_download_error", detail.clone())
+            .await;
+        state
+            .report_diagnostic("lcu", "replay_download_request_failed", &detail)
+            .await;
+        return Err(
+            "리플레이 다운로드 요청이 실패했습니다. 자세한 LCU 오류를 진단 로그에 기록했습니다."
+                .to_owned(),
+        );
+    }
+
+    state
+        .record_flight(
+            "replay_download",
+            format!("accepted context={context} game_id={game_id} version={version} endpoint={endpoint}"),
+        )
+        .await;
+
+    const POLL_MS: u64 = 1_500;
+    const ATTEMPTS: u64 = 30;
+    for attempt in 1..=ATTEMPTS {
+        sleep(Duration::from_millis(POLL_MS)).await;
+        match find_replay_path(hint).await {
+            Ok(Some(path)) => {
+                state
+                    .record_flight(
+                        "replay_download",
+                        format!(
+                            "ready context={context} game_id={game_id} version={version} wait_ms={} file={}",
+                            attempt * POLL_MS,
+                            path.file_name()
+                                .and_then(|value| value.to_str())
+                                .unwrap_or("replay.rofl")
+                        ),
+                    )
+                    .await;
+                return Ok(path);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let detail = format!(
+                    "context={context} game_id={game_id} version={version} wait_ms={} error={error}",
+                    attempt * POLL_MS
+                );
+                state
+                    .record_flight("replay_download_error", detail.clone())
+                    .await;
+                state
+                    .report_diagnostic("lcu", "replay_download_path_check_failed", &detail)
+                    .await;
+                return Err(error);
+            }
+        }
+    }
+
+    let waited_ms = POLL_MS * ATTEMPTS;
+    let detail = format!(
+        "context={context} game_id={game_id} version={version} endpoint={endpoint} request_accepted=true file_ready=false waited_ms={waited_ms}"
+    );
+    state
+        .record_flight("replay_download_timeout", detail.clone())
+        .await;
+    state
+        .report_diagnostic("lcu", "replay_download_timeout", &detail)
+        .await;
+    Err(format!(
+        "리플레이 다운로드 요청은 수락됐지만 {waited_ms}ms 안에 ROFL 파일이 생성되지 않았습니다. 진단 로그에 기록했습니다."
+    ))
 }
 
 #[tauri::command]
@@ -251,9 +526,33 @@ pub(crate) async fn match_fights(
     }
 
     let config = state.config.read().await.clone();
-    let client = history_client(state.inner()).await.ok();
+    let client = match history_client(state.inner()).await {
+        Ok(client) => Some(client),
+        Err(error) => {
+            state
+                .report_diagnostic(
+                    "lcu",
+                    "match_fights_client_unavailable",
+                    format!("game_id={game_id} error={error}"),
+                )
+                .await;
+            None
+        }
+    };
     let replay_dir = match client.as_ref() {
-        Some(client) => client.replay_directory().await.ok().flatten(),
+        Some(client) => match client.replay_directory().await {
+            Ok(value) => value,
+            Err(error) => {
+                state
+                    .report_diagnostic(
+                        "lcu",
+                        "match_fights_replay_directory_failed",
+                        format!("game_id={game_id} error={error}"),
+                    )
+                    .await;
+                None
+            }
+        },
         None => None,
     };
     let mut hint = RoflMatchHint::from_eog(game_id.clone(), &Value::Null);
@@ -265,33 +564,18 @@ pub(crate) async fn match_fights(
         .record_flight("match_fights", format!("prepare game_id={game_id}"))
         .await;
 
-    let mut replay_path = find_replay_path(&hint).await?;
-    if replay_path.is_none() {
-        let Some(client) = client.as_ref() else {
-            return Err(
-                "저장된 ROFL이 없습니다. 롤 클라이언트를 실행한 뒤 한타 분석을 다시 열어 주세요."
-                    .into(),
-            );
-        };
-        client
-            .download_history_replay(&game_id)
-            .await
-            .map_err(|_| {
-                "이 경기의 ROFL을 다운로드하지 못했습니다. 롤 클라이언트에서 리플레이 제공 여부를 확인하세요."
-                    .to_owned()
-            })?;
-
-        for _ in 0..30 {
-            sleep(Duration::from_millis(1_500)).await;
-            replay_path = find_replay_path(&hint).await?;
-            if replay_path.is_some() {
-                break;
-            }
+    let replay_path = match find_replay_path(&hint).await? {
+        Some(path) => path,
+        None => {
+            let Some(client) = client.as_ref() else {
+                return Err(
+                    "저장된 ROFL이 없습니다. 롤 클라이언트를 실행한 뒤 한타 분석을 다시 열어 주세요."
+                        .into(),
+                );
+            };
+            ensure_replay_downloaded(state.inner(), client, &game_id, &hint, "match_fights", None)
+                .await?
         }
-    }
-
-    let Some(replay_path) = replay_path else {
-        return Err("ROFL 다운로드가 완료되지 않았습니다. 잠시 후 다시 시도하세요.".into());
     };
 
     let analysis = match analyze_replay_fights(&config, &game_id, &replay_path).await {
@@ -321,16 +605,56 @@ pub(crate) async fn match_fights(
 pub(crate) async fn download_match_replay(
     state: State<'_, Arc<AppState>>,
     game_id: String,
+    game_version: Option<String>,
 ) -> Result<(), String> {
     validate_game_id(&game_id)?;
-    history_client(state.inner())
-        .await?
-        .download_history_replay(&game_id)
-        .await
-        .map_err(|_| {
-            "리플레이를 다운로드하지 못했습니다. 롤 클라이언트에서 해당 경기의 다운로드 가능 여부를 확인하세요."
-                .to_owned()
-        })?;
+    let client = match history_client(state.inner()).await {
+        Ok(client) => client,
+        Err(error) => {
+            let detail = format!(
+                "context=match_replay game_id={game_id} version={} error={error}",
+                game_version.as_deref().unwrap_or("unknown")
+            );
+            state
+                .record_flight("replay_download_error", detail.clone())
+                .await;
+            state
+                .report_diagnostic("lcu", "replay_download_client_unavailable", &detail)
+                .await;
+            return Err(error);
+        }
+    };
+
+    let replay_dir = match client.replay_directory().await {
+        Ok(value) => value,
+        Err(error) => {
+            let detail = format!(
+                "context=match_replay game_id={game_id} version={} replay_directory_error={error}",
+                game_version.as_deref().unwrap_or("unknown")
+            );
+            state
+                .record_flight("replay_download_warning", detail.clone())
+                .await;
+            state
+                .report_diagnostic("lcu", "replay_directory_lookup_failed", &detail)
+                .await;
+            None
+        }
+    };
+
+    let mut hint = RoflMatchHint::from_eog(game_id.clone(), &Value::Null);
+    if let Some(dir) = replay_dir.as_deref() {
+        hint.set_replay_dir(dir);
+    }
+    ensure_replay_downloaded(
+        state.inner(),
+        &client,
+        &game_id,
+        &hint,
+        "match_replay",
+        game_version.as_deref(),
+    )
+    .await?;
     Ok(())
 }
 

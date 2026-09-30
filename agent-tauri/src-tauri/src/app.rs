@@ -445,7 +445,12 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
     let Some(path) = lockfile_path(&config) else {
         return match LcuClient::probe_live_game().await {
             Ok(()) => LcuConnectionState::LoggedIn,
-            Err(_) => LcuConnectionState::ClientStopped,
+            Err(error) => {
+                state
+                    .report_diagnostic("lcu", "live_client_probe_failed", error.to_string())
+                    .await;
+                LcuConnectionState::ClientStopped
+            }
         };
     };
 

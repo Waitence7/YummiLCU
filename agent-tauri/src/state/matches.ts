@@ -66,6 +66,8 @@ export type Match = {
 
 export type MatchHistory = {
   summoner: string;
+  riotId?: string | null;
+  searched?: boolean;
   matches: Match[];
   hasMore: boolean;
   source: "live" | "cache" | "none";

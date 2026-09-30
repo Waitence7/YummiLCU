@@ -196,7 +196,7 @@ fn key_id(raw_key: &[u8; 32]) -> String {
 
 async fn fetch_key() -> AgentResult<CachedKey> {
     let url = Url::parse(COMMAND_KEY_URL)
-        .map_err(|_| AgentError::Relay("LCU command key URL 오류".into()))?;
+        .map_err(|error| AgentError::Relay(format!("LCU command key URL 오류: {error}")))?;
     if url.scheme() != "https"
         || url.host_str() != Some("yummi.duckdns.org")
         || url.path() != "/api/public/lcu-command-key"
@@ -208,17 +208,15 @@ async fn fetch_key() -> AgentResult<CachedKey> {
         .redirect(Policy::none())
         .timeout(Duration::from_secs(8))
         .build()
-        .map_err(|_| AgentError::Relay("LCU command key HTTP client 생성 실패".into()))?;
-    let response = client
-        .get(url)
-        .send()
-        .await
         .map_err(|error| {
-            AgentError::Relay(format!(
-                "LCU command key 조회 실패 ({})",
-                transport_detail(&error)
-            ))
+            AgentError::Relay(format!("LCU command key HTTP client 생성 실패: {error}"))
         })?;
+    let response = client.get(url).send().await.map_err(|error| {
+        AgentError::Relay(format!(
+            "LCU command key 조회 실패 ({})",
+            transport_detail(&error)
+        ))
+    })?;
     let status = response.status();
     if !status.is_success() {
         return Err(AgentError::Relay(format!(

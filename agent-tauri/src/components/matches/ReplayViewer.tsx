@@ -42,7 +42,7 @@ export function ReplayViewer({
       setError(null);
       setPlaying(false);
       try {
-        if (download) await downloadMatchReplay(match.id);
+        if (download) await downloadMatchReplay(match.id, match.version);
         const started = Date.now();
         const read = async (): Promise<void> => {
           if (request !== generation.current) return;

@@ -34,11 +34,84 @@ impl LcuClient {
         Ok(())
     }
 
-    pub(crate) async fn match_history(&self, offset: u32) -> AgentResult<(String, Value)> {
+    async fn resolve_history_summoner(&self, riot_id: Option<&str>) -> AgentResult<Value> {
+        let Some(riot_id) = riot_id else {
+            return self
+                .request(Method::GET, "/lol-summoner/v1/current-summoner", None)
+                .await;
+        };
+
+        let encoded = encode_component(riot_id);
+        let mut errors = Vec::new();
+
+        match self
+            .request(
+                Method::GET,
+                &format!("/lol-summoner/v1/summoners?name={encoded}"),
+                None,
+            )
+            .await
+        {
+            Ok(summoner) if summoner.get("puuid").and_then(Value::as_str).is_some() => {
+                return Ok(summoner);
+            }
+            Ok(_) => errors.push("summoner-name: puuid missing".to_owned()),
+            Err(error) => errors.push(format!("summoner-name: {error}")),
+        }
+
+        match self
+            .request(
+                Method::GET,
+                &format!("/lol-account/v1/accounts/aliases?riotId={encoded}"),
+                None,
+            )
+            .await
+        {
+            Ok(aliases) => {
+                if let Some(alias) = aliases.as_array().and_then(|rows| {
+                    rows.iter()
+                        .find(|row| row.get("puuid").and_then(Value::as_str).is_some())
+                }) {
+                    let Some(puuid) = alias.get("puuid").and_then(Value::as_str) else {
+                        unreachable!();
+                    };
+                    let (game_name, tag_line) = riot_id.rsplit_once('#').unwrap_or((riot_id, ""));
+                    return Ok(json!({
+                        "puuid": puuid,
+                        "gameName": alias
+                            .get("gameName")
+                            .or_else(|| alias.get("riotIdGameName"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(game_name),
+                        "tagLine": alias
+                            .get("tagLine")
+                            .or_else(|| alias.get("riotIdTagLine"))
+                            .or_else(|| alias.get("riotIdTagline"))
+                            .and_then(Value::as_str)
+                            .unwrap_or(tag_line),
+                    }));
+                }
+                errors.push("aliases: no puuid".to_owned());
+            }
+            Err(error) => errors.push(format!("aliases: {error}")),
+        }
+
+        Err(AgentError::Lcu(format!(
+            "Riot ID 조회 실패: {}",
+            errors.join(" | ")
+        )))
+    }
+
+    pub(crate) async fn match_history(
+        &self,
+        offset: u32,
+        riot_id: Option<&str>,
+    ) -> AgentResult<(String, Value, Vec<String>)> {
         validate_history_offset(offset)?;
 
+        let requested_riot_id = riot_id.map(validate_history_riot_id).transpose()?;
         let summoner = self
-            .request(Method::GET, "/lol-summoner/v1/current-summoner", None)
+            .resolve_history_summoner(requested_riot_id.as_deref())
             .await?;
         let puuid = summoner
             .get("puuid")
@@ -67,59 +140,82 @@ impl LcuClient {
             .and_then(Value::as_array)
             .ok_or_else(|| AgentError::Lcu("전적 응답을 읽지 못했습니다.".into()))?;
 
-        let champions = self
+        let (champions, champion_warning) = match self
             .request(
                 Method::GET,
                 "/lol-game-data/assets/v1/champion-summary.json",
                 None,
             )
             .await
-            .unwrap_or(Value::Null);
+        {
+            Ok(value) => (value, None),
+            Err(error) => (Value::Null, Some(format!("champion_summary error={error}"))),
+        };
 
         // The products/lol history list is intentionally compact and can contain
         // only the queried player's participant row. Fetch each game's detail so
         // the result screen has the complete roster (allies and opponents).
         let puuid_ref = puuid.as_str();
-        let matches = stream::iter(games.iter().cloned())
+        let outcomes = stream::iter(games.iter().cloned())
             .map(|summary| {
                 let champions = &champions;
                 let puuid = puuid_ref;
                 async move {
                     let game_id = game_id_string(&summary);
-                    let detail = if game_id.is_empty() {
-                        None
-                    } else {
-                        self.request(
+                    if game_id.is_empty() {
+                        return (
+                            normalize_match(&summary, puuid, champions),
+                            Some("detail game_id=missing".to_owned()),
+                        );
+                    }
+                    match self
+                        .request(
                             Method::GET,
                             &format!("/lol-match-history/v1/games/{game_id}"),
                             None,
                         )
                         .await
-                        .ok()
-                    };
-                    normalize_match(detail.as_ref().unwrap_or(&summary), puuid, champions)
+                    {
+                        Ok(detail) => (normalize_match(&detail, puuid, champions), None),
+                        Err(error) => (
+                            normalize_match(&summary, puuid, champions),
+                            Some(format!("detail game_id={game_id} error={error}")),
+                        ),
+                    }
                 }
             })
             .buffered(DETAIL_CONCURRENCY)
             .collect::<Vec<_>>()
             .await;
+        let mut warnings = Vec::new();
+        if let Some(warning) = champion_warning {
+            warnings.push(warning);
+        }
+        let mut matches = Vec::with_capacity(outcomes.len());
+        for (match_value, warning) in outcomes {
+            matches.push(match_value);
+            if let Some(warning) = warning {
+                warnings.push(warning);
+            }
+        }
 
-        let summoner_name = summoner
-            .get("gameName")
-            .or_else(|| summoner.get("displayName"))
-            .and_then(Value::as_str)
-            .unwrap_or("내 경기");
+        let summoner_name = summoner_display_name(&summoner)
+            .or_else(|| requested_riot_id.clone())
+            .unwrap_or_else(|| "내 경기".to_owned());
 
         Ok((
             puuid,
             json!({
                 "summoner": summoner_name,
+                "riotId": requested_riot_id,
+                "searched": riot_id.is_some(),
                 "matches": matches,
                 "hasMore": games.len() >= HISTORY_PAGE_SIZE
                     && offset + (HISTORY_PAGE_SIZE as u32) < (MAX_HISTORY_MATCHES as u32),
                 "source": "live",
                 "savedAt": now_ms(),
             }),
+            warnings,
         ))
     }
 }
@@ -140,8 +236,15 @@ pub(crate) async fn save_match_history_page(account_key: &str, page: &Value) -> 
 
     let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
     tokio::fs::write(&temp, bytes).await?;
-    if tokio::fs::metadata(&path).await.is_ok() {
-        let _ = tokio::fs::remove_file(&path).await;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(AgentError::Lcu(format!(
+                "기존 전적 캐시 삭제 실패: {error}"
+            )));
+        }
     }
     tokio::fs::rename(&temp, &path).await?;
     Ok(())
@@ -163,6 +266,59 @@ pub(crate) fn empty_match_history() -> Value {
         "source": "none",
         "savedAt": Value::Null,
     })
+}
+
+fn validate_history_riot_id(raw: &str) -> AgentResult<String> {
+    let value = raw.trim();
+    if value.is_empty() || value.len() > 128 || value.chars().any(char::is_control) {
+        return Err(AgentError::Lcu("Riot ID 형식이 올바르지 않습니다.".into()));
+    }
+    let Some((game_name, tag_line)) = value.rsplit_once('#') else {
+        return Err(AgentError::Lcu(
+            "다른 사람 전적은 게임이름#태그 형식으로 검색하세요.".into(),
+        ));
+    };
+    let game_name = game_name.trim();
+    let tag_line = tag_line.trim();
+    if game_name.is_empty() || tag_line.is_empty() {
+        return Err(AgentError::Lcu(
+            "다른 사람 전적은 게임이름#태그 형식으로 검색하세요.".into(),
+        ));
+    }
+    Ok(format!("{game_name}#{tag_line}"))
+}
+
+fn encode_component(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes())
+        .collect::<String>()
+        .replace('+', "%20")
+}
+
+fn summoner_display_name(summoner: &Value) -> Option<String> {
+    let game_name = summoner
+        .get("gameName")
+        .or_else(|| summoner.get("riotIdGameName"))
+        .or_else(|| summoner.get("displayName"))
+        .and_then(Value::as_str)?
+        .trim();
+    if game_name.is_empty() {
+        return None;
+    }
+    let tag_line = summoner
+        .get("tagLine")
+        .or_else(|| summoner.get("riotIdTagLine"))
+        .or_else(|| summoner.get("riotIdTagline"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if game_name.contains('#') {
+        Some(game_name.to_owned())
+    } else if let Some(tag_line) = tag_line {
+        Some(format!("{game_name}#{tag_line}"))
+    } else {
+        Some(game_name.to_owned())
+    }
 }
 
 fn validate_history_offset(offset: u32) -> AgentResult<()> {
@@ -437,6 +593,26 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validates_riot_id_search_query() {
+        assert_eq!(
+            validate_history_riot_id("  Player Name#KR1  ").unwrap(),
+            "Player Name#KR1"
+        );
+        assert!(validate_history_riot_id("missing-tag").is_err());
+        assert!(validate_history_riot_id("#KR1").is_err());
+        assert!(validate_history_riot_id("Player#").is_err());
+    }
+
+    #[test]
+    fn summoner_display_name_includes_tag_line() {
+        let summoner = json!({"gameName": "Player", "tagLine": "KR1"});
+        assert_eq!(
+            summoner_display_name(&summoner).as_deref(),
+            Some("Player#KR1")
+        );
+    }
 
     #[test]
     fn normalizes_full_roster_and_riot_ids() {

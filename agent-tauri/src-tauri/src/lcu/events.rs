@@ -3,6 +3,7 @@ use reqwest::Method;
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{mpsc, watch};
@@ -16,7 +17,7 @@ use tokio_tungstenite::{
 };
 use uuid::Uuid;
 
-use crate::{config::Config, error::AgentError};
+use crate::{config::Config, error::AgentError, state::AppState};
 
 use super::{
     collect_replay_bundle, collect_replay_file, discover_lockfile, find_existing_replay_path,
@@ -88,6 +89,7 @@ pub(crate) struct LcuEventPoller {
     lockfile_available: Option<bool>,
     lcu_available: Option<bool>,
     live_client_available: Option<bool>,
+    live_events_available: Option<bool>,
     live_game_id: Option<String>,
     connection_identity: Option<LcuIdentity>,
     connection_generation: u64,
@@ -120,6 +122,7 @@ impl LcuEventPoller {
         self.rofl_download_requested_game_id = None;
         self.rofl_auto_download_owned_game_id = None;
         self.lcu_available = None;
+        self.live_events_available = None;
         self.schema_warnings.clear();
     }
 
@@ -280,6 +283,7 @@ impl LcuEventPoller {
     }
 
     pub(crate) async fn watch_socket(
+        state: Arc<AppState>,
         config: Config,
         changed: mpsc::Sender<()>,
         mut stop: watch::Receiver<bool>,
@@ -288,11 +292,17 @@ impl LcuEventPoller {
             if *stop.borrow() {
                 return;
             }
-            let Some(discovery) = discover_lockfile_nonblocking(&config).await else {
-                if !wait_for_socket_retry(&mut stop).await {
-                    return;
+            let discovery = match discover_lockfile_nonblocking(&config).await {
+                Ok(discovery) => discovery,
+                Err(error) => {
+                    state
+                        .report_diagnostic("lcu_socket", "lockfile_discovery_failed", &error)
+                        .await;
+                    if !wait_for_socket_retry(&mut stop).await {
+                        return;
+                    }
+                    continue;
                 }
-                continue;
             };
             let Some(path) = discovery.path else {
                 if !wait_for_socket_retry(&mut stop).await {
@@ -300,18 +310,36 @@ impl LcuEventPoller {
                 }
                 continue;
             };
-            let Ok(client) =
-                LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
-            else {
-                if !wait_for_socket_retry(&mut stop).await {
-                    return;
+            let client = match LcuClient::from_lockfile(&path)
+                .or_else(|_| LcuClient::from_lockfile_legacy(&path))
+            {
+                Ok(client) => client,
+                Err(error) => {
+                    state
+                        .report_diagnostic(
+                            "lcu_socket",
+                            "client_from_lockfile_failed",
+                            error.to_string(),
+                        )
+                        .await;
+                    if !wait_for_socket_retry(&mut stop).await {
+                        return;
+                    }
+                    continue;
                 }
-                continue;
             };
             let (port, password) = client.event_connection();
             let mut request = match format!("wss://127.0.0.1:{port}").into_client_request() {
                 Ok(request) => request,
-                Err(_) => return,
+                Err(error) => {
+                    state
+                        .report_diagnostic("lcu_socket", "request_build_failed", error.to_string())
+                        .await;
+                    if !wait_for_socket_retry(&mut stop).await {
+                        return;
+                    }
+                    continue;
+                }
             };
             let mut credentials = format!("riot:{password}");
             let mut token = base64::Engine::encode(
@@ -325,16 +353,38 @@ impl LcuEventPoller {
                 token.as_bytes_mut().fill(0);
             }
             drop(client);
-            let Ok(header) = header else {
-                return;
+            let header = match header {
+                Ok(header) => header,
+                Err(error) => {
+                    state
+                        .report_diagnostic(
+                            "lcu_socket",
+                            "authorization_header_failed",
+                            error.to_string(),
+                        )
+                        .await;
+                    if !wait_for_socket_retry(&mut stop).await {
+                        return;
+                    }
+                    continue;
+                }
             };
             request.headers_mut().insert(AUTHORIZATION, header);
             let mut builder = native_tls::TlsConnector::builder();
             // Riot's local LCU certificate is self-signed. Host and process identity
             // are constrained separately before these credentials are used.
             builder.danger_accept_invalid_certs(true);
-            let Ok(tls) = builder.build() else {
-                return;
+            let tls = match builder.build() {
+                Ok(tls) => tls,
+                Err(error) => {
+                    state
+                        .report_diagnostic("lcu_socket", "tls_build_failed", error.to_string())
+                        .await;
+                    if !wait_for_socket_retry(&mut stop).await {
+                        return;
+                    }
+                    continue;
+                }
             };
             let connected = connect_async_tls_with_config(
                 request,
@@ -346,18 +396,34 @@ impl LcuEventPoller {
                 false,
                 Some(Connector::NativeTls(tls)),
             );
-            let Ok(Ok((mut socket, _))) = timeout(LCU_SOCKET_CONNECT_TIMEOUT, connected).await
-            else {
-                if !wait_for_socket_retry(&mut stop).await {
-                    return;
+            let mut socket = match timeout(LCU_SOCKET_CONNECT_TIMEOUT, connected).await {
+                Ok(Ok((socket, _))) => socket,
+                Ok(Err(error)) => {
+                    state
+                        .report_diagnostic("lcu_socket", "connect_failed", error.to_string())
+                        .await;
+                    if !wait_for_socket_retry(&mut stop).await {
+                        return;
+                    }
+                    continue;
                 }
-                continue;
+                Err(error) => {
+                    state
+                        .report_diagnostic("lcu_socket", "connect_timeout", error.to_string())
+                        .await;
+                    if !wait_for_socket_retry(&mut stop).await {
+                        return;
+                    }
+                    continue;
+                }
             };
-            if socket
+            if let Err(error) = socket
                 .send(Message::Text("[5,\"OnJsonApiEvent\"]".into()))
                 .await
-                .is_err()
             {
+                state
+                    .report_diagnostic("lcu_socket", "subscribe_failed", error.to_string())
+                    .await;
                 if !wait_for_socket_retry(&mut stop).await {
                     return;
                 }
@@ -371,7 +437,17 @@ impl LcuEventPoller {
                             if changed.is_closed() { return; }
                             let _ = changed.try_send(());
                         }
-                        Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                        Some(Err(error)) => {
+                            state
+                                .report_diagnostic(
+                                    "lcu_socket",
+                                    "stream_failed",
+                                    error.to_string(),
+                                )
+                                .await;
+                            break;
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
                         _ => {}
                     }
                 }
@@ -409,8 +485,30 @@ impl LcuEventPoller {
                             self.diagnostic("Live Client Data API 연결됨 (127.0.0.1:2999)");
                         }
                         self.live_client_available = Some(true);
-                        let live_events_response =
-                            LcuClient::live_game_request(LIVE_GAME_EVENTS).await.ok();
+                        let live_events_response = match LcuClient::live_game_request(
+                            LIVE_GAME_EVENTS,
+                        )
+                        .await
+                        {
+                            Ok(events) => {
+                                if self.live_events_available != Some(true) {
+                                    self.diagnostic(
+                                        "Live Client Events API 연결됨 (127.0.0.1:2999)",
+                                    );
+                                }
+                                self.live_events_available = Some(true);
+                                Some(events)
+                            }
+                            Err(error) => {
+                                if self.live_events_available != Some(false) {
+                                    self.diagnostic(format!(
+                                        "Live Client Events API 조회 실패; 기본 게임 데이터만 사용: {error}"
+                                    ));
+                                }
+                                self.live_events_available = Some(false);
+                                None
+                            }
+                        };
                         if let Some(payload) =
                             live_game_payload(&value, live_events_response.as_ref())
                         {
@@ -483,18 +581,18 @@ impl LcuEventPoller {
         if should_refresh_lockfile {
             self.last_lockfile_discovery = Some(Instant::now());
             match discover_lockfile_nonblocking(config).await {
-                Some(discovery) => {
+                Ok(discovery) => {
                     if self.lockfile_discovery_slow {
                         self.diagnostic("LCU lockfile 탐색 응답 정상화");
                     }
                     self.lockfile_discovery_slow = false;
                     self.cached_lockfile_discovery = Some(discovery);
                 }
-                None => {
+                Err(error) => {
                     if !self.lockfile_discovery_slow {
-                        self.diagnostic(
-                            "LCU lockfile 탐색이 2초를 초과해 이번 주기는 건너뜀 — Relay 처리는 계속함",
-                        );
+                        self.diagnostic(format!(
+                            "LCU lockfile 탐색 실패 — 이번 주기는 건너뜀; Relay 처리는 계속함: {error}"
+                        ));
                     }
                     self.lockfile_discovery_slow = true;
                 }
@@ -1037,11 +1135,27 @@ impl LcuEventPoller {
                     let mut payload = champ_select_payload(&value);
                     if payload.get("is_spectating").and_then(Value::as_bool) == Some(true) {
                         let champ_select_picks = spectator_champ_select_picks(&value);
-                        let gameflow_picks =
-                            match client.request(Method::GET, GAMEFLOW_SESSION, None).await {
-                                Ok(gameflow_session) => spectator_gameflow_picks(&gameflow_session),
-                                Err(_) => None,
-                            };
+                        let gameflow_picks = match client
+                            .request(Method::GET, GAMEFLOW_SESSION, None)
+                            .await
+                        {
+                            Ok(gameflow_session) => {
+                                self.schema_warnings
+                                    .remove("spectator_gameflow_request_failed");
+                                spectator_gameflow_picks(&gameflow_session)
+                            }
+                            Err(error) => {
+                                if self
+                                    .schema_warnings
+                                    .insert("spectator_gameflow_request_failed")
+                                {
+                                    self.diagnostic(format!(
+                                            "관전 gameflow 상세 조회 실패; champ-select 정보만 사용: {error}"
+                                        ));
+                                }
+                                None
+                            }
+                        };
                         if let Some(observer_picks) =
                             prefer_more_complete_picks(champ_select_picks, gameflow_picks)
                         {
@@ -1176,7 +1290,7 @@ fn is_expected_missing_lcu_endpoint(error: &AgentError) -> bool {
     )
 }
 
-async fn discover_lockfile_nonblocking(config: &Config) -> Option<LockfileDiscovery> {
+async fn discover_lockfile_nonblocking(config: &Config) -> Result<LockfileDiscovery, String> {
     let config = config.clone();
     match timeout(
         LOCKFILE_DISCOVERY_TIMEOUT,
@@ -1184,8 +1298,9 @@ async fn discover_lockfile_nonblocking(config: &Config) -> Option<LockfileDiscov
     )
     .await
     {
-        Ok(Ok(discovery)) => Some(discovery),
-        Ok(Err(_)) | Err(_) => None,
+        Ok(Ok(discovery)) => Ok(discovery),
+        Ok(Err(error)) => Err(format!("lockfile discovery worker failed: {error}")),
+        Err(error) => Err(format!("lockfile discovery timeout: {error}")),
     }
 }
 

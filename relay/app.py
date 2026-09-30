@@ -302,8 +302,12 @@ async def _try_bind_discord(
                     for key, value in parsed.items()
                     if key in {"name", "avatar"} and isinstance(value, str)
                 }
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as exc:
+            logger.warning(
+                "Discord profile cache JSON 파싱 실패 session=%s error=%s",
+                session_id[:8],
+                type(exc).__name__,
+            )
     bound = await conn.bind_discord(session_id, discord_id, profile)
     if bound:
         await mark_lcu_linked(r, discord_id)
@@ -909,7 +913,14 @@ async def agent_replay_upload(
             raw = await res.read()
             try:
                 body = json.loads(raw.decode("utf-8"))
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "ROFL 원본 전달 응답 JSON 파싱 실패 discord_id=%s game_id=%s status=%s error=%s",
+                    discord_id,
+                    game_id,
+                    res.status,
+                    type(exc).__name__,
+                )
                 body = {}
             logger.info(
                 "ROFL 원본 전달 완료 discord_id=%s game_id=%s target=%s bytes=%s",
@@ -1123,7 +1134,14 @@ async def _forward_tournament_broadcast_lcu(
                 return False
             try:
                 body = await res.json(content_type=None)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "대회 중계 LCU 응답 JSON 파싱 실패 discord_id=%s kind=%s status=%s error=%s",
+                    discord_id,
+                    kind,
+                    res.status,
+                    type(exc).__name__,
+                )
                 body = None
             matched = isinstance(body, dict) and body.get("matched") is True
             if matched:
@@ -1168,7 +1186,13 @@ async def _resolve_discord_presence_match_context(
                 return {"active": False, "status": "lookup_failed"}
             try:
                 body = await res.json(content_type=None)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Discord Presence 내전 조회 응답 JSON 파싱 실패 discord_id=%s status=%s error=%s",
+                    discord_id,
+                    res.status,
+                    type(exc).__name__,
+                )
                 return {"active": False, "status": "lookup_failed"}
     except Exception:
         logger.exception("Discord Presence 내전 조회 예외 discord_id=%s", discord_id)
@@ -1229,7 +1253,13 @@ async def _resolve_discord_join_riot_id(
                 return "lookup_failed", None
             try:
                 body = await res.json(content_type=None)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Discord 참가 요청 닉네임 응답 JSON 파싱 실패 requester_discord_id=%s status=%s error=%s",
+                    requester_discord_id,
+                    res.status,
+                    type(exc).__name__,
+                )
                 return "lookup_failed", None
     except Exception:
         logger.exception(
@@ -1322,7 +1352,13 @@ async def _forward_guild_match_eog(
                 return False
             try:
                 outcome = await res.json(content_type=None)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "내전 LCU ingest 응답 JSON 파싱 실패 discord_id=%s status=%s error=%s",
+                    discord_id,
+                    res.status,
+                    type(exc).__name__,
+                )
                 outcome = None
             matched = isinstance(outcome, dict) and outcome.get("matched") is True
             if not matched:
@@ -1386,7 +1422,13 @@ async def _deliver_guild_match_live(
                 return False, False
             try:
                 outcome = await res.json(content_type=None)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "내전 라이브 LCU ingest 응답 JSON 파싱 실패 discord_id=%s status=%s error=%s",
+                    discord_id,
+                    res.status,
+                    type(exc).__name__,
+                )
                 outcome = None
             if not isinstance(outcome, dict):
                 logger.warning(
@@ -2739,7 +2781,10 @@ async def ws_agent(
             else:
                 await websocket.send_json({"type": "session_bound", "discord_id": discord_id})
         except ValueError:
-            pass
+            logger.warning(
+                "Relay session discord_id 값 오류 session=%s",
+                session_id[:8],
+            )
 
     try:
         while True:

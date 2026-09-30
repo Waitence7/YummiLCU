@@ -138,10 +138,8 @@ impl AppState {
         let (unexpected_errors, _) = broadcast::channel(ERROR_REPORT_QUEUE_CAPACITY);
         let (update_diagnostics, _) = broadcast::channel(ERROR_REPORT_QUEUE_CAPACITY);
         let (diagnostic_reports, _) = broadcast::channel(DIAGNOSTIC_REPORT_QUEUE_CAPACITY);
-        let (discord_join_requests, _) =
-            broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
-        let (discord_join_resolutions, _) =
-            broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
+        let (discord_join_requests, _) = broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
+        let (discord_join_resolutions, _) = broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
         let (discord_presence_context_requests, _) =
             broadcast::channel(DISCORD_JOIN_REQUEST_QUEUE_CAPACITY);
         Self {
@@ -285,14 +283,14 @@ impl AppState {
                 );
                 let label = relay_state_flight_label(next);
                 self.record_flight("relay_state", label).await;
-                self.report_diagnostic("relay", "state_changed", label).await;
+                self.report_diagnostic("relay", "state_changed", label)
+                    .await;
                 self.ui.lock().await.relay = relay_ready;
                 if !relay_ready {
                     *self.discord_presence_match.write().await = None;
                 }
                 self.emit(app).await;
-                self
-                    .report_diagnostic("relay", "state", relay_state_flight_label(next))
+                self.report_diagnostic("relay", "state", relay_state_flight_label(next))
                     .await;
             }
         }
@@ -344,9 +342,14 @@ impl AppState {
 
         self.record_flight("server_diagnostic", format!("{category}:{code}: {detail}"))
             .await;
-        let _ = self
+        if self
             .diagnostic_reports
-            .send(AgentDiagnosticReport::new(category, code, detail));
+            .send(AgentDiagnosticReport::new(category, code, detail))
+            .is_err()
+        {
+            self.record_flight("diagnostic_report", "no_active_relay_receiver")
+                .await;
+        }
     }
 
     pub(crate) async fn report_update_diagnostic(
@@ -358,9 +361,14 @@ impl AppState {
         let detail = sanitize_error_summary(detail.as_ref());
         self.record_flight("updater", format!("{stage}: {detail}"))
             .await;
-        let _ = self
+        if self
             .update_diagnostics
-            .send(UpdateDiagnosticReport::new(stage, detail, target_version));
+            .send(UpdateDiagnosticReport::new(stage, detail, target_version))
+            .is_err()
+        {
+            self.record_flight("updater", "diagnostic_no_active_relay_receiver")
+                .await;
+        }
     }
 
     pub(crate) fn discord_join_request_receiver(&self) -> broadcast::Receiver<u64> {

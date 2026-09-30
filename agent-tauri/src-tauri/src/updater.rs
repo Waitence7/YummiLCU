@@ -373,14 +373,17 @@ fn validate_hash(bytes: &[u8], expected: &str) -> AgentResult<()> {
 }
 
 pub(crate) async fn beta_release_info() -> AgentResult<BetaReleaseInfo> {
-    let manifest_url = Url::parse(BETA_UPDATE_MANIFEST_URL)
-        .map_err(|_| AgentError::Update("beta manifest URL이 올바르지 않습니다.".into()))?;
+    let manifest_url = Url::parse(BETA_UPDATE_MANIFEST_URL).map_err(|error| {
+        AgentError::Update(format!("beta manifest URL이 올바르지 않습니다: {error}"))
+    })?;
     let client = Client::builder()
         .https_only(true)
         .redirect(Policy::none())
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|_| AgentError::Update("beta manifest 클라이언트 생성 실패".into()))?;
+        .map_err(|error| {
+            AgentError::Update(format!("beta manifest 클라이언트 생성 실패: {error}"))
+        })?;
     let bytes = download_limited(&client, manifest_url, MAX_UPDATE_MANIFEST_BYTES).await?;
     let target = parse_signed_manifest(&bytes)?
         .select_tauri()
@@ -390,8 +393,9 @@ pub(crate) async fn beta_release_info() -> AgentResult<BetaReleaseInfo> {
             "beta manifest 채널이 올바르지 않습니다.".into(),
         ));
     }
-    let installer_url = Url::parse(BETA_INSTALLER_URL)
-        .map_err(|_| AgentError::Update("beta 설치 파일 URL이 올바르지 않습니다.".into()))?;
+    let installer_url = Url::parse(BETA_INSTALLER_URL).map_err(|error| {
+        AgentError::Update(format!("beta 설치 파일 URL이 올바르지 않습니다: {error}"))
+    })?;
     validate_update_download_url(&installer_url)?;
 
     Ok(BetaReleaseInfo {
@@ -481,8 +485,12 @@ fn validate_manifest_files(root: &Path, files: Option<&[UpdateFile]>) -> AgentRe
     for file in files {
         let relative = validate_manifest_file_path(&file.path)?;
         let path = root.join(relative);
-        let metadata = fs::metadata(&path)
-            .map_err(|_| AgentError::Update(format!("업데이트 파일이 없습니다: {}", file.path)))?;
+        let metadata = fs::metadata(&path).map_err(|error| {
+            AgentError::Update(format!(
+                "업데이트 파일을 확인하지 못했습니다: {} ({error})",
+                file.path
+            ))
+        })?;
         if !metadata.is_file() || metadata.len() != file.size {
             return Err(AgentError::Update(format!(
                 "업데이트 파일 크기가 올바르지 않습니다: {}",
@@ -539,16 +547,12 @@ fn windows_signature_check_cmd(source: &Path, expected_thumbprint: Option<&str>)
 
 async fn download_limited(client: &Client, url: Url, max_bytes: usize) -> AgentResult<Vec<u8>> {
     let url_label = safe_url(&url);
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|error| {
-            AgentError::Update(format!(
-                "업데이트 다운로드 연결 실패 (method=GET endpoint={url_label} {})",
-                transport_detail(&error)
-            ))
-        })?;
+    let response = client.get(url).send().await.map_err(|error| {
+        AgentError::Update(format!(
+            "업데이트 다운로드 연결 실패 (method=GET endpoint={url_label} {})",
+            transport_detail(&error)
+        ))
+    })?;
     let status = response.status();
     if !status.is_success() {
         return Err(AgentError::Update(format!(
@@ -608,18 +612,36 @@ async fn apply_update(
     ) {
         return Ok(false);
     }
-    if let Some(reason) = update_block_reason(config).await {
-        state.report_update_diagnostic("blocked", &reason, Some(target_manifest.version.clone())).await;
-        state
-            .log(
-                app,
-                format!(
-                    "새 버전 {}이 있지만 게임 진행 중이라 업데이트를 보류합니다.",
-                    target_manifest.version
-                ),
-            )
-            .await;
-        return Ok(false);
+    match update_block_reason(config).await {
+        Ok(Some(reason)) => {
+            state
+                .report_update_diagnostic("blocked", &reason, Some(target_manifest.version.clone()))
+                .await;
+            state
+                .log(
+                    app,
+                    format!(
+                        "새 버전 {}이 있지만 게임 진행 중이라 업데이트를 보류합니다.",
+                        target_manifest.version
+                    ),
+                )
+                .await;
+            return Ok(false);
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let detail = format!("게임 진행 상태 확인 실패; 업데이트는 계속합니다: {error}");
+            state
+                .report_update_diagnostic(
+                    "block_check_failed",
+                    &detail,
+                    Some(target_manifest.version.clone()),
+                )
+                .await;
+            state
+                .record_flight("updater", format!("block_check_failed: {error}"))
+                .await;
+        }
     }
 
     let executable_name = target_manifest
@@ -666,11 +688,13 @@ async fn apply_update(
     validate_update_download_url(&parsed)?;
     let expected_thumbprint = expected_publisher_thumbprint(&target_manifest)?;
 
-    state.report_update_diagnostic(
-        "download_start",
-        if use_patch { "patch" } else { "archive" },
-        Some(target_manifest.version.clone()),
-    ).await;
+    state
+        .report_update_diagnostic(
+            "download_start",
+            if use_patch { "patch" } else { "archive" },
+            Some(target_manifest.version.clone()),
+        )
+        .await;
     state
         .set_update_message(
             app,
@@ -685,14 +709,16 @@ async fn apply_update(
         .redirect(Policy::none())
         .timeout(Duration::from_secs(120))
         .build()
-        .map_err(|_| AgentError::Update("업데이트 HTTP client 생성 실패".into()))?;
+        .map_err(|error| AgentError::Update(format!("업데이트 HTTP client 생성 실패: {error}")))?;
     let bytes = download_limited(&client, parsed, MAX_UPDATE_ARCHIVE_BYTES).await?;
     validate_hash(&bytes, hash)?;
-    state.report_update_diagnostic(
-        "download_success",
-        format!("bytes={}", bytes.len()),
-        Some(target_manifest.version.clone()),
-    ).await;
+    state
+        .report_update_diagnostic(
+            "download_success",
+            format!("bytes={}", bytes.len()),
+            Some(target_manifest.version.clone()),
+        )
+        .await;
 
     let work_root = std::env::temp_dir().join("yummi-lcu-update");
     fs::create_dir_all(&work_root)?;
@@ -705,20 +731,20 @@ async fn apply_update(
     safe_extract(&mut archive, &extract)?;
     validate_manifest_files(&extract, target_manifest.files.as_deref())?;
 
-    let source = std::iter::once(extract.join(executable_name))
-        .chain(
-            fs::read_dir(&extract)
-                .ok()
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| {
-                    entry
-                        .ok()
-                        .map(|entry| entry.path())
-                        .filter(|path| path.is_dir())
-                        .map(|path| path.join(executable_name))
-                }),
-        )
+    let mut executable_candidates = vec![extract.join(executable_name)];
+    for entry in fs::read_dir(&extract).map_err(|error| {
+        AgentError::Update(format!("업데이트 압축 해제 경로 조회 실패: {error}"))
+    })? {
+        let entry = entry.map_err(|error| {
+            AgentError::Update(format!("업데이트 압축 해제 항목 조회 실패: {error}"))
+        })?;
+        let path = entry.path();
+        if path.is_dir() {
+            executable_candidates.push(path.join(executable_name));
+        }
+    }
+    let source = executable_candidates
+        .into_iter()
         .find(|path| path.exists())
         .ok_or_else(|| AgentError::Update("업데이트 ZIP에 Tauri 실행 파일이 없습니다.".into()))?;
     let script = work.join("apply-update.cmd");
@@ -780,11 +806,13 @@ async fn apply_update(
     );
     fs::write(&script, script_text)?;
 
-    state.report_update_diagnostic(
-        "install_start",
-        "apply_script_spawn",
-        Some(target_manifest.version.clone()),
-    ).await;
+    state
+        .report_update_diagnostic(
+            "install_start",
+            "apply_script_spawn",
+            Some(target_manifest.version.clone()),
+        )
+        .await;
     state
         .set_update_message(
             app,
@@ -804,11 +832,13 @@ async fn apply_update(
             .map_err(|error| AgentError::Update(format!("업데이트 실행 실패: {error}")))?;
         update_mutex.hold_until_process_exit();
     }
-    state.report_update_diagnostic(
-        "install_success",
-        "apply_script_spawned",
-        Some(target_manifest.version.clone()),
-    ).await;
+    state
+        .report_update_diagnostic(
+            "install_success",
+            "apply_script_spawned",
+            Some(target_manifest.version.clone()),
+        )
+        .await;
     Ok(true)
 }
 
@@ -843,15 +873,26 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
     }
 }
 
-pub(crate) async fn check_and_apply_update(url: &str, config: &Config, app: &AppHandle, state: &AppState) {
-    state.report_update_diagnostic("update_check", "scheduled", None).await;
+pub(crate) async fn check_and_apply_update(
+    url: &str,
+    config: &Config,
+    app: &AppHandle,
+    state: &AppState,
+) {
+    state
+        .report_update_diagnostic("update_check", "scheduled", None)
+        .await;
     let parsed = match Url::parse(url) {
         Ok(parsed) => parsed,
         Err(error) => {
             let summary = format!("manifest URL parse failed: {error}");
-            state.report_update_diagnostic("failure", &summary, None).await;
+            state
+                .report_update_diagnostic("failure", &summary, None)
+                .await;
             state.record_flight("updater_error", &summary).await;
-            state.log(app, format!("자동 업데이트 설정 URL 오류: {error}")).await;
+            state
+                .log(app, format!("자동 업데이트 설정 URL 오류: {error}"))
+                .await;
             state
                 .report_unexpected_error("updater", "manifest_url_invalid", &summary)
                 .await;
@@ -870,7 +911,9 @@ pub(crate) async fn check_and_apply_update(url: &str, config: &Config, app: &App
         state
             .record_flight("updater_error", "manifest_url_rejected")
             .await;
-        state.log(app, "자동 업데이트 manifest URL 보안 검증 실패").await;
+        state
+            .log(app, "자동 업데이트 manifest URL 보안 검증 실패")
+            .await;
         state
             .report_unexpected_error(
                 "updater",
@@ -889,9 +932,13 @@ pub(crate) async fn check_and_apply_update(url: &str, config: &Config, app: &App
         Ok(client) => client,
         Err(error) => {
             let summary = format!("HTTP client build failed: {error}");
-            state.report_update_diagnostic("failure", &summary, None).await;
+            state
+                .report_update_diagnostic("failure", &summary, None)
+                .await;
             state.record_flight("updater_error", &summary).await;
-            state.log(app, format!("자동 업데이트 HTTP 준비 실패: {error}")).await;
+            state
+                .log(app, format!("자동 업데이트 HTTP 준비 실패: {error}"))
+                .await;
             state
                 .report_unexpected_error("updater", "http_client_build_failed", &summary)
                 .await;
@@ -902,9 +949,14 @@ pub(crate) async fn check_and_apply_update(url: &str, config: &Config, app: &App
         Ok(bytes) => bytes,
         Err(error) => {
             let summary = error.to_string();
-            state.report_update_diagnostic("failure", format!("manifest_download: {summary}"), None).await;
             state
-                .record_flight("updater_error", format!("manifest_download_failed: {summary}"))
+                .report_update_diagnostic("failure", format!("manifest_download: {summary}"), None)
+                .await;
+            state
+                .record_flight(
+                    "updater_error",
+                    format!("manifest_download_failed: {summary}"),
+                )
                 .await;
             state
                 .log(app, format!("자동 업데이트 확인 실패: {summary}"))
@@ -915,7 +967,13 @@ pub(crate) async fn check_and_apply_update(url: &str, config: &Config, app: &App
     let manifest = match parse_signed_manifest(&bytes) {
         Ok(manifest) => manifest,
         Err(error) => {
-            state.report_update_diagnostic("failure", format!("manifest_verification: {error}"), None).await;
+            state
+                .report_update_diagnostic(
+                    "failure",
+                    format!("manifest_verification: {error}"),
+                    None,
+                )
+                .await;
             state
                 .log(app, format!("자동 업데이트 manifest 검증 실패: {error}"))
                 .await;
@@ -941,7 +999,9 @@ pub(crate) async fn check_and_apply_update(url: &str, config: &Config, app: &App
             option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
             &config.update_channel,
         ) {
-            state.report_update_diagnostic("update_available", "applicable", Some(target.version)).await;
+            state
+                .report_update_diagnostic("update_available", "applicable", Some(target.version))
+                .await;
         }
     }
     match apply_update(manifest, app, state, config).await {
@@ -956,7 +1016,9 @@ pub(crate) async fn check_and_apply_update(url: &str, config: &Config, app: &App
             state.record_flight("updater", "no_applicable_update").await;
         }
         Err(error) => {
-            state.report_update_diagnostic("failure", error.to_string(), None).await;
+            state
+                .report_update_diagnostic("failure", error.to_string(), None)
+                .await;
             state.log(app, format!("자동 업데이트 실패: {error}")).await;
             state
                 .report_unexpected_error("updater", "apply_failed", error.to_string())
@@ -983,13 +1045,22 @@ async fn wait_for_update_check(
     }
 }
 
-async fn update_block_reason(config: &Config) -> Option<String> {
-    let path = lockfile_path(config)?;
+async fn update_block_reason(config: &Config) -> Result<Option<String>, String> {
+    let Some(path) = lockfile_path(config) else {
+        return Ok(None);
+    };
     let client = LcuClient::from_lockfile(&path)
-        .or_else(|_| LcuClient::from_lockfile_legacy(&path))
-        .ok()?;
-    let phase = client.gameflow_phase().await.ok()?;
-    blocks_update_for_gameflow_phase(&phase).then(|| format!("gameflow_phase={phase}"))
+        .or_else(|primary| {
+            LcuClient::from_lockfile_legacy(&path).map_err(|legacy| {
+                format!("LCU lockfile 확인 실패 primary={primary} legacy={legacy}")
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    let phase = client
+        .gameflow_phase()
+        .await
+        .map_err(|error| format!("gameflow phase 조회 실패: {error}"))?;
+    Ok(blocks_update_for_gameflow_phase(&phase).then(|| format!("gameflow_phase={phase}")))
 }
 
 fn blocks_update_for_gameflow_phase(phase: &str) -> bool {

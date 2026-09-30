@@ -70,10 +70,11 @@ impl LcuClient {
         let party_id = if let Some(id) = party_id.filter(|id| valid_party_id(id)) {
             Some(id)
         } else {
-            self.request(Method::GET, PLAYER_PARTY_ENDPOINT, None)
-                .await
-                .ok()
-                .and_then(|party| first_string(&party, &["partyId", "id"]).map(str::to_owned))
+            let party = self
+                .request(Method::GET, PLAYER_PARTY_ENDPOINT, None)
+                .await?;
+            first_string(&party, &["partyId", "id"])
+                .map(str::to_owned)
                 .filter(|id| valid_party_id(id))
         };
         let Some(id) = party_id else {

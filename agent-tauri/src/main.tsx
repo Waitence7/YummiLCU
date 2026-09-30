@@ -13,11 +13,11 @@ if (!root) throw new Error('Missing #root');
 if (!useMockBridge) {
   window.addEventListener('error', (event) => {
     const summary = event.error instanceof Error ? event.error.message : event.message;
-    void reportUnexpectedError('uncaught_error', summary || 'unknown UI error').catch(() => undefined);
+    void reportUnexpectedError('uncaught_error', summary || 'unknown UI error').catch((reportError) => console.warn('[diagnostic] uncaught error report failed', reportError));
   });
   window.addEventListener('unhandledrejection', (event) => {
     const summary = event.reason instanceof Error ? event.reason.message : String(event.reason);
-    void reportUnexpectedError('unhandled_rejection', summary).catch(() => undefined);
+    void reportUnexpectedError('unhandled_rejection', summary).catch((reportError) => console.warn('[diagnostic] rejection report failed', reportError));
   });
 }
 

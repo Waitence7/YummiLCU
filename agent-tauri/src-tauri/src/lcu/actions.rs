@@ -87,9 +87,14 @@ impl LcuClient {
         start_search: bool,
     ) -> AgentResult<ActionOutcome> {
         let mut last_error = None;
+        let mut cleanup_errors = Vec::new();
         for attempt in 1..=LOBBY_RETRY_COUNT {
-            let _ = self.request(Method::DELETE, MATCHMAKING_SEARCH, None).await;
-            let _ = self.request(Method::DELETE, LOBBY, None).await;
+            if let Err(error) = self.request(Method::DELETE, MATCHMAKING_SEARCH, None).await {
+                cleanup_errors.push(format!("attempt={attempt} matchmaking_cleanup={error}"));
+            }
+            if let Err(error) = self.request(Method::DELETE, LOBBY, None).await {
+                cleanup_errors.push(format!("attempt={attempt} lobby_cleanup={error}"));
+            }
             match self
                 .request(Method::POST, LOBBY, Some(json!({"queueId": queue.id()})))
                 .await
@@ -122,7 +127,18 @@ impl LcuClient {
                 sleep(LOBBY_RETRY_DELAY).await;
             }
         }
-        let detail = last_error.unwrap_or_else(|| "HTTP 요청 결과를 확인할 수 없음".into());
+        let mut detail = last_error.unwrap_or_else(|| "HTTP 요청 결과를 확인할 수 없음".into());
+        if !cleanup_errors.is_empty() {
+            detail.push_str("; 선행 정리 오류: ");
+            detail.push_str(
+                &cleanup_errors
+                    .iter()
+                    .take(4)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(" | "),
+            );
+        }
         Err(AgentError::Lcu(if start_search {
             format!("매칭 시작 실패: {detail}")
         } else {

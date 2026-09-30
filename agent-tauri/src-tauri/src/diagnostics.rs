@@ -29,8 +29,16 @@ impl FlightRecorder {
             category,
             detail: detail.into(),
         };
-        append_persistent_flight_record(&record);
+        let persistence_error = append_persistent_flight_record(&record).err();
         self.records.push_back(record);
+        if let Some(detail) = persistence_error {
+            eprintln!("[yummi diagnostics] {detail}");
+            self.records.push_back(FlightRecord {
+                at_ms: now_ms(),
+                category: "diagnostic_io",
+                detail,
+            });
+        }
         while self.records.len() > MAX_FLIGHT_RECORDS {
             self.records.pop_front();
         }
@@ -69,9 +77,20 @@ fn persistent_flight_backup_path(path: &std::path::Path, index: usize) -> PathBu
     path.with_file_name(format!("{file_name}.{index}"))
 }
 
-fn rotate_persistent_flight_log(path: &std::path::Path, max_bytes: u64) {
-    if !fs::metadata(path).is_ok_and(|metadata| metadata.len() >= max_bytes) {
-        return;
+fn diagnostic_io_error(operation: &str, path: &std::path::Path, error: &std::io::Error) -> String {
+    let file = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("diagnostic-file");
+    format!("operation={operation} file={file} error={error}")
+}
+
+fn rotate_persistent_flight_log(path: &std::path::Path, max_bytes: u64) -> Result<(), String> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.len() >= max_bytes => {}
+        Ok(_) => return Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(diagnostic_io_error("flight_metadata", path, &error)),
     }
 
     for index in (1..=PERSISTENT_FLIGHT_LOG_BACKUPS).rev() {
@@ -82,12 +101,16 @@ fn rotate_persistent_flight_log(path: &std::path::Path, max_bytes: u64) {
         };
         let destination = persistent_flight_backup_path(path, index);
         if destination.exists() {
-            let _ = fs::remove_file(&destination);
+            fs::remove_file(&destination).map_err(|error| {
+                diagnostic_io_error("flight_rotate_remove", &destination, &error)
+            })?;
         }
         if source.exists() {
-            let _ = fs::rename(&source, &destination);
+            fs::rename(&source, &destination)
+                .map_err(|error| diagnostic_io_error("flight_rotate_rename", &source, &error))?;
         }
     }
+    Ok(())
 }
 
 fn sanitize_persistent_flight_detail(value: &str) -> String {
@@ -181,35 +204,62 @@ fn redact_persistent_key_value(input: &str, key: &str) -> String {
     out
 }
 
-fn append_persistent_flight_record(record: &FlightRecord) {
+fn append_persistent_flight_record(record: &FlightRecord) -> Result<(), String> {
     let path = persistent_flight_log_path();
-    append_persistent_flight_record_to_path(&path, record, MAX_PERSISTENT_FLIGHT_LOG_BYTES);
+    append_persistent_flight_record_to_path(&path, record, MAX_PERSISTENT_FLIGHT_LOG_BYTES)
 }
 
 fn append_persistent_flight_record_to_path(
     path: &std::path::Path,
     record: &FlightRecord,
     max_bytes: u64,
-) {
+) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        fs::create_dir_all(parent)
+            .map_err(|error| diagnostic_io_error("flight_create_dir", parent, &error))?;
     }
-    rotate_persistent_flight_log(path, max_bytes);
+    rotate_persistent_flight_log(path, max_bytes)?;
     let detail = sanitize_persistent_flight_detail(&record.detail);
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} [{}] {}", record.at_ms, record.category, detail);
-    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| diagnostic_io_error("flight_open", path, &error))?;
+    writeln!(file, "{} [{}] {}", record.at_ms, record.category, detail)
+        .map_err(|error| diagnostic_io_error("flight_write", path, &error))?;
+    Ok(())
 }
 
 pub(crate) fn persistent_flight_log_snapshot() -> Option<String> {
     let path = persistent_flight_log_path();
-    let bytes = fs::read(path).ok()?;
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            eprintln!(
+                "[yummi diagnostics] {}",
+                diagnostic_io_error("flight_snapshot_read", &path, &error)
+            );
+            return None;
+        }
+    };
     if bytes.len() as u64 > MAX_PERSISTENT_FLIGHT_LOG_BYTES.saturating_add(16 * 1024) {
+        eprintln!(
+            "[yummi diagnostics] operation=flight_snapshot_read file=flight-recorder.log error=file_too_large bytes={}",
+            bytes.len()
+        );
         return None;
     }
-    String::from_utf8(bytes)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    match String::from_utf8(bytes) {
+        Ok(value) if !value.trim().is_empty() => Some(value),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!(
+                "[yummi diagnostics] operation=flight_snapshot_decode file=flight-recorder.log error={error}"
+            );
+            None
+        }
+    }
 }
 
 fn bootstrap_log_path() -> PathBuf {
@@ -219,10 +269,32 @@ fn bootstrap_log_path() -> PathBuf {
 pub(crate) fn write_bootstrap_error(summary: &str) {
     let path = bootstrap_log_path();
     if let Some(parent) = path.parent() {
-        let _ = fs::create_dir_all(parent);
+        if let Err(error) = fs::create_dir_all(parent) {
+            eprintln!(
+                "[yummi diagnostics] {}",
+                diagnostic_io_error("bootstrap_create_dir", parent, &error)
+            );
+            return;
+        }
     }
-    if fs::metadata(&path).is_ok_and(|metadata| metadata.len() >= MAX_BOOTSTRAP_LOG_BYTES) {
-        let _ = fs::remove_file(&path);
+    match fs::metadata(&path) {
+        Ok(metadata) if metadata.len() >= MAX_BOOTSTRAP_LOG_BYTES => {
+            if let Err(error) = fs::remove_file(&path) {
+                eprintln!(
+                    "[yummi diagnostics] {}",
+                    diagnostic_io_error("bootstrap_rotate_remove", &path, &error)
+                );
+                return;
+            }
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            eprintln!(
+                "[yummi diagnostics] {}",
+                diagnostic_io_error("bootstrap_metadata", &path, &error)
+            );
+        }
     }
     let sanitized = summary
         .chars()
@@ -235,19 +307,52 @@ pub(crate) fn write_bootstrap_error(summary: &str) {
         })
         .take(1_024)
         .collect::<String>();
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
-        let _ = writeln!(file, "{} {sanitized}", now_ms());
+    match OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            if let Err(error) = writeln!(file, "{} {sanitized}", now_ms()) {
+                eprintln!(
+                    "[yummi diagnostics] {}",
+                    diagnostic_io_error("bootstrap_write", &path, &error)
+                );
+            }
+        }
+        Err(error) => eprintln!(
+            "[yummi diagnostics] {}",
+            diagnostic_io_error("bootstrap_open", &path, &error)
+        ),
     }
 }
 
 pub(crate) fn bootstrap_log_snapshot() -> Option<String> {
-    let bytes = fs::read(bootstrap_log_path()).ok()?;
+    let path = bootstrap_log_path();
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            eprintln!(
+                "[yummi diagnostics] {}",
+                diagnostic_io_error("bootstrap_snapshot_read", &path, &error)
+            );
+            return None;
+        }
+    };
     if bytes.len() as u64 > MAX_BOOTSTRAP_LOG_BYTES {
+        eprintln!(
+            "[yummi diagnostics] operation=bootstrap_snapshot_read file=bootstrap-errors.log error=file_too_large bytes={}",
+            bytes.len()
+        );
         return None;
     }
-    String::from_utf8(bytes)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
+    match String::from_utf8(bytes) {
+        Ok(value) if !value.trim().is_empty() => Some(value),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!(
+                "[yummi diagnostics] operation=bootstrap_snapshot_decode file=bootstrap-errors.log error={error}"
+            );
+            None
+        }
+    }
 }
 
 fn now_ms() -> u64 {
@@ -308,7 +413,8 @@ mod tests {
                 detail: "after-rotation".into(),
             },
             8,
-        );
+        )
+        .unwrap();
 
         assert_eq!(
             fs::read_to_string(persistent_flight_backup_path(&path, 1)).unwrap(),

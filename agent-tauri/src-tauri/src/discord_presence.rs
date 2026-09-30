@@ -136,12 +136,11 @@ impl PresenceSession {
                         button.label("방 참가하기").url(match_join_url.clone())
                     });
                 } else if let Some(opgg_url) = snapshot.opgg_url.as_ref() {
-                    activity = activity.append_buttons(|button| {
-                        button.label("OP.GG 전적").url(opgg_url.clone())
-                    });
+                    activity = activity
+                        .append_buttons(|button| button.label("OP.GG 전적").url(opgg_url.clone()));
                 }
-                activity = activity
-                    .append_buttons(|button| button.label("앱 다운로드").url(DOWNLOAD_URL));
+                activity =
+                    activity.append_buttons(|button| button.label("앱 다운로드").url(DOWNLOAD_URL));
 
                 if let Some(assets) = snapshot.assets.as_ref() {
                     activity = activity.assets(|builder| {
@@ -190,7 +189,9 @@ impl PresenceSession {
 
     fn clear(&mut self) {
         if let Some(client) = self.client.as_mut() {
-            let _ = client.clear_activity();
+            if let Err(error) = client.clear_activity() {
+                eprintln!("[yummi discord] clear activity failed during cleanup: {error}");
+            }
         }
         self.disconnect();
     }
@@ -204,14 +205,16 @@ impl PresenceSession {
 
         let application_id = discord_application_id()
             .parse::<u64>()
-            .map_err(|_| "Discord application ID 형식 오류".to_string())?;
+            .map_err(|error| format!("Discord application ID 형식 오류: {error}"))?;
         let mut client = Client::with_error_config(application_id, Duration::from_secs(2), Some(1));
         let sender = self.join_sender.clone();
         client
             .on_activity_join(move |context| {
                 if let EventData::ActivityJoin(data) = context.event {
                     if let Some(secret) = data.secret {
-                        let _ = sender.send(secret);
+                        if sender.send(secret).is_err() {
+                            eprintln!("[yummi discord] activity join receiver unavailable");
+                        }
                     }
                 }
             })
@@ -224,7 +227,11 @@ impl PresenceSession {
                     if let Some(user) = data.user {
                         if let Some(id) = user.id {
                             if let Ok(user_id) = id.parse::<u64>() {
-                                let _ = request_sender.send(user_id);
+                                if request_sender.send(user_id).is_err() {
+                                    eprintln!(
+                                        "[yummi discord] activity join-request receiver unavailable"
+                                    );
+                                }
                             }
                         }
                     }
@@ -275,7 +282,9 @@ impl PresenceSession {
         self.subscribed_to_join = false;
         self.subscribed_to_join_request = false;
         if let Some(client) = self.client.take() {
-            let _ = client.shutdown();
+            if let Err(error) = client.shutdown() {
+                eprintln!("[yummi discord] IPC shutdown failed: {error}");
+            }
         }
     }
 }
@@ -400,6 +409,7 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
         }
 
         let snapshot = detect_presence(
+            &state,
             &config,
             &mut champion_summary,
             &request_party,
@@ -687,7 +697,15 @@ async fn apply_join_resolution(
     if resolution.status == "nickname_missing" {
         let user_id = resolution.requester_discord_id;
         pending.remove(&user_id);
-        let _ = session.close_join_request(user_id);
+        if let Err(error) = session.close_join_request(user_id) {
+            state
+                .report_diagnostic(
+                    "discord_presence",
+                    "close_join_request_failed",
+                    format!("user_id={user_id} reason=nickname_missing error={error}"),
+                )
+                .await;
+        }
         state
             .record_flight(
                 "discord_presence_join_request",
@@ -722,7 +740,15 @@ async fn flush_pending_join_requests(
 
     for user_id in expired {
         pending.remove(&user_id);
-        let _ = session.close_join_request(user_id);
+        if let Err(error) = session.close_join_request(user_id) {
+            state
+                .report_diagnostic(
+                    "discord_presence",
+                    "close_join_request_failed",
+                    format!("user_id={user_id} reason=expired error={error}"),
+                )
+                .await;
+        }
         state
             .record_flight(
                 "discord_presence_join_request",
@@ -748,13 +774,34 @@ async fn flush_pending_join_requests(
     let Some(path) = lockfile_path(config) else {
         return Ok(());
     };
-    let Ok(client) =
-        LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
-    else {
-        return Ok(());
-    };
+    let client =
+        match LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) {
+            Ok(client) => client,
+            Err(error) => {
+                state
+                    .report_diagnostic(
+                        "discord_presence",
+                        "join_request_lcu_client_failed",
+                        error.to_string(),
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
 
-    let phase = client.gameflow_phase().await.unwrap_or_default();
+    let phase = match client.gameflow_phase().await {
+        Ok(phase) => phase,
+        Err(error) => {
+            state
+                .report_diagnostic(
+                    "discord_presence",
+                    "join_request_gameflow_phase_failed",
+                    error.to_string(),
+                )
+                .await;
+            return Ok(());
+        }
+    };
     if phase != "Lobby" {
         return Ok(());
     }
@@ -769,7 +816,15 @@ async fn flush_pending_join_requests(
         match client.invite_discord_requester(&riot_id).await {
             Ok(outcome) if outcome.ok => {
                 pending.remove(&user_id);
-                let _ = session.close_join_request(user_id);
+                if let Err(error) = session.close_join_request(user_id) {
+                    state
+                        .report_diagnostic(
+                            "discord_presence",
+                            "close_join_request_failed",
+                            format!("user_id={user_id} reason=invite_sent error={error}"),
+                        )
+                        .await;
+                }
                 invited_count += 1;
                 state
                     .record_flight(
@@ -890,8 +945,7 @@ fn guild_match_join_url(context: &DiscordPresenceMatchContext) -> Option<String>
             | "IN_GAME"
             | "GAME_ENDED"
             | "RESULT_PENDING"
-    )
-        || context.discord_guild_id.is_empty()
+    ) || context.discord_guild_id.is_empty()
         || !context
             .discord_guild_id
             .chars()
@@ -914,86 +968,172 @@ fn guild_match_join_url(context: &DiscordPresenceMatchContext) -> Option<String>
 }
 
 async fn detect_presence(
+    state: &AppState,
     config: &Config,
     champion_summary: &mut Option<Value>,
     request_party: &PresenceParty,
     match_join_url: Option<String>,
 ) -> Option<PresenceSnapshot> {
     if let Some(path) = lockfile_path(config) {
-        if let Ok(client) =
-            LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
-        {
-            if let Ok(phase) = client.gameflow_phase().await {
-                if phase == "InProgress" {
-                    if let Ok(live_game) = LcuClient::live_game_request(LIVE_GAME_ENDPOINT).await {
-                        if champion_summary.is_none() {
-                            *champion_summary = client
-                                .champion_summary()
-                                .await
-                                .ok()
-                                .filter(Value::is_array);
+        match LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) {
+            Ok(client) => match client.gameflow_phase().await {
+                Ok(phase) => {
+                    if phase == "InProgress" {
+                        match LcuClient::live_game_request(LIVE_GAME_ENDPOINT).await {
+                            Ok(live_game) => {
+                                if champion_summary.is_none() {
+                                    match client.champion_summary().await {
+                                        Ok(summary) if summary.is_array() => {
+                                            *champion_summary = Some(summary);
+                                        }
+                                        Ok(_) => {
+                                            state
+                                                .report_diagnostic(
+                                                    "discord_presence",
+                                                    "champion_summary_invalid",
+                                                    "LCU champion summary 응답이 배열이 아님",
+                                                )
+                                                .await;
+                                        }
+                                        Err(error) => {
+                                            state
+                                                .report_diagnostic(
+                                                    "discord_presence",
+                                                    "champion_summary_failed",
+                                                    error.to_string(),
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                }
+                                let gameflow_session = match client.gameflow_session().await {
+                                    Ok(value) => Some(value),
+                                    Err(error) => {
+                                        state
+                                            .report_diagnostic(
+                                                "discord_presence",
+                                                "gameflow_session_failed",
+                                                error.to_string(),
+                                            )
+                                            .await;
+                                        None
+                                    }
+                                };
+                                let opgg_url = match client.current_summoner().await {
+                                    Ok(summoner) => opgg_url_from_identity(&summoner),
+                                    Err(error) => {
+                                        state
+                                            .report_diagnostic(
+                                                "discord_presence",
+                                                "current_summoner_failed",
+                                                error.to_string(),
+                                            )
+                                            .await;
+                                        None
+                                    }
+                                };
+                                return Some(in_progress_snapshot(
+                                    &live_game,
+                                    gameflow_session.as_ref(),
+                                    champion_summary.as_ref(),
+                                    request_party,
+                                    match_join_url.clone(),
+                                    opgg_url,
+                                ));
+                            }
+                            Err(error) => {
+                                state
+                                    .report_diagnostic(
+                                        "discord_presence",
+                                        "live_game_failed",
+                                        error.to_string(),
+                                    )
+                                    .await;
+                            }
                         }
-                        let gameflow_session = client.gameflow_session().await.ok();
-                        let opgg_url = client
-                            .current_summoner()
-                            .await
-                            .ok()
-                            .and_then(|summoner| opgg_url_from_identity(&summoner));
-                        return Some(in_progress_snapshot(
-                            &live_game,
-                            gameflow_session.as_ref(),
-                            champion_summary.as_ref(),
-                            request_party,
-                            match_join_url.clone(),
-                            opgg_url,
-                        ));
                     }
+                    let party = if phase == "Lobby" {
+                        match client.discord_party_info().await {
+                            Ok(Some(party)) => PresenceParty {
+                                // Keep Discord's activity party synthetic so clicking
+                                // Ask to Join never depends on the requester's Agent.
+                                id: request_party.id.clone(),
+                                size: party.size.or(request_party.size),
+                            },
+                            Ok(None) => request_party.clone(),
+                            Err(error) => {
+                                state
+                                    .report_diagnostic(
+                                        "discord_presence",
+                                        "party_info_failed",
+                                        error.to_string(),
+                                    )
+                                    .await;
+                                request_party.clone()
+                            }
+                        }
+                    } else {
+                        request_party.clone()
+                    };
+                    let opgg_url = match client.current_summoner().await {
+                        Ok(summoner) => opgg_url_from_identity(&summoner),
+                        Err(error) => {
+                            state
+                                .report_diagnostic(
+                                    "discord_presence",
+                                    "current_summoner_failed",
+                                    error.to_string(),
+                                )
+                                .await;
+                            None
+                        }
+                    };
+                    return phase_snapshot(
+                        &phase,
+                        Some(party),
+                        Some(request_only_secret(&request_party.id)),
+                        match_join_url.clone(),
+                        opgg_url,
+                    );
                 }
-                let party = if phase == "Lobby" {
-                    client
-                        .discord_party_info()
-                        .await
-                        .ok()
-                        .flatten()
-                        .map(|party| PresenceParty {
-                            // Keep Discord's activity party synthetic so clicking
-                            // Ask to Join never depends on the requester's Agent.
-                            id: request_party.id.clone(),
-                            size: party.size.or(request_party.size),
-                        })
-                        .unwrap_or_else(|| request_party.clone())
-                } else {
-                    request_party.clone()
-                };
-                let opgg_url = client
-                    .current_summoner()
-                    .await
-                    .ok()
-                    .and_then(|summoner| opgg_url_from_identity(&summoner));
-                return phase_snapshot(
-                    &phase,
-                    Some(party),
-                    Some(request_only_secret(&request_party.id)),
-                    match_join_url.clone(),
-                    opgg_url,
-                );
+                Err(error) => {
+                    state
+                        .report_diagnostic(
+                            "discord_presence",
+                            "gameflow_phase_failed",
+                            error.to_string(),
+                        )
+                        .await;
+                }
+            },
+            Err(error) => {
+                state
+                    .report_diagnostic("discord_presence", "lcu_client_failed", error.to_string())
+                    .await;
             }
         }
     }
 
-    LcuClient::live_game_request(LIVE_GAME_ENDPOINT)
-        .await
-        .ok()
-        .map(|live_game| {
-            in_progress_snapshot(
-                &live_game,
-                None,
-                champion_summary.as_ref(),
-                request_party,
-                match_join_url.clone(),
-                None,
-            )
-        })
+    match LcuClient::live_game_request(LIVE_GAME_ENDPOINT).await {
+        Ok(live_game) => Some(in_progress_snapshot(
+            &live_game,
+            None,
+            champion_summary.as_ref(),
+            request_party,
+            match_join_url.clone(),
+            None,
+        )),
+        Err(error) => {
+            state
+                .report_diagnostic(
+                    "discord_presence",
+                    "fallback_live_game_failed",
+                    error.to_string(),
+                )
+                .await;
+            None
+        }
+    }
 }
 
 fn yummi_assets() -> PresenceAssets {
@@ -1075,9 +1215,8 @@ fn in_progress_snapshot(
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    let champion = champion_alias.and_then(|alias| {
-        champion_summary.and_then(|summary| champion_metadata(summary, alias))
-    });
+    let champion = champion_alias
+        .and_then(|alias| champion_summary.and_then(|summary| champion_metadata(summary, alias)));
     let champion_name = champion
         .as_ref()
         .map(|(_, name)| name.as_str())
@@ -1296,8 +1435,8 @@ fn discord_application_id() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        activity_started_at_ms, game_mode_label, in_progress_snapshot, join_secret,
-        guild_match_join_url, parse_join_secret, parse_request_only_secret, phase_snapshot,
+        activity_started_at_ms, game_mode_label, guild_match_join_url, in_progress_snapshot,
+        join_secret, parse_join_secret, parse_request_only_secret, phase_snapshot,
         request_only_secret, PresenceParty, YUMMI_ICON_URL,
     };
     use serde_json::json;
@@ -1308,7 +1447,9 @@ mod tests {
         assert_eq!(matchmaking.phase_key, "Matchmaking");
         assert_eq!(matchmaking.details, "매칭 검색 중");
         assert_eq!(
-            phase_snapshot("ChampSelect", None, None, None, None).unwrap().details,
+            phase_snapshot("ChampSelect", None, None, None, None)
+                .unwrap()
+                .details,
             "챔피언 선택 중"
         );
         assert!(phase_snapshot("None", None, None, None, None).is_none());
@@ -1379,7 +1520,10 @@ mod tests {
         assert_eq!(snapshot.details, "솔로랭크 플레이 중");
         assert_eq!(snapshot.state, "아리 · 7 / 2 / 9");
         assert!(snapshot.started_at_ms.is_some());
-        assert_eq!(snapshot.party.as_ref().map(|party| party.id.as_str()), Some("yummi-presence-test"));
+        assert_eq!(
+            snapshot.party.as_ref().map(|party| party.id.as_str()),
+            Some("yummi-presence-test")
+        );
         assert_eq!(
             snapshot.join_secret.as_deref(),
             Some("yummi:request:v1:yummi-presence-test")

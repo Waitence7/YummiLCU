@@ -197,8 +197,13 @@ pub(crate) async fn save_cached_match_fights(
     tokio::fs::write(&temp, bytes)
         .await
         .map_err(|error| format!("한타 캐시 쓰기 실패: {error}"))?;
-    if tokio::fs::metadata(&path).await.is_ok() {
-        let _ = tokio::fs::remove_file(&path).await;
+    match tokio::fs::remove_file(&path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&temp).await;
+            return Err(format!("기존 한타 캐시 삭제 실패: {error}"));
+        }
     }
     tokio::fs::rename(&temp, &path)
         .await
@@ -235,7 +240,7 @@ fn safe_server_error(value: &Value) -> String {
 async fn stable_replay_size(path: &Path) -> Result<u64, String> {
     let first = tokio::fs::symlink_metadata(path)
         .await
-        .map_err(|_| "ROFL 파일을 찾지 못했습니다.".to_owned())?;
+        .map_err(|error| format!("ROFL 파일을 찾지 못했습니다: {error}"))?;
     if !first.is_file() || first.file_type().is_symlink() {
         return Err("ROFL 파일 형식이 올바르지 않습니다.".into());
     }
@@ -245,7 +250,7 @@ async fn stable_replay_size(path: &Path) -> Result<u64, String> {
     sleep(Duration::from_millis(500)).await;
     let second = tokio::fs::symlink_metadata(path)
         .await
-        .map_err(|_| "ROFL 파일 상태를 다시 확인하지 못했습니다.".to_owned())?;
+        .map_err(|error| format!("ROFL 파일 상태를 다시 확인하지 못했습니다: {error}"))?;
     if second.len() != first.len() {
         return Err("ROFL 파일이 아직 저장 중입니다. 잠시 후 다시 시도하세요.".into());
     }
@@ -262,12 +267,12 @@ pub(crate) async fn analyze_replay_fights(
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(5 * 60))
         .build()
-        .map_err(|_| "ROFL 분석용 HTTP 클라이언트 생성 실패".to_owned())?;
+        .map_err(|error| format!("ROFL 분석용 HTTP 클라이언트 생성 실패: {error}"))?;
 
     let analyze_url = endpoint(config, "/api/rofl/analyze")?;
     let file = tokio::fs::File::open(replay_path)
         .await
-        .map_err(|_| "ROFL 파일을 열 수 없습니다.".to_owned())?;
+        .map_err(|error| format!("ROFL 파일을 열 수 없습니다: {error}"))?;
     let body = reqwest::Body::wrap_stream(ReaderStream::new(file));
     let submit = client
         .post(analyze_url)
@@ -282,7 +287,7 @@ pub(crate) async fn analyze_replay_fights(
     let submit_json: Value = submit
         .json()
         .await
-        .map_err(|_| "ROFL 분석 서버 응답을 읽지 못했습니다.".to_owned())?;
+        .map_err(|error| format!("ROFL 분석 서버 응답을 읽지 못했습니다: {error}"))?;
     if submit_status != StatusCode::OK && submit_status != StatusCode::ACCEPTED {
         return Err(safe_server_error(&submit_json));
     }
@@ -315,7 +320,7 @@ pub(crate) async fn analyze_replay_fights(
         let job: Value = status
             .json()
             .await
-            .map_err(|_| "ROFL 분석 상태 응답을 읽지 못했습니다.".to_owned())?;
+            .map_err(|error| format!("ROFL 분석 상태 응답을 읽지 못했습니다: {error}"))?;
         match job.get("status").and_then(Value::as_str) {
             Some("done") => {
                 let response = client
@@ -332,7 +337,7 @@ pub(crate) async fn analyze_replay_fights(
                 let analysis: Value = response
                     .json()
                     .await
-                    .map_err(|_| "한타 분석 결과를 읽지 못했습니다.".to_owned())?;
+                    .map_err(|error| format!("한타 분석 결과를 읽지 못했습니다: {error}"))?;
                 if analysis.get("complete").and_then(Value::as_bool) == Some(false) {
                     return Err(
                         "ROFL 전체 해독이 끝나지 않아 한타 결과를 확정할 수 없습니다.".into(),

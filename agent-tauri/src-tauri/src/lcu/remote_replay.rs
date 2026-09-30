@@ -18,7 +18,7 @@ fn client() -> AgentResult<reqwest::Client> {
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(5 * 60))
         .build()
-        .map_err(|_| AgentError::Relay("ROFL 분석 HTTP client 생성 실패".into()))
+        .map_err(|error| AgentError::Relay(format!("ROFL 분석 HTTP client 생성 실패: {error}")))
 }
 
 async fn response_json(response: reqwest::Response, label: &str) -> AgentResult<Value> {
@@ -32,7 +32,8 @@ async fn response_json(response: reqwest::Response, label: &str) -> AgentResult<
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| AgentError::Relay(format!("{label} 응답 읽기 실패")))?;
+        let chunk =
+            chunk.map_err(|error| AgentError::Relay(format!("{label} 응답 읽기 실패: {error}")))?;
         if bytes.len().saturating_add(chunk.len()) > MAX_ANALYSIS_RESPONSE_BYTES {
             return Err(AgentError::Relay(format!("{label} 응답이 너무 큽니다.")));
         }
@@ -46,7 +47,8 @@ async fn response_json(response: reqwest::Response, label: &str) -> AgentResult<
             detail.chars().take(180).collect::<String>()
         )));
     }
-    serde_json::from_slice(&bytes).map_err(|_| AgentError::Relay(format!("{label} 응답 형식 오류")))
+    serde_json::from_slice(&bytes)
+        .map_err(|error| AgentError::Relay(format!("{label} 응답 형식 오류: {error}")))
 }
 
 pub(crate) async fn start_remote_replay_analysis(
@@ -57,7 +59,7 @@ pub(crate) async fn start_remote_replay_analysis(
 ) -> AgentResult<Value> {
     let metadata = tokio::fs::symlink_metadata(path)
         .await
-        .map_err(|_| AgentError::Relay("ROFL 파일을 확인할 수 없습니다.".into()))?;
+        .map_err(|error| AgentError::Relay(format!("ROFL 파일을 확인할 수 없습니다: {error}")))?;
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.len() == 0
@@ -70,7 +72,7 @@ pub(crate) async fn start_remote_replay_analysis(
 
     let file = tokio::fs::File::open(path)
         .await
-        .map_err(|_| AgentError::Relay("ROFL 파일을 열 수 없습니다.".into()))?;
+        .map_err(|error| AgentError::Relay(format!("ROFL 파일을 열 수 없습니다: {error}")))?;
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -84,7 +86,7 @@ pub(crate) async fn start_remote_replay_analysis(
         .body(reqwest::Body::wrap_stream(ReaderStream::new(file)))
         .send()
         .await
-        .map_err(|_| AgentError::Relay("ROFL 서버 분석 제출 연결 실패".into()))?;
+        .map_err(|error| AgentError::Relay(format!("ROFL 서버 분석 제출 연결 실패: {error}")))?;
     response_json(response, "ROFL 서버 분석 제출").await
 }
 
@@ -98,7 +100,9 @@ pub(crate) async fn remote_replay_analysis_job(
         .header("x-yummi-ws-token", &session.ws_token)
         .send()
         .await
-        .map_err(|_| AgentError::Relay("ROFL 서버 분석 상태 조회 연결 실패".into()))?;
+        .map_err(|error| {
+            AgentError::Relay(format!("ROFL 서버 분석 상태 조회 연결 실패: {error}"))
+        })?;
     response_json(response, "ROFL 서버 분석 상태 조회").await
 }
 
@@ -112,6 +116,8 @@ pub(crate) async fn remote_replay_analysis_viewer(
         .header("x-yummi-ws-token", &session.ws_token)
         .send()
         .await
-        .map_err(|_| AgentError::Relay("ROFL 서버 재생 데이터 조회 연결 실패".into()))?;
+        .map_err(|error| {
+            AgentError::Relay(format!("ROFL 서버 재생 데이터 조회 연결 실패: {error}"))
+        })?;
     response_json(response, "ROFL 서버 재생 데이터 조회").await
 }

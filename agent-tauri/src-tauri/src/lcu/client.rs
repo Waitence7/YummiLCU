@@ -160,8 +160,8 @@ impl LcuClient {
     }
 
     fn from_lockfile_inner(path: &Path, validate_process_identity: bool) -> AgentResult<Self> {
-        let metadata =
-            fs::symlink_metadata(path).map_err(|_| AgentError::Lcu("lockfile 읽기 실패".into()))?;
+        let metadata = fs::symlink_metadata(path)
+            .map_err(|error| AgentError::Lcu(format!("lockfile 상태 확인 실패: {error}")))?;
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
             || metadata.len() > MAX_LOCKFILE_BYTES
@@ -170,15 +170,15 @@ impl LcuClient {
         }
         let mut bytes = SensitiveBuffer(Vec::with_capacity(metadata.len() as usize));
         fs::File::open(path)
-            .map_err(|_| AgentError::Lcu("lockfile 읽기 실패".into()))?
+            .map_err(|error| AgentError::Lcu(format!("lockfile 열기 실패: {error}")))?
             .take(MAX_LOCKFILE_BYTES + 1)
             .read_to_end(&mut bytes.0)
-            .map_err(|_| AgentError::Lcu("lockfile 읽기 실패".into()))?;
+            .map_err(|error| AgentError::Lcu(format!("lockfile 읽기 실패: {error}")))?;
         if bytes.0.len() as u64 > MAX_LOCKFILE_BYTES {
             return Err(AgentError::Lcu("lockfile이 너무 큽니다.".into()));
         }
         let raw = std::str::from_utf8(&bytes.0)
-            .map_err(|_| AgentError::Lcu("lockfile 문자 인코딩 오류".into()))?;
+            .map_err(|error| AgentError::Lcu(format!("lockfile 문자 인코딩 오류: {error}")))?;
         let parts: Vec<_> = raw.trim().split(':').collect();
         if parts.len() != 5 {
             return Err(AgentError::Lcu("lockfile 형식 오류".into()));
@@ -220,7 +220,7 @@ impl LcuClient {
                 .redirect(Policy::none())
                 .timeout(LCU_REQUEST_TIMEOUT)
                 .build()
-                .map_err(|_| AgentError::Lcu("LCU HTTP client 생성 실패".into()))?,
+                .map_err(|error| AgentError::Lcu(format!("LCU HTTP client 생성 실패: {error}")))?,
         })
     }
 
@@ -254,7 +254,9 @@ impl LcuClient {
             .redirect(Policy::none())
             .timeout(LIVE_CLIENT_REQUEST_TIMEOUT)
             .build()
-            .map_err(|_| AgentError::Lcu("Live Client Data HTTP client 생성 실패".into()))?;
+            .map_err(|error| {
+                AgentError::Lcu(format!("Live Client Data HTTP client 생성 실패: {error}"))
+            })?;
         read_json_response(
             http.get(url),
             "Live Client Data",
@@ -456,7 +458,7 @@ fn validate_lcu_process(lockfile: &Path, process_id: u32) -> AgentResult<()> {
     };
 
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) }
-        .map_err(|_| AgentError::Lcu("LCU 프로세스를 확인할 수 없습니다.".into()))?;
+        .map_err(|error| AgentError::Lcu(format!("LCU 프로세스를 확인할 수 없습니다: {error}")))?;
     let mut buffer = vec![0_u16; 32_768];
     let mut length = buffer.len() as u32;
     let query = unsafe {
@@ -468,10 +470,10 @@ fn validate_lcu_process(lockfile: &Path, process_id: u32) -> AgentResult<()> {
         )
     };
     let _ = unsafe { CloseHandle(handle) };
-    query.map_err(|_| AgentError::Lcu("LCU 프로세스 경로 확인 실패".into()))?;
+    query.map_err(|error| AgentError::Lcu(format!("LCU 프로세스 경로 확인 실패: {error}")))?;
 
     let executable = String::from_utf16(&buffer[..length as usize])
-        .map_err(|_| AgentError::Lcu("LCU 프로세스 경로 오류".into()))?;
+        .map_err(|error| AgentError::Lcu(format!("LCU 프로세스 경로 오류: {error}")))?;
     let executable = std::path::PathBuf::from(executable);
     if !executable
         .file_name()
@@ -483,14 +485,18 @@ fn validate_lcu_process(lockfile: &Path, process_id: u32) -> AgentResult<()> {
         ));
     }
 
-    let process_dir = executable
+    let process_parent = executable
         .parent()
-        .and_then(|path| path.canonicalize().ok())
-        .ok_or_else(|| AgentError::Lcu("League Client 설치 경로 확인 실패".into()))?;
-    let lockfile_dir = lockfile
+        .ok_or_else(|| AgentError::Lcu("League Client 설치 경로가 없습니다.".into()))?;
+    let process_dir = process_parent
+        .canonicalize()
+        .map_err(|error| AgentError::Lcu(format!("League Client 설치 경로 확인 실패: {error}")))?;
+    let lockfile_parent = lockfile
         .parent()
-        .and_then(|path| path.canonicalize().ok())
-        .ok_or_else(|| AgentError::Lcu("lockfile 경로 확인 실패".into()))?;
+        .ok_or_else(|| AgentError::Lcu("lockfile 상위 경로가 없습니다.".into()))?;
+    let lockfile_dir = lockfile_parent
+        .canonicalize()
+        .map_err(|error| AgentError::Lcu(format!("lockfile 경로 확인 실패: {error}")))?;
     let same_install_dir = process_dir == lockfile_dir
         || lockfile_dir
             .file_name()
@@ -634,7 +640,7 @@ fn lcu_url(port: u16, endpoint: &str) -> AgentResult<Url> {
         return Err(AgentError::Lcu("허용되지 않은 LCU endpoint".into()));
     }
     let url = Url::parse(&format!("https://127.0.0.1:{port}{endpoint}"))
-        .map_err(|_| AgentError::Lcu("LCU endpoint 오류".into()))?;
+        .map_err(|error| AgentError::Lcu(format!("LCU endpoint 오류: {error}")))?;
     if url.scheme() != "https" || url.host_str().is_none_or(|host| host != "127.0.0.1") {
         return Err(AgentError::Lcu("LCU loopback 검증 실패".into()));
     }
@@ -651,7 +657,7 @@ fn live_client_url(endpoint: &str) -> AgentResult<Url> {
         ));
     }
     Url::parse(&format!("https://127.0.0.1:2999{endpoint}"))
-        .map_err(|_| AgentError::Lcu("Live Client Data endpoint 오류".into()))
+        .map_err(|error| AgentError::Lcu(format!("Live Client Data endpoint 오류: {error}")))
 }
 
 #[cfg(test)]

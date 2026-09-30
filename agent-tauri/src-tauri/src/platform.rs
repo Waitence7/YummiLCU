@@ -100,14 +100,14 @@ pub(crate) fn league_game_process_ids() -> Vec<u32> {
 pub(crate) fn open_login_url(app: &AppHandle, url: &str) -> AgentResult<()> {
     app.opener()
         .open_url(url, None::<&str>)
-        .map_err(|_| AgentError::Relay("Discord 로그인 페이지 열기 실패".into()))
+        .map_err(|error| AgentError::Relay(format!("Discord 로그인 페이지 열기 실패: {error}")))
 }
 
 pub(crate) fn open_beta_download_url(app: &AppHandle) -> AgentResult<()> {
     let url = crate::updater::beta_installer_url();
-    app.opener()
-        .open_url(url, None::<&str>)
-        .map_err(|_| AgentError::Update("beta 설치 파일 다운로드 페이지 열기 실패".into()))
+    app.opener().open_url(url, None::<&str>).map_err(|error| {
+        AgentError::Update(format!("beta 설치 파일 다운로드 페이지 열기 실패: {error}"))
+    })
 }
 
 #[cfg(windows)]

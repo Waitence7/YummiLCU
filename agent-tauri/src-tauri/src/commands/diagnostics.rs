@@ -22,7 +22,7 @@ pub(crate) async fn export_diagnostic_bundle(
         .unwrap_or_default()
         .as_secs();
     let path = directory.join(format!("yummi-agent-diagnostics-{timestamp}.txt"));
-    fs::write(&path, bundle).map_err(|_| "진단 파일 저장에 실패했습니다.".to_string())?;
+    fs::write(&path, bundle).map_err(|error| format!("진단 파일 저장에 실패했습니다: {error}"))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -36,6 +36,7 @@ pub(crate) async fn report_unexpected_error(
         "uncaught_error" => ("ui", "uncaught_error"),
         "unhandled_rejection" => ("ui", "unhandled_rejection"),
         "window_command_failed" => ("window", "command_failed"),
+        "ui_operation_failed" => ("ui", "operation_failed"),
         _ => return Err("지원하지 않는 UI 오류 코드입니다.".into()),
     };
     state

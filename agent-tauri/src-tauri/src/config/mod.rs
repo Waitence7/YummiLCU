@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 use url::{Host, Url};
 use uuid::Uuid;
 
-use crate::error::{AgentError, AgentResult};
+use crate::{
+    diagnostics::write_bootstrap_error,
+    error::{AgentError, AgentResult},
+};
 
 const STABLE_UPDATE_MANIFEST_URL: &str = "https://yummi.duckdns.org/agent/version.json";
 const BETA_UPDATE_MANIFEST_URL: &str =
@@ -107,11 +110,17 @@ impl Config {
     const MAX_CONFIG_BYTES: u64 = 64 * 1024;
 
     fn path() -> PathBuf {
-        std::env::current_exe()
-            .ok()
-            .and_then(|path| path.parent().map(ToOwned::to_owned))
-            .unwrap_or_default()
-            .join("agent.json")
+        match std::env::current_exe() {
+            Ok(path) => path
+                .parent()
+                .map(ToOwned::to_owned)
+                .unwrap_or_default()
+                .join("agent.json"),
+            Err(error) => {
+                eprintln!("[yummi config] current executable path lookup failed: {error}");
+                PathBuf::from("agent.json")
+            }
+        }
     }
 
     fn secure_url(raw: &str) -> String {
@@ -141,24 +150,48 @@ impl Config {
 
     pub(crate) fn load() -> Self {
         let path = Self::path();
-        let raw_config = fs::symlink_metadata(&path)
-            .ok()
-            .filter(|metadata| {
-                metadata.is_file()
-                    && !metadata.file_type().is_symlink()
-                    && metadata.len() <= Self::MAX_CONFIG_BYTES
-            })
-            .and_then(|_| {
-                let mut bytes = Vec::new();
-                fs::File::open(path)
-                    .ok()?
-                    .take(Self::MAX_CONFIG_BYTES + 1)
-                    .read_to_end(&mut bytes)
-                    .ok()?;
-                (bytes.len() as u64 <= Self::MAX_CONFIG_BYTES)
-                    .then(|| String::from_utf8(bytes).ok())
-                    .flatten()
-            });
+        let raw_config = match fs::symlink_metadata(&path) {
+            Ok(metadata) => {
+                if !metadata.is_file()
+                    || metadata.file_type().is_symlink()
+                    || metadata.len() > Self::MAX_CONFIG_BYTES
+                {
+                    write_bootstrap_error("config_load_rejected invalid_file_shape_or_size");
+                    None
+                } else {
+                    let mut bytes = Vec::new();
+                    match fs::File::open(&path).and_then(|file| {
+                        file.take(Self::MAX_CONFIG_BYTES + 1)
+                            .read_to_end(&mut bytes)
+                    }) {
+                        Ok(_) if bytes.len() as u64 <= Self::MAX_CONFIG_BYTES => {
+                            match String::from_utf8(bytes) {
+                                Ok(raw) => Some(raw),
+                                Err(error) => {
+                                    write_bootstrap_error(&format!(
+                                        "config_load_utf8_failed error={error}"
+                                    ));
+                                    None
+                                }
+                            }
+                        }
+                        Ok(_) => {
+                            write_bootstrap_error("config_load_rejected file_too_large");
+                            None
+                        }
+                        Err(error) => {
+                            write_bootstrap_error(&format!("config_load_io_failed error={error}"));
+                            None
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => {
+                write_bootstrap_error(&format!("config_metadata_failed error={error}"));
+                None
+            }
+        };
         let source_schema_version = raw_config
             .as_deref()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
@@ -169,10 +202,16 @@ impl Config {
             })
             .and_then(|version| u32::try_from(version).ok())
             .unwrap_or(0);
-        let mut config = raw_config
-            .as_deref()
-            .and_then(|raw| serde_json::from_str::<Self>(raw).ok())
-            .unwrap_or_default();
+        let mut config = match raw_config.as_deref() {
+            Some(raw) => match serde_json::from_str::<Self>(raw) {
+                Ok(config) => config,
+                Err(error) => {
+                    write_bootstrap_error(&format!("config_parse_failed error={error}"));
+                    Self::default()
+                }
+            },
+            None => Self::default(),
+        };
 
         apply_schema_migrations(&mut config, source_schema_version);
         config.normalize();
@@ -182,18 +221,23 @@ impl Config {
         config.run_at_windows_startup = true;
         let defaults = Self::default();
         if validate_relay_base_url(&config.relay_public_base_url, cfg!(debug_assertions)).is_err() {
+            write_bootstrap_error("config_relay_url_invalid fallback=default");
             config.relay_public_base_url = defaults.relay_public_base_url;
         }
         if validate_tray_hide_effect(&config.tray_hide_effect).is_err() {
+            write_bootstrap_error("config_tray_effect_invalid fallback=default");
             config.tray_hide_effect = defaults.tray_hide_effect.clone();
         }
         if validate_tray_effect_playback_rate(config.tray_effect_playback_rate).is_err() {
+            write_bootstrap_error("config_tray_effect_rate_invalid fallback=default");
             config.tray_effect_playback_rate = defaults.tray_effect_playback_rate;
         }
         if validate_window_glide_strength(config.window_glide_strength).is_err() {
+            write_bootstrap_error("config_window_glide_invalid fallback=default");
             config.window_glide_strength = defaults.window_glide_strength;
         }
         if validate_update_channel(&config.update_channel).is_err() {
+            write_bootstrap_error("config_update_channel_invalid fallback=default");
             config.update_channel = defaults.update_channel.clone();
             config.update_manifest_url = defaults.update_manifest_url.clone();
         }
@@ -203,7 +247,8 @@ impl Config {
         )
         .is_err()
         {
-            config.update_manifest_url = defaults.update_manifest_url;
+            write_bootstrap_error("config_update_url_invalid fallback=default");
+            config.update_manifest_url = defaults.update_manifest_url.clone();
         }
         config
     }
@@ -217,7 +262,7 @@ impl Config {
             ));
         }
         let serialized = serde_json::to_vec_pretty(self)
-            .map_err(|_| AgentError::Config("설정 직렬화 실패".into()))?;
+            .map_err(|error| AgentError::Config(format!("설정 직렬화 실패: {error}")))?;
         let parent = path
             .parent()
             .ok_or_else(|| AgentError::Config("설정 저장 경로 오류".into()))?;
@@ -231,10 +276,15 @@ impl Config {
             file.sync_all()?;
             fs::rename(&temporary, &path)
         })();
-        if result.is_err() {
-            let _ = fs::remove_file(&temporary);
+        if let Err(error) = result {
+            let cleanup = fs::remove_file(&temporary).err();
+            return Err(AgentError::Config(match cleanup {
+                Some(cleanup_error) => {
+                    format!("설정 저장 실패: {error}; 임시 파일 정리 실패: {cleanup_error}")
+                }
+                None => format!("설정 저장 실패: {error}"),
+            }));
         }
-        result.map_err(|_| AgentError::Config("설정 저장 실패".into()))?;
         Ok(())
     }
 
@@ -269,7 +319,7 @@ impl Config {
         let mut url = validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
         let websocket_scheme = if url.scheme() == "https" { "wss" } else { "ws" };
         url.set_scheme(websocket_scheme)
-            .map_err(|_| AgentError::Relay("Relay WebSocket URL 오류".into()))?;
+            .map_err(|_| AgentError::Relay("Relay WebSocket URL scheme 변환 실패".into()))?;
         url.set_path("/ws/agent");
         url.set_query(None);
         url.query_pairs_mut().append_pair("session_id", session_id);
@@ -307,6 +357,7 @@ impl Config {
             .append_pair("game_id", game_id);
         Ok(url.into())
     }
+
     pub(crate) fn replay_analysis_url(
         &self,
         session_id: &str,
@@ -400,7 +451,7 @@ fn is_loopback_url(url: &Url) -> bool {
 
 fn validate_relay_base_url(raw: &str, allow_insecure_loopback: bool) -> AgentResult<Url> {
     let url = Url::parse(raw.trim())
-        .map_err(|_| AgentError::Config("Relay URL이 올바르지 않습니다.".into()))?;
+        .map_err(|error| AgentError::Config(format!("Relay URL이 올바르지 않습니다: {error}")))?;
     let secure = url.scheme() == "https";
     let local_debug = allow_insecure_loopback && url.scheme() == "http" && is_loopback_url(&url);
     if !secure && !local_debug {
@@ -426,8 +477,9 @@ fn validate_update_url(raw: Option<&str>, allow_custom: bool) -> AgentResult<()>
     let Some(raw) = raw else {
         return Ok(());
     };
-    let url = Url::parse(raw.trim())
-        .map_err(|_| AgentError::Config("업데이트 URL이 올바르지 않습니다.".into()))?;
+    let url = Url::parse(raw.trim()).map_err(|error| {
+        AgentError::Config(format!("업데이트 URL이 올바르지 않습니다: {error}"))
+    })?;
     if url.scheme() != "https"
         || url.host().is_none()
         || !url.username().is_empty()

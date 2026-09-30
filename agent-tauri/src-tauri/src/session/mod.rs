@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
+    diagnostics::write_bootstrap_error,
     error::{AgentError, AgentResult},
 };
 
@@ -61,38 +62,84 @@ pub(crate) fn create(config: &Config) -> Session {
 
 pub(crate) fn load(config: &Config) -> Option<Session> {
     let path = path();
-    let metadata = fs::symlink_metadata(&path).ok()?;
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(error) => {
+            write_bootstrap_error(&format!("session_metadata_failed error={error}"));
+            return None;
+        }
+    };
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || metadata.len() > MAX_SESSION_FILE_BYTES
     {
+        write_bootstrap_error("session_load_rejected invalid_file_shape_or_size");
         return None;
     }
     let mut raw = Vec::new();
-    fs::File::open(path)
-        .ok()?
-        .take(MAX_SESSION_FILE_BYTES + 1)
-        .read_to_end(&mut raw)
-        .ok()?;
-    if raw.len() as u64 > MAX_SESSION_FILE_BYTES {
+    if let Err(error) = fs::File::open(&path)
+        .and_then(|file| file.take(MAX_SESSION_FILE_BYTES + 1).read_to_end(&mut raw))
+    {
+        write_bootstrap_error(&format!("session_load_io_failed error={error}"));
         return None;
     }
-    let raw = String::from_utf8(raw).ok()?;
-    let wrapper: Value = serde_json::from_str(&raw).ok()?;
-    let payload = wrapper.get("Payload")?.as_str()?;
-    let mut plain = dpapi::unprotect(payload)?;
-    let session = serde_json::from_slice::<Session>(&plain).ok();
+    if raw.len() as u64 > MAX_SESSION_FILE_BYTES {
+        write_bootstrap_error("session_load_rejected file_too_large");
+        return None;
+    }
+    let raw = match String::from_utf8(raw) {
+        Ok(raw) => raw,
+        Err(error) => {
+            write_bootstrap_error(&format!("session_load_utf8_failed error={error}"));
+            return None;
+        }
+    };
+    let wrapper: Value = match serde_json::from_str(&raw) {
+        Ok(wrapper) => wrapper,
+        Err(error) => {
+            write_bootstrap_error(&format!("session_wrapper_parse_failed error={error}"));
+            return None;
+        }
+    };
+    let Some(payload) = wrapper.get("Payload").and_then(Value::as_str) else {
+        write_bootstrap_error("session_wrapper_payload_missing");
+        return None;
+    };
+    let Some(mut plain) = dpapi::unprotect(payload) else {
+        write_bootstrap_error("session_dpapi_unprotect_failed");
+        return None;
+    };
+    let session = match serde_json::from_slice::<Session>(&plain) {
+        Ok(session) => session,
+        Err(error) => {
+            plain.fill(0);
+            write_bootstrap_error(&format!("session_payload_parse_failed error={error}"));
+            return None;
+        }
+    };
     plain.fill(0);
-    let session = session?;
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
+    let now = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(value) => value.as_secs(),
+        Err(error) => {
+            write_bootstrap_error(&format!("session_clock_invalid error={error}"));
+            return None;
+        }
+    };
     let max_age = config.saved_session_max_age_days.saturating_mul(86_400);
-    if !session_shape_valid(&session)
-        || session.saved_at_utc > now.saturating_add(300)
-        || session.relay_base_url
-            != config
-                .relay_public_base_url
-                .trim_end_matches('/')
-                .to_lowercase()
+    if !session_shape_valid(&session) {
+        write_bootstrap_error("session_shape_invalid");
+        return None;
+    }
+    if session.saved_at_utc > now.saturating_add(300) {
+        write_bootstrap_error("session_timestamp_in_future");
+        return None;
+    }
+    if session.relay_base_url
+        != config
+            .relay_public_base_url
+            .trim_end_matches('/')
+            .to_lowercase()
         || now.saturating_sub(session.saved_at_utc) > max_age
     {
         return None;
@@ -134,10 +181,15 @@ pub(crate) fn save(session: &Session) -> AgentResult<()> {
         file.sync_all()?;
         fs::rename(&temporary, &path)
     })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
+    if let Err(error) = result {
+        let cleanup = fs::remove_file(&temporary).err();
+        return Err(AgentError::Session(match cleanup {
+            Some(cleanup_error) => {
+                format!("세션 저장 실패: {error}; 임시 파일 정리 실패: {cleanup_error}")
+            }
+            None => format!("세션 저장 실패: {error}"),
+        }));
     }
-    result.map_err(|_| AgentError::Session("세션 저장 실패".into()))?;
     Ok(())
 }
 

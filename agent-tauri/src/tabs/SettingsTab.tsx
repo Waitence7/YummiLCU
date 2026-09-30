@@ -125,9 +125,10 @@ function BetaDownloadCard({
     setError(null);
     try {
       setRelease(await api.getBetaReleaseInfo());
-    } catch {
+    } catch (error) {
       setRelease(null);
       setError('최신 beta 정보를 불러오지 못했습니다.');
+      void api.reportUiFailure('beta_release_refresh', error);
     } finally {
       setLoading(false);
     }
@@ -142,8 +143,9 @@ function BetaDownloadCard({
     setError(null);
     try {
       await api.openBetaDownload();
-    } catch {
+    } catch (error) {
       setError('beta 설치 파일을 열지 못했습니다.');
+      void api.reportUiFailure('beta_download_open', error);
     } finally {
       setOpening(false);
     }
@@ -157,8 +159,9 @@ function BetaDownloadCard({
     try {
       await api.applyBetaUpdateNow();
       setApplyStarted(true);
-    } catch {
+    } catch (error) {
       setError('beta 채널 전환 또는 즉시 업데이트 시작에 실패했습니다.');
+      void api.reportUiFailure('beta_apply', error);
     } finally {
       setApplying(false);
     }
