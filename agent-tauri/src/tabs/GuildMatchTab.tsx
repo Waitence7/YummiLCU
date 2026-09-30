@@ -7,11 +7,13 @@ export function GuildMatchTab({
   recent,
   onRefreshRecent,
   onPatchConfig,
+  onViewHistory,
 }: {
   state: AgentState;
   recent: RecentState;
   onRefreshRecent(): void;
   onPatchConfig(patch: { AutoAcceptMatch: boolean }): void;
+  onViewHistory(): void;
 }) {
   const linked = state.relay && state.lcu;
   return (
@@ -44,9 +46,9 @@ export function GuildMatchTab({
       <Card
         title="최근 경기"
         action={
-          <Button onClick={onRefreshRecent} disabled={recent.loading}>
+          <div className="flex gap-1"><Button onClick={onViewHistory}>전적 보기</Button><Button onClick={onRefreshRecent} disabled={recent.loading}>
             {recent.loading ? '불러오는 중…' : '새로고침'}
-          </Button>
+          </Button></div>
         }
       >
         <RecentMatchBody recent={recent} lcu={state.lcu} />

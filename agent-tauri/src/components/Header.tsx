@@ -7,14 +7,29 @@ export function Header({
   onStop,
   onLogout,
   actionError,
+  compact = false,
 }: {
   state: AgentState;
   onStart(): void;
   onStop(): void;
   onLogout(): void;
   actionError?: string | null;
+  compact?: boolean;
 }) {
   const running = state.relay || state.lcu;
+  if (compact) {
+    return <header className="shrink-0 border-b border-slate-200 bg-white px-4 py-2">
+      <div className="flex items-center gap-3 text-[11px]">
+        <span className="min-w-0 truncate font-medium text-slate-700" title={state.status}>{state.discord_name || state.status}</span>
+        <div className="ml-auto flex shrink-0 items-center gap-3 text-slate-500">
+          <span className="flex items-center gap-1.5"><Dot on={state.relay} />Relay</span>
+          <span className="flex items-center gap-1.5"><Dot on={state.lcu} />LCU</span>
+        </div>
+        <Button onClick={running ? onStop : onStart}>{running ? '중지' : '연결 시작'}</Button>
+      </div>
+      {actionError && <p role="alert" className="mt-1 text-[11px] text-rose-700">{actionError}</p>}
+    </header>;
+  }
   return (
     <header className="border-b border-slate-200 bg-white px-4 pt-3 pb-2.5">
       <div className="flex items-start justify-between gap-3">

@@ -191,6 +191,11 @@ pub(crate) fn collect_replay_bundle(
     };
     let path = file.path;
     let bytes = fs::read(&path).map_err(|error| format!("ROFL 읽기 실패: {error}"))?;
+    let events = replay_events(hint, &path, &bytes)?;
+    Ok(Some(CollectedReplay { path, events }))
+}
+
+fn replay_events(hint: &RoflMatchHint, path: &Path, bytes: &[u8]) -> Result<Vec<Value>, String> {
     let replay = parse_envelope(&bytes)?;
     let mut events = Vec::new();
     events.push(summary_event(hint, &path, &replay));
@@ -221,7 +226,79 @@ pub(crate) fn collect_replay_bundle(
             }
         }));
     }
-    Ok(Some(CollectedReplay { path, events }))
+    Ok(events)
+}
+
+fn viewer_filename_matches(path: &Path, game_id: &str) -> bool {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("rofl"))
+        && path
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .is_some_and(|stem| stem.rsplit('-').next() == Some(game_id))
+}
+
+pub(crate) fn replay_for_viewer(game_id: &str, replay_dir: Option<&str>) -> Result<Value, String> {
+    let mut hint = RoflMatchHint::from_eog(game_id.to_owned(), &Value::Null);
+    if let Some(dir) = replay_dir {
+        hint.set_replay_dir(dir);
+    }
+    // Explicit history selection has no recency cutoff and never falls back to
+    // a different game's replay based on matching participant names.
+    let mut found = None;
+    for dir in replay_dirs(&hint) {
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("리플레이 폴더를 읽을 수 없습니다.".into()),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| "리플레이 폴더를 읽을 수 없습니다.")?;
+            if viewer_filename_matches(&entry.path(), game_id) {
+                found = Some(entry.path());
+                break;
+            }
+        }
+        if found.is_some() {
+            break;
+        }
+    }
+    let Some(path) = found else {
+        return Ok(json!({"status": "missing"}));
+    };
+    let metadata =
+        fs::symlink_metadata(&path).map_err(|_| "리플레이 파일을 확인할 수 없습니다.")?;
+    if !metadata.is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() == 0
+        || metadata.len() > MAX_REPLAY_FILE_BYTES
+    {
+        return Err("리플레이 파일 형식 또는 크기가 올바르지 않습니다.".into());
+    }
+    let mut bytes = Vec::new();
+    fs::File::open(&path)
+        .map_err(|_| "리플레이 파일을 열 수 없습니다.")?
+        .take(MAX_REPLAY_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "리플레이 파일을 읽을 수 없습니다.")?;
+    if bytes.len() as u64 != metadata.len() {
+        return Err("리플레이 저장 중입니다. 잠시 후 다시 확인하세요.".into());
+    }
+    let events = replay_events(&hint, &path, &bytes)?;
+    let summary = events.first().ok_or("리플레이 요약이 없습니다.")?;
+    let movements: Vec<&Value> = events
+        .iter()
+        .filter(|event| event["kind"] == "movement")
+        .collect();
+    let unsupported = events.iter().any(|event| {
+        event.pointer("/movement/status").and_then(Value::as_str) == Some("unsupported_build")
+    });
+    Ok(json!({
+        "status": if unsupported { "unsupported" } else if movements.is_empty() { "unavailable" } else { "ready" },
+        "version": summary["replay"]["clientVersion"], "durationMs": summary["replay"]["gameLengthMs"],
+        "participants": summary["participants"], "movements": movements,
+    }))
 }
 
 pub(crate) fn collect_replay_events(hint: &RoflMatchHint) -> Result<Option<Vec<Value>>, String> {
@@ -1183,6 +1260,15 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn viewer_requires_exact_game_id_and_rofl_extension() {
+        assert!(viewer_filename_matches(Path::new("KR-123.rofl"), "123"));
+        assert!(viewer_filename_matches(Path::new("123.ROFL"), "123"));
+        assert!(!viewer_filename_matches(Path::new("KR-1234.rofl"), "123"));
+        assert!(!viewer_filename_matches(Path::new("KR-9123.rofl"), "123"));
+        assert!(!viewer_filename_matches(Path::new("KR-123.json"), "123"));
+    }
 
     #[test]
     fn movement_wire_byte_matches_verified_26_17_examples() {

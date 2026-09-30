@@ -1,6 +1,7 @@
 mod actions;
 mod client;
 mod events;
+mod history;
 mod lockfile;
 mod party;
 mod rewards;
@@ -10,7 +11,8 @@ pub(crate) use client::{LcuClient, LcuIdentity};
 pub(crate) use events::LcuEventPoller;
 pub(crate) use lockfile::{discover_lockfile, lockfile_path, LockfileDiscovery};
 pub(crate) use rofl::{
-    collect_replay_bundle, collect_replay_file, find_existing_replay_path, RoflMatchHint,
+    collect_replay_bundle, collect_replay_file, find_existing_replay_path, replay_for_viewer,
+    RoflMatchHint,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

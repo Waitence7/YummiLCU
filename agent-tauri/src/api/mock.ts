@@ -3,6 +3,7 @@
  * 시뮬레이션한다. 프로덕션 번들에는 포함되지 않는다 (DEV 전용 동적 import).
  */
 import { initialState, type AgentState, type Config, type RecentMatch } from '../state/types';
+import { previewHistory, previewReplay } from './mock-matches';
 
 const MAX_UI_LOGS = 2_000;
 
@@ -38,6 +39,15 @@ export async function mockInvoke<T>(
   args?: Record<string, unknown>,
 ): Promise<T> {
   switch (command) {
+    case 'match_history':
+      if (!state.lcu) throw new Error('롤 클라이언트가 연결되지 않았습니다.');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return previewHistory(Number(args?.offset ?? 0)) as T;
+    case 'match_replay':
+      await new Promise((resolve) => setTimeout(resolve, 450));
+      return previewReplay(String(args?.gameId)) as T;
+    case 'download_match_replay':
+      throw new Error('프리뷰에서는 다운로드하지 않습니다. 실제 앱에서 롤 클라이언트에 연결해 주세요.');
     case 'get_agent_state':
       return structuredClone(state) as T;
     case 'load_config':
