@@ -11,7 +11,10 @@ use tokio::time::{sleep, timeout, Duration, Instant};
 use tokio_tungstenite::{
     connect_async_tls_with_config,
     tungstenite::{
-        client::IntoClientRequest, http::header::AUTHORIZATION, protocol::WebSocketConfig, Message,
+        client::IntoClientRequest,
+        http::{header::AUTHORIZATION, HeaderValue},
+        protocol::WebSocketConfig,
+        Message,
     },
     Connector,
 };
@@ -346,7 +349,7 @@ impl LcuEventPoller {
                 &base64::engine::general_purpose::STANDARD,
                 credentials.as_bytes(),
             );
-            let header = format!("Basic {token}").parse();
+            let header: Result<HeaderValue, _> = format!("Basic {token}").parse();
             // Both values are ASCII, so NUL replacement keeps each String valid before drop.
             unsafe {
                 credentials.as_bytes_mut().fill(0);

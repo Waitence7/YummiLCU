@@ -1212,10 +1212,17 @@ async fn connect_once(
                                 state.relay.set_oauth_sender(generation, None).await;
                                 if lcu_socket_watch.is_none() {
                                     let (stop_tx, stop_rx) = watch::channel(false);
+                                    let event_state = Arc::clone(&state);
                                     let event_config = config.clone();
                                     let event_tx = lcu_poll_worker.trigger.clone();
                                     let task = tokio::spawn(async move {
-                                        LcuEventPoller::watch_socket(event_config, event_tx, stop_rx).await;
+                                        LcuEventPoller::watch_socket(
+                                            event_state,
+                                            event_config,
+                                            event_tx,
+                                            stop_rx,
+                                        )
+                                        .await;
                                     });
                                     lcu_socket_watch = Some(LcuSocketWatch { stop: stop_tx, task });
                                 }
