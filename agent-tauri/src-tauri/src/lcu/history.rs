@@ -116,7 +116,7 @@ impl LcuClient {
                 "summoner": summoner_name,
                 "matches": matches,
                 "hasMore": games.len() >= HISTORY_PAGE_SIZE
-                    && offset + HISTORY_PAGE_SIZE as u32 < MAX_HISTORY_MATCHES as u32,
+                    && offset + (HISTORY_PAGE_SIZE as u32) < (MAX_HISTORY_MATCHES as u32),
                 "source": "live",
                 "savedAt": now_ms(),
             }),
