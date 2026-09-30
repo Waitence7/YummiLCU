@@ -929,6 +929,127 @@ async def agent_replay_upload(
         raise HTTPException(502, "replay upload failed") from exc
 
 
+def _agent_rofl_analysis_headers(discord_id: int) -> dict[str, str]:
+    api_token = config.tournament_bot_internal_token()
+    if not api_token:
+        raise HTTPException(503, "tournament api unavailable")
+    return {
+        "x-internal-bot-token": api_token,
+        "x-actor-discord-user-id": str(discord_id),
+    }
+
+
+async def _proxy_agent_rofl_analysis_get(
+    request: Request,
+    discord_id: int,
+    upstream_path: str,
+) -> Response:
+    url = f"{config.tournament_api_base_url()}{upstream_path}"
+    try:
+        async with request.app.state.http.get(
+            url,
+            headers=_agent_rofl_analysis_headers(discord_id),
+        ) as res:
+            raw = await res.read()
+            content_type = res.headers.get("content-type", "application/json")
+            return Response(content=raw, status_code=res.status, media_type=content_type.split(";", 1)[0])
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("ROFL 분석 조회 예외 discord_id=%s path=%s", discord_id, upstream_path)
+        raise HTTPException(502, "replay analysis upstream failed") from exc
+
+
+@app.post("/agent/replay-analysis")
+@app.post("/lcu/replay-analysis")
+async def agent_replay_analysis(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+    game_id: str = Query(..., min_length=1, max_length=64),
+) -> Response:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
+        raise HTTPException(400, "invalid game_id")
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type != "application/octet-stream":
+        raise HTTPException(415, "application/octet-stream required")
+    raw_length = request.headers.get("content-length")
+    if raw_length:
+        try:
+            content_length = int(raw_length)
+        except ValueError as exc:
+            raise HTTPException(400, "invalid content-length") from exc
+        if content_length <= 0 or content_length > MAX_REPLAY_UPLOAD_BYTES:
+            raise HTTPException(413, "replay file too large")
+    file_name = request.headers.get("x-replay-file-name", f"{game_id}.rofl")[:160]
+    headers = {
+        **_agent_rofl_analysis_headers(discord_id),
+        "content-type": "application/octet-stream",
+        "x-replay-game-id": game_id,
+        "x-replay-file-name": file_name,
+    }
+    url = f"{config.tournament_api_base_url()}/api/bot/lcu/replays/analyze"
+    try:
+        async with request.app.state.http.post(url, headers=headers, data=request.stream()) as res:
+            raw = await res.read()
+            response_type = res.headers.get("content-type", "application/json")
+            if res.status >= 400:
+                logger.warning(
+                    "ROFL 임시 분석 제출 실패 discord_id=%s game_id=%s status=%s",
+                    discord_id,
+                    game_id,
+                    res.status,
+                )
+            return Response(
+                content=raw,
+                status_code=res.status,
+                media_type=response_type.split(";", 1)[0],
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("ROFL 임시 분석 제출 예외 discord_id=%s game_id=%s", discord_id, game_id)
+        raise HTTPException(502, "replay analysis submit failed") from exc
+
+
+@app.get("/agent/replay-analysis-job")
+@app.get("/lcu/replay-analysis-job")
+async def agent_replay_analysis_job(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+    job_id: str = Query(..., min_length=8, max_length=64),
+) -> Response:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    try:
+        uuid.UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid job_id") from exc
+    return await _proxy_agent_rofl_analysis_get(
+        request,
+        discord_id,
+        f"/api/bot/lcu/replays/analysis-jobs/{job_id}",
+    )
+
+
+@app.get("/agent/replay-analysis-viewer")
+@app.get("/lcu/replay-analysis-viewer")
+async def agent_replay_analysis_viewer(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+    job_id: str = Query(..., min_length=8, max_length=64),
+) -> Response:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    try:
+        uuid.UUID(job_id)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid job_id") from exc
+    return await _proxy_agent_rofl_analysis_get(
+        request,
+        discord_id,
+        f"/api/bot/lcu/replays/analysis-jobs/{job_id}/viewer",
+    )
+
+
 @app.get("/auth/status")
 async def auth_status(request: Request, session_id: str = Query(..., min_length=8, max_length=64)) -> JSONResponse:
     """에이전트 폴링 — pending | link_pending | ok | expired."""

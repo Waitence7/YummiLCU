@@ -46,6 +46,11 @@ export async function mockInvoke<T>(
     case 'match_replay':
       await new Promise((resolve) => setTimeout(resolve, 450));
       return previewReplay(String(args?.gameId)) as T;
+    case 'match_fights': {
+      await new Promise((resolve) => setTimeout(resolve, 650));
+      const match = previewHistory(0).matches.find((entry) => entry.id === String(args?.gameId));
+      return { status: 'ready', fights: match?.fights ?? [], analyzedAt: Date.now(), method: 'preview-teamfights', cached: false } as T;
+    }
     case 'download_match_replay':
       throw new Error('프리뷰에서는 다운로드하지 않습니다. 실제 앱에서 롤 클라이언트에 연결해 주세요.');
     case 'get_agent_state':

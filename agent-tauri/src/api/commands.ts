@@ -1,5 +1,5 @@
 import type { AgentState, BetaReleaseInfo, Config, RecentMatch } from '../state/types';
-import type { MatchHistory, MatchReplay } from '../state/matches';
+import type { MatchFightAnalysis, MatchHistory, MatchReplay } from '../state/matches';
 
 /**
  * 브라우저(비 Tauri) 환경에서는 목 브리지로 대체해 UI를 확인할 수 있게 한다.
@@ -27,7 +27,9 @@ export const stopAgent = () => call<void>('stop_agent');
 export const logout = () => call<void>('logout');
 export const recentMatch = () => call<RecentMatch>('recent_match');
 export const matchHistory = (offset = 0) => call<MatchHistory>('match_history', { offset });
+export const matchFights = (gameId: string) => call<MatchFightAnalysis>('match_fights', { gameId });
 export const matchReplay = (gameId: string) => call<MatchReplay>('match_replay', { gameId });
+export const matchReplayAnalysis = (gameId: string, jobId: string) => call<MatchReplay>('match_replay_analysis', { gameId, jobId });
 export const downloadMatchReplay = (gameId: string) => call<void>('download_match_replay', { gameId });
 export const hideMainWindow = () => call<void>('hide_main_window');
 export const completeTrayHide = () => call<void>('complete_tray_hide');
