@@ -5,7 +5,6 @@ on:
     branches: [main]
     paths:
       - "agent-tauri/**"
-      - ".github/workflows/build-tauri-agent.yml"
   workflow_dispatch:
     inputs:
       version:
@@ -34,6 +33,18 @@ on:
         required: false
         default: "100"
 
+# 일반 main push는 최신 빌드만 남기고, 실제 release는 서로 취소하지 않고 직렬화한다.
+concurrency:
+  group: >-
+    yummi-lcu-agent-${{
+      (github.event_name == 'workflow_dispatch' ||
+       startsWith(github.event.head_commit.message, 'release(agent):') ||
+       startsWith(github.event.head_commit.message, 'release(agent-beta):'))
+      && 'release'
+      || github.ref
+    }}
+  cancel-in-progress: ${{ github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'release(agent):') && !startsWith(github.event.head_commit.message, 'release(agent-beta):') }}
+
 permissions:
   contents: read
   actions: read
@@ -41,20 +52,27 @@ permissions:
 jobs:
   relay-tests:
     name: Relay protocol contract
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
       - name: Install relay dependencies
-        run: python -m pip install .
+        run: uv sync --frozen
       - name: Relay and Agent protocol tests
-        run: python -m unittest discover -s relay -p "test_*.py"
+        run: uv run --frozen python -m unittest discover -s relay -p "test_*.py"
 
   build:
     needs: relay-tests
     runs-on: windows-latest
+    permissions:
+      contents: read
+      actions: write
     outputs:
       version: ${{ steps.manifest.outputs.version }}
       channel: ${{ steps.release_meta.outputs.channel }}
@@ -204,9 +222,11 @@ jobs:
         working-directory: agent-tauri
         run: npm ci
 
-      - name: Typecheck and build frontend
+      - name: Typecheck frontend
         working-directory: agent-tauri
-        run: npm run build
+        # tauri build가 tauri.conf.json의 beforeBuildCommand(npm run build)를 실행하므로
+        # 여기서는 Vite bundle을 중복 생성하지 않고 타입만 먼저 검사한다.
+        run: npm exec -- tsc --noEmit
 
       - name: Rust tests
         working-directory: agent-tauri/src-tauri
@@ -317,27 +337,15 @@ jobs:
           "setup=$setup" >> $env:GITHUB_OUTPUT
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
+        if: github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'release(agent):') && !startsWith(github.event.head_commit.message, 'release(agent-beta):')
         with:
-          name: YummiLcuTauri-win-x64-portable
-          path: ${{ steps.manifest.outputs.zip }}
-          retention-days: 7
-
-      - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
-        with:
-          name: YummiLcuTauri-Installers
+          name: YummiLcuTauri-build
           path: |
+            ${{ steps.manifest.outputs.zip }}
             ${{ steps.artifacts.outputs.nsis }}
             ${{ steps.artifacts.outputs.msi }}
+            agent-version.json
           if-no-files-found: warn
-          retention-days: 7
-
-      - uses: actions/upload-artifact@v4
-        if: github.event_name != 'pull_request'
-        with:
-          name: agent-version-json
-          path: agent-version.json
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
@@ -348,13 +356,70 @@ jobs:
             ${{ steps.manifest.outputs.zip }}
             agent-version.json
             ${{ steps.manifest.outputs.setup }}
+            ${{ steps.artifacts.outputs.msi }}
+          if-no-files-found: warn
           retention-days: 7
 
-  publish-github-release:
-    name: Publish GitHub release
+      - name: Prune old workflow artifacts
+        uses: actions/github-script@v7
+        continue-on-error: true
+        with:
+          script: |
+            const keepRuns = 2;
+            const keepRunIds = new Set([context.runId]);
+
+            const runs = await github.paginate(
+              github.rest.actions.listWorkflowRuns,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: 'build-tauri-agent.yml',
+                status: 'success',
+                per_page: 20,
+              }
+            );
+
+            for (const run of runs) {
+              if (keepRunIds.has(run.id)) continue;
+              const { data } = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: run.id,
+              });
+              if (data.jobs.some((job) => job.name === 'build' && job.conclusion === 'success')) {
+                keepRunIds.add(run.id);
+                if (keepRunIds.size >= keepRuns) break;
+              }
+            }
+
+            const artifacts = await github.paginate(
+              github.rest.actions.listArtifactsForRepo,
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              }
+            );
+
+            let deleted = 0;
+            let freed = 0;
+            for (const artifact of artifacts) {
+              if (keepRunIds.has(artifact.workflow_run.id)) continue;
+              await github.rest.actions.deleteArtifact({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                artifact_id: artifact.id,
+              });
+              deleted += 1;
+              freed += artifact.size_in_bytes || 0;
+            }
+            core.info('Deleted ' + deleted + ' old artifact(s), ~' + (freed / 1024 / 1024).toFixed(1) + ' MB');
+
+  publish-and-deploy:
+    name: Publish and deploy agent release
     needs: build
     if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.event.head_commit.message, 'release(agent):') || startsWith(github.event.head_commit.message, 'release(agent-beta):')))
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
     permissions:
       actions: read
       contents: write
@@ -403,19 +468,6 @@ jobs:
             release/agent-version.json \
             --repo "$GITHUB_REPOSITORY" \
             --clobber
-
-  deploy:
-    name: Deploy agent update files
-    needs: build
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.event.head_commit.message, 'release(agent):') || startsWith(github.event.head_commit.message, 'release(agent-beta):')))
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: agent-release
-          path: release
 
       - name: Stage update manifest
         env:
