@@ -232,9 +232,30 @@ fn merge_remote_viewer(mut base: Value, viewer: Value) -> Value {
     let Some(object) = base.as_object_mut() else {
         return viewer;
     };
-    for key in ["status", "version", "durationMs", "movements", "source"] {
+    for key in [
+        "status",
+        "version",
+        "durationMs",
+        "movements",
+        "events",
+        "capabilities",
+        "source",
+    ] {
         if let Some(value) = viewer.get(key).filter(|value| !value.is_null()) {
             object.insert(key.to_owned(), value.clone());
+        }
+    }
+    if let Some(participants) = viewer.get("participants").and_then(Value::as_array) {
+        if !participants.is_empty()
+            || object
+                .get("participants")
+                .and_then(Value::as_array)
+                .is_none()
+        {
+            object.insert(
+                "participants".to_owned(),
+                Value::Array(participants.clone()),
+            );
         }
     }
     object.remove("jobId");

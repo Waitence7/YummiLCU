@@ -86,6 +86,38 @@ export type ReplayParticipant = {
   participantIndex: number;
   champion: string | null;
   team: number | null;
+  name?: string | null;
+  role?: string | null;
+  summonerSpells?: number[];
+  finalLevel?: number | null;
+  finalItems?: number[];
+};
+
+export type ReplayEventItem = {
+  itemId: number;
+  slot: number;
+  stackCount?: number;
+};
+
+export type ReplayEvent = {
+  atMs: number;
+  kind: string;
+  participantIndex?: number;
+  targetParticipantIndex?: number;
+  data?: Record<string, string | number | boolean | null>;
+  items?: ReplayEventItem[];
+};
+
+export type ReplayCapabilities = {
+  movement?: boolean;
+  events?: boolean;
+  levels?: boolean;
+  skills?: boolean;
+  inventory?: boolean;
+  resources?: boolean;
+  combatStats?: boolean;
+  deaths?: boolean;
+  targets?: boolean;
 };
 
 export type ReplayMovement = {
@@ -102,6 +134,8 @@ export type MatchReplay = {
   durationMs?: number;
   participants?: ReplayParticipant[];
   movements?: ReplayMovement[];
+  events?: ReplayEvent[];
+  capabilities?: ReplayCapabilities;
   jobId?: string;
   progress?: number;
   stage?: string;
