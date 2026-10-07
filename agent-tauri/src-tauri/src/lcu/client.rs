@@ -98,11 +98,34 @@ fn compact_match_history_game(game: &Value) -> Option<Value> {
                         .and_then(|stats| stats.get("win"))
                         .cloned()
                         .unwrap_or(Value::Null);
+                    let timeline = stats_row.and_then(|candidate| candidate.get("timeline"));
+                    let team_position = stats_row
+                        .and_then(|candidate| candidate.get("teamPosition"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let individual_position = stats_row
+                        .and_then(|candidate| candidate.get("individualPosition"))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let lane = stats_row
+                        .and_then(|candidate| candidate.get("lane"))
+                        .or_else(|| timeline.and_then(|value| value.get("lane")))
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let role = stats_row
+                        .and_then(|candidate| candidate.get("role"))
+                        .or_else(|| timeline.and_then(|value| value.get("role")))
+                        .cloned()
+                        .unwrap_or(Value::Null);
                     Some(json!({
                         "gameName": game_name,
                         "tagLine": tag_line,
                         "teamId": team_id,
-                        "won": won
+                        "won": won,
+                        "teamPosition": team_position,
+                        "individualPosition": individual_position,
+                        "lane": lane,
+                        "role": role
                     }))
                 })
                 .collect::<Vec<_>>()
@@ -664,6 +687,28 @@ fn live_client_url(endpoint: &str) -> AgentResult<Url> {
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn compact_match_history_preserves_actual_lane_and_role() {
+        let compact = compact_match_history_game(&json!({
+            "gameId": 42,
+            "participantIdentities": [{
+                "participantId": 1,
+                "player": {"gameName": "Player", "tagLine": "KR1"}
+            }],
+            "participants": [{
+                "participantId": 1,
+                "teamId": 100,
+                "stats": {"win": true},
+                "timeline": {"lane": "BOTTOM", "role": "DUO_SUPPORT"}
+            }]
+        })).unwrap();
+        let participant = &compact["participants"][0];
+        assert_eq!(participant["lane"], "BOTTOM");
+        assert_eq!(participant["role"], "DUO_SUPPORT");
+        assert_eq!(participant["teamId"], 100);
+        assert_eq!(participant["won"], true);
+    }
 
     #[test]
     fn recognizes_current_lcu_lockfile_process_labels() {

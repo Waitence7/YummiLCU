@@ -1540,7 +1540,11 @@ async fn eog_payload(
                     "gameName": name,
                     "tagLine": tag,
                     "teamId": player.get("teamId").cloned().unwrap_or(Value::Null),
-                    "won": player.get("win").cloned().or_else(|| winning.map(Value::Bool)).unwrap_or(Value::Null)
+                    "won": player.get("win").cloned().or_else(|| winning.map(Value::Bool)).unwrap_or(Value::Null),
+                    "teamPosition": player.get("teamPosition").cloned().unwrap_or(Value::Null),
+                    "individualPosition": player.get("individualPosition").cloned().unwrap_or(Value::Null),
+                    "lane": player.get("lane").cloned().unwrap_or(Value::Null),
+                    "role": player.get("role").cloned().unwrap_or(Value::Null)
                 }));
             }
         }
