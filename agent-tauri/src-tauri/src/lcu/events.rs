@@ -94,6 +94,7 @@ pub(crate) struct LcuEventPoller {
     live_client_available: Option<bool>,
     live_events_available: Option<bool>,
     live_game_id: Option<String>,
+    authoritative_game_id: Option<String>,
     connection_identity: Option<LcuIdentity>,
     connection_generation: u64,
     schema_warnings: HashSet<&'static str>,
@@ -113,6 +114,7 @@ impl LcuEventPoller {
         self.eog_recovery_started_at = None;
         self.eog_attempt_count = 0;
         self.eog_expected_game_id = None;
+        self.authoritative_game_id = None;
         self.rofl_match_hint = None;
         self.rofl_preflight_requested_game_id = None;
         self.rofl_preflight_resolved_game_id = None;
@@ -512,12 +514,14 @@ impl LcuEventPoller {
                                 None
                             }
                         };
-                        if let Some(payload) =
+                        if let Some(mut payload) =
                             live_game_payload(&value, live_events_response.as_ref())
                         {
-                            let game_id = payload
-                                .pointer("/game/id")
-                                .map(Value::to_string)
+                            apply_authoritative_live_game_id(
+                                &mut payload,
+                                self.authoritative_game_id.as_deref(),
+                            );
+                            let game_id = json_scalar_id(payload.pointer("/game/id"))
                                 .unwrap_or_else(|| "unknown".into());
                             if self.live_game_id.as_deref() != Some(game_id.as_str()) {
                                 self.live_game = None;
@@ -667,6 +671,11 @@ impl LcuEventPoller {
                 previous_phase.as_deref().unwrap_or("초기")
             ));
         }
+        if previous_phase.as_deref() != Some(phase.as_str())
+            && matches!(phase.as_str(), "None" | "Lobby" | "Matchmaking" | "ReadyCheck")
+        {
+            self.authoritative_game_id = None;
+        }
         push_gameflow_snapshot(
             &mut self.gameflow,
             &mut self.last_gameflow_emit,
@@ -674,6 +683,38 @@ impl LcuEventPoller {
             json!({"phase": phase, "lcu_ready": true}),
             &mut events,
         );
+        let entering_game_identity_phase = matches!(
+            phase.as_str(),
+            "ChampSelect" | "GameStart" | "InProgress"
+        ) && previous_phase.as_deref() != Some(phase.as_str());
+        let mut active_gameflow_session = None;
+        if matches!(phase.as_str(), "ChampSelect" | "GameStart" | "InProgress")
+            && (entering_game_identity_phase || self.authoritative_game_id.is_none())
+        {
+            match client.request(Method::GET, GAMEFLOW_SESSION, None).await {
+                Ok(session) => {
+                    self.schema_warnings.remove("live_gameflow_session_request_failed");
+                    if let Some(game_id) = gameflow_session_game_id(&session) {
+                        if self.authoritative_game_id.as_deref() != Some(game_id.as_str()) {
+                            self.diagnostic(format!(
+                                "게임 ID 확정(Gameflow): {} -> {game_id}",
+                                self.authoritative_game_id.as_deref().unwrap_or("unknown")
+                            ));
+                            self.authoritative_game_id = Some(game_id);
+                            self.force_live_game_resync();
+                        }
+                    }
+                    active_gameflow_session = Some(session);
+                }
+                Err(error) => {
+                    if self.schema_warnings.insert("live_gameflow_session_request_failed") {
+                        self.diagnostic(format!(
+                            "게임 중 Gameflow session 조회 실패; Live Client 데이터만 사용: {error}"
+                        ));
+                    }
+                }
+            }
+        }
         if lcu_became_available {
             let status =
                 participant_status(&phase, &json!({"in_lobby": false, "riot_ids_in_party": []}));
@@ -1129,6 +1170,15 @@ impl LcuEventPoller {
         if plan.champ_select {
             match client.request(Method::GET, CHAMP_SELECT, None).await {
                 Ok(value) => {
+                    if let Some(game_id) = champ_select_game_id(&value) {
+                        if self.authoritative_game_id.as_deref() != Some(game_id.as_str()) {
+                            self.diagnostic(format!(
+                                "게임 ID 확정(ChampSelect): {} -> {game_id}",
+                                self.authoritative_game_id.as_deref().unwrap_or("unknown")
+                            ));
+                            self.authoritative_game_id = Some(game_id);
+                        }
+                    }
                     self.observe_schema(
                         "champ_select",
                         value.is_object()
@@ -1138,25 +1188,30 @@ impl LcuEventPoller {
                     let mut payload = champ_select_payload(&value);
                     if payload.get("is_spectating").and_then(Value::as_bool) == Some(true) {
                         let champ_select_picks = spectator_champ_select_picks(&value);
-                        let gameflow_picks = match client
-                            .request(Method::GET, GAMEFLOW_SESSION, None)
-                            .await
+                        let gameflow_picks = if let Some(gameflow_session) =
+                            active_gameflow_session.as_ref()
                         {
-                            Ok(gameflow_session) => {
-                                self.schema_warnings
-                                    .remove("spectator_gameflow_request_failed");
-                                spectator_gameflow_picks(&gameflow_session)
-                            }
-                            Err(error) => {
-                                if self
-                                    .schema_warnings
-                                    .insert("spectator_gameflow_request_failed")
-                                {
-                                    self.diagnostic(format!(
+                            self.schema_warnings
+                                .remove("spectator_gameflow_request_failed");
+                            spectator_gameflow_picks(gameflow_session)
+                        } else {
+                            match client.request(Method::GET, GAMEFLOW_SESSION, None).await {
+                                Ok(gameflow_session) => {
+                                    self.schema_warnings
+                                        .remove("spectator_gameflow_request_failed");
+                                    spectator_gameflow_picks(&gameflow_session)
+                                }
+                                Err(error) => {
+                                    if self
+                                        .schema_warnings
+                                        .insert("spectator_gameflow_request_failed")
+                                    {
+                                        self.diagnostic(format!(
                                             "관전 gameflow 상세 조회 실패; champ-select 정보만 사용: {error}"
                                         ));
+                                    }
+                                    None
                                 }
-                                None
                             }
                         };
                         if let Some(observer_picks) =
@@ -1368,6 +1423,17 @@ fn json_scalar_id(value: Option<&Value>) -> Option<String> {
     }
 }
 
+fn champ_select_game_id(value: &Value) -> Option<String> {
+    json_scalar_id(value.get("gameId"))
+        .or_else(|| json_scalar_id(value.get("game_id")))
+}
+
+fn gameflow_session_game_id(value: &Value) -> Option<String> {
+    json_scalar_id(value.pointer("/gameData/gameId"))
+        .or_else(|| json_scalar_id(value.pointer("/gameData/game_id")))
+        .or_else(|| json_scalar_id(value.get("gameId")))
+}
+
 fn is_eog_phase(phase: &str) -> bool {
     matches!(phase, "PreEndOfGame" | "EndOfGame" | "WaitingForStats")
 }
@@ -1449,7 +1515,11 @@ async fn eog_payload(
     recovery_age_ms: u64,
 ) -> Value {
     let mut none_reasons = Vec::new();
-    let query_eog_stats = is_eog_phase(phase);
+    // Some clients skip EndOfGame and jump straight from WaitingForStats to Lobby.
+    // Keep polling eog-stats during the bounded post-game recovery window as long
+    // as we already know which game we are recovering.
+    let query_eog_stats = is_eog_phase(phase)
+        || (matches!(phase, "Lobby" | "None") && expected_game_id.is_some());
     let (eog, eog_request_status, eog_request_error) = if query_eog_stats {
         match client.request(Method::GET, EOG_STATS, None).await {
             Ok(value) => (Some(value), "ok", None),
@@ -2113,6 +2183,7 @@ fn champ_select_payload(value: &Value) -> Value {
         });
     json!({
         "active": true,
+        "game_id": champ_select_game_id(value),
         "phase": timer.and_then(|timer| timer.get("phase")).and_then(Value::as_str).unwrap_or(""),
         "timer_ms": remaining_ms,
         "timer": {
@@ -2378,6 +2449,17 @@ fn participant_status(phase: &str, party: &Value) -> Value {
 
 fn live_game_payload(value: &Value, events: Option<&Value>) -> Option<Value> {
     live_game_payload_at(value, events, unix_now_ms())
+}
+
+fn apply_authoritative_live_game_id(payload: &mut Value, game_id: Option<&str>) {
+    let Some(game_id) = game_id else {
+        return;
+    };
+    let Some(game) = payload.get_mut("game").and_then(Value::as_object_mut) else {
+        return;
+    };
+    game.insert("id".into(), Value::String(game_id.to_owned()));
+    game.insert("game_id".into(), Value::String(game_id.to_owned()));
 }
 
 fn unix_now_ms() -> u64 {
@@ -2716,6 +2798,17 @@ mod tests {
     }
 
     #[test]
+    fn postgame_lobby_recovery_queries_eog_stats_when_game_id_is_known() {
+        assert!(should_attempt_eog_recovery(
+            "Lobby",
+            Some("WaitingForStats"),
+            false,
+            None,
+            Some(Instant::now()),
+            Some("8409126446"),
+        ));
+    }
+
     fn eog_recovery_continues_into_lobby_with_known_game_id() {
         assert!(should_attempt_eog_recovery(
             "Lobby",
@@ -2951,9 +3044,10 @@ mod tests {
     #[test]
     fn champ_select_payload_preserves_relay_keys() {
         let payload = champ_select_payload(
-            &json!({"localPlayerCellId": 1, "timer":{"phase":"BAN_PICK","adjustedTimeLeftInPhase":12000}, "actions":[[{"id":7,"type":"pick","championId":10,"isAllyAction":true,"isInProgress":true,"actorCellId":1}]]}),
+            &json!({"gameId": 123, "localPlayerCellId": 1, "timer":{"phase":"BAN_PICK","adjustedTimeLeftInPhase":12000}, "actions":[[{"id":7,"type":"pick","championId":10,"isAllyAction":true,"isInProgress":true,"actorCellId":1}]]}),
         );
         assert_eq!(payload["active"], true);
+        assert_eq!(payload["game_id"], "123");
         assert_eq!(payload["is_spectating"], false);
         assert_eq!(payload["actions"][0]["champion_id"], 10);
         assert_eq!(payload["current_action"]["id"], 7);
@@ -3057,6 +3151,34 @@ mod tests {
         }));
         assert_eq!(payload["timer"]["phase_end_at_ms"], 105000);
         assert_eq!(payload["timer"]["authoritative_epoch"], true);
+    }
+
+    #[test]
+    fn gameflow_session_game_id_reads_the_in_progress_id() {
+        assert_eq!(
+            gameflow_session_game_id(&json!({"gameData": {"gameId": 8370018689}})).as_deref(),
+            Some("8370018689")
+        );
+    }
+
+    #[test]
+    fn authoritative_game_id_fills_live_client_payload_when_live_data_has_no_id() {
+        let mut payload = live_game_payload(
+            &json!({
+                "gameData": {"gameMode": "CLASSIC", "gameTime": 120.5},
+                "allPlayers": [
+                    {"summonerName":"P1"},{"summonerName":"P2"},{"summonerName":"P3"},{"summonerName":"P4"},{"summonerName":"P5"},
+                    {"summonerName":"P6"},{"summonerName":"P7"},{"summonerName":"P8"},{"summonerName":"P9"},{"summonerName":"P10"}
+                ]
+            }),
+            None,
+        )
+        .unwrap();
+        assert!(payload["game"]["id"].is_null());
+
+        apply_authoritative_live_game_id(&mut payload, Some("8370018689"));
+        assert_eq!(payload["game"]["id"], "8370018689");
+        assert_eq!(payload["game"]["game_id"], "8370018689");
     }
 
     #[test]
