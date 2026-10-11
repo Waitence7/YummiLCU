@@ -499,6 +499,38 @@ class ConnectionManager:
             await self.unregister_bot_ws(ws)
             return False
 
+    async def replay_live_game_update(self, discord_id: int) -> bool:
+        """늦은 Bot 구독에 마지막 live-game 스냅샷을 즉시 재전송합니다."""
+        did = int(discord_id)
+        async with self._lock:
+            if did not in self._live_game_subscribers:
+                return False
+            cached = self.get_live_game(did)
+            ws = self._bot_ws
+        if cached is None or ws is None:
+            return False
+        data = cached.get("data")
+        if not isinstance(data, dict):
+            return False
+        try:
+            await ws.send_json(
+                {
+                    "type": "live_game_update",
+                    "discord_id": did,
+                    "data": dict(data),
+                }
+            )
+            logger.info(
+                "봇 WS live_game_update 캐시 재전송 discord_id=%s age_ms=%s",
+                did,
+                cached.get("age_ms"),
+            )
+            return True
+        except Exception:
+            logger.exception("봇 WS live_game_update 캐시 재전송 실패 discord_id=%s", did)
+            await self.unregister_bot_ws(ws)
+            return False
+
     async def replay_gameflow_update(self, discord_id: int) -> bool:
         """늦은 Bot 구독에 마지막 gameflow 스냅샷을 즉시 재전송합니다."""
         did = int(discord_id)

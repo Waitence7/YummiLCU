@@ -2890,6 +2890,7 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
             if not isinstance(recruitment_id, (str, int)):
                 recruitment_id = None
             conn.subscribe_live_game(raw_id, str(recruitment_id)[:128] if recruitment_id else None)
+            await conn.replay_live_game_update(raw_id)
             await conn.sync_live_game_polling(raw_id)
             logger.info(
                 "봇 live_game 구독 요청: discord_id=%s 모집_id=%s",

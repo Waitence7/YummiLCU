@@ -599,6 +599,22 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.payload["type"], "live_game_update")
         self.assertEqual(websocket.payload["data"]["participants"][0]["kills"], 3)
 
+    async def test_live_game_subscription_replays_cached_snapshot(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.register_bot_ws(websocket)
+        payload = {
+            "game": {"time_seconds": 42},
+            "participants": [{"kills": index} for index in range(10)],
+        }
+        manager.set_live_game(42, payload)
+        manager.subscribe_live_game(42, "1771")
+
+        self.assertTrue(await manager.replay_live_game_update(42))
+        self.assertEqual(websocket.payload["type"], "live_game_update")
+        self.assertEqual(websocket.payload["discord_id"], 42)
+        self.assertEqual(websocket.payload["data"], payload)
+
     async def test_partial_live_game_updates_are_not_cached_or_forwarded(self) -> None:
         manager = ConnectionManager()
         websocket = _WebSocketStub()
