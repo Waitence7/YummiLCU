@@ -515,6 +515,41 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(manager.agent_info(42), info)
 
+    async def test_discord_profile_is_stored_in_agent_info_on_bind(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        info = {"version": "0.7.22", "lcu_ready": False, "capabilities": {}}
+
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertIsNone(await manager.set_agent_info_for_ws(websocket, info))
+        self.assertTrue(
+            await manager.bind_discord(
+                "session-1",
+                42,
+                {"name": "Test User", "avatar": "https://example.invalid/avatar.png"},
+            )
+        )
+
+        stored = manager.agent_info(42)
+        self.assertEqual(stored["discord_name"], "Test User")
+        self.assertEqual(stored["discord_avatar"], "https://example.invalid/avatar.png")
+
+    async def test_agent_hello_refresh_preserves_discord_profile(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42, {"name": "Test User"}))
+
+        await manager.set_agent_info_for_ws(
+            websocket,
+            {"version": "0.7.22", "lcu_ready": True, "capabilities": {}},
+        )
+
+        stored = manager.agent_info(42)
+        self.assertEqual(stored["discord_name"], "Test User")
+        self.assertEqual(stored["version"], "0.7.22")
+        self.assertTrue(stored["lcu_ready"])
+
     async def test_reconnect_replaces_stale_offline_status_with_online_agent(self) -> None:
         manager = ConnectionManager()
         first = _WebSocketStub()

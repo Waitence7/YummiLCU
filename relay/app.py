@@ -41,6 +41,7 @@ SESSION_STATUS_KEY = "relay:session_status:{session_id}"
 WS_TOKEN_KEY = "relay:ws_token:{session_id}"
 OAUTH_LINK_PENDING_KEY = "relay:oauth_link_pending:{session_id}"
 DISCORD_PROFILE_KEY = "relay:discord_profile:{session_id}"
+DISCORD_USER_PROFILE_KEY = "relay:discord_user_profile:{discord_id}"
 OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
 OAUTH_LINK_CODE_TTL_SEC = 600
@@ -186,6 +187,10 @@ def _discord_profile_redis_key(session_id: str) -> str:
     return DISCORD_PROFILE_KEY.format(session_id=session_id)
 
 
+def _discord_user_profile_redis_key(discord_id: int) -> str:
+    return DISCORD_USER_PROFILE_KEY.format(discord_id=int(discord_id))
+
+
 def _discord_profile(user: dict[str, Any], discord_id: int) -> dict[str, str]:
     """Tauri UI에 표시할 공개 Discord 프로필만 보관한다. 토큰은 저장하지 않는다."""
     name = str(user.get("global_name") or user.get("username") or "Discord 사용자").strip()[:64]
@@ -273,7 +278,10 @@ async def _complete_oauth_link(
     ttl = config.relay_session_ttl_sec()
     await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
     profile = pending.get("profile") if isinstance(pending.get("profile"), dict) else {}
-    await r.set(_discord_profile_redis_key(session_id), json.dumps(profile), ex=ttl)
+    encoded_profile = json.dumps(profile)
+    await r.set(_discord_profile_redis_key(session_id), encoded_profile, ex=ttl)
+    if profile:
+        await r.set(_discord_user_profile_redis_key(discord_id), encoded_profile)
     await r.set(_status_redis_key(session_id), "ok", ex=ttl)
     await r.delete(_oauth_link_pending_redis_key(session_id))
     bound = await _try_bind_discord(conn, r, session_id, discord_id)
@@ -296,6 +304,8 @@ async def _try_bind_discord(
         return False
     profile: dict[str, str] = {}
     raw_profile = await r.get(_discord_profile_redis_key(session_id))
+    if not raw_profile:
+        raw_profile = await r.get(_discord_user_profile_redis_key(discord_id))
     if raw_profile:
         try:
             parsed = json.loads(raw_profile)
@@ -307,10 +317,15 @@ async def _try_bind_discord(
                 }
         except json.JSONDecodeError as exc:
             logger.warning(
-                "Discord profile cache JSON 파싱 실패 session=%s error=%s",
+                "Discord profile cache JSON 파싱 실패 session=%s discord_id=%s error=%s",
                 session_id[:8],
+                discord_id,
                 type(exc).__name__,
             )
+    if profile:
+        # Keep a Discord-id keyed copy so Relay restarts/new sessions can restore
+        # display metadata without requiring another OAuth round-trip.
+        await r.set(_discord_user_profile_redis_key(discord_id), json.dumps(profile))
     bound = await conn.bind_discord(session_id, discord_id, profile)
     if bound:
         await mark_lcu_linked(r, discord_id)
@@ -721,7 +736,10 @@ async def auth_callback(
     ttl = config.relay_session_ttl_sec()
     profile = _discord_profile(user or {}, discord_id)
     await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
-    await r.set(_discord_profile_redis_key(session_id), json.dumps(profile), ex=ttl)
+    encoded_profile = json.dumps(profile)
+    await r.set(_discord_profile_redis_key(session_id), encoded_profile, ex=ttl)
+    if profile:
+        await r.set(_discord_user_profile_redis_key(discord_id), encoded_profile)
     await r.set(_status_redis_key(session_id), "ok", ex=ttl)
     # 이전 수동 링크 코드가 남아 있더라도 자동 바인딩 성공 이후에는 재사용할 수 없게 정리한다.
     await r.delete(

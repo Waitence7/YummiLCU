@@ -86,11 +86,17 @@ class ConnectionManager:
             self._by_discord[discord_id] = ws
             self._ws_discord[id(ws)] = discord_id
             pending_agent_info = self._pending_agent_info_by_ws.pop(id(ws), None)
-            if pending_agent_info is not None:
-                self._agent_info[discord_id] = pending_agent_info
+            info = dict(pending_agent_info or {})
+            if profile:
+                if profile.get("name"):
+                    info["discord_name"] = profile["name"]
+                if profile.get("avatar"):
+                    info["discord_avatar"] = profile["avatar"]
+            if info:
+                self._agent_info[discord_id] = info
             self._connected_participant_status_locked(
                 discord_id,
-                lcu_ready=bool((pending_agent_info or {}).get("lcu_ready")),
+                lcu_ready=bool(info.get("lcu_ready")),
             )
             logger.info("에이전트 등록: discord_id=%s session=%s", discord_id, session_id[:8])
         if replaced is not None:
@@ -172,10 +178,15 @@ class ConnectionManager:
             if discord_id is None:
                 self._pending_agent_info_by_ws[id(ws)] = dict(info)
                 return None
-            self._agent_info[discord_id] = dict(info)
+            merged = dict(info)
+            previous = self._agent_info.get(discord_id) or {}
+            for key in ("discord_name", "discord_avatar"):
+                if key in previous and key not in merged:
+                    merged[key] = previous[key]
+            self._agent_info[discord_id] = merged
             self._connected_participant_status_locked(
                 discord_id,
-                lcu_ready=bool(info.get("lcu_ready")),
+                lcu_ready=bool(merged.get("lcu_ready")),
             )
             return discord_id
 
