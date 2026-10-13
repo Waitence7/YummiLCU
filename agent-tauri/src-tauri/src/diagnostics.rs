@@ -2,13 +2,14 @@ use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_FLIGHT_RECORDS: usize = 2_048;
 const MAX_BOOTSTRAP_LOG_BYTES: u64 = 64 * 1024;
 const MAX_PERSISTENT_FLIGHT_LOG_BYTES: u64 = 1024 * 1024;
 const PERSISTENT_FLIGHT_LOG_BACKUPS: usize = 2;
 const MAX_PERSISTENT_FLIGHT_DETAIL_CHARS: usize = 2_048;
+const SLOW_PERSISTENT_FLIGHT_WRITE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FlightRecord {
@@ -29,8 +30,25 @@ impl FlightRecorder {
             category,
             detail: detail.into(),
         };
+        let persistence_started = Instant::now();
         let persistence_error = append_persistent_flight_record(&record).err();
+        let persistence_elapsed = persistence_started.elapsed();
         self.records.push_back(record);
+        if persistence_elapsed >= SLOW_PERSISTENT_FLIGHT_WRITE {
+            let detail = format!(
+                "elapsed_ms={} threshold_ms={}",
+                persistence_elapsed.as_millis(),
+                SLOW_PERSISTENT_FLIGHT_WRITE.as_millis()
+            );
+            eprintln!("[yummi diagnostics] persistent flight write slow: {detail}");
+            // Keep this warning memory-only. Persisting it would recursively invoke
+            // the same slow disk path we are trying to diagnose.
+            self.records.push_back(FlightRecord {
+                at_ms: now_ms(),
+                category: "diagnostic_io_slow",
+                detail,
+            });
+        }
         if let Some(detail) = persistence_error {
             eprintln!("[yummi diagnostics] {detail}");
             self.records.push_back(FlightRecord {

@@ -436,6 +436,7 @@ fn run_windows_physics_drag(
     const MAX_ANGULAR_SPEED_DEG_S: f64 = 1800.0;
     const RELEASE_SPIN_TRANSFER: f64 = 0.72;
     const COLLISION_SPIN_COUPLING: f64 = 0.42;
+    const MAX_PHYSICS_STEP_S: f64 = 0.024;
 
     if !motion_is_current(generation) || !left_button_down() {
         return;
@@ -610,11 +611,20 @@ fn run_windows_physics_drag(
             return;
         }
 
+        // Do not rely on the WebView pointer event to stop inertia. While the
+        // native window is moving/rotated, Windows hit-testing can delay or
+        // miss the React pointer-down entirely. A fresh left press must stop
+        // the current glide immediately; if it landed on the title bar, the
+        // subsequent start_main_window_drag call will start a new generation.
+        if left_button_down() {
+            return;
+        }
+
         let now = Instant::now();
         let dt = now
             .saturating_duration_since(previous)
             .as_secs_f64()
-            .clamp(0.001, 0.050);
+            .clamp(0.001, MAX_PHYSICS_STEP_S);
         previous = now;
 
         x += vx * dt;

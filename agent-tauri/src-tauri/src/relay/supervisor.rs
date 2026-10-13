@@ -458,7 +458,21 @@ impl LcuPollWorker {
                 }
 
                 let config = state.config.read().await.clone();
+                let poll_started = Instant::now();
                 let events = poller.poll(&config, poll_lcu).await;
+                let poll_elapsed = poll_started.elapsed();
+                if poll_elapsed >= Duration::from_secs(5) {
+                    state
+                        .report_diagnostic(
+                            "lcu",
+                            "poll_slow",
+                            format!(
+                                "elapsed_ms={} poll_lcu={poll_lcu}",
+                                poll_elapsed.as_millis()
+                            ),
+                        )
+                        .await;
+                }
                 let diagnostics = poller.take_diagnostics();
                 if events.is_empty() && diagnostics.is_empty() {
                     continue;

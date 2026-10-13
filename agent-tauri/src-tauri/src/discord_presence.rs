@@ -39,6 +39,7 @@ const JOIN_REQUEST_LOOKUP_RETRY: Duration = Duration::from_secs(30);
 const JOIN_INVITE_RETRY: Duration = Duration::from_secs(15);
 const MATCH_CONTEXT_REFRESH_INTERVAL: Duration = Duration::from_secs(15);
 const PHASE_REPUBLISH_DELAY: Duration = Duration::from_millis(1500);
+const SLOW_PRESENCE_SET_ACTIVITY: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PresenceParty {
@@ -439,7 +440,25 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
         if changed || should_retry || delayed_republish_due {
             match snapshot.as_ref() {
                 Some(current) => {
-                    match set_activity_with_startup_retry(&mut session, current).await {
+                    let presence_started = Instant::now();
+                    let presence_result =
+                        set_activity_with_startup_retry(&mut session, current).await;
+                    let presence_elapsed = presence_started.elapsed();
+                    if presence_elapsed >= SLOW_PRESENCE_SET_ACTIVITY {
+                        state
+                            .report_diagnostic(
+                                "lifecycle",
+                                "discord_presence_set_activity_slow",
+                                format!(
+                                    "phase={} elapsed_ms={} threshold_ms={}",
+                                    current.phase_key,
+                                    presence_elapsed.as_millis(),
+                                    SLOW_PRESENCE_SET_ACTIVITY.as_millis()
+                                ),
+                            )
+                            .await;
+                    }
+                    match presence_result {
                         Ok(()) => {
                             if delayed_republish_due {
                                 state

@@ -15,6 +15,7 @@ const DISCORD_JOIN_REQUEST_QUEUE_CAPACITY: usize = 64;
 const ERROR_REPORT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const DIAGNOSTIC_REPORT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_ERROR_SUMMARY_CHARS: usize = 512;
+const SLOW_UI_EMIT: Duration = Duration::from_millis(250);
 
 use crate::{
     config::Config,
@@ -170,7 +171,22 @@ impl AppState {
             ui.clone()
         };
         self.flight.lock().await.record("ui", message);
-        if let Err(error) = app.emit("agent-state", snapshot) {
+        let emit_started = Instant::now();
+        let emit_result = app.emit("agent-state", snapshot);
+        let emit_elapsed = emit_started.elapsed();
+        if emit_elapsed >= SLOW_UI_EMIT {
+            self.report_diagnostic(
+                "lifecycle",
+                "ui_emit_slow",
+                format!(
+                    "source=log elapsed_ms={} threshold_ms={}",
+                    emit_elapsed.as_millis(),
+                    SLOW_UI_EMIT.as_millis()
+                ),
+            )
+            .await;
+        }
+        if let Err(error) = emit_result {
             self.record_flight("ui_emit_error", error.to_string()).await;
         }
     }
@@ -196,7 +212,22 @@ impl AppState {
 
     pub(crate) async fn emit(&self, app: &AppHandle) {
         let snapshot = self.snapshot().await;
-        if let Err(error) = app.emit("agent-state", snapshot) {
+        let emit_started = Instant::now();
+        let emit_result = app.emit("agent-state", snapshot);
+        let emit_elapsed = emit_started.elapsed();
+        if emit_elapsed >= SLOW_UI_EMIT {
+            self.report_diagnostic(
+                "lifecycle",
+                "ui_emit_slow",
+                format!(
+                    "source=emit elapsed_ms={} threshold_ms={}",
+                    emit_elapsed.as_millis(),
+                    SLOW_UI_EMIT.as_millis()
+                ),
+            )
+            .await;
+        }
+        if let Err(error) = emit_result {
             self.record_flight("ui_emit_error", error.to_string()).await;
         }
     }
