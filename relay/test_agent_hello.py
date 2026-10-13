@@ -571,18 +571,26 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         ))
         self.assertTrue(manager.agent_info(42)["lcu_ready"])
 
-    async def test_duplicate_session_keeps_first_websocket_active(self) -> None:
+    async def test_same_session_reconnect_replaces_stale_websocket(self) -> None:
         manager = ConnectionManager()
         previous = _WebSocketStub()
         current = _WebSocketStub()
         self.assertTrue(await manager.attach_session("session-1", previous, "token-1"))
         self.assertTrue(await manager.bind_discord("session-1", 42))
-        self.assertFalse(await manager.attach_session("session-1", current, "token-2"))
 
-        self.assertFalse(previous.closed)
-        self.assertEqual(manager.discord_id_for_ws(previous), 42)
-        self.assertIsNone(manager.discord_id_for_ws(current))
+        # 이전 WS의 finally/unregister보다 재접속이 먼저 도착하는 레이스를 재현합니다.
+        self.assertTrue(await manager.attach_session("session-1", current, "token-1"))
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+
+        self.assertTrue(previous.closed)
+        self.assertIsNone(manager.discord_id_for_ws(previous))
+        self.assertEqual(manager.discord_id_for_ws(current), 42)
         self.assertTrue(manager.has_active_session_ws("session-1"))
+
+        # 늦게 도착한 이전 WS 정리가 새 연결을 지우면 안 됩니다.
+        self.assertIsNone(await manager.unregister_ws(previous))
+        self.assertEqual(manager.discord_id_for_ws(current), 42)
+        self.assertTrue(manager.is_online(42))
 
     async def test_live_game_updates_are_forwarded_only_to_subscribers(self) -> None:
         manager = ConnectionManager()

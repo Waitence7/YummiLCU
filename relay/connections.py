@@ -45,13 +45,16 @@ class ConnectionManager:
         self._lock = asyncio.Lock()
 
     async def attach_session(self, session_id: str, ws: WebSocket, ws_token: str) -> bool:
-        """세션의 첫 WS만 활성화하고 중복 WS는 연결된 대기 상태로 둡니다."""
+        """검증된 동일 세션 재접속은 새 WS가 기존 WS를 교체하도록 준비합니다.
+
+        실제 Discord 바인딩/기존 WS 종료는 ``bind_discord``에서 원자적으로 처리합니다.
+        이렇게 해야 이전 연결의 ``finally`` 정리보다 재접속이 먼저 도착해도 새 WS가
+        영구적인 미바인딩 대기 상태로 남지 않습니다.
+        """
         async with self._lock:
             old = self._active_session_ws.get(session_id)
             if old is not None and old is not ws:
-                self._ws_session_id[id(ws)] = session_id
-                logger.warning("중복 에이전트 대기: session=%s", session_id[:8])
-                return False
+                logger.info("에이전트 세션 재접속 교체 준비: session=%s", session_id[:8])
             self._active_session_ws[session_id] = ws
             self._session_ws[session_id] = ws
             self._session_ws_token[session_id] = ws_token
