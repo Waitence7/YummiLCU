@@ -3156,7 +3156,7 @@ mod tests {
     #[test]
     fn gameflow_session_game_id_reads_the_in_progress_id() {
         assert_eq!(
-            gameflow_session_game_id(&json!({"gameData": {"gameId": 8370018689}})).as_deref(),
+            gameflow_session_game_id(&json!({"gameData": {"gameId": 8370018689_i64}})).as_deref(),
             Some("8370018689")
         );
     }
