@@ -1165,7 +1165,9 @@ def _enqueue_tournament_broadcast_lcu(
     kind: str,
     payload: dict[str, Any],
 ) -> None:
-    queue: asyncio.Queue[tuple[int, str, dict[str, Any]]] = app.state.tournament_broadcast_queue
+    queue = getattr(app.state, "tournament_broadcast_queue", None)
+    if queue is None:
+        return
     try:
         queue.put_nowait((int(discord_id), kind, dict(payload)))
     except asyncio.QueueFull:
