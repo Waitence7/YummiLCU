@@ -47,6 +47,9 @@ OAUTH_LINK_CODE_TTL_SEC = 600
 WS_AUTH_TIMEOUT_SEC = 15.0
 MAX_WS_AUTH_MESSAGE_BYTES = 4 * 1024
 MAX_AGENT_MESSAGE_BYTES = 256 * 1024
+TOURNAMENT_BROADCAST_QUEUE_MAX = 64
+TOURNAMENT_BROADCAST_WORKERS = 4
+TOURNAMENT_BROADCAST_TIMEOUT_SEC = 3.0
 MAX_REPLAY_UPLOAD_BYTES = 128 * 1024 * 1024
 BOT_EOG_PERSIST_ACK_TIMEOUT_SEC = 8.0
 LIVE_DELTA_STATE_TTL_SEC = 2 * 60 * 60
@@ -421,12 +424,25 @@ async def _lifespan(app: FastAPI):
     app.state.http = aiohttp.ClientSession(timeout=timeout)
     app.state.redis = redis.from_url(config.redis_url(), decode_responses=True)
     app.state.connections = ConnectionManager()
+    app.state.tournament_broadcast_queue = asyncio.Queue(maxsize=TOURNAMENT_BROADCAST_QUEUE_MAX)
+    app.state.tournament_broadcast_workers = [
+        asyncio.create_task(
+            _tournament_broadcast_worker(app, worker_index),
+            name=f"tournament-broadcast-{worker_index}",
+        )
+        for worker_index in range(TOURNAMENT_BROADCAST_WORKERS)
+    ]
     try:
         await app.state.redis.ping()
         logger.info("Redis 연결 OK")
     except Exception as e:
         logger.error("Redis 연결 실패: %s", e)
     yield
+    workers = list(app.state.tournament_broadcast_workers)
+    for worker in workers:
+        worker.cancel()
+    if workers:
+        await asyncio.gather(*workers, return_exceptions=True)
     await app.state.http.close()
     await app.state.redis.aclose()
 
@@ -1095,6 +1111,54 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
 # * ========================================================
 
 
+async def _tournament_broadcast_worker(app: FastAPI, worker_index: int) -> None:
+    queue: asyncio.Queue[tuple[int, str, dict[str, Any]]] = app.state.tournament_broadcast_queue
+    while True:
+        discord_id, kind, payload = await queue.get()
+        started = time.monotonic()
+        try:
+            await _forward_tournament_broadcast_lcu(app.state.http, discord_id, kind, payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception(
+                "대회 중계 LCU background worker 예외 worker=%s discord_id=%s kind=%s",
+                worker_index,
+                discord_id,
+                kind,
+            )
+        finally:
+            queue.task_done()
+            elapsed_ms = max(0, int((time.monotonic() - started) * 1000))
+            if elapsed_ms >= 1_000:
+                logger.warning(
+                    "Tournament broadcast slow worker=%s discord_id=%s kind=%s elapsed_ms=%s queue=%s",
+                    worker_index,
+                    discord_id,
+                    kind,
+                    elapsed_ms,
+                    queue.qsize(),
+                )
+
+
+def _enqueue_tournament_broadcast_lcu(
+    app: FastAPI,
+    discord_id: int,
+    kind: str,
+    payload: dict[str, Any],
+) -> None:
+    queue: asyncio.Queue[tuple[int, str, dict[str, Any]]] = app.state.tournament_broadcast_queue
+    try:
+        queue.put_nowait((int(discord_id), kind, dict(payload)))
+    except asyncio.QueueFull:
+        logger.warning(
+            "Tournament broadcast queue full; dropping discord_id=%s kind=%s queue=%s",
+            discord_id,
+            kind,
+            queue.qsize(),
+        )
+
+
 async def _forward_tournament_broadcast_lcu(
     http: aiohttp.ClientSession,
     discord_id: int,
@@ -1121,7 +1185,10 @@ async def _forward_tournament_broadcast_lcu(
     }
     try:
         async with http.post(
-            url, headers=headers, json={"kind": kind, "data": payload}
+            url,
+            headers=headers,
+            json={"kind": kind, "data": payload},
+            timeout=aiohttp.ClientTimeout(total=TOURNAMENT_BROADCAST_TIMEOUT_SEC),
         ) as res:
             if res.status >= 400:
                 logger.warning(
@@ -2573,8 +2640,8 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         await conn.forward_champ_select_update(discord_id, payload)
-        await _forward_tournament_broadcast_lcu(
-            websocket.app.state.http, discord_id, "champ_select", payload
+        _enqueue_tournament_broadcast_lcu(
+            websocket.app, discord_id, "champ_select", payload
         )
         return
 
@@ -2584,8 +2651,8 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         await conn.forward_gameflow_update(discord_id, payload)
-        await _forward_tournament_broadcast_lcu(
-            websocket.app.state.http, discord_id, "gameflow", payload
+        _enqueue_tournament_broadcast_lcu(
+            websocket.app, discord_id, "gameflow", payload
         )
         if isinstance(payload, dict) and payload.get("phase") == "ReadyCheck":
             await conn.forward_ready_check_update(
@@ -2698,8 +2765,8 @@ async def _handle_agent_message(
             await r.delete(_live_delta_api_block_key(discord_id, prepared["stream_id"]))
 
         await conn.forward_live_game_update(discord_id, full_state)
-        await _forward_tournament_broadcast_lcu(
-            websocket.app.state.http, discord_id, "live_game", full_state
+        _enqueue_tournament_broadcast_lcu(
+            websocket.app, discord_id, "live_game", full_state
         )
         await _ack_agent_event(websocket, event_id)
         logger.info(
@@ -2734,6 +2801,23 @@ async def _handle_agent_message(
         if isinstance(extra, dict):
             result["data"] = extra
         conn.complete_pending_result(discord_id, request_id, result)
+
+
+def _agent_message_type_for_log(msg: str) -> str:
+    """Return only a bounded message type for diagnostics; never log payload fields."""
+    try:
+        data = json.loads(msg)
+    except json.JSONDecodeError:
+        return "unknown"
+    if not isinstance(data, dict):
+        return "unknown"
+    msg_type = data.get("type")
+    if (
+        isinstance(msg_type, str)
+        and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", msg_type)
+    ):
+        return msg_type
+    return "unknown"
 
 
 @app.websocket("/ws/agent")
@@ -2786,23 +2870,55 @@ async def ws_agent(
                 session_id[:8],
             )
 
+    connected_at = time.monotonic()
+    last_message_at = connected_at
+    last_ping_at: float | None = None
+    last_message_type = "auth"
+
     try:
         while True:
             msg = await websocket.receive_text()
+            now = time.monotonic()
+            last_message_at = now
             if len(msg.encode("utf-8")) > MAX_AGENT_MESSAGE_BYTES:
                 await websocket.close(code=1009)
                 return
             if msg == "ping":
+                last_ping_at = now
+                last_message_type = "ping"
                 sid = conn.ws_session_id(websocket)
                 if sid:
                     await _refresh_session_ttl(r, sid)
                 await websocket.send_json({"type": "pong"})
                 continue
+            last_message_type = _agent_message_type_for_log(msg)
+            handler_started = time.monotonic()
             await _handle_agent_message(websocket, conn, msg)
+            handler_elapsed_ms = max(0, int((time.monotonic() - handler_started) * 1000))
+            if handler_elapsed_ms >= 1_000:
+                logger.warning(
+                    "Agent message handler slow discord_id=%s type=%s elapsed_ms=%s",
+                    conn.discord_id_for_ws(websocket) or "-",
+                    last_message_type,
+                    handler_elapsed_ms,
+                )
     except WebSocketDisconnect as exc:
+        disconnected_at = time.monotonic()
         discord_id = conn.discord_id_for_ws(websocket)
         reason = redact_log_text(str(getattr(exc, "reason", "") or ""))[:160]
         code = getattr(exc, "code", None)
+        connected_ms = max(0, int((disconnected_at - connected_at) * 1000))
+        idle_ms = max(0, int((disconnected_at - last_message_at) * 1000))
+        last_ping_age_ms = (
+            max(0, int((disconnected_at - last_ping_at) * 1000))
+            if last_ping_at is not None
+            else -1
+        )
+        disconnect_detail = (
+            f"code={code if code is not None else 'unknown'} reason={reason or '-'} "
+            f"connected_ms={connected_ms} idle_ms={idle_ms} "
+            f"last_ping_age_ms={last_ping_age_ms} last_type={last_message_type}"
+        )
         if discord_id is not None:
             info = conn.agent_info(discord_id) or {}
             try:
@@ -2814,7 +2930,7 @@ async def ws_agent(
                         "occurred_at_ms": int(time.time() * 1000),
                         "category": "relay",
                         "code": "server_disconnect",
-                        "detail": f"code={code if code is not None else 'unknown'} reason={reason or '-'}",
+                        "detail": disconnect_detail,
                         "source": "relay",
                         "app_version": str(info.get("version") or "unknown")[:64],
                     },
@@ -2825,10 +2941,14 @@ async def ws_agent(
                     discord_id,
                 )
         logger.info(
-            "Agent websocket disconnected discord_id=%s code=%s reason=%s",
+            "Agent websocket disconnected discord_id=%s code=%s reason=%s connected_ms=%s idle_ms=%s last_ping_age_ms=%s last_type=%s",
             discord_id if discord_id is not None else "-",
             code,
             reason or "-",
+            connected_ms,
+            idle_ms,
+            last_ping_age_ms,
+            last_message_type,
         )
     finally:
         offline = await conn.unregister_ws(websocket)

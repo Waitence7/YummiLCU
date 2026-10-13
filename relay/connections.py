@@ -15,6 +15,11 @@ logger = logging.getLogger("yummi_lcu.relay.connections")
 
 LIVE_GAME_CACHE_TTL_SEC = 15.0
 LIVE_GAME_PARTICIPANT_COUNT = 10
+BOT_WS_SEND_TIMEOUT_SEC = 2.0
+
+
+async def _send_bot_json(ws: WebSocket, payload: dict[str, Any]) -> None:
+    await asyncio.wait_for(ws.send_json(payload), timeout=BOT_WS_SEND_TIMEOUT_SEC)
 
 
 class ConnectionManager:
@@ -443,7 +448,8 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await ws.send_json(
+            await _send_bot_json(
+                ws,
                 {
                     "type": "participant_status_update",
                     "discord_id": int(discord_id),
@@ -466,7 +472,8 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await ws.send_json(
+            await _send_bot_json(
+                ws,
                 {
                     "type": "champ_select_update",
                     "discord_id": int(discord_id),
@@ -489,7 +496,8 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await ws.send_json(
+            await _send_bot_json(
+                ws,
                 {
                     "type": "ready_check_update",
                     "discord_id": int(discord_id),
@@ -516,7 +524,8 @@ class ConnectionManager:
         if not isinstance(data, dict):
             return False
         try:
-            await ws.send_json(
+            await _send_bot_json(
+                ws,
                 {
                     "type": "live_game_update",
                     "discord_id": did,
@@ -545,7 +554,8 @@ class ConnectionManager:
         if cached is None or ws is None:
             return False
         try:
-            await ws.send_json(
+            await _send_bot_json(
+                ws,
                 {
                     "type": "gameflow_update",
                     "discord_id": did,
@@ -574,7 +584,8 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await ws.send_json(
+            await _send_bot_json(
+                ws,
                 {
                     "type": "gameflow_update",
                     "discord_id": did,
@@ -605,7 +616,7 @@ class ConnectionManager:
             }
             if event_id is not None:
                 payload["event_id"] = event_id
-            await ws.send_json(payload)
+            await _send_bot_json(ws, payload)
             return True
         except Exception:
             logger.exception("봇 WS guild_match_eog 전달 실패 discord_id=%s", discord_id)
@@ -657,7 +668,8 @@ class ConnectionManager:
             )
             return False
         try:
-            await ws.send_json(
+            await _send_bot_json(
+                ws,
                 {
                     "type": "live_game_update",
                     "discord_id": did,
@@ -692,7 +704,8 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await ws.send_json(
+            await _send_bot_json(
+                ws,
                 {
                     "type": "party_lobby_update",
                     "discord_id": int(discord_id),

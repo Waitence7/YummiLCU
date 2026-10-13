@@ -31,6 +31,11 @@ def main() -> None:
         port=config.relay_port(),
         reload=False,
         ws_max_size=MAX_AGENT_MESSAGE_BYTES,
+        # The Agent already owns connection liveness with an application-level
+        # heartbeat (25s ping / 10s timeout) and reconnects itself. Running
+        # Uvicorn's protocol-level ping watchdog in parallel can terminate an
+        # otherwise recoverable Agent connection first, surfacing as code 1005.
+        ws_ping_interval=None,
         # Discord returns its one-time authorization code in the callback query string.
         # Keep application diagnostics, but do not persist sensitive queries in Uvicorn access logs.
         access_log=False,
