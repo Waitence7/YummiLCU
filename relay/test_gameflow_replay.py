@@ -53,3 +53,44 @@ def test_gameflow_replay_requires_same_active_subscription() -> None:
         assert bot_ws.sent == []
 
     asyncio.run(run())
+
+
+def test_guild_match_eog_is_forwarded_during_unsubscribe_grace() -> None:
+    async def run() -> None:
+        conn = ConnectionManager()
+        bot_ws = _FakeWs()
+        await conn.register_bot_ws(bot_ws)  # type: ignore[arg-type]
+        conn.subscribe_gameflow(42)
+        conn.unsubscribe_gameflow(42)
+
+        forwarded = await conn.forward_guild_match_eog(
+            42,
+            {"gameId": "KR_123", "gameflowPhase": "EndOfGame"},
+            "evt-1",
+        )
+
+        assert forwarded is True
+        assert bot_ws.sent[-1] == {
+            "type": "guild_match_eog",
+            "discord_id": 42,
+            "data": {"gameId": "KR_123", "gameflowPhase": "EndOfGame"},
+            "event_id": "evt-1",
+        }
+
+    asyncio.run(run())
+
+
+def test_guild_match_eog_is_rejected_after_unsubscribe_grace_expires() -> None:
+    async def run() -> None:
+        conn = ConnectionManager()
+        bot_ws = _FakeWs()
+        await conn.register_bot_ws(bot_ws)  # type: ignore[arg-type]
+        conn._gameflow_eog_grace_until[42] = 0.0
+
+        forwarded = await conn.forward_guild_match_eog(42, {"gameId": "KR_old"}, "evt-old")
+
+        assert forwarded is False
+        assert bot_ws.sent == []
+        assert 42 not in conn._gameflow_eog_grace_until
+
+    asyncio.run(run())

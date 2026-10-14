@@ -16,6 +16,7 @@ logger = logging.getLogger("yummi_lcu.relay.connections")
 LIVE_GAME_CACHE_TTL_SEC = 15.0
 LIVE_GAME_PARTICIPANT_COUNT = 10
 BOT_WS_SEND_TIMEOUT_SEC = 2.0
+GAMEFLOW_EOG_GRACE_SEC = 180.0
 
 
 async def _send_bot_json(ws: WebSocket, payload: dict[str, Any]) -> None:
@@ -38,6 +39,7 @@ class ConnectionManager:
         self._bot_ws: WebSocket | None = None
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._gameflow_subscribers: set[int] = set()
+        self._gameflow_eog_grace_until: dict[int, float] = {}
         self._gameflow: dict[int, dict[str, Any]] = {}
         self._live_game_subscribers: set[int] = set()
         self._live_game_recruitments: dict[int, str | None] = {}
@@ -282,11 +284,17 @@ class ConnectionManager:
         return self._bot_ws is not None
 
     def subscribe_gameflow(self, discord_id: int) -> None:
-        self._gameflow_subscribers.add(int(discord_id))
+        did = int(discord_id)
+        self._gameflow_subscribers.add(did)
+        self._gameflow_eog_grace_until.pop(did, None)
 
     def unsubscribe_gameflow(self, discord_id: int) -> None:
-        self._gameflow_subscribers.discard(int(discord_id))
-        self._clear_live_game_cache_if_unsubscribed(discord_id)
+        did = int(discord_id)
+        self._gameflow_subscribers.discard(did)
+        # Stop normal gameflow/live polling immediately, but allow an already-running
+        # game to deliver its slightly-late EOG for a bounded window.
+        self._gameflow_eog_grace_until[did] = time.monotonic() + GAMEFLOW_EOG_GRACE_SEC
+        self._clear_live_game_cache_if_unsubscribed(did)
 
     def live_game_polling_required(self, discord_id: int) -> bool:
         did = int(discord_id)
@@ -613,9 +621,13 @@ class ConnectionManager:
         self, discord_id: int, data: dict[str, Any], event_id: str | None = None
     ) -> bool:
         """내전 EOG 결과와 durable event id를 gameflow 구독 중인 Bot에 전달합니다."""
+        did = int(discord_id)
         async with self._lock:
-            if int(discord_id) not in self._gameflow_subscribers:
-                return False
+            if did not in self._gameflow_subscribers:
+                grace_until = self._gameflow_eog_grace_until.get(did, 0.0)
+                if grace_until <= time.monotonic():
+                    self._gameflow_eog_grace_until.pop(did, None)
+                    return False
             ws = self._bot_ws
         if ws is None:
             return False
