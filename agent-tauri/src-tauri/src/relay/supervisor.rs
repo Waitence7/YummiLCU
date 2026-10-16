@@ -44,6 +44,7 @@ use super::{
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
+const RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
 const LCU_WORKER_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const LCU_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(8);
@@ -937,22 +938,24 @@ async fn connect_once(
         .map_err(|_| AgentError::Relay("Relay TLS/WebSocket 연결 실패".into()))?;
     state.log(app, "Relay WebSocket 연결 성공").await;
 
-    websocket
-        .send(Message::Text(
-            serde_json::to_string(&AuthMessage::new(&session.ws_token))?.into(),
-        ))
-        .await
-        .map_err(|_| AgentError::Relay("Relay 인증 메시지 전송 실패".into()))?;
+    send_relay_message(
+        &mut websocket,
+        Message::Text(serde_json::to_string(&AuthMessage::new(&session.ws_token))?.into()),
+        "Relay 인증 메시지 전송 실패",
+    )
+    .await?;
     state.log(app, "Relay 인증 메시지 전송 완료").await;
     if *stop_rx.borrow() {
         let _ = websocket.close(None).await;
         return Ok(ConnectionEnd::Stopped);
     }
     let hello = AgentHelloMessage::new(state.lcu_state().await.is_ready());
-    websocket
-        .send(Message::Text(serde_json::to_string(&hello)?.into()))
-        .await
-        .map_err(|_| AgentError::Relay("Relay hello 전송 실패".into()))?;
+    send_relay_message(
+        &mut websocket,
+        Message::Text(serde_json::to_string(&hello)?.into()),
+        "Relay hello 전송 실패",
+    )
+    .await?;
     state
         .log(
             app,
@@ -1040,18 +1043,27 @@ async fn connect_once(
             mut code = receive_oauth_code(&mut oauth_rx) => {
                 state.log(app, "Discord OAuth 코드 전송 시작").await;
                 let message = serde_json::to_string(&OAuthCodeMessage::new(&code))?;
-                let sent = websocket.send(Message::Text(message.into())).await;
+                let sent = timeout(
+                    RELAY_SEND_TIMEOUT,
+                    websocket.send(Message::Text(message.into())),
+                ).await;
                 // The code is ASCII, so zeroing its bytes keeps the String valid before drop.
                 unsafe { code.as_bytes_mut().fill(0) };
-                sent.map_err(|_| AgentError::Relay("OAuth 코드 전송 실패".into()))?;
+                match sent {
+                    Ok(Ok(())) => {}
+                    Ok(Err(_)) => return Err(AgentError::Relay("OAuth 코드 전송 실패".into())),
+                    Err(_) => return Err(AgentError::Relay("OAuth 코드 전송 실패: send timeout".into())),
+                }
                 state.log(app, "Discord OAuth 코드 전송 완료").await;
             }
             message = websocket.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) if text.as_str() == "ping" => {
-                        websocket.send(Message::Text(
-                            serde_json::to_string(&PongMessage::new())?.into()
-                        )).await.map_err(|_| AgentError::Relay("Relay pong 전송 실패".into()))?;
+                        send_relay_message(
+                            &mut websocket,
+                            Message::Text(serde_json::to_string(&PongMessage::new())?.into()),
+                            "Relay pong 전송 실패",
+                        ).await?;
                     }
                     Some(Ok(Message::Text(text))) => {
                         let incoming = IncomingMessage::parse(text.as_str())
@@ -1258,8 +1270,7 @@ async fn connect_once(
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        websocket.send(Message::Pong(payload)).await
-                            .map_err(|_| AgentError::Relay("Relay pong 전송 실패".into()))?;
+                        send_relay_message(&mut websocket, Message::Pong(payload), "Relay pong 전송 실패").await?;
                     }
                     Some(Ok(Message::Pong(_))) => {
                         if let Some(sent_at) = awaiting_pong.take() {
@@ -1318,15 +1329,13 @@ async fn connect_once(
                     ),
                 );
                 let message = serde_json::to_string(&report)?;
-                websocket.send(Message::Text(message.into())).await
-                    .map_err(|_| AgentError::Relay("운영 상태 스냅샷 전송 실패".into()))?;
+                send_relay_message(&mut websocket, Message::Text(message.into()), "운영 상태 스냅샷 전송 실패").await?;
             }
             report = update_reports.recv(), if session_bound && update_diagnostics_enabled => {
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
-                        websocket.send(Message::Text(message.into())).await
-                            .map_err(|_| AgentError::Relay("업데이트 진단 전송 실패".into()))?;
+                        send_relay_message(&mut websocket, Message::Text(message.into()), "업데이트 진단 전송 실패").await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         state.record_flight("updater", format!("diagnostic_queue_lagged skipped={skipped}")).await;
@@ -1340,8 +1349,7 @@ async fn connect_once(
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
-                        websocket.send(Message::Text(message.into())).await
-                            .map_err(|_| AgentError::Relay("운영 진단 전송 실패".into()))?;
+                        send_relay_message(&mut websocket, Message::Text(message.into()), "운영 진단 전송 실패").await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         state.record_flight(
@@ -1358,8 +1366,7 @@ async fn connect_once(
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
-                        websocket.send(Message::Text(message.into())).await
-                            .map_err(|_| AgentError::Relay("예상치 못한 오류 보고 전송 실패".into()))?;
+                        send_relay_message(&mut websocket, Message::Text(message.into()), "예상치 못한 오류 보고 전송 실패").await?;
                         state.record_flight("error_report", "unexpected_error_sent").await;
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1388,10 +1395,11 @@ async fn connect_once(
                                 .await;
                             continue;
                         };
-                        websocket
-                            .send(Message::Text(event.text.into()))
-                            .await
-                            .map_err(|_| AgentError::Relay("Discord 참가 요청 Relay 전송 실패".into()))?;
+                        send_relay_message(
+                            &mut websocket,
+                            Message::Text(event.text.into()),
+                            "Discord 참가 요청 Relay 전송 실패",
+                        ).await?;
                         state
                             .record_flight(
                                 "discord_presence_join_request",
@@ -1421,10 +1429,11 @@ async fn connect_once(
                         )? else {
                             continue;
                         };
-                        websocket
-                            .send(Message::Text(event.text.into()))
-                            .await
-                            .map_err(|_| AgentError::Relay("Discord Presence 내전 조회 요청 전송 실패".into()))?;
+                        send_relay_message(
+                            &mut websocket,
+                            Message::Text(event.text.into()),
+                            "Discord Presence 내전 조회 요청 전송 실패",
+                        ).await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         state
@@ -1441,8 +1450,11 @@ async fn connect_once(
             }
             _ = heartbeat.tick() => {
                 if awaiting_pong.is_none() {
-                    websocket.send(Message::Text("ping".into())).await
-                        .map_err(|_| AgentError::Relay("Relay heartbeat 전송 실패".into()))?;
+                    send_relay_message(
+                        &mut websocket,
+                        Message::Text("ping".into()),
+                        "Relay heartbeat 전송 실패",
+                    ).await?;
                     awaiting_pong = Some(Instant::now());
                     state.log(app, "Relay heartbeat 전송").await;
                 }
@@ -1607,8 +1619,11 @@ async fn connect_once(
                             }
                         }
                     }
-                    websocket.send(Message::Text(event.text.into())).await
-                        .map_err(|_| AgentError::Relay("Relay 이벤트 전송 실패".into()))?;
+                    send_relay_message(
+                        &mut websocket,
+                        Message::Text(event.text.into()),
+                        "Relay 이벤트 전송 실패",
+                    ).await?;
                     state.log(app, format!("Relay 이벤트 전송: {event_log}")).await;
                     if let Some(count) = live_participant_count {
                         live_game_announced = true;
@@ -1657,10 +1672,12 @@ where
             if !command_is_authorized(session_bound) {
                 let result =
                     CommandResult::failure(request_id, "Relay 인증이 완료되지 않았습니다.");
-                websocket
-                    .send(Message::Text(serde_json::to_string(&result)?.into()))
-                    .await
-                    .map_err(|_| AgentError::Relay("Relay 응답 전송 실패".into()))?;
+                send_relay_message(
+                    websocket,
+                    Message::Text(serde_json::to_string(&result)?.into()),
+                    "Relay 응답 전송 실패",
+                )
+                .await?;
                 state.log(app, "인증 전 Relay 명령 차단").await;
                 return Ok(());
             }
@@ -1675,10 +1692,12 @@ where
                 Ok(payload) => payload,
                 Err(error) => {
                     let result = CommandResult::failure(request_id, "LCU 명령 인증 실패");
-                    websocket
-                        .send(Message::Text(serde_json::to_string(&result)?.into()))
-                        .await
-                        .map_err(|_| AgentError::Relay("Relay 응답 전송 실패".into()))?;
+                    send_relay_message(
+                        websocket,
+                        Message::Text(serde_json::to_string(&result)?.into()),
+                        "Relay 응답 전송 실패",
+                    )
+                    .await?;
                     state
                         .log(app, format!("Relay LCU 명령 서명 차단: {error}"))
                         .await;
@@ -1738,10 +1757,12 @@ where
                     ),
                 )
                 .await;
-            websocket
-                .send(Message::Text(serde_json::to_string(&result)?.into()))
-                .await
-                .map_err(|_| AgentError::Relay("Relay 응답 전송 실패".into()))?;
+            send_relay_message(
+                websocket,
+                Message::Text(serde_json::to_string(&result)?.into()),
+                "Relay 응답 전송 실패",
+            )
+            .await?;
             if !parsed_action.is_some_and(Action::is_background) {
                 let result_label = if result.is_ok() { "성공" } else { "실패" };
                 state
@@ -2245,10 +2266,12 @@ where
 {
     let events = replay.snapshot();
     for event in &events {
-        websocket
-            .send(Message::Text(event.text.clone().into()))
-            .await
-            .map_err(|_| AgentError::Relay("Relay EOG 이벤트 재전송 실패".into()))?;
+        send_relay_message(
+            websocket,
+            Message::Text(event.text.clone().into()),
+            "Relay EOG 이벤트 재전송 실패",
+        )
+        .await?;
     }
     Ok(events.len())
 }
@@ -2270,10 +2293,12 @@ where
         return Ok(0);
     }
     for event in &events {
-        websocket
-            .send(Message::Text(event.text.clone().into()))
-            .await
-            .map_err(|_| AgentError::Relay("live delta 재전송 실패".into()))?;
+        send_relay_message(
+            websocket,
+            Message::Text(event.text.clone().into()),
+            "live delta 재전송 실패",
+        )
+        .await?;
     }
     Ok(events.len())
 }
@@ -2387,6 +2412,21 @@ fn should_reconnect(manual_stop: bool) -> bool {
 
 fn heartbeat_timed_out(awaiting_since: Option<Instant>, now: Instant) -> bool {
     awaiting_since.is_some_and(|started| now.duration_since(started) >= HEARTBEAT_TIMEOUT)
+}
+
+async fn send_relay_message<S>(
+    websocket: &mut S,
+    message: Message,
+    failure: &'static str,
+) -> AgentResult<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+{
+    match timeout(RELAY_SEND_TIMEOUT, websocket.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(_)) => Err(AgentError::Relay(failure.into())),
+        Err(_) => Err(AgentError::Relay(format!("{failure}: send timeout").into())),
+    }
 }
 
 fn should_start_login(session_bound: bool, login_opened: bool, elapsed: Duration) -> bool {

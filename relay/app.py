@@ -27,7 +27,7 @@ from pydantic import BaseModel, Field
 
 from relay import auth, config
 from relay.actions import ALLOWED_ACTIONS, action_policy
-from relay.connections import ConnectionManager
+from relay.connections import AGENT_HEARTBEAT_STALE_SEC, ConnectionManager
 from relay.http_diagnostics import upstream_error_detail
 from relay.lcu_linked import is_lcu_linked, lcu_linked_map, mark_lcu_linked
 from relay.lcu_recent import mark_recent_lcu_data, recent_lcu_data, recent_lcu_data_map
@@ -46,6 +46,7 @@ OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
 OAUTH_LINK_CODE_TTL_SEC = 600
 WS_AUTH_TIMEOUT_SEC = 15.0
+AGENT_HEARTBEAT_CHECK_SEC = 15.0
 MAX_WS_AUTH_MESSAGE_BYTES = 4 * 1024
 MAX_AGENT_MESSAGE_BYTES = 256 * 1024
 TOURNAMENT_BROADCAST_QUEUE_MAX = 64
@@ -154,6 +155,10 @@ _OAUTH_LINK_ATTEMPT_REDIS_KEY = "relay:oauth_link_attempt:{session_id}"
 
 def _agent_diagnostics_redis_key(discord_id: int) -> str:
     return f"relay:agent_diagnostics:{discord_id}"
+
+def _legacy_update_notice_redis_key(discord_id: int, version: str) -> str:
+    safe_version = version.replace(":", "_")
+    return f"relay:legacy_update_notice:{safe_version}:{discord_id}"
 
 
 def _safe_compare_digest(left: str, right: str) -> bool:
@@ -2636,6 +2641,14 @@ async def _handle_agent_message(
             info["version"],
             info["lcu_ready"],
         )
+        if info["version"] == "0.7.0":
+            notice_key = _legacy_update_notice_redis_key(discord_id, info["version"])
+            if not await r.exists(notice_key):
+                await conn.send_bot_event({
+                    "type": "legacy_update_notice",
+                    "discord_id": int(discord_id),
+                    "version": info["version"],
+                })
         return
 
     if msg_type == "party_lobby_update":
@@ -2897,7 +2910,20 @@ async def ws_agent(
 
     try:
         while True:
-            msg = await websocket.receive_text()
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=AGENT_HEARTBEAT_CHECK_SEC)
+            except asyncio.TimeoutError:
+                now = time.monotonic()
+                heartbeat_age = now - (last_ping_at if last_ping_at is not None else connected_at)
+                if heartbeat_age > AGENT_HEARTBEAT_STALE_SEC:
+                    logger.warning(
+                        "Agent heartbeat timeout discord_id=%s age_ms=%s",
+                        conn.discord_id_for_ws(websocket) or "-",
+                        int(heartbeat_age * 1000),
+                    )
+                    await websocket.close(code=1001, reason="heartbeat timeout")
+                    return
+                continue
             now = time.monotonic()
             last_message_at = now
             if len(msg.encode("utf-8")) > MAX_AGENT_MESSAGE_BYTES:
@@ -2905,6 +2931,7 @@ async def ws_agent(
                 return
             if msg == "ping":
                 last_ping_at = now
+                conn.mark_agent_heartbeat(websocket)
                 last_message_type = "ping"
                 sid = conn.ws_session_id(websocket)
                 if sid:
@@ -2998,6 +3025,13 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
         if event_id is not None:
             conn.complete_pending_bot_eog(event_id, data.get("ok") is True)
         return
+    if msg_type == "legacy_update_notice_sent":
+        raw_id = data.get("discord_id")
+        version = data.get("version")
+        if isinstance(raw_id, int) and raw_id > 0 and version == "0.7.0":
+            await r.set(_legacy_update_notice_redis_key(raw_id, version), "1")
+        return
+
     if msg_type == "subscribe_party":
         raw_id = data.get("discord_id")
         if isinstance(raw_id, int) and raw_id > 0:

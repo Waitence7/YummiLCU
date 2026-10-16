@@ -16,6 +16,8 @@ logger = logging.getLogger("yummi_lcu.relay.connections")
 LIVE_GAME_CACHE_TTL_SEC = 15.0
 LIVE_GAME_PARTICIPANT_COUNT = 10
 BOT_WS_SEND_TIMEOUT_SEC = 2.0
+AGENT_WS_SEND_TIMEOUT_SEC = 5.0
+AGENT_HEARTBEAT_STALE_SEC = 75.0
 GAMEFLOW_EOG_GRACE_SEC = 180.0
 
 
@@ -34,6 +36,7 @@ class ConnectionManager:
         self._ws_discord: dict[int, int] = {}  # id(ws) -> discord_id
         self._ws_session: dict[int, str] = {}  # id(ws) -> session_id (인증 전)
         self._ws_session_id: dict[int, str] = {}  # id(ws) -> session_id (TTL 갱신용)
+        self._ws_last_heartbeat: dict[int, float] = {}
         self._pending_results: dict[tuple[int, str], asyncio.Future[dict[str, Any]]] = {}
         self._pending_bot_eog: dict[str, asyncio.Future[bool]] = {}
         self._bot_ws: WebSocket | None = None
@@ -68,6 +71,7 @@ class ConnectionManager:
             wid = id(ws)
             self._ws_session[wid] = session_id
             self._ws_session_id[wid] = session_id
+            self._ws_last_heartbeat[wid] = time.monotonic()
         return True
 
     async def bind_discord(
@@ -153,6 +157,7 @@ class ConnectionManager:
             if active_ws is ws:
                 del self._active_session_ws[session_id]
         self._ws_session_id.pop(wid, None)
+        self._ws_last_heartbeat.pop(wid, None)
 
     def session_ws_token(self, session_id: str) -> str | None:
         return self._session_ws_token.get(session_id)
@@ -170,8 +175,21 @@ class ConnectionManager:
             if fut is not None and not fut.done():
                 fut.cancel()
 
+    def mark_agent_heartbeat(self, ws: WebSocket) -> None:
+        wid = id(ws)
+        if wid in self._ws_session_id or wid in self._ws_discord:
+            self._ws_last_heartbeat[wid] = time.monotonic()
+
+    def _ws_is_fresh(self, ws: WebSocket, *, now: float | None = None) -> bool:
+        last = self._ws_last_heartbeat.get(id(ws))
+        if last is None:
+            return False
+        current = time.monotonic() if now is None else now
+        return current - last <= AGENT_HEARTBEAT_STALE_SEC
+
     def is_online(self, discord_id: int) -> bool:
-        return discord_id in self._by_discord
+        ws = self._by_discord.get(int(discord_id))
+        return ws is not None and self._ws_is_fresh(ws)
 
     async def set_agent_info_for_ws(self, ws: WebSocket, info: dict[str, Any]) -> int | None:
         """OAuth 바인딩 전 hello는 WS 단위로 보관했다가 bind_discord에서 이전한다."""
@@ -238,15 +256,33 @@ class ConnectionManager:
 
     async def send_command(self, discord_id: int, payload: dict[str, Any]) -> bool:
         async with self._lock:
-            ws = self._by_discord.get(discord_id)
-        if ws is None:
+            ws = self._by_discord.get(int(discord_id))
+            fresh = ws is not None and self._ws_is_fresh(ws)
+        if ws is None or not fresh:
             return False
         try:
-            await ws.send_json(payload)
+            await asyncio.wait_for(ws.send_json(payload), timeout=AGENT_WS_SEND_TIMEOUT_SEC)
             return True
         except Exception:
             logger.exception("WS send 실패 discord_id=%s", discord_id)
             await self.unregister_ws(ws)
+            try:
+                await ws.close(code=1001)
+            except Exception:
+                pass
+            return False
+
+    async def send_bot_event(self, payload: dict[str, Any]) -> bool:
+        async with self._lock:
+            ws = self._bot_ws
+        if ws is None:
+            return False
+        try:
+            await _send_bot_json(ws, payload)
+            return True
+        except Exception:
+            logger.exception("봇 WS event 전달 실패 type=%s", payload.get("type"))
+            await self.unregister_bot_ws(ws)
             return False
 
     async def register_bot_ws(self, ws: WebSocket) -> None:
