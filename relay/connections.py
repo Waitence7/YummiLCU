@@ -17,7 +17,7 @@ LIVE_GAME_CACHE_TTL_SEC = 15.0
 LIVE_GAME_PARTICIPANT_COUNT = 10
 BOT_WS_SEND_TIMEOUT_SEC = 2.0
 AGENT_WS_SEND_TIMEOUT_SEC = 5.0
-AGENT_HEARTBEAT_STALE_SEC = 75.0
+AGENT_HEARTBEAT_STALE_SEC = 180.0
 GAMEFLOW_EOG_GRACE_SEC = 180.0
 
 
@@ -175,10 +175,22 @@ class ConnectionManager:
             if fut is not None and not fut.done():
                 fut.cancel()
 
-    def mark_agent_heartbeat(self, ws: WebSocket) -> None:
+    def mark_agent_activity(self, ws: WebSocket) -> None:
+        """Refresh liveness for any successfully received Agent message.
+
+        Heartbeat pings are the normal source of activity, but Agent work such as
+        LCU phase transitions may briefly delay the dedicated ping branch.  A
+        diagnostic/event received on the same WebSocket is equally strong proof
+        that the connection is alive and must prevent a false stale disconnect.
+        """
         wid = id(ws)
         if wid in self._ws_session_id or wid in self._ws_discord:
             self._ws_last_heartbeat[wid] = time.monotonic()
+
+    def mark_agent_heartbeat(self, ws: WebSocket) -> None:
+        # Compatibility alias for callers/tests that still describe activity as
+        # a heartbeat. New receive paths should use mark_agent_activity().
+        self.mark_agent_activity(ws)
 
     def _ws_is_fresh(self, ws: WebSocket, *, now: float | None = None) -> bool:
         last = self._ws_last_heartbeat.get(id(ws))

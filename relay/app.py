@@ -2914,24 +2914,25 @@ async def ws_agent(
                 msg = await asyncio.wait_for(websocket.receive_text(), timeout=AGENT_HEARTBEAT_CHECK_SEC)
             except asyncio.TimeoutError:
                 now = time.monotonic()
-                heartbeat_age = now - (last_ping_at if last_ping_at is not None else connected_at)
-                if heartbeat_age > AGENT_HEARTBEAT_STALE_SEC:
+                activity_age = now - last_message_at
+                if activity_age > AGENT_HEARTBEAT_STALE_SEC:
                     logger.warning(
-                        "Agent heartbeat timeout discord_id=%s age_ms=%s",
+                        "Agent activity timeout discord_id=%s age_ms=%s last_type=%s",
                         conn.discord_id_for_ws(websocket) or "-",
-                        int(heartbeat_age * 1000),
+                        int(activity_age * 1000),
+                        last_message_type,
                     )
-                    await websocket.close(code=1001, reason="heartbeat timeout")
+                    await websocket.close(code=1001, reason="activity timeout")
                     return
                 continue
             now = time.monotonic()
             last_message_at = now
+            conn.mark_agent_activity(websocket)
             if len(msg.encode("utf-8")) > MAX_AGENT_MESSAGE_BYTES:
                 await websocket.close(code=1009)
                 return
             if msg == "ping":
                 last_ping_at = now
-                conn.mark_agent_heartbeat(websocket)
                 last_message_type = "ping"
                 sid = conn.ws_session_id(websocket)
                 if sid:

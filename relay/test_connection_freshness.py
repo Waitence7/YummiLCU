@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from relay.connections import ConnectionManager
+from relay.connections import AGENT_HEARTBEAT_STALE_SEC, ConnectionManager
 
 
 class _WebSocketStub:
@@ -35,13 +35,28 @@ class AgentConnectionFreshnessTests(unittest.IsolatedAsyncioTestCase):
         manager = await self._bound(websocket)
         self.assertTrue(manager.is_online(1234))
 
-        manager._ws_last_heartbeat[id(websocket)] = time.monotonic() - 76.0
+        manager._ws_last_heartbeat[id(websocket)] = (
+            time.monotonic() - AGENT_HEARTBEAT_STALE_SEC - 1.0
+        )
         self.assertFalse(manager.is_online(1234))
         self.assertFalse(await manager.send_command(1234, {"type": "test"}))
 
         manager.mark_agent_heartbeat(websocket)
         self.assertTrue(manager.is_online(1234))
         self.assertTrue(await manager.send_command(1234, {"type": "test"}))
+
+
+    async def test_any_agent_activity_refreshes_connection_freshness(self) -> None:
+        websocket = _WebSocketStub()
+        manager = await self._bound(websocket)
+        manager._ws_last_heartbeat[id(websocket)] = (
+            time.monotonic() - AGENT_HEARTBEAT_STALE_SEC - 1.0
+        )
+        self.assertFalse(manager.is_online(1234))
+
+        manager.mark_agent_activity(websocket)
+
+        self.assertTrue(manager.is_online(1234))
 
     async def test_send_timeout_unregisters_stuck_agent(self) -> None:
         websocket = _HangingWebSocketStub()
