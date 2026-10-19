@@ -240,6 +240,10 @@ impl AppState {
         self.ui.lock().await.discord_id
     }
 
+    pub(crate) async fn oauth_pending(&self) -> bool {
+        self.ui.lock().await.oauth_pending
+    }
+
     pub(crate) async fn update_config(&self, config: Config) {
         *self.config.write().await = config.clone();
         self.ui.lock().await.config = config;

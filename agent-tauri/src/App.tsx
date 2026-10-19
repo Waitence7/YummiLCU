@@ -186,7 +186,7 @@ export function App() {
         onLogout={() => void actions.logout()}
         actionError={actionError?.startsWith('설정 저장 실패:') ? null : actionError}
       />
-      <Banners state={state} />
+      <Banners state={state} onDiscordLogin={() => void actions.start()} />
 
       <nav className="flex shrink-0 gap-1 overflow-x-auto border-b border-slate-200 bg-white px-3 pt-2">
         {TABS.map(({ id, label, badge }) => (

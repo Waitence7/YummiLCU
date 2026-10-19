@@ -559,21 +559,33 @@ impl RelaySupervisor {
             .is_some_and(|task| !task.is_finished())
     }
 
-    pub(crate) async fn start(app: AppHandle, state: Arc<AppState>) -> AgentResult<()> {
-        Self::start_impl(app, state, true).await.map(|_| ())
+    pub(crate) async fn start_background(app: AppHandle, state: Arc<AppState>) -> AgentResult<()> {
+        Self::start_impl(app, state, true, false).await.map(|_| ())
+    }
+
+    pub(crate) async fn start_user_requested(
+        app: AppHandle,
+        state: Arc<AppState>,
+    ) -> AgentResult<()> {
+        let started = Self::start_impl(app.clone(), state.clone(), true, true).await?;
+        if !started && state.oauth_pending().await {
+            Self::open_pending_login(&app, &state).await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn restart_if_desired(
         app: AppHandle,
         state: Arc<AppState>,
     ) -> AgentResult<bool> {
-        Self::start_impl(app, state, false).await
+        Self::start_impl(app, state, false, false).await
     }
 
     async fn start_impl(
         app: AppHandle,
         state: Arc<AppState>,
         explicit_start: bool,
+        user_initiated_login: bool,
     ) -> AgentResult<bool> {
         let (generation, stop_rx) = {
             let mut control = state.relay.control.lock().await;
@@ -637,6 +649,7 @@ impl RelaySupervisor {
                     task_state.clone(),
                     generation,
                     stop_rx.clone(),
+                    user_initiated_login,
                     error_reports,
                     update_reports,
                     diagnostic_reports,
@@ -717,7 +730,22 @@ impl RelaySupervisor {
 
     pub(crate) async fn restart(app: AppHandle, state: Arc<AppState>) -> AgentResult<()> {
         Self::stop(&app, &state).await;
-        Self::start(app, state).await
+        Self::start_background(app, state).await
+    }
+
+    async fn open_pending_login(app: &AppHandle, state: &Arc<AppState>) -> AgentResult<()> {
+        let config = state.config.read().await.clone();
+        let session = session::load(&config).ok_or_else(|| {
+            AgentError::Relay("Discord 로그인 세션을 준비하지 못했습니다. 다시 시도하세요.".into())
+        })?;
+        open_login_url(app, &config.login_url(&session.session_id)?)?;
+        state
+            .set_oauth_pending(app, true, "브라우저에서 Discord 로그인 중…")
+            .await;
+        state
+            .record_flight("relay", "oauth_browser_opened_by_user")
+            .await;
+        Ok(())
     }
 
     pub(crate) async fn submit_oauth_code(&self, mut code: String) -> AgentResult<()> {
@@ -796,6 +824,7 @@ async fn run_supervisor(
     state: Arc<AppState>,
     generation: u64,
     mut stop_rx: watch::Receiver<bool>,
+    mut user_initiated_login: bool,
     mut error_reports: broadcast::Receiver<UnexpectedErrorReport>,
     mut update_reports: broadcast::Receiver<UpdateDiagnosticReport>,
     mut diagnostic_reports: broadcast::Receiver<AgentDiagnosticReport>,
@@ -841,6 +870,7 @@ async fn run_supervisor(
             &mut session,
             &mut stop_rx,
             &mut needs_login,
+            user_initiated_login,
             &mut durable_replay,
             &mut error_reports,
             &mut update_reports,
@@ -850,6 +880,9 @@ async fn run_supervisor(
         ))
         .catch_unwind()
         .await;
+        // A browser launch is allowed only as the direct consequence of one
+        // explicit user action, never on later automatic reconnect attempts.
+        user_initiated_login = false;
 
         match connection_result {
             Ok(Ok(ConnectionEnd::Stopped)) => break,
@@ -931,6 +964,7 @@ async fn connect_once(
     session: &mut session::Session,
     stop_rx: &mut watch::Receiver<bool>,
     needs_login: &mut bool,
+    user_initiated_login: bool,
     durable_replay: &mut DurableReplayBuffer,
     error_reports: &mut broadcast::Receiver<UnexpectedErrorReport>,
     update_reports: &mut broadcast::Receiver<UpdateDiagnosticReport>,
@@ -1004,16 +1038,25 @@ async fn connect_once(
             app,
             *needs_login,
             if *needs_login {
-                "브라우저에서 Discord 로그인 중…"
+                if user_initiated_login {
+                    "브라우저에서 Discord 로그인 중…"
+                } else {
+                    "Discord 로그인이 필요합니다 — Agent에서 로그인 버튼을 눌러주세요."
+                }
             } else {
                 "저장된 Discord 세션 복원 중…"
             },
         )
         .await;
-    if *needs_login {
+    if oauth_browser_should_open(user_initiated_login, *needs_login) {
         open_login_url(app, &config.login_url(&session.session_id)?)?;
+        state
+            .record_flight("relay", "oauth_browser_opened_by_user")
+            .await;
     }
     let auth_started = Instant::now();
+    // `login_opened` also means that a missing-session prompt has already been
+    // surfaced. Automatic/background starts wait silently for an explicit click.
     let mut login_opened = *needs_login;
     if let Err(error) = session::save(session) {
         let summary = error.to_string();
@@ -1491,8 +1534,16 @@ async fn connect_once(
                 if should_start_login(session_bound, login_opened, auth_started.elapsed()) {
                     *needs_login = true;
                     login_opened = true;
-                    state.set_oauth_pending(app, true, "저장된 세션이 만료되어 Discord 재인증이 필요합니다.").await;
-                    open_login_url(app, &config.login_url(&session.session_id)?)?;
+                    let status = if user_initiated_login {
+                        "저장된 세션이 만료되어 Discord 재인증 페이지를 열었습니다."
+                    } else {
+                        "저장된 세션이 만료되었습니다 — Agent에서 Discord 로그인을 눌러주세요."
+                    };
+                    state.set_oauth_pending(app, true, status).await;
+                    if oauth_browser_should_open(user_initiated_login, true) {
+                        open_login_url(app, &config.login_url(&session.session_id)?)?;
+                        state.record_flight("relay", "oauth_browser_opened_by_user").await;
+                    }
                 }
             }
             Some(batch) = lcu_poll_rx.recv(), if session_bound => {
@@ -2461,6 +2512,10 @@ fn should_start_login(session_bound: bool, login_opened: bool, elapsed: Duration
     !session_bound && !login_opened && elapsed >= SESSION_RESTORE_TIMEOUT
 }
 
+fn oauth_browser_should_open(user_initiated_login: bool, login_required: bool) -> bool {
+    user_initiated_login && login_required
+}
+
 fn backoff_delay(attempt: u32) -> Duration {
     let exponent = attempt.saturating_sub(1).min(5);
     let base = Duration::from_secs((1_u64 << exponent).min(MAX_BACKOFF.as_secs()));
@@ -2607,6 +2662,14 @@ mod tests {
             now
         ));
         assert!(heartbeat_timed_out(Some(now - HEARTBEAT_TIMEOUT), now));
+    }
+
+    #[test]
+    fn oauth_browser_opens_only_for_explicit_user_action() {
+        assert!(oauth_browser_should_open(true, true));
+        assert!(!oauth_browser_should_open(false, true));
+        assert!(!oauth_browser_should_open(true, false));
+        assert!(!oauth_browser_should_open(false, false));
     }
 
     #[test]

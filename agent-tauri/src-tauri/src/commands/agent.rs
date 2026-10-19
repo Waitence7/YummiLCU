@@ -9,7 +9,7 @@ use crate::{
 };
 
 pub(crate) async fn start_agent_inner(app: AppHandle, state: Arc<AppState>) -> Result<(), String> {
-    RelaySupervisor::start(app, state)
+    RelaySupervisor::start_background(app, state)
         .await
         .map_err(|error| error.to_string())
 }
@@ -23,7 +23,9 @@ pub(crate) async fn start_agent(
     state
         .report_diagnostic("command", "manual_start", "user requested relay start")
         .await;
-    start_agent_inner(app, state.inner().clone()).await
+    RelaySupervisor::start_user_requested(app, state.inner().clone())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
