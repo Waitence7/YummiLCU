@@ -18,6 +18,7 @@ LIVE_GAME_PARTICIPANT_COUNT = 10
 BOT_WS_SEND_TIMEOUT_SEC = 2.0
 AGENT_WS_SEND_TIMEOUT_SEC = 5.0
 AGENT_HEARTBEAT_STALE_SEC = 180.0
+AGENT_SESSION_CONFLICT_CLOSE_CODE = 4009
 GAMEFLOW_EOG_GRACE_SEC = 180.0
 
 
@@ -75,10 +76,16 @@ class ConnectionManager:
         return True
 
     async def bind_discord(
-        self, session_id: str, discord_id: int, profile: dict[str, str] | None = None
+        self,
+        session_id: str,
+        discord_id: int,
+        profile: dict[str, str] | None = None,
+        *,
+        allow_takeover: bool = False,
     ) -> bool:
-        """ws_token 이 등록된 session WS만 discord_id에 바인딩합니다."""
+        """세션을 바인딩하되 다른 정상 연결의 인계는 명시적 OAuth만 허용합니다."""
         replaced: WebSocket | None = None
+        rejected = False
         async with self._lock:
             ws = self._session_ws.pop(session_id, None)
             ws_token = self._session_ws_token.pop(session_id, None)
@@ -86,28 +93,45 @@ class ConnectionManager:
                 return False
             self._ws_session.pop(id(ws), None)
             prev = self._by_discord.get(discord_id)
-            if prev is not None and prev is not ws:
-                self._drop_ws_locked(prev)
-                replaced = prev
-            self._by_discord[discord_id] = ws
-            self._ws_discord[id(ws)] = discord_id
-            pending_agent_info = self._pending_agent_info_by_ws.pop(id(ws), None)
-            info = dict(pending_agent_info or {})
-            if profile:
-                if profile.get("name"):
-                    info["discord_name"] = profile["name"]
-                if profile.get("avatar"):
-                    info["discord_avatar"] = profile["avatar"]
-            if info:
-                self._agent_info[discord_id] = info
-            self._connected_participant_status_locked(
-                discord_id,
-                lcu_ready=bool(info.get("lcu_ready")),
-            )
-            logger.info("에이전트 등록: discord_id=%s session=%s", discord_id, session_id[:8])
+            if (
+                prev is not None
+                and prev is not ws
+                and self._ws_session_id.get(id(prev)) != session_id
+                and self._ws_is_fresh(prev)
+                and not allow_takeover
+            ):
+                # Saved sessions must not steal a healthy connection back from
+                # another Agent. Older Agents reconnect after every close, so
+                # client-side close handling alone cannot prevent the loop.
+                self._drop_ws_locked(ws)
+                rejected = True
+                logger.info("다른 Agent 연결 유지: discord_id=%s session=%s", discord_id, session_id[:8])
+            if not rejected:
+                if prev is not None and prev is not ws:
+                    self._drop_ws_locked(prev)
+                    replaced = prev
+                self._by_discord[discord_id] = ws
+                self._ws_discord[id(ws)] = discord_id
+                pending_agent_info = self._pending_agent_info_by_ws.pop(id(ws), None)
+                info = dict(pending_agent_info or {})
+                if profile:
+                    if profile.get("name"):
+                        info["discord_name"] = profile["name"]
+                    if profile.get("avatar"):
+                        info["discord_avatar"] = profile["avatar"]
+                if info:
+                    self._agent_info[discord_id] = info
+                self._connected_participant_status_locked(
+                    discord_id,
+                    lcu_ready=bool(info.get("lcu_ready")),
+                )
+                logger.info("에이전트 등록: discord_id=%s session=%s", discord_id, session_id[:8])
+        if rejected:
+            await ws.close(code=AGENT_SESSION_CONFLICT_CLOSE_CODE)
+            return False
         if replaced is not None:
             try:
-                await replaced.close(code=1000)
+                await replaced.close(code=AGENT_SESSION_CONFLICT_CLOSE_CODE)
             except Exception:
                 logger.warning("교체된 Discord Agent WebSocket 종료 실패")
         try:

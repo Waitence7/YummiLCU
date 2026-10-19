@@ -45,6 +45,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_CONFLICT_CLOSE_CODE: u16 = 4009;
 const SESSION_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
 const LCU_WORKER_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const LCU_RECOVERY_POLL_INTERVAL: Duration = Duration::from_secs(8);
@@ -796,6 +797,18 @@ impl RelaySupervisor {
         }
     }
 
+    async fn suspend_for_session_conflict(&self, generation: u64) -> bool {
+        let mut control = self.control.lock().await;
+        if control.generation != generation {
+            return false;
+        }
+        // A deliberate server-side handover is not a transport failure. Keep
+        // the app watchdog from restarting this displaced connection as well.
+        control.desired_running = false;
+        control.oauth_tx = None;
+        true
+    }
+
     async fn finish(&self, app: &AppHandle, state: &AppState, generation: u64) {
         let should_publish = {
             let mut control = self.control.lock().await;
@@ -886,6 +899,15 @@ async fn run_supervisor(
 
         match connection_result {
             Ok(Ok(ConnectionEnd::Stopped)) => break,
+            Ok(Ok(ConnectionEnd::SessionConflict)) => {
+                if state.relay.suspend_for_session_conflict(generation).await {
+                    let status = "다른 Agent에서 연결 중입니다. 기존 Agent를 종료하거나 Discord 로그아웃 후 다시 로그인하세요.";
+                    state.mark_stopped(&app).await;
+                    state.set_oauth_pending(&app, false, status).await;
+                    state.log(&app, format!("{status} 자동 재접속을 중지했습니다.")).await;
+                }
+                break;
+            }
             Ok(Ok(ConnectionEnd::Closed { authenticated })) => {
                 if authenticated {
                     attempt = 0;
@@ -953,7 +975,18 @@ async fn run_supervisor(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ConnectionEnd {
     Stopped,
+    SessionConflict,
     Closed { authenticated: bool },
+}
+
+impl ConnectionEnd {
+    fn for_close(code: Option<u16>, authenticated: bool) -> Self {
+        if code == Some(SESSION_CONFLICT_CLOSE_CODE) {
+            Self::SessionConflict
+        } else {
+            Self::Closed { authenticated }
+        }
+    }
 }
 
 async fn connect_once(
@@ -1358,7 +1391,10 @@ async fn connect_once(
                             .report_diagnostic("relay", "websocket_close", detail)
                             .await;
                         state.relay.set_oauth_sender(generation, None).await;
-                        return Ok(ConnectionEnd::Closed { authenticated: session_bound });
+                        return Ok(ConnectionEnd::for_close(
+                            frame.as_ref().map(|frame| u16::from(frame.code)),
+                            session_bound,
+                        ));
                     }
                     None => {
                         state
@@ -2651,6 +2687,38 @@ mod tests {
     fn relay_close_reconnects_unless_manually_stopped() {
         assert!(should_reconnect(false));
         assert!(!should_reconnect(true));
+    }
+
+    #[test]
+    fn session_conflict_close_is_terminal_even_before_binding() {
+        for authenticated in [false, true] {
+            assert_eq!(
+                ConnectionEnd::for_close(Some(4009), authenticated),
+                ConnectionEnd::SessionConflict,
+            );
+            for code in [None, Some(1000), Some(1001), Some(1008), Some(1011)] {
+                assert_eq!(
+                    ConnectionEnd::for_close(code, authenticated),
+                    ConnectionEnd::Closed { authenticated },
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn session_conflict_disables_watchdog_until_explicit_start() {
+        let supervisor = RelaySupervisor::new();
+        {
+            let mut control = supervisor.control.lock().await;
+            control.generation = 2;
+            control.desired_running = true;
+        }
+        // A late result from an older connection must not stop a newer one.
+        assert!(!supervisor.suspend_for_session_conflict(1).await);
+        assert!(supervisor.control.lock().await.desired_running);
+        assert!(supervisor.suspend_for_session_conflict(2).await);
+        let control = supervisor.control.lock().await;
+        assert!(!watchdog_restart_allowed(control.desired_running, false));
     }
 
     #[test]

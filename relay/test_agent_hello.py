@@ -20,7 +20,7 @@ from relay.app import (
     _safe_compare_digest,
     _server_hello,
 )
-from relay.connections import ConnectionManager
+from relay.connections import AGENT_SESSION_CONFLICT_CLOSE_CODE, ConnectionManager
 
 
 class AgentHelloTests(unittest.TestCase):
@@ -186,6 +186,7 @@ class _WebSocketStub:
         self.payload: dict[str, object] | None = None
         self.payloads: list[dict[str, object]] = []
         self.closed = False
+        self.close_codes: list[int] = []
         self.app = SimpleNamespace(state=SimpleNamespace(http=object(), redis=object()))
 
     async def send_json(self, payload: dict[str, object]) -> None:
@@ -193,7 +194,8 @@ class _WebSocketStub:
         self.payloads.append(payload)
 
     async def close(self, code: int = 1000) -> None:
-        self.closed = code == 1000
+        self.closed = True
+        self.close_codes.append(code)
 
 
 class _AuthWebSocketStub:
@@ -618,6 +620,7 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.bind_discord("session-1", 42))
 
         self.assertTrue(previous.closed)
+        self.assertEqual(previous.close_codes, [AGENT_SESSION_CONFLICT_CLOSE_CODE])
         self.assertIsNone(manager.discord_id_for_ws(previous))
         self.assertEqual(manager.discord_id_for_ws(current), 42)
         self.assertTrue(manager.has_active_session_ws("session-1"))

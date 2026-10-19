@@ -51,7 +51,9 @@ class OAuthAutoBindTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("자동으로 연결", body)
         self.assertNotIn("6자리", body)
         self.assertNotIn("코드", body)
-        bind.assert_awaited_once_with(connections, redis, session_id, 123456789)
+        bind.assert_awaited_once_with(
+            connections, redis, session_id, 123456789, allow_takeover=True
+        )
         redis.delete.assert_awaited_once_with(
             _oauth_link_pending_redis_key(session_id),
             _oauth_link_attempt_redis_key(session_id),

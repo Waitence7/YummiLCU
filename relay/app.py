@@ -289,7 +289,7 @@ async def _complete_oauth_link(
         await r.set(_discord_user_profile_redis_key(discord_id), encoded_profile)
     await r.set(_status_redis_key(session_id), "ok", ex=ttl)
     await r.delete(_oauth_link_pending_redis_key(session_id))
-    bound = await _try_bind_discord(conn, r, session_id, discord_id)
+    bound = await _try_bind_discord(conn, r, session_id, discord_id, allow_takeover=True)
     logger.info("OAuth 링크 코드 확인 discord_id=%s session=%s bound_ws=%s", discord_id, session_id[:8], bound)
     return bound
 
@@ -299,6 +299,8 @@ async def _try_bind_discord(
     r: redis.Redis,
     session_id: str,
     discord_id: int,
+    *,
+    allow_takeover: bool = False,
 ) -> bool:
     """OAuth 완료 후 ws_token 이 일치하는 에이전트 WS 만 discord_id 에 바인딩."""
     ws_token = conn.session_ws_token(session_id)
@@ -331,7 +333,7 @@ async def _try_bind_discord(
         # Keep a Discord-id keyed copy so Relay restarts/new sessions can restore
         # display metadata without requiring another OAuth round-trip.
         await r.set(_discord_user_profile_redis_key(discord_id), json.dumps(profile))
-    bound = await conn.bind_discord(session_id, discord_id, profile)
+    bound = await conn.bind_discord(session_id, discord_id, profile, allow_takeover=allow_takeover)
     if bound:
         await mark_lcu_linked(r, discord_id)
     return bound
@@ -751,7 +753,7 @@ async def auth_callback(
         _oauth_link_pending_redis_key(session_id),
         _oauth_link_attempt_redis_key(session_id),
     )
-    bound = await _try_bind_discord(conn, r, session_id, discord_id)
+    bound = await _try_bind_discord(conn, r, session_id, discord_id, allow_takeover=True)
     logger.info(
         "OAuth 자동 연결 완료 discord_id=%s session=%s bound_ws=%s",
         discord_id,
@@ -2895,6 +2897,10 @@ async def ws_agent(
             discord_id = int(raw)
             if attached:
                 await _try_bind_discord(conn, r, session_id, discord_id)
+                if conn.ws_session_id(websocket) is None:
+                    # A competing saved session was closed and removed by
+                    # bind_discord; do not receive again on that closed socket.
+                    return
             else:
                 await websocket.send_json({"type": "session_bound", "discord_id": discord_id})
         except ValueError:
