@@ -10,6 +10,7 @@ use crate::{
     discord_presence::watch_discord_presence,
     lcu::{lockfile_path, LcuClient, LcuConnectionState},
     platform::sync_windows_startup,
+    relay::supervisor::RelaySupervisor,
     state::{AgentEvent, AppState},
     tray,
     updater::auto_update_on_startup,
@@ -18,6 +19,7 @@ use crate::{
 const INSTALLER_SHUTDOWN_ARG: &str = "--shutdown-for-install";
 const BACKGROUND_START_ARG: &str = "--background";
 const POST_INSTALL_LAUNCH_PREFIX: &str = "--post-install-launch=";
+const RELAY_SUPERVISOR_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
 #[cfg(windows)]
 const POST_INSTALL_PARENT_WAIT_MS: u32 = 15_000;
 
@@ -38,6 +40,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
     let connect_state = state.clone();
     let lcu_state = state.clone();
     let presence_state = state.clone();
+    let relay_watchdog_state = state.clone();
     let lifecycle_state = state.clone();
 
     let mut builder = tauri::Builder::default();
@@ -202,6 +205,12 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 "task_panicked",
                 watch_discord_presence(handle.clone(), presence_state),
             );
+            spawn_monitored(
+                relay_watchdog_state.clone(),
+                "relay_watchdog",
+                "task_panicked",
+                watch_relay_supervisor(handle.clone(), relay_watchdog_state),
+            );
             let start_report_state = connect_state.clone();
             spawn_monitored(connect_state, "relay", "task_panicked", async move {
                 if let Err(error) = start_agent_inner(handle, start_report_state.clone()).await {
@@ -348,6 +357,50 @@ async fn wait_for_installer_exit(process_id: u32) {
     #[cfg(not(windows))]
     {
         let _ = process_id;
+    }
+}
+
+async fn watch_relay_supervisor(app: AppHandle, state: Arc<AppState>) {
+    let mut shutdown = state.shutdown_receiver();
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+
+        match RelaySupervisor::restart_if_desired(app.clone(), state.clone()).await {
+            Ok(true) => {
+                state.record_flight("relay", "watchdog_restart").await;
+                state
+                    .log(&app, "Relay supervisor watchdog 자동 재시작")
+                    .await;
+                state
+                    .report_diagnostic(
+                        "relay",
+                        "watchdog_restart",
+                        "relay supervisor task was no longer running",
+                    )
+                    .await;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let summary = error.to_string();
+                state
+                    .record_flight("relay_error", format!("watchdog_restart_failed: {summary}"))
+                    .await;
+                state
+                    .report_unexpected_error("relay_watchdog", "restart_failed", summary)
+                    .await;
+            }
+        }
+
+        tokio::select! {
+            _ = sleep(RELAY_SUPERVISOR_WATCHDOG_INTERVAL) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
     }
 }
 

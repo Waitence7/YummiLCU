@@ -526,6 +526,7 @@ pub(crate) enum RelayConnectionState {
 
 struct SupervisorControl {
     generation: u64,
+    desired_running: bool,
     stop_tx: Option<watch::Sender<bool>>,
     task: Option<JoinHandle<()>>,
     oauth_tx: Option<mpsc::Sender<String>>,
@@ -541,6 +542,7 @@ impl RelaySupervisor {
         Self {
             control: Mutex::new(SupervisorControl {
                 generation: 0,
+                desired_running: false,
                 stop_tx: None,
                 task: None,
                 oauth_tx: None,
@@ -558,14 +560,34 @@ impl RelaySupervisor {
     }
 
     pub(crate) async fn start(app: AppHandle, state: Arc<AppState>) -> AgentResult<()> {
+        Self::start_impl(app, state, true).await.map(|_| ())
+    }
+
+    pub(crate) async fn restart_if_desired(
+        app: AppHandle,
+        state: Arc<AppState>,
+    ) -> AgentResult<bool> {
+        Self::start_impl(app, state, false).await
+    }
+
+    async fn start_impl(
+        app: AppHandle,
+        state: Arc<AppState>,
+        explicit_start: bool,
+    ) -> AgentResult<bool> {
         let (generation, stop_rx) = {
             let mut control = state.relay.control.lock().await;
-            if control
+            let task_running = control
                 .task
                 .as_ref()
-                .is_some_and(|task| !task.is_finished())
-            {
-                return Ok(());
+                .is_some_and(|task| !task.is_finished());
+            if explicit_start {
+                control.desired_running = true;
+                if task_running {
+                    return Ok(false);
+                }
+            } else if !watchdog_restart_allowed(control.desired_running, task_running) {
+                return Ok(false);
             }
             control.task.take();
             control.generation = control.generation.wrapping_add(1);
@@ -656,17 +678,19 @@ impl RelaySupervisor {
         });
 
         let mut control = state.relay.control.lock().await;
-        if control.generation == generation {
+        if control.generation == generation && control.desired_running {
             control.task = Some(task);
+            Ok(true)
         } else {
             task.abort();
+            Ok(false)
         }
-        Ok(())
     }
 
     pub(crate) async fn stop(app: &AppHandle, state: &Arc<AppState>) {
         let task = {
             let mut control = state.relay.control.lock().await;
+            control.desired_running = false;
             control.generation = control.generation.wrapping_add(1);
             if let Some(stop_tx) = control.stop_tx.take() {
                 let _ = stop_tx.send(true);
@@ -2406,6 +2430,10 @@ fn event_summary(message_type: &str, data: &Value) -> String {
     }
 }
 
+fn watchdog_restart_allowed(desired_running: bool, task_running: bool) -> bool {
+    desired_running && !task_running
+}
+
 fn should_reconnect(manual_stop: bool) -> bool {
     !manual_stop
 }
@@ -2554,6 +2582,14 @@ mod tests {
                 assert!(*stop_rx.borrow());
             }
         }
+    }
+
+    #[test]
+    fn relay_watchdog_only_restarts_when_running_is_still_desired() {
+        assert!(watchdog_restart_allowed(true, false));
+        assert!(!watchdog_restart_allowed(true, true));
+        assert!(!watchdog_restart_allowed(false, false));
+        assert!(!watchdog_restart_allowed(false, true));
     }
 
     #[test]
