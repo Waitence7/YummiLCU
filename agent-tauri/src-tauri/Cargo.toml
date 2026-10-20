@@ -1,6 +1,6 @@
 [package]
 name = "yummi-lcu-tauri"
-version = "0.7.24"
+version = "0.7.25"
 edition = "2021"
 
 [lib]
