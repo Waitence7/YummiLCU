@@ -58,6 +58,17 @@ const MAX_REPLAY_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
 const REPLAY_LOCAL_DELETE_DELAY: Duration = Duration::from_secs(5 * 60);
 const REPLAY_LOCAL_DELETE_MONITOR_INTERVAL: Duration = Duration::from_secs(2);
+const HEARTBEAT_SCHEDULER_WARN: Duration = Duration::from_secs(5);
+
+struct AbortTaskOnDrop(JoinHandle<()>);
+
+impl Drop for AbortTaskOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+type SharedRelayWriter<S> = Arc<Mutex<S>>;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct SerializedAgentEvent {
@@ -1026,7 +1037,9 @@ async fn connect_once(
     };
     let (mut websocket, _) = connection
         .map_err(|_| AgentError::Relay("Relay 연결 시간 초과".into()))?
-        .map_err(|_| AgentError::Relay("Relay TLS/WebSocket 연결 실패".into()))?;
+        .map_err(|error| {
+            AgentError::Relay(format!("Relay TLS/WebSocket 연결 실패: {error}").into())
+        })?;
     state.log(app, "Relay WebSocket 연결 성공").await;
 
     send_relay_message(
@@ -1060,6 +1073,98 @@ async fn connect_once(
         .relay
         .set_connection_state(app, state, generation, RelayConnectionState::Authenticating)
         .await;
+
+    // Split read/write after authentication bootstrap so heartbeat transmission is
+    // completely independent from LCU polling/event handling in the main select loop.
+    let (writer_half, mut reader) = websocket.split();
+    let writer = Arc::new(Mutex::new(writer_half));
+
+    let (heartbeat_failure_tx, mut heartbeat_failure_rx) = mpsc::channel::<String>(1);
+    let heartbeat_awaiting = Arc::new(Mutex::new(None::<Instant>));
+    let heartbeat_writer = Arc::clone(&writer);
+    let heartbeat_awaiting_task = Arc::clone(&heartbeat_awaiting);
+    let heartbeat_state = Arc::clone(state);
+    let heartbeat_app = app.clone();
+    let heartbeat_task = AbortTaskOnDrop(tokio::spawn(async move {
+        let mut heartbeat = interval(HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        heartbeat.tick().await;
+        let mut watchdog = interval(Duration::from_secs(1));
+        watchdog.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        watchdog.tick().await;
+        let mut last_heartbeat_tick = Instant::now();
+
+        heartbeat_state
+            .record_flight("relay_heartbeat", "independent_task_started")
+            .await;
+
+        loop {
+            tokio::select! {
+                _ = heartbeat.tick() => {
+                    let now = Instant::now();
+                    let gap = now.duration_since(last_heartbeat_tick);
+                    last_heartbeat_tick = now;
+                    if gap > HEARTBEAT_INTERVAL + HEARTBEAT_SCHEDULER_WARN {
+                        let detail = format!(
+                            "scheduler_delay gap_ms={} expected_ms={}",
+                            gap.as_millis(),
+                            HEARTBEAT_INTERVAL.as_millis(),
+                        );
+                        heartbeat_state.record_flight("relay_heartbeat", detail.clone()).await;
+                        heartbeat_state
+                            .log(&heartbeat_app, format!("Relay heartbeat 스케줄 지연: {detail}"))
+                            .await;
+                    }
+
+                    if heartbeat_awaiting_task.lock().await.is_some() {
+                        continue;
+                    }
+
+                    let send_started = Instant::now();
+                    match send_shared_relay_message(
+                        &heartbeat_writer,
+                        Message::Text("ping".into()),
+                        "Relay heartbeat 전송 실패",
+                    ).await {
+                        Ok(()) => {
+                            *heartbeat_awaiting_task.lock().await = Some(Instant::now());
+                            heartbeat_state
+                                .record_flight(
+                                    "relay_heartbeat",
+                                    format!("ping_sent send_ms={}", send_started.elapsed().as_millis()),
+                                )
+                                .await;
+                        }
+                        Err(error) => {
+                            let detail = format!("send_failed error={error}");
+                            heartbeat_state.record_flight("relay_heartbeat", detail.clone()).await;
+                            heartbeat_state
+                                .log(&heartbeat_app, format!("Relay heartbeat 전송 실패: {error}"))
+                                .await;
+                            let _ = heartbeat_failure_tx.try_send(detail);
+                            break;
+                        }
+                    }
+                }
+                _ = watchdog.tick() => {
+                    let sent_at = *heartbeat_awaiting_task.lock().await;
+                    if heartbeat_timed_out(sent_at, Instant::now()) {
+                        if let Some(sent_at) = sent_at {
+                            let age = sent_at.elapsed();
+                            let detail = format!("pong_timeout age_ms={}", age.as_millis());
+                            heartbeat_state.record_flight("relay_heartbeat", detail.clone()).await;
+                            heartbeat_state
+                                .log(&heartbeat_app, format!("Relay heartbeat 응답 시간 초과: {detail}"))
+                                .await;
+                            let _ = heartbeat_failure_tx.try_send(detail);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }));
+    let _heartbeat_task = heartbeat_task;
 
     let (oauth_tx, mut oauth_rx) = mpsc::channel::<String>(1);
     state
@@ -1106,9 +1211,6 @@ async fn connect_once(
         state.record_flight("session", "saved_before_auth").await;
     }
 
-    let mut heartbeat = interval(HEARTBEAT_INTERVAL);
-    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    heartbeat.tick().await;
     let mut watchdog = interval(Duration::from_secs(1));
     watchdog.set_missed_tick_behavior(MissedTickBehavior::Skip);
     watchdog.tick().await;
@@ -1122,7 +1224,6 @@ async fn connect_once(
         DIAGNOSTIC_HEARTBEAT_INTERVAL,
     );
     diagnostic_heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut awaiting_pong: Option<Instant> = None;
     let mut live_game_announced = false;
     let mut session_bound = false;
     let mut durable_replay_enabled = false;
@@ -1136,31 +1237,38 @@ async fn connect_once(
         tokio::select! {
             changed = stop_rx.changed() => {
                 let _ = changed;
-                let _ = websocket.close(None).await;
+                let _ = send_shared_relay_message(
+                    &writer,
+                    Message::Close(None),
+                    "Relay 종료 프레임 전송 실패",
+                ).await;
                 state.relay.set_oauth_sender(generation, None).await;
                 return Ok(ConnectionEnd::Stopped);
+            }
+            failure = heartbeat_failure_rx.recv() => {
+                let detail = failure.unwrap_or_else(|| "heartbeat_task_channel_closed".into());
+                state.record_flight("relay_heartbeat", format!("task_failed {detail}")).await;
+                state.relay.set_oauth_sender(generation, None).await;
+                return Err(AgentError::Relay(format!("독립 Relay heartbeat 실패: {detail}").into()));
             }
             mut code = receive_oauth_code(&mut oauth_rx) => {
                 state.log(app, "Discord OAuth 코드 전송 시작").await;
                 let message = serde_json::to_string(&OAuthCodeMessage::new(&code))?;
-                let sent = timeout(
-                    RELAY_SEND_TIMEOUT,
-                    websocket.send(Message::Text(message.into())),
+                let sent = send_shared_relay_message(
+                    &writer,
+                    Message::Text(message.into()),
+                    "OAuth 코드 전송 실패",
                 ).await;
                 // The code is ASCII, so zeroing its bytes keeps the String valid before drop.
                 unsafe { code.as_bytes_mut().fill(0) };
-                match sent {
-                    Ok(Ok(())) => {}
-                    Ok(Err(_)) => return Err(AgentError::Relay("OAuth 코드 전송 실패".into())),
-                    Err(_) => return Err(AgentError::Relay("OAuth 코드 전송 실패: send timeout".into())),
-                }
+                sent?;
                 state.log(app, "Discord OAuth 코드 전송 완료").await;
             }
-            message = websocket.next() => {
+            message = reader.next() => {
                 match message {
                     Some(Ok(Message::Text(text))) if text.as_str() == "ping" => {
-                        send_relay_message(
-                            &mut websocket,
+                        send_shared_relay_message(
+                            &writer,
                             Message::Text(serde_json::to_string(&PongMessage::new())?.into()),
                             "Relay pong 전송 실패",
                         ).await?;
@@ -1170,12 +1278,17 @@ async fn connect_once(
                             .map_err(|message| AgentError::Relay(message.into()))?;
                         match &incoming {
                             IncomingMessage::Pong => {
-                                if let Some(sent_at) = awaiting_pong.take() {
+                                let sent_at = heartbeat_awaiting.lock().await.take();
+                                if let Some(sent_at) = sent_at {
                                     state
                                         .record_flight(
                                             "relay_heartbeat",
                                             format!("pong rtt_ms={}", sent_at.elapsed().as_millis()),
                                         )
+                                        .await;
+                                } else {
+                                    state
+                                        .record_flight("relay_heartbeat", "pong_without_pending_ping")
                                         .await;
                                 }
                             }
@@ -1200,7 +1313,7 @@ async fn connect_once(
                                 to_seq,
                             } => {
                                 let replayed = replay_live_delta_range(
-                                    &mut websocket,
+                                    &writer,
                                     durable_replay,
                                     stream_id,
                                     *from_seq,
@@ -1272,7 +1385,7 @@ async fn connect_once(
                                     )
                                     .await;
                                 if durable_replay_enabled && session_bound {
-                                    let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
+                                    let replayed = replay_durable_events(&writer, durable_replay).await?;
                                     if replayed > 0 {
                                         state.log(app, format!("미확인 durable 이벤트 {replayed}건 재전송")).await;
                                     }
@@ -1311,7 +1424,7 @@ async fn connect_once(
                                 handle_incoming(
                                     app,
                                     state,
-                                    &mut websocket,
+                                    &writer,
                                     incoming,
                                     false,
                                     &lcu_poll_worker.live_game_polling,
@@ -1319,7 +1432,7 @@ async fn connect_once(
                                 .await?;
                                 session_bound = true;
                                 if durable_replay_enabled {
-                                    let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
+                                    let replayed = replay_durable_events(&writer, durable_replay).await?;
                                     if replayed > 0 {
                                         state.log(app, format!("미확인 durable 이벤트 {replayed}건 재전송")).await;
                                     }
@@ -1362,7 +1475,7 @@ async fn connect_once(
                             _ => handle_incoming(
                                 app,
                                 state,
-                                &mut websocket,
+                                &writer,
                                 incoming,
                                 session_bound,
                                 &lcu_poll_worker.live_game_polling,
@@ -1370,15 +1483,20 @@ async fn connect_once(
                         }
                     }
                     Some(Ok(Message::Ping(payload))) => {
-                        send_relay_message(&mut websocket, Message::Pong(payload), "Relay pong 전송 실패").await?;
+                        send_shared_relay_message(&writer, Message::Pong(payload), "Relay pong 전송 실패").await?;
                     }
                     Some(Ok(Message::Pong(_))) => {
-                        if let Some(sent_at) = awaiting_pong.take() {
+                        let sent_at = heartbeat_awaiting.lock().await.take();
+                        if let Some(sent_at) = sent_at {
                             state
                                 .record_flight(
                                     "relay_heartbeat",
                                     format!("ws_pong rtt_ms={}", sent_at.elapsed().as_millis()),
                                 )
+                                .await;
+                        } else {
+                            state
+                                .record_flight("relay_heartbeat", "ws_pong_without_pending_ping")
                                 .await;
                         }
                     }
@@ -1414,7 +1532,7 @@ async fn connect_once(
                 }
             }
             _ = durable_replay_tick.tick(), if session_bound && durable_replay_enabled => {
-                let replayed = replay_durable_events(&mut websocket, durable_replay).await?;
+                let replayed = replay_durable_events(&writer, durable_replay).await?;
                 if replayed > 0 {
                     state.log(app, format!("ACK 대기 durable 이벤트 {replayed}건 재전송: {}", durable_replay.pending_summary())).await;
                 }
@@ -1432,13 +1550,13 @@ async fn connect_once(
                     ),
                 );
                 let message = serde_json::to_string(&report)?;
-                send_relay_message(&mut websocket, Message::Text(message.into()), "운영 상태 스냅샷 전송 실패").await?;
+                send_shared_relay_message(&writer, Message::Text(message.into()), "운영 상태 스냅샷 전송 실패").await?;
             }
             report = update_reports.recv(), if session_bound && update_diagnostics_enabled => {
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
-                        send_relay_message(&mut websocket, Message::Text(message.into()), "업데이트 진단 전송 실패").await?;
+                        send_shared_relay_message(&writer, Message::Text(message.into()), "업데이트 진단 전송 실패").await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         state.record_flight("updater", format!("diagnostic_queue_lagged skipped={skipped}")).await;
@@ -1452,7 +1570,7 @@ async fn connect_once(
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
-                        send_relay_message(&mut websocket, Message::Text(message.into()), "운영 진단 전송 실패").await?;
+                        send_shared_relay_message(&writer, Message::Text(message.into()), "운영 진단 전송 실패").await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         state.record_flight(
@@ -1469,7 +1587,7 @@ async fn connect_once(
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
-                        send_relay_message(&mut websocket, Message::Text(message.into()), "예상치 못한 오류 보고 전송 실패").await?;
+                        send_shared_relay_message(&writer, Message::Text(message.into()), "예상치 못한 오류 보고 전송 실패").await?;
                         state.record_flight("error_report", "unexpected_error_sent").await;
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
@@ -1498,8 +1616,8 @@ async fn connect_once(
                                 .await;
                             continue;
                         };
-                        send_relay_message(
-                            &mut websocket,
+                        send_shared_relay_message(
+                            &writer,
                             Message::Text(event.text.into()),
                             "Discord 참가 요청 Relay 전송 실패",
                         ).await?;
@@ -1532,8 +1650,8 @@ async fn connect_once(
                         )? else {
                             continue;
                         };
-                        send_relay_message(
-                            &mut websocket,
+                        send_shared_relay_message(
+                            &writer,
                             Message::Text(event.text.into()),
                             "Discord Presence 내전 조회 요청 전송 실패",
                         ).await?;
@@ -1551,22 +1669,7 @@ async fn connect_once(
                     }
                 }
             }
-            _ = heartbeat.tick() => {
-                if awaiting_pong.is_none() {
-                    send_relay_message(
-                        &mut websocket,
-                        Message::Text("ping".into()),
-                        "Relay heartbeat 전송 실패",
-                    ).await?;
-                    awaiting_pong = Some(Instant::now());
-                    state.log(app, "Relay heartbeat 전송").await;
-                }
-            }
             _ = watchdog.tick() => {
-                if heartbeat_timed_out(awaiting_pong, Instant::now()) {
-                    state.relay.set_oauth_sender(generation, None).await;
-                    return Err(AgentError::Relay("Relay heartbeat 응답 시간 초과".into()));
-                }
                 if should_start_login(session_bound, login_opened, auth_started.elapsed()) {
                     *needs_login = true;
                     login_opened = true;
@@ -1730,8 +1833,8 @@ async fn connect_once(
                             }
                         }
                     }
-                    send_relay_message(
-                        &mut websocket,
+                    send_shared_relay_message(
+                        &writer,
                         Message::Text(event.text.into()),
                         "Relay 이벤트 전송 실패",
                     ).await?;
@@ -1765,7 +1868,7 @@ async fn receive_oauth_code(receiver: &mut mpsc::Receiver<String>) -> String {
 async fn handle_incoming<S>(
     app: &AppHandle,
     state: &Arc<AppState>,
-    websocket: &mut S,
+    websocket: &SharedRelayWriter<S>,
     incoming: IncomingMessage,
     session_bound: bool,
     live_game_polling: &watch::Sender<bool>,
@@ -1783,7 +1886,7 @@ where
             if !command_is_authorized(session_bound) {
                 let result =
                     CommandResult::failure(request_id, "Relay 인증이 완료되지 않았습니다.");
-                send_relay_message(
+                send_shared_relay_message(
                     websocket,
                     Message::Text(serde_json::to_string(&result)?.into()),
                     "Relay 응답 전송 실패",
@@ -1803,7 +1906,7 @@ where
                 Ok(payload) => payload,
                 Err(error) => {
                     let result = CommandResult::failure(request_id, "LCU 명령 인증 실패");
-                    send_relay_message(
+                    send_shared_relay_message(
                         websocket,
                         Message::Text(serde_json::to_string(&result)?.into()),
                         "Relay 응답 전송 실패",
@@ -1868,7 +1971,7 @@ where
                     ),
                 )
                 .await;
-            send_relay_message(
+            send_shared_relay_message(
                 websocket,
                 Message::Text(serde_json::to_string(&result)?.into()),
                 "Relay 응답 전송 실패",
@@ -2368,7 +2471,7 @@ fn is_durable_event(message_type: &str, event: &SerializedAgentEvent) -> bool {
 }
 
 async fn replay_durable_events<S>(
-    websocket: &mut S,
+    websocket: &SharedRelayWriter<S>,
     replay: &DurableReplayBuffer,
 ) -> AgentResult<usize>
 where
@@ -2377,7 +2480,7 @@ where
 {
     let events = replay.snapshot();
     for event in &events {
-        send_relay_message(
+        send_shared_relay_message(
             websocket,
             Message::Text(event.text.clone().into()),
             "Relay EOG 이벤트 재전송 실패",
@@ -2388,7 +2491,7 @@ where
 }
 
 async fn replay_live_delta_range<S>(
-    websocket: &mut S,
+    websocket: &SharedRelayWriter<S>,
     replay: &DurableReplayBuffer,
     stream_id: &str,
     from_seq: u64,
@@ -2404,7 +2507,7 @@ where
         return Ok(0);
     }
     for event in &events {
-        send_relay_message(
+        send_shared_relay_message(
             websocket,
             Message::Text(event.text.clone().into()),
             "live delta 재전송 실패",
@@ -2529,6 +2632,39 @@ fn heartbeat_timed_out(awaiting_since: Option<Instant>, now: Instant) -> bool {
     awaiting_since.is_some_and(|started| now.duration_since(started) >= HEARTBEAT_TIMEOUT)
 }
 
+async fn send_shared_relay_message<S>(
+    websocket: &SharedRelayWriter<S>,
+    message: Message,
+    failure: &'static str,
+) -> AgentResult<()>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let lock_started = Instant::now();
+    let mut guard = timeout(RELAY_SEND_TIMEOUT, websocket.lock())
+        .await
+        .map_err(|_| {
+            AgentError::Relay(
+                format!(
+                    "{failure}: writer lock timeout after {}ms",
+                    lock_started.elapsed().as_millis(),
+                )
+                .into(),
+            )
+        })?;
+    let lock_wait_ms = lock_started.elapsed().as_millis();
+    match timeout(RELAY_SEND_TIMEOUT, guard.send(message)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(AgentError::Relay(
+            format!("{failure}: websocket send error={error} lock_wait_ms={lock_wait_ms}",).into(),
+        )),
+        Err(_) => Err(AgentError::Relay(
+            format!("{failure}: send timeout lock_wait_ms={lock_wait_ms}",).into(),
+        )),
+    }
+}
+
 async fn send_relay_message<S>(
     websocket: &mut S,
     message: Message,
@@ -2536,10 +2672,13 @@ async fn send_relay_message<S>(
 ) -> AgentResult<()>
 where
     S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
 {
     match timeout(RELAY_SEND_TIMEOUT, websocket.send(message)).await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(_)) => Err(AgentError::Relay(failure.into())),
+        Ok(Err(error)) => Err(AgentError::Relay(
+            format!("{failure}: websocket send error={error}").into(),
+        )),
         Err(_) => Err(AgentError::Relay(format!("{failure}: send timeout").into())),
     }
 }
