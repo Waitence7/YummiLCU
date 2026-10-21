@@ -120,6 +120,25 @@ fn relay_progress_is_stale(age: Duration) -> bool {
     age >= RELAY_PROGRESS_STALE_AFTER
 }
 
+fn relay_select_loop_age() -> Option<Duration> {
+    let last_ms = RELAY_LAST_SELECT_LOOP_MS.load(Ordering::Acquire);
+    if last_ms == 0 {
+        None
+    } else {
+        Some(Duration::from_millis(
+            relay_progress_now_ms().saturating_sub(last_ms),
+        ))
+    }
+}
+
+fn reset_relay_select_progress() {
+    let now = relay_progress_now_ms();
+    RELAY_LAST_SELECT_LOOP_MS.store(now, Ordering::Release);
+    RELAY_LAST_BRANCH_DONE_MS.store(now, Ordering::Release);
+    RELAY_LAST_BRANCH_CODE.store(0, Ordering::Release);
+    RELAY_LAST_BRANCH_START_MS.store(0, Ordering::Release);
+}
+
 fn trace_age_ms(last_ms: u64) -> String {
     if last_ms == 0 {
         "-1".into()
@@ -969,7 +988,12 @@ impl RelaySupervisor {
         app: AppHandle,
         state: Arc<AppState>,
     ) -> AgentResult<bool> {
-        let age = relay_progress_age();
+        // The independent heartbeat intentionally keeps network/progress counters
+        // moving even when the main connection task is no longer being polled.
+        // Therefore the watchdog must key off the main select loop specifically.
+        let Some(age) = relay_select_loop_age() else {
+            return Ok(false);
+        };
         if !relay_progress_is_stale(age) {
             return Ok(false);
         }
@@ -980,7 +1004,10 @@ impl RelaySupervisor {
                 .task
                 .as_ref()
                 .is_some_and(|task| !task.is_finished());
-            if !control.desired_running || !task_running {
+            if !control.desired_running
+                || !task_running
+                || control.connection_state != RelayConnectionState::Connected
+            {
                 return Ok(false);
             }
 
@@ -1556,6 +1583,11 @@ async fn connect_once(
     } else {
         state.record_flight("session", "saved_before_auth").await;
     }
+
+    // Start a fresh main-loop progress epoch for this connection. Without this,
+    // a stale timestamp from the previous connection could make a newly-bound
+    // session look hung before it reaches its first select iteration.
+    reset_relay_select_progress();
 
     let mut watchdog = interval(Duration::from_secs(1));
     watchdog.set_missed_tick_behavior(MissedTickBehavior::Skip);

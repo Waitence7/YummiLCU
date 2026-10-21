@@ -2,6 +2,11 @@ use std::collections::VecDeque;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::{
+    mpsc::{sync_channel, SyncSender, TrySendError},
+    OnceLock,
+};
+use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_FLIGHT_RECORDS: usize = 2_048;
@@ -11,6 +16,7 @@ const PERSISTENT_FLIGHT_LOG_BACKUPS: usize = 2;
 const MAX_PERSISTENT_FLIGHT_DETAIL_CHARS: usize = 2_048;
 const MAX_RELAY_RUNTIME_TRACE_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const SLOW_PERSISTENT_FLIGHT_WRITE: Duration = Duration::from_millis(250);
+const PERSISTENT_FLIGHT_QUEUE_CAPACITY: usize = 4_096;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FlightRecord {
@@ -31,33 +37,14 @@ impl FlightRecorder {
             category,
             detail: detail.into(),
         };
-        let persistence_started = Instant::now();
-        let persistence_error = append_persistent_flight_record(&record).err();
-        let persistence_elapsed = persistence_started.elapsed();
+
+        // Persistent diagnostics must never perform filesystem I/O while holding
+        // the async AppState flight mutex. Windows filesystem filters, antivirus,
+        // cloud sync, or a degraded disk can stall open/write/metadata calls for
+        // minutes. Keeping persistence on a dedicated bounded writer thread means
+        // relay reader/heartbeat tasks remain schedulable even when disk I/O hangs.
+        enqueue_persistent_flight_record(record.clone());
         self.records.push_back(record);
-        if persistence_elapsed >= SLOW_PERSISTENT_FLIGHT_WRITE {
-            let detail = format!(
-                "elapsed_ms={} threshold_ms={}",
-                persistence_elapsed.as_millis(),
-                SLOW_PERSISTENT_FLIGHT_WRITE.as_millis()
-            );
-            eprintln!("[yummi diagnostics] persistent flight write slow: {detail}");
-            // Keep this warning memory-only. Persisting it would recursively invoke
-            // the same slow disk path we are trying to diagnose.
-            self.records.push_back(FlightRecord {
-                at_ms: now_ms(),
-                category: "diagnostic_io_slow",
-                detail,
-            });
-        }
-        if let Some(detail) = persistence_error {
-            eprintln!("[yummi diagnostics] {detail}");
-            self.records.push_back(FlightRecord {
-                at_ms: now_ms(),
-                category: "diagnostic_io",
-                detail,
-            });
-        }
         while self.records.len() > MAX_FLIGHT_RECORDS {
             self.records.pop_front();
         }
@@ -221,6 +208,50 @@ fn redact_persistent_key_value(input: &str, key: &str) -> String {
     }
     out.push_str(&input[cursor..]);
     out
+}
+
+fn persistent_flight_writer() -> &'static SyncSender<FlightRecord> {
+    static WRITER: OnceLock<SyncSender<FlightRecord>> = OnceLock::new();
+    WRITER.get_or_init(|| {
+        let (tx, rx) = sync_channel::<FlightRecord>(PERSISTENT_FLIGHT_QUEUE_CAPACITY);
+        thread::Builder::new()
+            .name("yummi-flight-writer".into())
+            .spawn(move || {
+                while let Ok(record) = rx.recv() {
+                    let started = Instant::now();
+                    let result = append_persistent_flight_record(&record);
+                    let elapsed = started.elapsed();
+                    if elapsed >= SLOW_PERSISTENT_FLIGHT_WRITE {
+                        eprintln!(
+                            "[yummi diagnostics] persistent flight write slow: elapsed_ms={} threshold_ms={}",
+                            elapsed.as_millis(),
+                            SLOW_PERSISTENT_FLIGHT_WRITE.as_millis()
+                        );
+                    }
+                    if let Err(detail) = result {
+                        eprintln!("[yummi diagnostics] {detail}");
+                    }
+                }
+            })
+            .expect("failed to start persistent flight writer thread");
+        tx
+    })
+}
+
+fn enqueue_persistent_flight_record(record: FlightRecord) {
+    match persistent_flight_writer().try_send(record) {
+        Ok(()) => {}
+        Err(TrySendError::Full(_)) => {
+            eprintln!(
+                "[yummi diagnostics] persistent flight queue full; dropping disk-only record"
+            );
+        }
+        Err(TrySendError::Disconnected(_)) => {
+            eprintln!(
+                "[yummi diagnostics] persistent flight writer disconnected; dropping disk-only record"
+            );
+        }
+    }
 }
 
 fn append_persistent_flight_record(record: &FlightRecord) -> Result<(), String> {
