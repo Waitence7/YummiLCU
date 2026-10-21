@@ -9,6 +9,7 @@ const MAX_BOOTSTRAP_LOG_BYTES: u64 = 64 * 1024;
 const MAX_PERSISTENT_FLIGHT_LOG_BYTES: u64 = 1024 * 1024;
 const PERSISTENT_FLIGHT_LOG_BACKUPS: usize = 2;
 const MAX_PERSISTENT_FLIGHT_DETAIL_CHARS: usize = 2_048;
+const MAX_RELAY_RUNTIME_TRACE_SNAPSHOT_BYTES: usize = 1024 * 1024;
 const SLOW_PERSISTENT_FLIGHT_WRITE: Duration = Duration::from_millis(250);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -274,6 +275,48 @@ pub(crate) fn persistent_flight_log_snapshot() -> Option<String> {
         Err(error) => {
             eprintln!(
                 "[yummi diagnostics] operation=flight_snapshot_decode file=flight-recorder.log error={error}"
+            );
+            None
+        }
+    }
+}
+
+pub(crate) fn relay_runtime_trace_log_snapshot() -> Option<String> {
+    let root = agent_data_dir();
+    let current = root.join("relay-runtime-trace.log");
+    let backup = root.join("relay-runtime-trace.log.1");
+    let mut chunks = Vec::new();
+    for path in [&backup, &current] {
+        match fs::read(path) {
+            Ok(bytes) => {
+                let start = bytes
+                    .len()
+                    .saturating_sub(MAX_RELAY_RUNTIME_TRACE_SNAPSHOT_BYTES);
+                chunks.extend_from_slice(&bytes[start..]);
+                if !chunks.ends_with(b"\n") {
+                    chunks.push(b'\n');
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!(
+                "[yummi diagnostics] {}",
+                diagnostic_io_error("relay_trace_snapshot_read", path, &error)
+            ),
+        }
+    }
+    if chunks.is_empty() {
+        return None;
+    }
+    if chunks.len() > MAX_RELAY_RUNTIME_TRACE_SNAPSHOT_BYTES {
+        let start = chunks.len() - MAX_RELAY_RUNTIME_TRACE_SNAPSHOT_BYTES;
+        chunks = chunks[start..].to_vec();
+    }
+    match String::from_utf8(chunks) {
+        Ok(value) if !value.trim().is_empty() => Some(value),
+        Ok(_) => None,
+        Err(error) => {
+            eprintln!(
+                "[yummi diagnostics] operation=relay_trace_snapshot_decode file=relay-runtime-trace.log error={error}"
             );
             None
         }

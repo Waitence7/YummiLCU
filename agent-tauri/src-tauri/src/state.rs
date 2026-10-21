@@ -550,6 +550,13 @@ fn build_diagnostic_bundle(ui: &UiState, flight: &[crate::diagnostics::FlightRec
             let _ = writeln!(out, "{}", sanitize_diagnostic_line(line));
         }
     }
+    if let Some(runtime_trace) = crate::diagnostics::relay_runtime_trace_log_snapshot() {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "--- Relay Runtime Trace (5s sampler) ---");
+        for line in runtime_trace.lines() {
+            let _ = writeln!(out, "{}", sanitize_diagnostic_line(line));
+        }
+    }
     out
 }
 

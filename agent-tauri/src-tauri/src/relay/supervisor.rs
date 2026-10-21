@@ -66,6 +66,38 @@ const RELAY_PROGRESS_STALE_AFTER: Duration = Duration::from_secs(90);
 
 static RELAY_PROGRESS_EPOCH: OnceLock<StdInstant> = OnceLock::new();
 static RELAY_PROGRESS_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_NETWORK_PROGRESS_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_SELECT_LOOP_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_SELECT_LOOP_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_BRANCH_CODE: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_BRANCH_START_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_BRANCH_DONE_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_SEND_STARTED_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_SEND_LOCKED_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_SEND_OK_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_SEND_FAIL_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_SEND_KIND: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_SEND_START_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_SEND_LOCKED_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_SEND_OK_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_SEND_FAIL_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_RECV_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_RECV_KIND: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_RECV_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_HEARTBEAT_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_HEARTBEAT_TICK_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_HEARTBEAT_GAP_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_PING_SENT_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_PING_SENT_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_PONG_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_PONG_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_HEARTBEAT_PHASE: AtomicU64 = AtomicU64::new(0);
+static RELAY_HEARTBEAT_WATCHDOG_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
+static RELAY_LAST_HEARTBEAT_WATCHDOG_TICK_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_TRACE_THREAD: OnceLock<()> = OnceLock::new();
+
+const RELAY_TRACE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
+const RELAY_TRACE_LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 fn relay_progress_now_ms() -> u64 {
     RELAY_PROGRESS_EPOCH
@@ -86,6 +118,197 @@ fn relay_progress_age() -> Duration {
 
 fn relay_progress_is_stale(age: Duration) -> bool {
     age >= RELAY_PROGRESS_STALE_AFTER
+}
+
+fn trace_age_ms(last_ms: u64) -> String {
+    if last_ms == 0 {
+        "-1".into()
+    } else {
+        relay_progress_now_ms().saturating_sub(last_ms).to_string()
+    }
+}
+
+fn touch_relay_network_progress() {
+    RELAY_NETWORK_PROGRESS_MS.store(relay_progress_now_ms(), Ordering::Release);
+}
+
+fn relay_send_kind(failure: &'static str) -> u64 {
+    match failure {
+        "Relay heartbeat 전송 실패" => 1,
+        "Relay pong 전송 실패" => 2,
+        "Relay 이벤트 전송 실패" => 3,
+        "운영 진단 전송 실패" => 4,
+        "운영 상태 스냅샷 전송 실패" => 5,
+        "업데이트 진단 전송 실패" => 6,
+        "예상치 못한 오류 보고 전송 실패" => 7,
+        "Discord 참가 요청 Relay 전송 실패" => 8,
+        "Discord Presence 내전 조회 요청 전송 실패" => 9,
+        "Relay 응답 전송 실패" => 10,
+        "Relay 종료 프레임 전송 실패" => 11,
+        "OAuth 코드 전송 실패" => 12,
+        _ => 99,
+    }
+}
+
+fn relay_send_kind_label(code: u64) -> &'static str {
+    match code {
+        1 => "heartbeat_ping",
+        2 => "pong",
+        3 => "agent_event",
+        4 => "diagnostic",
+        5 => "health_snapshot",
+        6 => "update_diagnostic",
+        7 => "unexpected_error",
+        8 => "discord_join_request",
+        9 => "discord_presence_context_request",
+        10 => "command_response",
+        11 => "close",
+        12 => "oauth_code",
+        99 => "other",
+        _ => "none",
+    }
+}
+
+fn relay_recv_kind_label(code: u64) -> &'static str {
+    match code {
+        1 => "text_ping",
+        2 => "text",
+        3 => "ws_ping",
+        4 => "ws_pong",
+        5 => "close",
+        6 => "eof",
+        7 => "other",
+        8 => "error",
+        _ => "none",
+    }
+}
+
+fn relay_branch_label(code: u64) -> &'static str {
+    match code {
+        1 => "stop",
+        2 => "heartbeat_failure",
+        3 => "oauth",
+        4 => "reader",
+        5 => "durable_replay",
+        6 => "health_snapshot",
+        7 => "update_report",
+        8 => "diagnostic_report",
+        9 => "error_report",
+        10 => "discord_join_request",
+        11 => "discord_presence_request",
+        12 => "watchdog",
+        13 => "lcu_batch",
+        _ => "none",
+    }
+}
+
+fn relay_heartbeat_phase_label(code: u64) -> &'static str {
+    match code {
+        1 => "tick",
+        2 => "awaiting_check",
+        3 => "send_ping",
+        4 => "mark_awaiting",
+        5 => "watchdog_tick",
+        6 => "timeout_check",
+        7 => "failed_exit",
+        _ => "idle",
+    }
+}
+
+fn mark_relay_select_loop() {
+    let now = relay_progress_now_ms();
+    RELAY_LAST_BRANCH_DONE_MS.store(now, Ordering::Release);
+    RELAY_LAST_SELECT_LOOP_MS.store(now, Ordering::Release);
+    RELAY_SELECT_LOOP_COUNT.fetch_add(1, Ordering::AcqRel);
+}
+
+fn mark_relay_branch(code: u64) {
+    RELAY_LAST_BRANCH_CODE.store(code, Ordering::Release);
+    RELAY_LAST_BRANCH_START_MS.store(relay_progress_now_ms(), Ordering::Release);
+}
+
+fn mark_relay_receive(code: u64) {
+    let now = relay_progress_now_ms();
+    RELAY_RECV_COUNT.fetch_add(1, Ordering::AcqRel);
+    RELAY_LAST_RECV_KIND.store(code, Ordering::Release);
+    RELAY_LAST_RECV_MS.store(now, Ordering::Release);
+    RELAY_NETWORK_PROGRESS_MS.store(now, Ordering::Release);
+}
+
+fn relay_trace_snapshot() -> String {
+    let started = RELAY_SEND_STARTED_COUNT.load(Ordering::Acquire);
+    let locked = RELAY_SEND_LOCKED_COUNT.load(Ordering::Acquire);
+    let ok = RELAY_SEND_OK_COUNT.load(Ordering::Acquire);
+    let fail = RELAY_SEND_FAIL_COUNT.load(Ordering::Acquire);
+    format!(
+        "progress_age_ms={} network_age_ms={} select_count={} select_age_ms={} branch={} branch_age_ms={} branch_done_age_ms={} send_started={} send_locked={} send_ok={} send_fail={} send_pending={} send_lock_pending={} last_send_kind={} last_send_start_age_ms={} last_send_lock_age_ms={} last_send_ok_age_ms={} last_send_fail_age_ms={} recv_count={} last_recv_kind={} last_recv_age_ms={} hb_ticks={} hb_tick_age_ms={} hb_gap_ms={} hb_phase={} hb_watchdog_ticks={} hb_watchdog_age_ms={} ping_sent={} ping_age_ms={} pong_count={} pong_age_ms={}",
+        relay_progress_age().as_millis(),
+        trace_age_ms(RELAY_NETWORK_PROGRESS_MS.load(Ordering::Acquire)),
+        RELAY_SELECT_LOOP_COUNT.load(Ordering::Acquire),
+        trace_age_ms(RELAY_LAST_SELECT_LOOP_MS.load(Ordering::Acquire)),
+        relay_branch_label(RELAY_LAST_BRANCH_CODE.load(Ordering::Acquire)),
+        trace_age_ms(RELAY_LAST_BRANCH_START_MS.load(Ordering::Acquire)),
+        trace_age_ms(RELAY_LAST_BRANCH_DONE_MS.load(Ordering::Acquire)),
+        started,
+        locked,
+        ok,
+        fail,
+        started.saturating_sub(ok.saturating_add(fail)),
+        started.saturating_sub(locked.saturating_add(fail)),
+        relay_send_kind_label(RELAY_LAST_SEND_KIND.load(Ordering::Acquire)),
+        trace_age_ms(RELAY_LAST_SEND_START_MS.load(Ordering::Acquire)),
+        trace_age_ms(RELAY_LAST_SEND_LOCKED_MS.load(Ordering::Acquire)),
+        trace_age_ms(RELAY_LAST_SEND_OK_MS.load(Ordering::Acquire)),
+        trace_age_ms(RELAY_LAST_SEND_FAIL_MS.load(Ordering::Acquire)),
+        RELAY_RECV_COUNT.load(Ordering::Acquire),
+        relay_recv_kind_label(RELAY_LAST_RECV_KIND.load(Ordering::Acquire)),
+        trace_age_ms(RELAY_LAST_RECV_MS.load(Ordering::Acquire)),
+        RELAY_HEARTBEAT_TICK_COUNT.load(Ordering::Acquire),
+        trace_age_ms(RELAY_LAST_HEARTBEAT_TICK_MS.load(Ordering::Acquire)),
+        RELAY_LAST_HEARTBEAT_GAP_MS.load(Ordering::Acquire),
+        relay_heartbeat_phase_label(RELAY_HEARTBEAT_PHASE.load(Ordering::Acquire)),
+        RELAY_HEARTBEAT_WATCHDOG_TICK_COUNT.load(Ordering::Acquire),
+        trace_age_ms(RELAY_LAST_HEARTBEAT_WATCHDOG_TICK_MS.load(Ordering::Acquire)),
+        RELAY_PING_SENT_COUNT.load(Ordering::Acquire),
+        trace_age_ms(RELAY_LAST_PING_SENT_MS.load(Ordering::Acquire)),
+        RELAY_PONG_COUNT.load(Ordering::Acquire),
+        trace_age_ms(RELAY_LAST_PONG_MS.load(Ordering::Acquire)),
+    )
+}
+
+fn append_relay_runtime_trace(snapshot: &str) -> std::io::Result<()> {
+    let root = dirs::data_local_dir()
+        .unwrap_or_else(std::env::temp_dir)
+        .join("YummiAgent");
+    fs::create_dir_all(&root)?;
+    let path = root.join("relay-runtime-trace.log");
+    if fs::metadata(&path).map(|m| m.len()).unwrap_or(0) >= RELAY_TRACE_LOG_MAX_BYTES {
+        let backup = root.join("relay-runtime-trace.log.1");
+        let _ = fs::remove_file(&backup);
+        let _ = fs::rename(&path, &backup);
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    let wall_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    writeln!(file, "{wall_ms} {snapshot}")
+}
+
+fn ensure_relay_trace_thread_started() {
+    RELAY_TRACE_THREAD.get_or_init(|| {
+        let _ = std::thread::Builder::new()
+            .name("yummi-relay-trace".into())
+            .spawn(|| loop {
+                std::thread::sleep(RELAY_TRACE_SAMPLE_INTERVAL);
+                if let Err(error) = append_relay_runtime_trace(&relay_trace_snapshot()) {
+                    eprintln!("[yummi relay trace] write failed: {error}");
+                }
+            });
+    });
 }
 
 struct AbortTaskOnDrop(JoinHandle<()>);
@@ -627,6 +850,7 @@ impl RelaySupervisor {
         explicit_start: bool,
         user_initiated_login: bool,
     ) -> AgentResult<bool> {
+        ensure_relay_trace_thread_started();
         let (generation, stop_rx) = {
             let mut control = state.relay.control.lock().await;
             let task_running = control
@@ -776,7 +1000,11 @@ impl RelaySupervisor {
         state
             .record_flight(
                 "relay_watchdog",
-                format!("stale_task_aborted age_ms={}", age.as_millis()),
+                format!(
+                    "stale_task_aborted age_ms={} trace={}",
+                    age.as_millis(),
+                    relay_trace_snapshot()
+                ),
             )
             .await;
         state
@@ -1022,9 +1250,16 @@ async fn run_supervisor(
                     .relay
                     .set_connection_state(&app, &state, generation, RelayConnectionState::Failed)
                     .await;
-                state.record_flight("relay_error", error.to_string()).await;
+                let trace = relay_trace_snapshot();
                 state
-                    .report_diagnostic("relay", "connection_error", error.to_string())
+                    .record_flight("relay_error", format!("{error}; trace={trace}"))
+                    .await;
+                state
+                    .report_diagnostic(
+                        "relay",
+                        "connection_error",
+                        format!("{error}; trace={trace}"),
+                    )
                     .await;
                 state.log(&app, format!("Relay 오류: {error}")).await;
             }
@@ -1186,10 +1421,17 @@ async fn connect_once(
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
+                    RELAY_HEARTBEAT_PHASE.store(1, Ordering::Release);
                     touch_relay_progress();
                     let now = Instant::now();
                     let gap = now.duration_since(last_heartbeat_tick);
                     last_heartbeat_tick = now;
+                    RELAY_HEARTBEAT_TICK_COUNT.fetch_add(1, Ordering::AcqRel);
+                    RELAY_LAST_HEARTBEAT_TICK_MS.store(relay_progress_now_ms(), Ordering::Release);
+                    RELAY_LAST_HEARTBEAT_GAP_MS.store(
+                        gap.as_millis().min(u128::from(u64::MAX)) as u64,
+                        Ordering::Release,
+                    );
                     if gap > HEARTBEAT_INTERVAL + HEARTBEAT_SCHEDULER_WARN {
                         let detail = format!(
                             "scheduler_delay gap_ms={} expected_ms={}",
@@ -1202,10 +1444,13 @@ async fn connect_once(
                             .await;
                     }
 
+                    RELAY_HEARTBEAT_PHASE.store(2, Ordering::Release);
                     if heartbeat_awaiting_task.lock().await.is_some() {
+                        RELAY_HEARTBEAT_PHASE.store(0, Ordering::Release);
                         continue;
                     }
 
+                    RELAY_HEARTBEAT_PHASE.store(3, Ordering::Release);
                     let send_started = Instant::now();
                     match send_shared_relay_message(
                         &heartbeat_writer,
@@ -1213,7 +1458,11 @@ async fn connect_once(
                         "Relay heartbeat 전송 실패",
                     ).await {
                         Ok(()) => {
+                            RELAY_PING_SENT_COUNT.fetch_add(1, Ordering::AcqRel);
+                            RELAY_LAST_PING_SENT_MS.store(relay_progress_now_ms(), Ordering::Release);
+                            RELAY_HEARTBEAT_PHASE.store(4, Ordering::Release);
                             *heartbeat_awaiting_task.lock().await = Some(Instant::now());
+                            RELAY_HEARTBEAT_PHASE.store(0, Ordering::Release);
                             heartbeat_state
                                 .record_flight(
                                     "relay_heartbeat",
@@ -1222,7 +1471,8 @@ async fn connect_once(
                                 .await;
                         }
                         Err(error) => {
-                            let detail = format!("send_failed error={error}");
+                            RELAY_HEARTBEAT_PHASE.store(7, Ordering::Release);
+                            let detail = format!("send_failed error={error} trace={}", relay_trace_snapshot());
                             heartbeat_state.record_flight("relay_heartbeat", detail.clone()).await;
                             heartbeat_state
                                 .log(&heartbeat_app, format!("Relay heartbeat 전송 실패: {error}"))
@@ -1233,11 +1483,20 @@ async fn connect_once(
                     }
                 }
                 _ = watchdog.tick() => {
+                    RELAY_HEARTBEAT_PHASE.store(5, Ordering::Release);
+                    RELAY_HEARTBEAT_WATCHDOG_TICK_COUNT.fetch_add(1, Ordering::AcqRel);
+                    RELAY_LAST_HEARTBEAT_WATCHDOG_TICK_MS
+                        .store(relay_progress_now_ms(), Ordering::Release);
+                    RELAY_HEARTBEAT_PHASE.store(6, Ordering::Release);
                     let sent_at = *heartbeat_awaiting_task.lock().await;
                     if heartbeat_timed_out(sent_at, Instant::now()) {
                         if let Some(sent_at) = sent_at {
                             let age = sent_at.elapsed();
-                            let detail = format!("pong_timeout age_ms={}", age.as_millis());
+                            let detail = format!(
+                                "pong_timeout age_ms={} trace={}",
+                                age.as_millis(),
+                                relay_trace_snapshot()
+                            );
                             heartbeat_state.record_flight("relay_heartbeat", detail.clone()).await;
                             heartbeat_state
                                 .log(&heartbeat_app, format!("Relay heartbeat 응답 시간 초과: {detail}"))
@@ -1246,6 +1505,7 @@ async fn connect_once(
                             break;
                         }
                     }
+                    RELAY_HEARTBEAT_PHASE.store(0, Ordering::Release);
                 }
             }
         }
@@ -1321,8 +1581,10 @@ async fn connect_once(
 
     loop {
         touch_relay_progress();
+        mark_relay_select_loop();
         tokio::select! {
             changed = stop_rx.changed() => {
+                mark_relay_branch(1);
                 let _ = changed;
                 let _ = send_shared_relay_message(
                     &writer,
@@ -1333,12 +1595,14 @@ async fn connect_once(
                 return Ok(ConnectionEnd::Stopped);
             }
             failure = heartbeat_failure_rx.recv() => {
+                mark_relay_branch(2);
                 let detail = failure.unwrap_or_else(|| "heartbeat_task_channel_closed".into());
                 state.record_flight("relay_heartbeat", format!("task_failed {detail}")).await;
                 state.relay.set_oauth_sender(generation, None).await;
                 return Err(AgentError::Relay(format!("독립 Relay heartbeat 실패: {detail}").into()));
             }
             mut code = receive_oauth_code(&mut oauth_rx) => {
+                mark_relay_branch(3);
                 state.log(app, "Discord OAuth 코드 전송 시작").await;
                 let message = serde_json::to_string(&OAuthCodeMessage::new(&code))?;
                 let sent = send_shared_relay_message(
@@ -1352,6 +1616,18 @@ async fn connect_once(
                 state.log(app, "Discord OAuth 코드 전송 완료").await;
             }
             message = reader.next() => {
+                mark_relay_branch(4);
+                let recv_kind = match &message {
+                    Some(Ok(Message::Text(text))) if text.as_str() == "ping" => 1,
+                    Some(Ok(Message::Text(_))) => 2,
+                    Some(Ok(Message::Ping(_))) => 3,
+                    Some(Ok(Message::Pong(_))) => 4,
+                    Some(Ok(Message::Close(_))) => 5,
+                    None => 6,
+                    Some(Ok(_)) => 7,
+                    Some(Err(_)) => 8,
+                };
+                mark_relay_receive(recv_kind);
                 match message {
                     Some(Ok(Message::Text(text))) if text.as_str() == "ping" => {
                         send_shared_relay_message(
@@ -1365,6 +1641,9 @@ async fn connect_once(
                             .map_err(|message| AgentError::Relay(message.into()))?;
                         match &incoming {
                             IncomingMessage::Pong => {
+                                RELAY_PONG_COUNT.fetch_add(1, Ordering::AcqRel);
+                                RELAY_LAST_PONG_MS.store(relay_progress_now_ms(), Ordering::Release);
+                                touch_relay_network_progress();
                                 let sent_at = heartbeat_awaiting.lock().await.take();
                                 if let Some(sent_at) = sent_at {
                                     state
@@ -1573,6 +1852,9 @@ async fn connect_once(
                         send_shared_relay_message(&writer, Message::Pong(payload), "Relay pong 전송 실패").await?;
                     }
                     Some(Ok(Message::Pong(_))) => {
+                        RELAY_PONG_COUNT.fetch_add(1, Ordering::AcqRel);
+                        RELAY_LAST_PONG_MS.store(relay_progress_now_ms(), Ordering::Release);
+                        touch_relay_network_progress();
                         let sent_at = heartbeat_awaiting.lock().await.take();
                         if let Some(sent_at) = sent_at {
                             state
@@ -1593,7 +1875,11 @@ async fn connect_once(
                             .map(|frame| format!("code={:?} reason={}", frame.code, frame.reason))
                             .unwrap_or_else(|| "code=none reason=none".into());
                         state
-                            .report_diagnostic("relay", "websocket_close", detail)
+                            .report_diagnostic(
+                                "relay",
+                                "websocket_close",
+                                format!("{detail}; trace={}", relay_trace_snapshot()),
+                            )
                             .await;
                         state.relay.set_oauth_sender(generation, None).await;
                         return Ok(ConnectionEnd::for_close(
@@ -1603,7 +1889,14 @@ async fn connect_once(
                     }
                     None => {
                         state
-                            .report_diagnostic("relay", "websocket_eof", "stream ended without close frame")
+                            .report_diagnostic(
+                                "relay",
+                                "websocket_eof",
+                                format!(
+                                    "stream ended without close frame; trace={}",
+                                    relay_trace_snapshot()
+                                ),
+                            )
                             .await;
                         state.relay.set_oauth_sender(generation, None).await;
                         return Ok(ConnectionEnd::Closed { authenticated: session_bound });
@@ -1611,7 +1904,11 @@ async fn connect_once(
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
                         state
-                            .report_diagnostic("relay", "websocket_receive_failed", error.to_string())
+                            .report_diagnostic(
+                                "relay",
+                                "websocket_receive_failed",
+                                format!("{error}; trace={}", relay_trace_snapshot()),
+                            )
                             .await;
                         state.relay.set_oauth_sender(generation, None).await;
                         return Err(AgentError::Relay("Relay 메시지 수신 실패".into()));
@@ -1619,27 +1916,31 @@ async fn connect_once(
                 }
             }
             _ = durable_replay_tick.tick(), if session_bound && durable_replay_enabled => {
+                mark_relay_branch(5);
                 let replayed = replay_durable_events(&writer, durable_replay).await?;
                 if replayed > 0 {
                     state.log(app, format!("ACK 대기 durable 이벤트 {replayed}건 재전송: {}", durable_replay.pending_summary())).await;
                 }
             }
             _ = diagnostic_heartbeat_tick.tick(), if session_bound && diagnostic_reports_enabled => {
+                mark_relay_branch(6);
                 let report = AgentDiagnosticReport::new(
                     "lifecycle",
                     "health_snapshot",
                     format!(
-                        "lcu_state={:?} durable_pending={} durable_replay={} live_delta={}",
+                        "lcu_state={:?} durable_pending={} durable_replay={} live_delta={} trace={}",
                         state.lcu_state().await,
                         durable_replay.len(),
                         durable_replay_enabled,
                         *lcu_poll_worker.live_game_delta_enabled.borrow(),
+                        relay_trace_snapshot(),
                     ),
                 );
                 let message = serde_json::to_string(&report)?;
                 send_shared_relay_message(&writer, Message::Text(message.into()), "운영 상태 스냅샷 전송 실패").await?;
             }
             report = update_reports.recv(), if session_bound && update_diagnostics_enabled => {
+                mark_relay_branch(7);
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
@@ -1654,6 +1955,7 @@ async fn connect_once(
                 }
             }
             report = diagnostic_reports.recv(), if session_bound && diagnostic_reports_enabled => {
+                mark_relay_branch(8);
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
@@ -1671,6 +1973,7 @@ async fn connect_once(
                 }
             }
             report = error_reports.recv(), if session_bound && unexpected_error_reports_enabled => {
+                mark_relay_branch(9);
                 match report {
                     Ok(report) => {
                         let message = serde_json::to_string(&report)?;
@@ -1689,6 +1992,7 @@ async fn connect_once(
                 }
             }
             request = discord_join_requests.recv(), if session_bound => {
+                mark_relay_branch(10);
                 match request {
                     Ok(requester_discord_id) => {
                         let Some(event) = serialize_agent_event(
@@ -1729,6 +2033,7 @@ async fn connect_once(
                 }
             }
             request = discord_presence_context_requests.recv(), if session_bound => {
+                mark_relay_branch(11);
                 match request {
                     Ok(()) => {
                         let Some(event) = serialize_agent_event(
@@ -1757,6 +2062,7 @@ async fn connect_once(
                 }
             }
             _ = watchdog.tick() => {
+                mark_relay_branch(12);
                 if should_start_login(session_bound, login_opened, auth_started.elapsed()) {
                     *needs_login = true;
                     login_opened = true;
@@ -1773,6 +2079,7 @@ async fn connect_once(
                 }
             }
             Some(batch) = lcu_poll_rx.recv(), if session_bound => {
+                mark_relay_branch(13);
                 for (message_type, data) in batch.events {
                     if message_type == "match_rofl_candidate" {
                         if let Some(game_id) = replay_game_id(&data) {
@@ -2408,14 +2715,16 @@ async fn check_replay_upload_needed(
                 let status = response.status();
                 if status.is_success() {
                     match response.json::<Value>().await {
-                        Ok(body) if body.get("upload").and_then(Value::as_bool) == Some(true) => {
-                            return Ok(true);
-                        }
-                        Ok(_) => {
-                            if attempt == REPLAY_UPLOAD_ATTEMPTS {
-                                return Ok(false);
+                        Ok(body) => match body.get("upload").and_then(Value::as_bool) {
+                            Some(true) => return Ok(true),
+                            Some(false) => return Ok(false),
+                            None => {
+                                last_error = format!(
+                                    "ROFL 업로드 대상 응답 형식 오류 (method=GET endpoint={target_url_label} {} missing_upload_boolean)",
+                                    status_detail(status)
+                                );
                             }
-                        }
+                        },
                         Err(error) => {
                             last_error = format!(
                                 "ROFL 업로드 대상 응답 형식 오류 (method=GET endpoint={target_url_label} {} decode_reason={error})",
@@ -2728,27 +3037,65 @@ where
     S: futures_util::Sink<Message> + Unpin,
     S::Error: std::fmt::Display,
 {
+    let kind = relay_send_kind(failure);
+    let started_at = relay_progress_now_ms();
+    RELAY_SEND_STARTED_COUNT.fetch_add(1, Ordering::AcqRel);
+    RELAY_LAST_SEND_KIND.store(kind, Ordering::Release);
+    RELAY_LAST_SEND_START_MS.store(started_at, Ordering::Release);
+
     let lock_started = Instant::now();
-    let mut guard = timeout(RELAY_SEND_TIMEOUT, websocket.lock())
-        .await
-        .map_err(|_| {
-            AgentError::Relay(
+    let mut guard = match timeout(RELAY_SEND_TIMEOUT, websocket.lock()).await {
+        Ok(guard) => {
+            RELAY_SEND_LOCKED_COUNT.fetch_add(1, Ordering::AcqRel);
+            RELAY_LAST_SEND_LOCKED_MS.store(relay_progress_now_ms(), Ordering::Release);
+            guard
+        }
+        Err(_) => {
+            RELAY_SEND_FAIL_COUNT.fetch_add(1, Ordering::AcqRel);
+            RELAY_LAST_SEND_FAIL_MS.store(relay_progress_now_ms(), Ordering::Release);
+            return Err(AgentError::Relay(
                 format!(
-                    "{failure}: writer lock timeout after {}ms",
+                    "{failure}: writer lock timeout after {}ms trace={}",
                     lock_started.elapsed().as_millis(),
+                    relay_trace_snapshot(),
                 )
                 .into(),
-            )
-        })?;
+            ));
+        }
+    };
     let lock_wait_ms = lock_started.elapsed().as_millis();
+    let send_started = Instant::now();
     match timeout(RELAY_SEND_TIMEOUT, guard.send(message)).await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(AgentError::Relay(
-            format!("{failure}: websocket send error={error} lock_wait_ms={lock_wait_ms}",).into(),
-        )),
-        Err(_) => Err(AgentError::Relay(
-            format!("{failure}: send timeout lock_wait_ms={lock_wait_ms}",).into(),
-        )),
+        Ok(Ok(())) => {
+            RELAY_SEND_OK_COUNT.fetch_add(1, Ordering::AcqRel);
+            RELAY_LAST_SEND_OK_MS.store(relay_progress_now_ms(), Ordering::Release);
+            touch_relay_network_progress();
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            RELAY_SEND_FAIL_COUNT.fetch_add(1, Ordering::AcqRel);
+            RELAY_LAST_SEND_FAIL_MS.store(relay_progress_now_ms(), Ordering::Release);
+            Err(AgentError::Relay(
+                format!(
+                    "{failure}: websocket send error={error} lock_wait_ms={lock_wait_ms} send_ms={} trace={}",
+                    send_started.elapsed().as_millis(),
+                    relay_trace_snapshot(),
+                )
+                .into(),
+            ))
+        }
+        Err(_) => {
+            RELAY_SEND_FAIL_COUNT.fetch_add(1, Ordering::AcqRel);
+            RELAY_LAST_SEND_FAIL_MS.store(relay_progress_now_ms(), Ordering::Release);
+            Err(AgentError::Relay(
+                format!(
+                    "{failure}: send timeout lock_wait_ms={lock_wait_ms} send_ms={} trace={}",
+                    send_started.elapsed().as_millis(),
+                    relay_trace_snapshot(),
+                )
+                .into(),
+            ))
+        }
     }
 }
 
