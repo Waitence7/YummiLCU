@@ -16,6 +16,10 @@ const ERROR_REPORT_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const DIAGNOSTIC_REPORT_COOLDOWN: Duration = Duration::from_secs(30);
 const MAX_ERROR_SUMMARY_CHARS: usize = 512;
 const SLOW_UI_EMIT: Duration = Duration::from_millis(250);
+static DIAGNOSTIC_DISK_IO: crate::blocking_io::BlockingIo = crate::blocking_io::BlockingIo::new();
+const DIAGNOSTIC_DISK_TIMEOUT: Duration = Duration::from_secs(8);
+
+const MAX_AUTO_LOG_SOURCE_BYTES: usize = 128 * 1024;
 
 use crate::{
     config::Config,
@@ -198,7 +202,78 @@ impl AppState {
     pub(crate) async fn diagnostic_bundle(&self) -> String {
         let ui = self.ui.lock().await.clone();
         let flight = self.flight.lock().await.snapshot();
-        build_diagnostic_bundle(&ui, &flight)
+        DIAGNOSTIC_DISK_IO
+            .run(DIAGNOSTIC_DISK_TIMEOUT, move || {
+                build_diagnostic_bundle(&ui, &flight)
+            })
+            .await
+            .unwrap_or_else(|error| format!("Diagnostic disk collection unavailable: {error}"))
+    }
+
+    pub(crate) async fn automatic_log_sources(&self) -> Vec<(&'static str, String)> {
+        use std::fmt::Write as _;
+
+        let ui = self.ui.lock().await.clone();
+        let flight = self.flight.lock().await.snapshot();
+
+        let mut ui_log = String::new();
+        for line in &ui.logs {
+            let _ = writeln!(ui_log, "{}", sanitize_diagnostic_line(line));
+        }
+
+        let mut flight_memory = String::new();
+        for record in &flight {
+            let _ = writeln!(
+                flight_memory,
+                "{} [{}] {}",
+                record.at_ms,
+                record.category,
+                sanitize_diagnostic_line(&record.detail)
+            );
+        }
+
+        let disk_sources = DIAGNOSTIC_DISK_IO
+            .run(DIAGNOSTIC_DISK_TIMEOUT, || {
+                [
+                    ("bootstrap", crate::diagnostics::bootstrap_log_snapshot()),
+                    (
+                        "persistent_flight",
+                        crate::diagnostics::persistent_flight_log_snapshot(),
+                    ),
+                    (
+                        "runtime_trace",
+                        crate::diagnostics::relay_runtime_trace_log_snapshot(),
+                    ),
+                ]
+            })
+            .await
+            .unwrap_or([
+                ("bootstrap", None),
+                ("persistent_flight", None),
+                ("runtime_trace", None),
+            ]);
+
+        let mut sources = Vec::with_capacity(5);
+        if !ui_log.trim().is_empty() {
+            sources.push(("ui", bounded_recent_log(&ui_log)));
+        }
+        if !flight_memory.trim().is_empty() {
+            sources.push(("flight_memory", bounded_recent_log(&flight_memory)));
+        }
+        for (source, content) in disk_sources {
+            let Some(content) = content else {
+                continue;
+            };
+            let sanitized = content
+                .lines()
+                .map(sanitize_diagnostic_line)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !sanitized.trim().is_empty() {
+                sources.push((source, bounded_recent_log(&sanitized)));
+            }
+        }
+        sources
     }
 
     pub(crate) async fn set_update_message(
@@ -558,6 +633,17 @@ fn build_diagnostic_bundle(ui: &UiState, flight: &[crate::diagnostics::FlightRec
         }
     }
     out
+}
+
+fn bounded_recent_log(value: &str) -> String {
+    if value.len() <= MAX_AUTO_LOG_SOURCE_BYTES {
+        return value.to_owned();
+    }
+    let mut start = value.len() - MAX_AUTO_LOG_SOURCE_BYTES;
+    while start < value.len() && !value.is_char_boundary(start) {
+        start += 1;
+    }
+    value[start..].to_owned()
 }
 
 fn diagnostic_now_ms() -> u64 {

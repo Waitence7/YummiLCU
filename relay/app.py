@@ -87,6 +87,7 @@ _SERVER_CAPABILITIES = frozenset({
     "unexpected_error_reports",
     "update_diagnostics",
     "diagnostic_reports",
+    "diagnostic_log_chunks",
 })
 
 _AGENT_ERROR_COMPONENTS = frozenset({
@@ -137,6 +138,17 @@ _AGENT_DIAGNOSTIC_CATEGORIES = frozenset({
 })
 _AGENT_DIAGNOSTIC_TTL_SEC = 7 * 24 * 60 * 60
 _AGENT_DIAGNOSTIC_MAX_ENTRIES = 200
+_AGENT_LOG_TTL_SEC = 7 * 24 * 60 * 60
+_AGENT_LOG_MAX_ENTRIES = 200
+_AGENT_LOG_MAX_CONTENT_BYTES = 32 * 1024
+_AGENT_LOG_MAX_CHUNKS = 16
+_AGENT_LOG_SOURCES = frozenset({
+    "ui",
+    "flight_memory",
+    "bootstrap",
+    "persistent_flight",
+    "runtime_trace",
+})
 
 _AGENT_ERROR_MIN_INTERVAL_SEC = 30.0
 _AGENT_ERROR_DUPLICATE_COOLDOWN_SEC = 5 * 60.0
@@ -155,6 +167,10 @@ _OAUTH_LINK_ATTEMPT_REDIS_KEY = "relay:oauth_link_attempt:{session_id}"
 
 def _agent_diagnostics_redis_key(discord_id: int) -> str:
     return f"relay:agent_diagnostics:{discord_id}"
+
+
+def _agent_logs_redis_key(discord_id: int) -> str:
+    return f"relay:agent_logs:{discord_id}"
 
 def _legacy_update_notice_redis_key(discord_id: int, version: str) -> str:
     safe_version = version.replace(":", "_")
@@ -2276,6 +2292,73 @@ async def _remember_agent_diagnostic(
     await pipe.execute()
 
 
+def _agent_log_chunk(data: dict[str, Any]) -> dict[str, Any] | None:
+    batch_id = data.get("batch_id")
+    occurred_at_ms = data.get("occurred_at_ms")
+    source = data.get("source")
+    chunk_index = data.get("chunk_index")
+    chunk_count = data.get("chunk_count")
+    content = data.get("content")
+    if (
+        not isinstance(batch_id, str)
+        or not isinstance(occurred_at_ms, int)
+        or isinstance(occurred_at_ms, bool)
+        or occurred_at_ms <= 0
+        or source not in _AGENT_LOG_SOURCES
+        or not isinstance(chunk_index, int)
+        or isinstance(chunk_index, bool)
+        or not isinstance(chunk_count, int)
+        or isinstance(chunk_count, bool)
+        or chunk_count <= 0
+        or chunk_count > _AGENT_LOG_MAX_CHUNKS
+        or chunk_index < 0
+        or chunk_index >= chunk_count
+        or not isinstance(content, str)
+        or not content
+        or len(content.encode("utf-8")) > _AGENT_LOG_MAX_CONTENT_BYTES
+    ):
+        return None
+    try:
+        batch_id = str(uuid.UUID(batch_id))
+    except ValueError:
+        return None
+    metadata = {}
+    for field, limit in {
+        "app_version": 64,
+        "release_label": 128,
+        "release_channel": 32,
+        "build_id": 128,
+        "git_commit": 128,
+    }.items():
+        value = data.get(field)
+        if not isinstance(value, str) or not value or len(value) > limit or not value.isascii():
+            return None
+        metadata[field] = value
+    return {
+        "batch_id": batch_id,
+        "occurred_at_ms": occurred_at_ms,
+        "source": source,
+        "chunk_index": chunk_index,
+        "chunk_count": chunk_count,
+        "content": redact_log_text(content),
+        **metadata,
+    }
+
+
+async def _remember_agent_log_chunk(
+    r: redis.Redis,
+    discord_id: int,
+    chunk: dict[str, Any],
+) -> None:
+    key = _agent_logs_redis_key(discord_id)
+    encoded = json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
+    pipe = r.pipeline()
+    pipe.lpush(key, encoded)
+    pipe.ltrim(key, 0, _AGENT_LOG_MAX_ENTRIES - 1)
+    pipe.expire(key, _AGENT_LOG_TTL_SEC)
+    await pipe.execute()
+
+
 _AGENT_UPDATE_STAGES = frozenset({
     "update_check",
     "update_available",
@@ -2395,6 +2478,26 @@ async def _handle_agent_message(
             report["report_id"],
             report["occurred_at_ms"],
             report["detail"],
+        )
+        return
+
+    if msg_type == "agent_log_chunk":
+        discord_id = conn.discord_id_for_ws(websocket)
+        chunk = _agent_log_chunk(data)
+        if discord_id is None or chunk is None:
+            return
+        await _remember_agent_log_chunk(websocket.app.state.redis, discord_id, chunk)
+        logger.info(
+            "Agent log chunk discord_id=%s source=%s batch_id=%s chunk=%s/%s version=%s build=%s commit=%s bytes=%s",
+            discord_id,
+            chunk["source"],
+            chunk["batch_id"],
+            chunk["chunk_index"] + 1,
+            chunk["chunk_count"],
+            chunk["app_version"],
+            chunk["build_id"],
+            chunk["git_commit"],
+            len(chunk["content"].encode("utf-8")),
         )
         return
 
@@ -3305,6 +3408,36 @@ async def internal_agent_diagnostics(
         if isinstance(item, dict):
             diagnostics.append(item)
     return JSONResponse({"discord_id": discord_id, "diagnostics": diagnostics})
+
+
+@app.get("/internal/logs/{discord_id}")
+async def internal_agent_logs(
+    request: Request,
+    discord_id: int,
+    limit: int = Query(200, ge=1, le=200),
+    source: str | None = Query(None),
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    """최근 Agent 로그 chunk. Agent와 Relay 양쪽에서 민감값을 redaction한다."""
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    if source is not None and source not in _AGENT_LOG_SOURCES:
+        return JSONResponse({"detail": "invalid source"}, status_code=400)
+    r: redis.Redis = request.app.state.redis
+    rows = await r.lrange(_agent_logs_redis_key(discord_id), 0, _AGENT_LOG_MAX_ENTRIES - 1)
+    logs: list[dict[str, Any]] = []
+    for raw in rows:
+        try:
+            item = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if not isinstance(item, dict):
+            continue
+        if source is not None and item.get("source") != source:
+            continue
+        logs.append(item)
+        if len(logs) >= limit:
+            break
+    return JSONResponse({"discord_id": discord_id, "logs": logs})
 
 
 @app.get("/internal/live-game/{discord_id}")

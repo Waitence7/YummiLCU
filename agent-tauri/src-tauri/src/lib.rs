@@ -1,4 +1,5 @@
 mod app;
+mod blocking_io;
 mod commands;
 mod config;
 mod diagnostics;

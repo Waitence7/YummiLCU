@@ -3,7 +3,8 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{
-    mpsc::{sync_channel, SyncSender, TrySendError},
+    atomic::{AtomicU64, Ordering},
+    mpsc::{sync_channel, SyncSender},
     OnceLock,
 };
 use std::thread;
@@ -32,10 +33,19 @@ pub(crate) struct FlightRecorder {
 
 impl FlightRecorder {
     pub(crate) fn record(&mut self, category: &'static str, detail: impl Into<String>) {
+        self.record_with_writer(category, detail.into(), persistent_flight_writer());
+    }
+
+    fn record_with_writer(
+        &mut self,
+        category: &'static str,
+        detail: String,
+        writer: &PersistentFlightWriter,
+    ) {
         let record = FlightRecord {
             at_ms: now_ms(),
             category,
-            detail: detail.into(),
+            detail,
         };
 
         // Persistent diagnostics must never perform filesystem I/O while holding
@@ -43,7 +53,7 @@ impl FlightRecorder {
         // cloud sync, or a degraded disk can stall open/write/metadata calls for
         // minutes. Keeping persistence on a dedicated bounded writer thread means
         // relay reader/heartbeat tasks remain schedulable even when disk I/O hangs.
-        enqueue_persistent_flight_record(record.clone());
+        writer.enqueue(record.clone());
         self.records.push_back(record);
         while self.records.len() > MAX_FLIGHT_RECORDS {
             self.records.pop_front();
@@ -210,48 +220,61 @@ fn redact_persistent_key_value(input: &str, key: &str) -> String {
     out
 }
 
-fn persistent_flight_writer() -> &'static SyncSender<FlightRecord> {
-    static WRITER: OnceLock<SyncSender<FlightRecord>> = OnceLock::new();
-    WRITER.get_or_init(|| {
-        let (tx, rx) = sync_channel::<FlightRecord>(PERSISTENT_FLIGHT_QUEUE_CAPACITY);
-        thread::Builder::new()
+struct PersistentFlightWriter {
+    sender: SyncSender<FlightRecord>,
+    dropped: AtomicU64,
+}
+
+impl PersistentFlightWriter {
+    fn start(capacity: usize, mut append: impl FnMut(FlightRecord) + Send + 'static) -> Self {
+        let (sender, receiver) = sync_channel(capacity);
+        // If thread creation fails, dropping the receiver makes enqueue fail
+        // immediately. Diagnostic persistence must never panic the Agent.
+        let _ = thread::Builder::new()
             .name("yummi-flight-writer".into())
             .spawn(move || {
-                while let Ok(record) = rx.recv() {
-                    let started = Instant::now();
-                    let result = append_persistent_flight_record(&record);
-                    let elapsed = started.elapsed();
-                    if elapsed >= SLOW_PERSISTENT_FLIGHT_WRITE {
-                        eprintln!(
-                            "[yummi diagnostics] persistent flight write slow: elapsed_ms={} threshold_ms={}",
-                            elapsed.as_millis(),
-                            SLOW_PERSISTENT_FLIGHT_WRITE.as_millis()
-                        );
-                    }
-                    if let Err(detail) = result {
-                        eprintln!("[yummi diagnostics] {detail}");
-                    }
+                while let Ok(record) = receiver.recv() {
+                    append(record);
                 }
-            })
-            .expect("failed to start persistent flight writer thread");
-        tx
+            });
+        Self {
+            sender,
+            dropped: AtomicU64::new(0),
+        }
+    }
+
+    fn enqueue(&self, record: FlightRecord) {
+        if self.sender.try_send(record).is_err() {
+            // Even stderr can block. No I/O or waiting on the producer path,
+            // including overflow and disconnected-writer handling.
+            self.dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn persistent_flight_writer() -> &'static PersistentFlightWriter {
+    static WRITER: OnceLock<PersistentFlightWriter> = OnceLock::new();
+    WRITER.get_or_init(|| {
+        PersistentFlightWriter::start(PERSISTENT_FLIGHT_QUEUE_CAPACITY, |record| {
+            let started = Instant::now();
+            let result = append_persistent_flight_record(&record);
+            let elapsed = started.elapsed();
+            if elapsed >= SLOW_PERSISTENT_FLIGHT_WRITE {
+                eprintln!(
+                    "[yummi diagnostics] persistent flight write slow: elapsed_ms={} threshold_ms={}",
+                    elapsed.as_millis(),
+                    SLOW_PERSISTENT_FLIGHT_WRITE.as_millis()
+                );
+            }
+            if let Err(detail) = result {
+                eprintln!("[yummi diagnostics] {detail}");
+            }
+        })
     })
 }
 
-fn enqueue_persistent_flight_record(record: FlightRecord) {
-    match persistent_flight_writer().try_send(record) {
-        Ok(()) => {}
-        Err(TrySendError::Full(_)) => {
-            eprintln!(
-                "[yummi diagnostics] persistent flight queue full; dropping disk-only record"
-            );
-        }
-        Err(TrySendError::Disconnected(_)) => {
-            eprintln!(
-                "[yummi diagnostics] persistent flight writer disconnected; dropping disk-only record"
-            );
-        }
-    }
+pub(crate) fn persistent_flight_dropped() -> u64 {
+    persistent_flight_writer().dropped.load(Ordering::Relaxed)
 }
 
 fn append_persistent_flight_record(record: &FlightRecord) -> Result<(), String> {
@@ -457,6 +480,64 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_disk_writer_does_not_block_reader_or_heartbeat() {
+        use std::sync::Arc;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let mut entered_tx = Some(entered_tx);
+        let writer = Arc::new(PersistentFlightWriter::start(1, move |_| {
+            if let Some(tx) = entered_tx.take() {
+                let _ = tx.send(());
+                let _ = release_rx.recv();
+            }
+        }));
+        let recorder = Arc::new(tokio::sync::Mutex::new(FlightRecorder::default()));
+        recorder
+            .lock()
+            .await
+            .record_with_writer("reader", "first".into(), &writer);
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        // The writer cannot resume until we release it below. Fill its queue
+        // and exercise the same producer path while holding the flight mutex.
+        let heartbeat_recorder = Arc::clone(&recorder);
+        let heartbeat_writer = Arc::clone(&writer);
+        let heartbeat = tokio::spawn(async move {
+            for _ in 0..8 {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                heartbeat_recorder.lock().await.record_with_writer(
+                    "relay_heartbeat",
+                    "ping_sent".into(),
+                    &heartbeat_writer,
+                );
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(2), heartbeat)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(writer.dropped.load(Ordering::Relaxed), 7);
+        assert_eq!(recorder.lock().await.len(), 9);
+        release_tx.send(()).unwrap();
+    }
+
+    #[test]
+    fn disconnected_writer_keeps_memory_record() {
+        let (sender, receiver) = sync_channel(1);
+        drop(receiver);
+        let writer = PersistentFlightWriter {
+            sender,
+            dropped: AtomicU64::new(0),
+        };
+        let mut recorder = FlightRecorder::default();
+        recorder.record_with_writer("reader", "retained".into(), &writer);
+        assert_eq!(writer.dropped.load(Ordering::Relaxed), 1);
+        assert_eq!(recorder.first_detail(), Some("retained"));
+    }
 
     #[test]
     fn flight_recorder_is_bounded_and_fifo() {

@@ -25,6 +25,7 @@ use tokio_tungstenite::{
     tungstenite::{protocol::WebSocketConfig, Message},
 };
 use tokio_util::io::ReaderStream;
+use uuid::Uuid;
 
 use crate::{
     error::{AgentError, AgentResult},
@@ -38,14 +39,20 @@ use crate::{
 use super::{
     command_auth,
     protocol::{
-        Action, AgentDiagnosticReport, AgentEventMessage, AgentHelloMessage, AuthMessage,
-        CommandResult, IncomingMessage, OAuthCodeMessage, PongMessage, UnexpectedErrorReport,
-        UpdateDiagnosticReport, MAX_RELAY_MESSAGE_BYTES,
+        Action, AgentDiagnosticReport, AgentEventMessage, AgentHelloMessage, AgentLogChunk,
+        AuthMessage, CommandResult, IncomingMessage, OAuthCodeMessage, PongMessage,
+        UnexpectedErrorReport, UpdateDiagnosticReport, MAX_RELAY_MESSAGE_BYTES,
     },
 };
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(25);
+static REPLAY_DISK_IO: crate::blocking_io::BlockingIo = crate::blocking_io::BlockingIo::new();
+const REPLAY_DISK_TIMEOUT: Duration = Duration::from_secs(2);
+static COMMAND_DISK_IO: crate::blocking_io::BlockingIo = crate::blocking_io::BlockingIo::new();
+const COMMAND_DISK_TIMEOUT: Duration = Duration::from_secs(5);
+const COMMAND_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_CONFLICT_CLOSE_CODE: u16 = 4009;
@@ -57,6 +64,9 @@ const MAX_DURABLE_REPLAY_EVENTS: usize = 4096;
 const MAX_LIVE_PENDING_FILE_BYTES: u64 = 64 * 1024 * 1024;
 const DURABLE_REPLAY_INTERVAL: Duration = Duration::from_secs(30);
 const DIAGNOSTIC_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const DIAGNOSTIC_LOG_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const DIAGNOSTIC_LOG_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
+const DIAGNOSTIC_LOG_CHUNK_BYTES: usize = 24 * 1024;
 const MAX_REPLAY_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
 const REPLAY_LOCAL_DELETE_DELAY: Duration = Duration::from_secs(5 * 60);
@@ -217,6 +227,8 @@ fn relay_branch_label(code: u64) -> &'static str {
         11 => "discord_presence_request",
         12 => "watchdog",
         13 => "lcu_batch",
+        14 => "diagnostic_log_sync",
+        15 => "command_done",
         _ => "none",
     }
 }
@@ -230,6 +242,7 @@ fn relay_heartbeat_phase_label(code: u64) -> &'static str {
         5 => "watchdog_tick",
         6 => "timeout_check",
         7 => "failed_exit",
+        8 => "flight_record",
         _ => "idle",
     }
 }
@@ -260,7 +273,7 @@ fn relay_trace_snapshot() -> String {
     let ok = RELAY_SEND_OK_COUNT.load(Ordering::Acquire);
     let fail = RELAY_SEND_FAIL_COUNT.load(Ordering::Acquire);
     format!(
-        "progress_age_ms={} network_age_ms={} select_count={} select_age_ms={} branch={} branch_age_ms={} branch_done_age_ms={} send_started={} send_locked={} send_ok={} send_fail={} send_pending={} send_lock_pending={} last_send_kind={} last_send_start_age_ms={} last_send_lock_age_ms={} last_send_ok_age_ms={} last_send_fail_age_ms={} recv_count={} last_recv_kind={} last_recv_age_ms={} hb_ticks={} hb_tick_age_ms={} hb_gap_ms={} hb_phase={} hb_watchdog_ticks={} hb_watchdog_age_ms={} ping_sent={} ping_age_ms={} pong_count={} pong_age_ms={}",
+        "progress_age_ms={} network_age_ms={} select_count={} select_age_ms={} branch={} branch_age_ms={} branch_done_age_ms={} send_started={} send_locked={} send_ok={} send_fail={} send_pending={} send_lock_pending={} last_send_kind={} last_send_start_age_ms={} last_send_lock_age_ms={} last_send_ok_age_ms={} last_send_fail_age_ms={} recv_count={} last_recv_kind={} last_recv_age_ms={} hb_ticks={} hb_tick_age_ms={} hb_gap_ms={} hb_phase={} hb_watchdog_ticks={} hb_watchdog_age_ms={} ping_sent={} ping_age_ms={} pong_count={} pong_age_ms={} flight_disk_dropped={}",
         relay_progress_age().as_millis(),
         trace_age_ms(RELAY_NETWORK_PROGRESS_MS.load(Ordering::Acquire)),
         RELAY_SELECT_LOOP_COUNT.load(Ordering::Acquire),
@@ -292,6 +305,7 @@ fn relay_trace_snapshot() -> String {
         trace_age_ms(RELAY_LAST_PING_SENT_MS.load(Ordering::Acquire)),
         RELAY_PONG_COUNT.load(Ordering::Acquire),
         trace_age_ms(RELAY_LAST_PONG_MS.load(Ordering::Acquire)),
+        crate::diagnostics::persistent_flight_dropped(),
     )
 }
 
@@ -348,11 +362,13 @@ struct SerializedAgentEvent {
     live_seq: Option<u64>,
 }
 
+#[derive(Clone)]
 struct DurableReplayBuffer {
     pending: VecDeque<SerializedAgentEvent>,
     live_pending_path: PathBuf,
     load_issue: Option<String>,
     needs_live_resync: bool,
+    persistence_dirty: bool,
 }
 
 fn quarantine_live_pending(path: &std::path::Path) -> String {
@@ -371,12 +387,6 @@ fn quarantine_live_pending(path: &std::path::Path) -> String {
             .unwrap_or("quarantined")
             .to_owned(),
         Err(error) => format!("rename_failed:{error}"),
-    }
-}
-
-impl Default for DurableReplayBuffer {
-    fn default() -> Self {
-        Self::load()
     }
 }
 
@@ -494,6 +504,7 @@ impl DurableReplayBuffer {
             live_pending_path: path,
             load_issue,
             needs_live_resync,
+            persistence_dirty: false,
         }
     }
 
@@ -505,7 +516,17 @@ impl DurableReplayBuffer {
         std::mem::take(&mut self.needs_live_resync)
     }
 
-    fn persist_live_pending(&self) -> Result<(), String> {
+    async fn persist_live_pending(&mut self) -> Result<(), String> {
+        self.persistence_dirty = true;
+        let snapshot = self.clone();
+        REPLAY_DISK_IO
+            .run(REPLAY_DISK_TIMEOUT, move || snapshot.write_live_pending())
+            .await??;
+        self.persistence_dirty = false;
+        Ok(())
+    }
+
+    fn write_live_pending(&self) -> Result<(), String> {
         if fs::symlink_metadata(&self.live_pending_path)
             .is_ok_and(|metadata| metadata.file_type().is_symlink())
         {
@@ -549,7 +570,7 @@ impl DurableReplayBuffer {
         Ok(())
     }
 
-    fn track(&mut self, event: SerializedAgentEvent) -> Result<bool, String> {
+    async fn track(&mut self, event: SerializedAgentEvent) -> Result<bool, String> {
         if self
             .pending
             .iter()
@@ -566,12 +587,12 @@ impl DurableReplayBuffer {
         };
         self.pending.push_back(event);
         if live_changed || dropped {
-            self.persist_live_pending()?;
+            self.persist_live_pending().await?;
         }
         Ok(dropped)
     }
 
-    fn ack(&mut self, event_id: &str) -> Result<bool, String> {
+    async fn ack(&mut self, event_id: &str) -> Result<bool, String> {
         let live_changed = self.pending.iter().any(|event| {
             event.event_id == event_id && event.live_stream_id.is_some() && event.live_seq.is_some()
         });
@@ -579,7 +600,7 @@ impl DurableReplayBuffer {
         self.pending.retain(|event| event.event_id != event_id);
         let changed = self.pending.len() != before;
         if changed && live_changed {
-            self.persist_live_pending()?;
+            self.persist_live_pending().await?;
         }
         Ok(changed)
     }
@@ -636,13 +657,13 @@ impl DurableReplayBuffer {
             .collect()
     }
 
-    fn drop_live_stream(&mut self, stream_id: &str) -> Result<usize, String> {
+    async fn drop_live_stream(&mut self, stream_id: &str) -> Result<usize, String> {
         let before = self.pending.len();
         self.pending
             .retain(|event| event.live_stream_id.as_deref() != Some(stream_id));
         let removed = before.saturating_sub(self.pending.len());
         if removed > 0 {
-            self.persist_live_pending()?;
+            self.persist_live_pending().await?;
         }
         Ok(removed)
     }
@@ -1207,7 +1228,25 @@ async fn run_supervisor(
     let mut needs_login = saved_session.is_none();
     let mut session = saved_session.unwrap_or_else(|| session::create(&config));
     let mut attempt = 0_u32;
-    let mut durable_replay = DurableReplayBuffer::default();
+    // Never treat a timed-out load as an empty journal: retry without losing
+    // persisted events, and keep manual stop responsive during disk trouble.
+    let mut durable_replay = loop {
+        let loaded = tokio::select! {
+            _ = stop_rx.changed() => return,
+            loaded = REPLAY_DISK_IO.run(REPLAY_DISK_TIMEOUT, DurableReplayBuffer::load) => loaded,
+        };
+        match loaded {
+            Ok(replay) => break replay,
+            Err(error) => {
+                state
+                    .record_flight("live_delta_persist_error", format!("load: {error}"))
+                    .await;
+                if !wait_for_retry(&mut stop_rx, Duration::from_secs(5)).await {
+                    return;
+                }
+            }
+        }
+    };
     if let Some(issue) = durable_replay.take_load_issue() {
         state
             .report_diagnostic("live_delta", "pending_load_issue", issue)
@@ -1489,13 +1528,14 @@ async fn connect_once(
                             RELAY_LAST_PING_SENT_MS.store(relay_progress_now_ms(), Ordering::Release);
                             RELAY_HEARTBEAT_PHASE.store(4, Ordering::Release);
                             *heartbeat_awaiting_task.lock().await = Some(Instant::now());
-                            RELAY_HEARTBEAT_PHASE.store(0, Ordering::Release);
+                            RELAY_HEARTBEAT_PHASE.store(8, Ordering::Release);
                             heartbeat_state
                                 .record_flight(
                                     "relay_heartbeat",
                                     format!("ping_sent send_ms={}", send_started.elapsed().as_millis()),
                                 )
                                 .await;
+                            RELAY_HEARTBEAT_PHASE.store(0, Ordering::Release);
                         }
                         Err(error) => {
                             RELAY_HEARTBEAT_PHASE.store(7, Ordering::Release);
@@ -1602,12 +1642,24 @@ async fn connect_once(
         DIAGNOSTIC_HEARTBEAT_INTERVAL,
     );
     diagnostic_heartbeat_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut diagnostic_log_tick = interval_at(
+        Instant::now() + DIAGNOSTIC_LOG_SYNC_INTERVAL,
+        DIAGNOSTIC_LOG_SYNC_INTERVAL,
+    );
+    diagnostic_log_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut live_game_announced = false;
     let mut session_bound = false;
     let mut durable_replay_enabled = false;
     let mut unexpected_error_reports_enabled = false;
     let mut update_diagnostics_enabled = false;
     let mut diagnostic_reports_enabled = false;
+    let mut diagnostic_log_chunks_enabled = false;
+    let mut diagnostic_log_initial_sync_pending = false;
+    let mut diagnostic_log_sync_running = false;
+    let mut diagnostic_log_task: Option<AbortTaskOnDrop> = None;
+    let mut command_tasks = tokio::task::JoinSet::new();
+    let (diagnostic_log_done_tx, mut diagnostic_log_done_rx) =
+        mpsc::channel::<Result<(usize, usize), String>>(1);
     let (lcu_poll_worker, mut lcu_poll_rx) = LcuPollWorker::start(Arc::clone(state));
     let mut lcu_socket_watch: Option<LcuSocketWatch> = None;
 
@@ -1691,7 +1743,7 @@ async fn connect_once(
                                 }
                             }
                             IncomingMessage::EventAck { event_id } => {
-                                match durable_replay.ack(event_id) {
+                                match durable_replay.ack(event_id).await {
                                     Ok(true) => {
                                         state.record_flight("relay_ack", format!("event_id={event_id}")).await;
                                     }
@@ -1728,7 +1780,7 @@ async fn connect_once(
                                     )
                                     .await;
                                 if replayed < expected {
-                                    let removed = durable_replay.drop_live_stream(stream_id).unwrap_or(0);
+                                    let removed = durable_replay.drop_live_stream(stream_id).await.unwrap_or(0);
                                     state
                                         .record_flight(
                                             "live_delta_resync",
@@ -1742,7 +1794,7 @@ async fn connect_once(
                                 }
                             }
                             IncomingMessage::LiveDeltaResync { stream_id } => {
-                                let removed = durable_replay.drop_live_stream(stream_id).unwrap_or(0);
+                                let removed = durable_replay.drop_live_stream(stream_id).await.unwrap_or(0);
                                 state
                                     .record_flight(
                                         "live_delta_resync",
@@ -1764,6 +1816,11 @@ async fn connect_once(
                                     && capabilities.get("update_diagnostics") == Some(&true);
                                 diagnostic_reports_enabled = *protocol_version >= 1
                                     && capabilities.get("diagnostic_reports") == Some(&true);
+                                diagnostic_log_chunks_enabled = *protocol_version >= 1
+                                    && capabilities.get("diagnostic_log_chunks") == Some(&true);
+                                if diagnostic_log_chunks_enabled && session_bound {
+                                    diagnostic_log_initial_sync_pending = true;
+                                }
                                 let live_delta_enabled = *protocol_version >= 1
                                     && capabilities.get("live_game_delta_v1") == Some(&true);
                                 let _ = lcu_poll_worker
@@ -1773,12 +1830,13 @@ async fn connect_once(
                                     .record_flight(
                                         "protocol",
                                         format!(
-                                            "server_protocol={} durable_replay={} live_delta={} error_reports={} diagnostics={}",
+                                            "server_protocol={} durable_replay={} live_delta={} error_reports={} diagnostics={} log_chunks={}",
                                             protocol_version,
                                             durable_replay_enabled,
                                             live_delta_enabled,
                                             unexpected_error_reports_enabled,
                                             diagnostic_reports_enabled,
+                                            diagnostic_log_chunks_enabled,
                                         ),
                                     )
                                     .await;
@@ -1829,6 +1887,9 @@ async fn connect_once(
                                 )
                                 .await?;
                                 session_bound = true;
+                                if diagnostic_log_chunks_enabled {
+                                    diagnostic_log_initial_sync_pending = true;
+                                }
                                 if durable_replay_enabled {
                                     let replayed = replay_durable_events(&writer, durable_replay).await?;
                                     if replayed > 0 {
@@ -1869,6 +1930,22 @@ async fn connect_once(
                                     generation,
                                     RelayConnectionState::Connected,
                                 ).await;
+                            }
+                            IncomingMessage::Command { request_id, .. } => {
+                                // Keep reader/pong processing live while a command waits on
+                                // LCU. Bound concurrency instead of building an unbounded queue.
+                                if !command_tasks.is_empty() {
+                                    let result = CommandResult::failure(request_id.clone(), "다른 LCU 명령 처리 중");
+                                    send_shared_relay_message(&writer, Message::Text(serde_json::to_string(&result)?.into()), "Relay 응답 전송 실패").await?;
+                                } else {
+                                    let command_app = app.clone();
+                                    let command_state = Arc::clone(state);
+                                    let command_writer = Arc::clone(&writer);
+                                    let polling = lcu_poll_worker.live_game_polling.clone();
+                                    command_tasks.spawn(async move {
+                                        handle_incoming(&command_app, &command_state, &command_writer, incoming, session_bound, &polling).await
+                                    });
+                                }
                             }
                             _ => handle_incoming(
                                 app,
@@ -1947,11 +2024,74 @@ async fn connect_once(
                     }
                 }
             }
+            completed = command_tasks.join_next(), if !command_tasks.is_empty() => {
+                mark_relay_branch(15);
+                match completed {
+                    Some(Ok(result)) => result?,
+                    Some(Err(error)) => return Err(AgentError::Relay(format!("LCU command task failed: {error}").into())),
+                    None => {}
+                }
+            }
             _ = durable_replay_tick.tick(), if session_bound && durable_replay_enabled => {
                 mark_relay_branch(5);
+                if durable_replay.persistence_dirty {
+                    if let Err(error) = durable_replay.persist_live_pending().await {
+                        state.record_flight("live_delta_persist_error", format!("retry: {error}")).await;
+                    }
+                }
                 let replayed = replay_durable_events(&writer, durable_replay).await?;
                 if replayed > 0 {
                     state.log(app, format!("ACK 대기 durable 이벤트 {replayed}건 재전송: {}", durable_replay.pending_summary())).await;
+                }
+            }
+            _ = diagnostic_log_tick.tick(), if session_bound && diagnostic_log_chunks_enabled => {
+                diagnostic_log_initial_sync_pending = true;
+            }
+            _ = async {}, if session_bound && diagnostic_log_chunks_enabled && diagnostic_log_initial_sync_pending && !diagnostic_log_sync_running => {
+                mark_relay_branch(14);
+                diagnostic_log_initial_sync_pending = false;
+                diagnostic_log_sync_running = true;
+                let sync_state = Arc::clone(state);
+                let sync_writer = Arc::clone(&writer);
+                let done_tx = diagnostic_log_done_tx.clone();
+                diagnostic_log_task = Some(AbortTaskOnDrop(tokio::spawn(async move {
+                    let result = AssertUnwindSafe(send_automatic_log_sources(&sync_state, &sync_writer))
+                        .catch_unwind()
+                        .await;
+                    let result = match result {
+                        Ok(Ok(value)) => Ok(value),
+                        Ok(Err(error)) => Err(error.to_string()),
+                        Err(_) => Err("automatic diagnostic log sync panicked".to_owned()),
+                    };
+                    let _ = done_tx.send(result).await;
+                })));
+            }
+            result = diagnostic_log_done_rx.recv(), if diagnostic_log_sync_running => {
+                mark_relay_branch(14);
+                diagnostic_log_sync_running = false;
+                drop(diagnostic_log_task.take());
+                match result {
+                    Some(Ok((sources, chunks))) => {
+                        state
+                            .record_flight(
+                                "diagnostic_log_sync",
+                                format!("sources={sources} chunks={chunks}"),
+                            )
+                            .await;
+                    }
+                    Some(Err(error)) => {
+                        state
+                            .record_flight(
+                                "diagnostic_log_sync",
+                                format!("failed error={error}"),
+                            )
+                            .await;
+                    }
+                    None => {
+                        state
+                            .record_flight("diagnostic_log_sync", "completion_channel_closed")
+                            .await;
+                    }
                 }
             }
             _ = diagnostic_heartbeat_tick.tick(), if session_bound && diagnostic_reports_enabled => {
@@ -2245,7 +2385,7 @@ async fn connect_once(
                         continue;
                     };
                     if durable_replay_enabled && is_durable_event(message_type, &event) {
-                        match durable_replay.track(event.clone()) {
+                        match durable_replay.track(event.clone()).await {
                             Ok(true) => {
                                 state.log(app, "durable replay buffer가 가득 차 가장 오래된 이벤트를 제거함").await;
                             }
@@ -2280,6 +2420,60 @@ async fn connect_once(
             }
         }
     }
+}
+
+async fn send_automatic_log_sources<S>(
+    state: &Arc<AppState>,
+    writer: &SharedRelayWriter<S>,
+) -> AgentResult<(usize, usize)>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    let sources = timeout(DIAGNOSTIC_LOG_SYNC_TIMEOUT, state.automatic_log_sources())
+        .await
+        .map_err(|_| AgentError::Relay("자동 진단 로그 수집 시간 초과".into()))?;
+    let mut source_count = 0usize;
+    let mut chunk_total = 0usize;
+
+    for (source, content) in sources {
+        if content.is_empty() {
+            continue;
+        }
+        let mut chunks = Vec::new();
+        let mut start = 0usize;
+        while start < content.len() {
+            let mut end = (start + DIAGNOSTIC_LOG_CHUNK_BYTES).min(content.len());
+            while end > start && !content.is_char_boundary(end) {
+                end -= 1;
+            }
+            if end == start {
+                return Err(AgentError::Relay("자동 진단 로그 UTF-8 분할 실패".into()));
+            }
+            chunks.push(content[start..end].to_owned());
+            start = end;
+        }
+        let batch_id = Uuid::new_v4().to_string();
+        let chunk_count = chunks.len() as u32;
+        for (index, content) in chunks.into_iter().enumerate() {
+            let report =
+                AgentLogChunk::new(batch_id.clone(), source, index as u32, chunk_count, content);
+            let message = serde_json::to_string(&report)?;
+            if message.len() > MAX_RELAY_MESSAGE_BYTES {
+                return Err(AgentError::Relay("자동 진단 로그 메시지 크기 초과".into()));
+            }
+            send_shared_relay_message(
+                writer,
+                Message::Text(message.into()),
+                "자동 진단 로그 전송 실패",
+            )
+            .await?;
+            chunk_total += 1;
+        }
+        source_count += 1;
+    }
+
+    Ok((source_count, chunk_total))
 }
 
 async fn receive_oauth_code(receiver: &mut mpsc::Receiver<String>) -> String {
@@ -2350,21 +2544,52 @@ where
             let result = match parsed_action {
                 None => CommandResult::failure(request_id, "unknown action"),
                 Some(Action::LaunchClient) => {
-                    let (ok, message) = launch_league_client();
-                    CommandResult::from_parts(request_id, ok, message, json!({}))
+                    match COMMAND_DISK_IO
+                        .run(COMMAND_DISK_TIMEOUT, launch_league_client)
+                        .await
+                    {
+                        Ok((ok, message)) => {
+                            CommandResult::from_parts(request_id, ok, message, json!({}))
+                        }
+                        Err(error) => CommandResult::failure(
+                            request_id,
+                            format!("클라이언트 실행 결과 확인 불가: {error}"),
+                        ),
+                    }
                 }
                 Some(Action::Ping) => CommandResult::success(request_id, "pong", json!({})),
                 Some(action) => {
                     let config = state.config.read().await.clone();
-                    if let Some(path) = lockfile_path(&config) {
-                        let _guard = state.command_lock.lock().await;
-                        match LcuClient::from_lockfile(&path)
-                            .or_else(|_| LcuClient::from_lockfile_legacy(&path))
-                        {
-                            Ok(client) => match client
-                                .execute_action(action, &payload, &config)
-                                .await
-                            {
+                    let _guard =
+                        match timeout(COMMAND_LOCK_TIMEOUT, state.command_lock.lock()).await {
+                            Ok(guard) => guard,
+                            Err(_) => {
+                                let result = CommandResult::failure(
+                                    request_id,
+                                    "LCU 명령 처리 중: 잠금 대기 시간 초과",
+                                );
+                                send_shared_relay_message(
+                                    websocket,
+                                    Message::Text(serde_json::to_string(&result)?.into()),
+                                    "Relay 응답 전송 실패",
+                                )
+                                .await?;
+                                state.record_flight("command", "command_lock_timeout").await;
+                                return Ok(());
+                            }
+                        };
+                    let discovery_config = config.clone();
+                    let client = COMMAND_DISK_IO
+                        .run(COMMAND_DISK_TIMEOUT, move || {
+                            let path = lockfile_path(&discovery_config)
+                                .ok_or_else(|| AgentError::Lcu("LCU 미연결".into()))?;
+                            LcuClient::from_lockfile(&path)
+                                .or_else(|_| LcuClient::from_lockfile_legacy(&path))
+                        })
+                        .await;
+                    match client {
+                        Ok(Ok(client)) => {
+                            match client.execute_action(action, &payload, &config).await {
                                 Ok(outcome) => CommandResult::from_parts(
                                     request_id,
                                     outcome.ok,
@@ -2372,11 +2597,13 @@ where
                                     outcome.data,
                                 ),
                                 Err(error) => CommandResult::failure(request_id, error.to_string()),
-                            },
-                            Err(error) => CommandResult::failure(request_id, error.to_string()),
+                            }
                         }
-                    } else {
-                        CommandResult::failure(request_id, "LCU 미연결")
+                        Ok(Err(error)) => CommandResult::failure(request_id, error.to_string()),
+                        Err(error) => CommandResult::failure(
+                            request_id,
+                            format!("LCU 파일 접근 실패: {error}"),
+                        ),
                     }
                 }
             };
@@ -3190,6 +3417,7 @@ mod tests {
             )),
             load_issue: None,
             needs_live_resync: false,
+            persistence_dirty: false,
         }
     }
 
@@ -3387,8 +3615,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn durable_replay_buffer_deduplicates_and_acks() {
+    #[tokio::test]
+    async fn durable_replay_buffer_deduplicates_and_acks() {
         let mut replay = test_replay_buffer();
         let event = SerializedAgentEvent {
             event_id: "event-1".into(),
@@ -3396,15 +3624,15 @@ mod tests {
             live_stream_id: None,
             live_seq: None,
         };
-        assert!(!replay.track(event.clone()).unwrap());
-        assert!(!replay.track(event).unwrap());
+        assert!(!replay.track(event.clone()).await.unwrap());
+        assert!(!replay.track(event).await.unwrap());
         assert_eq!(replay.snapshot().len(), 1);
-        assert!(replay.ack("event-1").unwrap());
+        assert!(replay.ack("event-1").await.unwrap());
         assert!(replay.snapshot().is_empty());
     }
 
-    #[test]
-    fn pending_replay_summary_identifies_event_without_logging_payload() {
+    #[tokio::test]
+    async fn pending_replay_summary_identifies_event_without_logging_payload() {
         let mut replay = test_replay_buffer();
         let event = serialize_agent_event(
             "match_rofl",
@@ -3417,7 +3645,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        replay.track(event).unwrap();
+        replay.track(event).await.unwrap();
 
         let summary = replay.pending_summary();
         assert!(summary.contains("match_rofl game_id=123 kind=summary participants=0"));
@@ -3425,8 +3653,8 @@ mod tests {
         assert!(!summary.contains("private-value"));
     }
 
-    #[test]
-    fn durable_replay_selects_requested_live_sequence_range() {
+    #[tokio::test]
+    async fn durable_replay_selects_requested_live_sequence_range() {
         let mut replay = test_replay_buffer();
         for seq in 20..=22 {
             assert!(!replay
@@ -3436,6 +3664,7 @@ mod tests {
                     live_stream_id: Some("123e4567-e89b-42d3-a456-426614174000".into()),
                     live_seq: Some(seq),
                 })
+                .await
                 .unwrap());
         }
         let events = replay.live_range("123e4567-e89b-42d3-a456-426614174000", 20, 21);
@@ -3446,11 +3675,24 @@ mod tests {
         let persisted: Vec<SerializedAgentEvent> =
             serde_json::from_slice(&fs::read(&replay.live_pending_path).unwrap()).unwrap();
         assert_eq!(persisted.len(), 3);
+
+        // A failed ACK persistence must retain dirty state and be retryable.
+        let original_path = replay.live_pending_path.clone();
+        replay.live_pending_path = original_path.join("invalid-child.json");
+        assert!(replay.ack(&events[0].event_id).await.is_err());
+        assert!(replay.persistence_dirty);
+        replay.live_pending_path = original_path;
+        replay.persist_live_pending().await.unwrap();
+        assert!(!replay.persistence_dirty);
+        let persisted: Vec<SerializedAgentEvent> =
+            serde_json::from_slice(&fs::read(&replay.live_pending_path).unwrap()).unwrap();
+        assert_eq!(persisted.len(), 2);
         assert_eq!(
             replay
                 .drop_live_stream("123e4567-e89b-42d3-a456-426614174000")
+                .await
                 .unwrap(),
-            3
+            2
         );
         assert!(replay
             .live_range("123e4567-e89b-42d3-a456-426614174000", 20, 22)

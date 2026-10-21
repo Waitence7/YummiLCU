@@ -11,6 +11,7 @@ from relay.app import (
     _agent_hello_info,
     _agent_error_report,
     _agent_diagnostic_report,
+    _agent_log_chunk,
     _agent_update_report,
     _agent_error_last_by_discord,
     _agent_error_recent,
@@ -69,6 +70,7 @@ class AgentHelloTests(unittest.TestCase):
                     "live_game_delta_v1": True,
                     "unexpected_error_reports": True,
                     "diagnostic_reports": True,
+                    "diagnostic_log_chunks": True,
                     "unknown_future_feature": True,
                     "heartbeat": False,
                 },
@@ -83,6 +85,7 @@ class AgentHelloTests(unittest.TestCase):
                 "live_game_delta_v1": True,
                 "unexpected_error_reports": True,
                 "diagnostic_reports": True,
+                "diagnostic_log_chunks": True,
             },
         )
 
@@ -127,6 +130,35 @@ class AgentHelloTests(unittest.TestCase):
             "category": "unknown",
             "code": "bad code!",
             "detail": "x",
+        }))
+
+    def test_agent_log_chunk_is_bounded_and_redacted(self) -> None:
+        chunk = _agent_log_chunk({
+            "type": "agent_log_chunk",
+            "batch_id": "123e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 1,
+            "source": "runtime_trace",
+            "chunk_index": 0,
+            "chunk_count": 1,
+            "content": "phase=reader token=secret\nnext=line",
+            "app_version": "0.7.29",
+            "release_label": "0.7.29",
+            "release_channel": "stable",
+            "build_id": "build-1",
+            "git_commit": "abc123",
+        })
+        self.assertIsNotNone(chunk)
+        assert chunk is not None
+        self.assertEqual(chunk["source"], "runtime_trace")
+        self.assertIn("next=line", chunk["content"])
+        self.assertNotIn("secret", chunk["content"])
+        self.assertIsNone(_agent_log_chunk({
+            "batch_id": "123e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 1,
+            "source": "unknown",
+            "chunk_index": 0,
+            "chunk_count": 1,
+            "content": "x",
         }))
 
     def test_agent_update_report_is_bounded_and_redacted(self) -> None:
@@ -330,6 +362,34 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         remember.assert_awaited_once()
         self.assertIn("category=relay", logs.output[0])
         self.assertIn("discord_id=42", logs.output[0])
+
+    async def test_bound_agent_log_chunk_is_stored(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.attach_session("session-1", websocket, "token")
+        self.assertTrue(await manager.bind_discord("session-1", 42))
+
+        with patch("relay.app._remember_agent_log_chunk", new=AsyncMock()) as remember:
+            await _handle_agent_message(
+                websocket,
+                manager,
+                json.dumps({
+                    "type": "agent_log_chunk",
+                    "batch_id": "123e4567-e89b-42d3-a456-426614174000",
+                    "occurred_at_ms": 1,
+                    "source": "flight_memory",
+                    "chunk_index": 0,
+                    "chunk_count": 1,
+                    "content": "123 [relay] connected",
+                    "app_version": "0.7.29",
+                    "release_label": "0.7.29",
+                    "release_channel": "stable",
+                    "build_id": "build-1",
+                    "git_commit": "abc123",
+                }),
+            )
+
+        remember.assert_awaited_once()
 
     async def test_durable_eog_is_acked_only_after_forward_succeeds(self) -> None:
         manager = ConnectionManager()

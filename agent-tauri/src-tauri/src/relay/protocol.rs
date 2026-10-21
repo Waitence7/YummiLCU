@@ -351,6 +351,7 @@ pub(crate) struct AgentCapabilities {
     unexpected_error_reports: bool,
     update_diagnostics: bool,
     diagnostic_reports: bool,
+    diagnostic_log_chunks: bool,
 }
 
 impl AgentCapabilities {
@@ -380,6 +381,7 @@ impl AgentCapabilities {
             unexpected_error_reports: true,
             update_diagnostics: true,
             diagnostic_reports: true,
+            diagnostic_log_chunks: true,
         }
     }
 }
@@ -429,6 +431,53 @@ impl AgentDiagnosticReport {
             category,
             code,
             detail,
+            app_version: env!("CARGO_PKG_VERSION"),
+            release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL")
+                .unwrap_or(env!("CARGO_PKG_VERSION")),
+            release_channel: option_env!("YUMMI_AGENT_RELEASE_CHANNEL").unwrap_or("stable"),
+            build_id: option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
+            git_commit: option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct AgentLogChunk {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    batch_id: String,
+    occurred_at_ms: u64,
+    source: &'static str,
+    chunk_index: u32,
+    chunk_count: u32,
+    content: String,
+    app_version: &'static str,
+    release_label: &'static str,
+    release_channel: &'static str,
+    build_id: &'static str,
+    git_commit: &'static str,
+}
+
+impl AgentLogChunk {
+    pub(crate) fn new(
+        batch_id: String,
+        source: &'static str,
+        chunk_index: u32,
+        chunk_count: u32,
+        content: String,
+    ) -> Self {
+        let occurred_at_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Self {
+            message_type: "agent_log_chunk",
+            batch_id,
+            occurred_at_ms,
+            source,
+            chunk_index,
+            chunk_count,
+            content,
             app_version: env!("CARGO_PKG_VERSION"),
             release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL")
                 .unwrap_or(env!("CARGO_PKG_VERSION")),
@@ -786,6 +835,24 @@ mod tests {
         assert_eq!(value["capabilities"]["unexpected_error_reports"], true);
         assert_eq!(value["capabilities"]["update_diagnostics"], true);
         assert_eq!(value["capabilities"]["diagnostic_reports"], true);
+        assert_eq!(value["capabilities"]["diagnostic_log_chunks"], true);
+    }
+
+    #[test]
+    fn agent_log_chunk_contains_source_and_chunk_metadata() {
+        let value = serde_json::to_value(AgentLogChunk::new(
+            "123e4567-e89b-42d3-a456-426614174000".into(),
+            "runtime_trace",
+            1,
+            3,
+            "reader branch active".into(),
+        ))
+        .unwrap();
+        assert_eq!(value["type"], "agent_log_chunk");
+        assert_eq!(value["source"], "runtime_trace");
+        assert_eq!(value["chunk_index"], 1);
+        assert_eq!(value["chunk_count"], 3);
+        assert_eq!(value["content"], "reader branch active");
     }
 
     #[test]
