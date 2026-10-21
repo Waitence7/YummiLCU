@@ -4,8 +4,11 @@ use std::{
     io::Write,
     panic::AssertUnwindSafe,
     path::PathBuf,
-    sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, OnceLock,
+    },
+    time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::{FutureExt, SinkExt, StreamExt};
@@ -59,6 +62,31 @@ const REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
 const REPLAY_LOCAL_DELETE_DELAY: Duration = Duration::from_secs(5 * 60);
 const REPLAY_LOCAL_DELETE_MONITOR_INTERVAL: Duration = Duration::from_secs(2);
 const HEARTBEAT_SCHEDULER_WARN: Duration = Duration::from_secs(5);
+const RELAY_PROGRESS_STALE_AFTER: Duration = Duration::from_secs(90);
+
+static RELAY_PROGRESS_EPOCH: OnceLock<StdInstant> = OnceLock::new();
+static RELAY_PROGRESS_MS: AtomicU64 = AtomicU64::new(0);
+
+fn relay_progress_now_ms() -> u64 {
+    RELAY_PROGRESS_EPOCH
+        .get_or_init(StdInstant::now)
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn touch_relay_progress() {
+    RELAY_PROGRESS_MS.store(relay_progress_now_ms(), Ordering::Release);
+}
+
+fn relay_progress_age() -> Duration {
+    let last = RELAY_PROGRESS_MS.load(Ordering::Acquire);
+    Duration::from_millis(relay_progress_now_ms().saturating_sub(last))
+}
+
+fn relay_progress_is_stale(age: Duration) -> bool {
+    age >= RELAY_PROGRESS_STALE_AFTER
+}
 
 struct AbortTaskOnDrop(JoinHandle<()>);
 
@@ -607,6 +635,7 @@ impl RelaySupervisor {
                 .is_some_and(|task| !task.is_finished());
             if explicit_start {
                 control.desired_running = true;
+                touch_relay_progress();
                 if task_running {
                     return Ok(false);
                 }
@@ -712,10 +741,62 @@ impl RelaySupervisor {
         }
     }
 
+    pub(crate) async fn restart_if_stale(
+        app: AppHandle,
+        state: Arc<AppState>,
+    ) -> AgentResult<bool> {
+        let age = relay_progress_age();
+        if !relay_progress_is_stale(age) {
+            return Ok(false);
+        }
+
+        let stale_task = {
+            let mut control = state.relay.control.lock().await;
+            let task_running = control
+                .task
+                .as_ref()
+                .is_some_and(|task| !task.is_finished());
+            if !control.desired_running || !task_running {
+                return Ok(false);
+            }
+
+            control.generation = control.generation.wrapping_add(1);
+            if let Some(stop_tx) = control.stop_tx.take() {
+                let _ = stop_tx.send(true);
+            }
+            control.oauth_tx = None;
+            control.connection_state = RelayConnectionState::Failed;
+            control.task.take()
+        };
+
+        if let Some(task) = stale_task {
+            task.abort();
+        }
+        touch_relay_progress();
+        state
+            .record_flight(
+                "relay_watchdog",
+                format!("stale_task_aborted age_ms={}", age.as_millis()),
+            )
+            .await;
+        state
+            .log(
+                &app,
+                format!(
+                    "Relay 진행 정지 감지({}ms) — supervisor 강제 재시작",
+                    age.as_millis()
+                ),
+            )
+            .await;
+
+        Self::start_impl(app, state, false, false).await
+    }
+
     pub(crate) async fn stop(app: &AppHandle, state: &Arc<AppState>) {
         let task = {
             let mut control = state.relay.control.lock().await;
             control.desired_running = false;
+            touch_relay_progress();
             control.generation = control.generation.wrapping_add(1);
             if let Some(stop_tx) = control.stop_tx.take() {
                 let _ = stop_tx.send(true);
@@ -816,6 +897,7 @@ impl RelaySupervisor {
         // A deliberate server-side handover is not a transport failure. Keep
         // the app watchdog from restarting this displaced connection as well.
         control.desired_running = false;
+        touch_relay_progress();
         control.oauth_tx = None;
         true
     }
@@ -881,6 +963,7 @@ async fn run_supervisor(
         if *stop_rx.borrow() {
             break;
         }
+        touch_relay_progress();
         state
             .relay
             .set_connection_state(&app, &state, generation, RelayConnectionState::Connecting)
@@ -915,7 +998,9 @@ async fn run_supervisor(
                     let status = "다른 Agent에서 연결 중입니다. 기존 Agent를 종료하거나 Discord 로그아웃 후 다시 로그인하세요.";
                     state.mark_stopped(&app).await;
                     state.set_oauth_pending(&app, false, status).await;
-                    state.log(&app, format!("{status} 자동 재접속을 중지했습니다.")).await;
+                    state
+                        .log(&app, format!("{status} 자동 재접속을 중지했습니다."))
+                        .await;
                 }
                 break;
             }
@@ -1101,6 +1186,7 @@ async fn connect_once(
         loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
+                    touch_relay_progress();
                     let now = Instant::now();
                     let gap = now.duration_since(last_heartbeat_tick);
                     last_heartbeat_tick = now;
@@ -1234,6 +1320,7 @@ async fn connect_once(
     let mut lcu_socket_watch: Option<LcuSocketWatch> = None;
 
     loop {
+        touch_relay_progress();
         tokio::select! {
             changed = stop_rx.changed() => {
                 let _ = changed;
@@ -2812,6 +2899,17 @@ mod tests {
                 assert!(*stop_rx.borrow());
             }
         }
+    }
+
+    #[test]
+    fn relay_progress_watchdog_uses_stale_threshold() {
+        assert!(!relay_progress_is_stale(
+            RELAY_PROGRESS_STALE_AFTER - Duration::from_millis(1)
+        ));
+        assert!(relay_progress_is_stale(RELAY_PROGRESS_STALE_AFTER));
+        assert!(relay_progress_is_stale(
+            RELAY_PROGRESS_STALE_AFTER + Duration::from_secs(30)
+        ));
     }
 
     #[test]

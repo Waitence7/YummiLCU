@@ -367,29 +367,59 @@ async fn watch_relay_supervisor(app: AppHandle, state: Arc<AppState>) {
             break;
         }
 
-        match RelaySupervisor::restart_if_desired(app.clone(), state.clone()).await {
-            Ok(true) => {
-                state.record_flight("relay", "watchdog_restart").await;
-                state
-                    .log(&app, "Relay supervisor watchdog 자동 재시작")
-                    .await;
-                state
-                    .report_diagnostic(
-                        "relay",
-                        "watchdog_restart",
-                        "relay supervisor task was no longer running",
-                    )
-                    .await;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                let summary = error.to_string();
-                state
-                    .record_flight("relay_error", format!("watchdog_restart_failed: {summary}"))
-                    .await;
-                state
-                    .report_unexpected_error("relay_watchdog", "restart_failed", summary)
-                    .await;
+        let stale_restarted =
+            match RelaySupervisor::restart_if_stale(app.clone(), state.clone()).await {
+                Ok(true) => {
+                    state
+                        .report_diagnostic(
+                            "relay",
+                            "watchdog_stale_restart",
+                            "relay supervisor was alive but stopped making progress",
+                        )
+                        .await;
+                    true
+                }
+                Ok(false) => false,
+                Err(error) => {
+                    let summary = error.to_string();
+                    state
+                        .record_flight(
+                            "relay_error",
+                            format!("watchdog_stale_restart_failed: {summary}"),
+                        )
+                        .await;
+                    state
+                        .report_unexpected_error("relay_watchdog", "stale_restart_failed", summary)
+                        .await;
+                    false
+                }
+            };
+
+        if !stale_restarted {
+            match RelaySupervisor::restart_if_desired(app.clone(), state.clone()).await {
+                Ok(true) => {
+                    state.record_flight("relay", "watchdog_restart").await;
+                    state
+                        .log(&app, "Relay supervisor watchdog 자동 재시작")
+                        .await;
+                    state
+                        .report_diagnostic(
+                            "relay",
+                            "watchdog_restart",
+                            "relay supervisor task was no longer running",
+                        )
+                        .await;
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    let summary = error.to_string();
+                    state
+                        .record_flight("relay_error", format!("watchdog_restart_failed: {summary}"))
+                        .await;
+                    state
+                        .report_unexpected_error("relay_watchdog", "restart_failed", summary)
+                        .await;
+                }
             }
         }
 
