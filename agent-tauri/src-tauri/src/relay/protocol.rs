@@ -30,6 +30,11 @@ pub(crate) enum IncomingMessage {
     },
     #[serde(rename = "pong")]
     Pong,
+    #[serde(rename = "force_reconnect")]
+    ForceReconnect {
+        #[serde(default)]
+        reason: Option<String>,
+    },
     #[serde(rename = "live_game_polling")]
     LiveGamePolling { enabled: bool },
     #[serde(rename = "server_hello")]
@@ -314,13 +319,15 @@ pub(crate) struct AuthMessage<'a> {
     #[serde(rename = "type")]
     message_type: &'static str,
     ws_token: &'a str,
+    connection_id: &'a str,
 }
 
 impl<'a> AuthMessage<'a> {
-    pub(crate) fn new(ws_token: &'a str) -> Self {
+    pub(crate) fn new(ws_token: &'a str, connection_id: &'a str) -> Self {
         Self {
             message_type: "auth",
             ws_token,
+            connection_id,
         }
     }
 }

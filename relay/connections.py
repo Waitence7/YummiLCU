@@ -18,6 +18,10 @@ LIVE_GAME_PARTICIPANT_COUNT = 10
 BOT_WS_SEND_TIMEOUT_SEC = 2.0
 AGENT_WS_SEND_TIMEOUT_SEC = 5.0
 AGENT_HEARTBEAT_STALE_SEC = 180.0
+AGENT_QUALITY_HEALTHY_SEC = 40.0
+AGENT_QUALITY_DEGRADED_SEC = 90.0
+AGENT_RECONNECTING_WINDOW_SEC = 120.0
+FORCE_RECONNECT_COOLDOWN_SEC = 10.0
 AGENT_SESSION_CONFLICT_CLOSE_CODE = 4009
 GAMEFLOW_EOG_GRACE_SEC = 180.0
 
@@ -37,7 +41,11 @@ class ConnectionManager:
         self._ws_discord: dict[int, int] = {}  # id(ws) -> discord_id
         self._ws_session: dict[int, str] = {}  # id(ws) -> session_id (인증 전)
         self._ws_session_id: dict[int, str] = {}  # id(ws) -> session_id (TTL 갱신용)
+        self._ws_connection_id: dict[int, str] = {}
         self._ws_last_heartbeat: dict[int, float] = {}
+        self._last_disconnect_at: dict[int, float] = {}
+        self._reconnect_count: dict[int, int] = {}
+        self._force_reconnect_last_at: dict[int, float] = {}
         self._pending_results: dict[tuple[int, str], asyncio.Future[dict[str, Any]]] = {}
         self._pending_bot_eog: dict[str, asyncio.Future[bool]] = {}
         self._bot_ws: WebSocket | None = None
@@ -55,24 +63,49 @@ class ConnectionManager:
         self._pending_agent_info_by_ws: dict[int, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
 
-    async def attach_session(self, session_id: str, ws: WebSocket, ws_token: str) -> bool:
+    async def attach_session(
+        self,
+        session_id: str,
+        ws: WebSocket,
+        ws_token: str,
+        connection_id: str | None = None,
+    ) -> bool:
         """검증된 동일 세션 재접속은 새 WS가 기존 WS를 교체하도록 준비합니다.
 
         실제 Discord 바인딩/기존 WS 종료는 ``bind_discord``에서 원자적으로 처리합니다.
         이렇게 해야 이전 연결의 ``finally`` 정리보다 재접속이 먼저 도착해도 새 WS가
         영구적인 미바인딩 대기 상태로 남지 않습니다.
         """
+        replaced: WebSocket | None = None
         async with self._lock:
             old = self._active_session_ws.get(session_id)
             if old is not None and old is not ws:
-                logger.info("에이전트 세션 재접속 교체 준비: session=%s", session_id[:8])
+                logger.info(
+                    "에이전트 세션 재접속 즉시 교체: session=%s old_connection_id=%s new_connection_id=%s old_fresh=%s",
+                    session_id[:8],
+                    self._ws_connection_id.get(id(old), "unknown"),
+                    connection_id or "unknown",
+                    self._ws_is_fresh(old),
+                )
+                old_did = self._ws_discord.get(id(old))
+                if old_did is not None:
+                    self._last_disconnect_at[int(old_did)] = time.monotonic()
+                    self._reconnect_count[int(old_did)] = self._reconnect_count.get(int(old_did), 0) + 1
+                self._drop_ws_locked(old)
+                replaced = old
             self._active_session_ws[session_id] = ws
             self._session_ws[session_id] = ws
             self._session_ws_token[session_id] = ws_token
             wid = id(ws)
             self._ws_session[wid] = session_id
             self._ws_session_id[wid] = session_id
+            self._ws_connection_id[wid] = connection_id or f"server-{wid:x}"
             self._ws_last_heartbeat[wid] = time.monotonic()
+        if replaced is not None:
+            try:
+                await replaced.close(code=AGENT_SESSION_CONFLICT_CLOSE_CODE)
+            except Exception:
+                logger.debug("교체된 세션 WebSocket 즉시 종료 실패", exc_info=True)
         return True
 
     async def bind_discord(
@@ -105,7 +138,13 @@ class ConnectionManager:
                 # client-side close handling alone cannot prevent the loop.
                 self._drop_ws_locked(ws)
                 rejected = True
-                logger.info("다른 Agent 연결 유지: discord_id=%s session=%s", discord_id, session_id[:8])
+                logger.info(
+                    "다른 Agent 연결 유지: discord_id=%s session=%s rejected_connection_id=%s current_connection_id=%s",
+                    discord_id,
+                    session_id[:8],
+                    self._ws_connection_id.get(id(ws), "unknown"),
+                    self._ws_connection_id.get(id(prev), "unknown") if prev is not None else "-",
+                )
             if not rejected:
                 if prev is not None and prev is not ws:
                     self._drop_ws_locked(prev)
@@ -125,7 +164,13 @@ class ConnectionManager:
                     discord_id,
                     lcu_ready=bool(info.get("lcu_ready")),
                 )
-                logger.info("에이전트 등록: discord_id=%s session=%s", discord_id, session_id[:8])
+                logger.info(
+                    "에이전트 등록: discord_id=%s session=%s connection_id=%s replaced_connection_id=%s",
+                    discord_id,
+                    session_id[:8],
+                    self._ws_connection_id.get(id(ws), "unknown"),
+                    self._ws_connection_id.get(id(replaced), "-") if replaced is not None else "-",
+                )
         if rejected:
             await ws.close(code=AGENT_SESSION_CONFLICT_CLOSE_CODE)
             return False
@@ -153,8 +198,9 @@ class ConnectionManager:
         async with self._lock:
             wid = id(ws)
             did = self._ws_discord.get(wid)
-            if did is not None:
+            if did is not None and self._by_discord.get(int(did)) is ws:
                 offline_id = int(did)
+                self._last_disconnect_at[offline_id] = time.monotonic()
                 offline_payload = self._offline_participant_status_locked(offline_id)
             self._drop_ws_locked(ws)
         if offline_id is not None and offline_payload is not None:
@@ -181,6 +227,7 @@ class ConnectionManager:
             if active_ws is ws:
                 del self._active_session_ws[session_id]
         self._ws_session_id.pop(wid, None)
+        self._ws_connection_id.pop(wid, None)
         self._ws_last_heartbeat.pop(wid, None)
 
     def session_ws_token(self, session_id: str) -> str | None:
@@ -192,6 +239,9 @@ class ConnectionManager:
 
     def ws_session_id(self, ws: WebSocket) -> str | None:
         return self._ws_session_id.get(id(ws))
+
+    def ws_connection_id(self, ws: WebSocket) -> str | None:
+        return self._ws_connection_id.get(id(ws))
 
     def _cancel_pending_for_discord_locked(self, discord_id: int) -> None:
         for key in [k for k in self._pending_results if k[0] == discord_id]:
@@ -252,6 +302,78 @@ class ConnectionManager:
 
     def discord_id_for_ws(self, ws: WebSocket) -> int | None:
         return self._ws_discord.get(id(ws))
+
+    def is_current_ws(self, ws: WebSocket) -> bool:
+        """Whether this socket is still the authoritative socket for its Discord id/session."""
+        wid = id(ws)
+        did = self._ws_discord.get(wid)
+        if did is not None and self._by_discord.get(did) is not ws:
+            return False
+        sid = self._ws_session_id.get(wid)
+        if sid is not None and self._active_session_ws.get(sid) is not ws:
+            return False
+        return did is not None or sid is not None
+
+    def connection_quality(self, discord_id: int) -> dict[str, Any]:
+        did = int(discord_id)
+        now = time.monotonic()
+        ws = self._by_discord.get(did)
+        if ws is not None:
+            last = self._ws_last_heartbeat.get(id(ws))
+            age = None if last is None else max(0.0, now - last)
+            if age is None or age > AGENT_QUALITY_DEGRADED_SEC:
+                quality = "stale"
+            elif age > AGENT_QUALITY_HEALTHY_SEC:
+                quality = "degraded"
+            else:
+                quality = "healthy"
+            return {
+                "quality": quality,
+                "connection_id": self._ws_connection_id.get(id(ws)),
+                "last_activity_age_ms": int(age * 1000) if age is not None else None,
+                "reconnect_count": self._reconnect_count.get(did, 0),
+            }
+        disconnected = self._last_disconnect_at.get(did)
+        disconnect_age = None if disconnected is None else max(0.0, now - disconnected)
+        quality = (
+            "reconnecting"
+            if disconnect_age is not None and disconnect_age <= AGENT_RECONNECTING_WINDOW_SEC
+            else "offline"
+        )
+        return {
+            "quality": quality,
+            "connection_id": None,
+            "last_activity_age_ms": None,
+            "last_disconnect_age_ms": int(disconnect_age * 1000) if disconnect_age is not None else None,
+            "reconnect_count": self._reconnect_count.get(did, 0),
+        }
+
+    async def force_reconnect(self, discord_id: int, reason: str = "operator_requested") -> tuple[bool, str]:
+        did = int(discord_id)
+        now = time.monotonic()
+        async with self._lock:
+            ws = self._by_discord.get(did)
+            if ws is None:
+                return False, "offline"
+            last = self._force_reconnect_last_at.get(did, 0.0)
+            if now - last < FORCE_RECONNECT_COOLDOWN_SEC:
+                return False, "cooldown"
+            self._force_reconnect_last_at[did] = now
+            connection_id = self._ws_connection_id.get(id(ws), "unknown")
+        payload = {
+            "type": "force_reconnect",
+            "reason": str(reason or "operator_requested")[:160],
+        }
+        try:
+            await asyncio.wait_for(ws.send_json(payload), timeout=AGENT_WS_SEND_TIMEOUT_SEC)
+            logger.warning(
+                "Agent force reconnect 전송 discord_id=%s connection_id=%s reason=%s",
+                did, connection_id, payload["reason"],
+            )
+            return True, connection_id
+        except Exception:
+            logger.exception("Agent force reconnect 전송 실패 discord_id=%s", did)
+            return False, "send_failed"
 
     def register_pending_result(self, discord_id: int, request_id: str) -> asyncio.Future[dict[str, Any]]:
         fut: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()

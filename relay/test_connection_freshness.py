@@ -177,3 +177,44 @@ class AgentConnectionFreshnessTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(manager.is_online(1234))
         self.assertEqual(websocket.close_codes, [1001])
+
+class AgentConnectionRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_replaced_old_socket_cannot_publish_offline(self) -> None:
+        manager = ConnectionManager()
+        old = _WebSocketStub()
+        await manager.attach_session("session-1", old, "token", connection_id="old")
+        self.assertTrue(await manager.bind_discord("session-1", 1234))
+
+        new = _WebSocketStub()
+        await manager.attach_session("session-1", new, "token", connection_id="new")
+        self.assertEqual(old.close_codes, [AGENT_SESSION_CONFLICT_CLOSE_CODE])
+        self.assertIsNone(await manager.unregister_ws(old))
+        self.assertTrue(await manager.bind_discord("session-1", 1234))
+        self.assertTrue(manager.is_online(1234))
+        self.assertEqual(manager.connection_quality(1234)["connection_id"], "new")
+
+    async def test_connection_quality_transitions(self) -> None:
+        manager = ConnectionManager()
+        ws = _WebSocketStub()
+        await manager.attach_session("session-1", ws, "token", connection_id="c1")
+        self.assertTrue(await manager.bind_discord("session-1", 1234))
+        self.assertEqual(manager.connection_quality(1234)["quality"], "healthy")
+        manager._ws_last_heartbeat[id(ws)] = time.monotonic() - 50
+        self.assertEqual(manager.connection_quality(1234)["quality"], "degraded")
+        manager._ws_last_heartbeat[id(ws)] = time.monotonic() - 100
+        self.assertEqual(manager.connection_quality(1234)["quality"], "stale")
+        await manager.unregister_ws(ws)
+        self.assertEqual(manager.connection_quality(1234)["quality"], "reconnecting")
+
+    async def test_force_reconnect_is_single_flight_with_cooldown(self) -> None:
+        manager = ConnectionManager()
+        ws = _WebSocketStub()
+        await manager.attach_session("session-1", ws, "token", connection_id="c1")
+        self.assertTrue(await manager.bind_discord("session-1", 1234))
+        ok, detail = await manager.force_reconnect(1234, "test")
+        self.assertTrue(ok)
+        self.assertEqual(detail, "c1")
+        self.assertEqual(ws.payloads[-1], {"type": "force_reconnect", "reason": "test"})
+        ok, detail = await manager.force_reconnect(1234, "again")
+        self.assertFalse(ok)
+        self.assertEqual(detail, "cooldown")

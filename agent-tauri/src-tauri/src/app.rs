@@ -367,7 +367,25 @@ async fn watch_relay_supervisor(app: AppHandle, state: Arc<AppState>) {
             break;
         }
 
-        let stale_restarted =
+        let hard_revived =
+            match RelaySupervisor::hard_revive_if_unhealthy(app.clone(), state.clone()).await {
+                Ok(true) => true,
+                Ok(false) => false,
+                Err(error) => {
+                    let summary = error.to_string();
+                    state
+                        .record_flight("relay_error", format!("hard_revive_failed: {summary}"))
+                        .await;
+                    state
+                        .report_unexpected_error("relay_watchdog", "hard_revive_failed", summary)
+                        .await;
+                    false
+                }
+            };
+
+        let stale_restarted = if hard_revived {
+            true
+        } else {
             match RelaySupervisor::restart_if_stale(app.clone(), state.clone()).await {
                 Ok(true) => {
                     state
@@ -393,7 +411,8 @@ async fn watch_relay_supervisor(app: AppHandle, state: Arc<AppState>) {
                         .await;
                     false
                 }
-            };
+            }
+        };
 
         if !stale_restarted {
             match RelaySupervisor::restart_if_desired(app.clone(), state.clone()).await {

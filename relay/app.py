@@ -15,6 +15,7 @@ import re
 import secrets
 import time
 import uuid
+from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -27,9 +28,19 @@ from pydantic import BaseModel, Field
 
 from relay import auth, config
 from relay.actions import ALLOWED_ACTIONS, action_policy
-from relay.connections import AGENT_HEARTBEAT_STALE_SEC, ConnectionManager
+from relay.connections import (
+    AGENT_HEARTBEAT_STALE_SEC,
+    AGENT_WS_SEND_TIMEOUT_SEC,
+    ConnectionManager,
+)
 from relay.http_diagnostics import upstream_error_detail
-from relay.lcu_linked import is_lcu_linked, lcu_linked_map, mark_lcu_linked
+from relay.lcu_linked import (
+    is_lcu_linked,
+    lcu_agent_version_map,
+    lcu_linked_map,
+    mark_lcu_agent_version,
+    mark_lcu_linked,
+)
 from relay.lcu_recent import mark_recent_lcu_data, recent_lcu_data, recent_lcu_data_map
 from relay.logging_safety import redact_log_text
 
@@ -130,6 +141,7 @@ _AGENT_ERROR_CODES = frozenset({
 _AGENT_DIAGNOSTIC_CATEGORIES = frozenset({
     "lcu",
     "relay",
+    "relay_network",
     "command",
     "live_delta",
     "lifecycle",
@@ -142,6 +154,7 @@ _AGENT_LOG_TTL_SEC = 7 * 24 * 60 * 60
 _AGENT_LOG_MAX_ENTRIES = 200
 _AGENT_LOG_MAX_CONTENT_BYTES = 32 * 1024
 _AGENT_LOG_MAX_CHUNKS = 16
+_AGENT_FAILURE_COUNTER_TTL_SEC = 30 * 24 * 60 * 60
 _AGENT_LOG_SOURCES = frozenset({
     "ui",
     "flight_memory",
@@ -171,6 +184,67 @@ def _agent_diagnostics_redis_key(discord_id: int) -> str:
 
 def _agent_logs_redis_key(discord_id: int) -> str:
     return f"relay:agent_logs:{discord_id}"
+
+
+def _agent_failure_counter_redis_key(discord_id: int) -> str:
+    return f"relay:agent_failures:{discord_id}"
+
+
+def _agent_failure_events_redis_key(discord_id: int) -> str:
+    return f"relay:agent_failure_events:{discord_id}"
+
+
+async def _increment_agent_failure(r: redis.Redis, discord_id: int, kind: str) -> None:
+    safe = re.sub(r"[^a-z0-9_]+", "_", str(kind).lower())[:64].strip("_") or "unknown"
+    key = _agent_failure_counter_redis_key(discord_id)
+    events_key = _agent_failure_events_redis_key(discord_id)
+    now_ms = int(time.time() * 1000)
+    cutoff_ms = now_ms - (_AGENT_FAILURE_COUNTER_TTL_SEC * 1000)
+    event = f"{safe}|{now_ms}|{uuid.uuid4()}"
+    pipe = r.pipeline()
+    pipe.hincrby(key, safe, 1)
+    pipe.hset(key, f"last_{safe}_at_ms", now_ms)
+    pipe.expire(key, _AGENT_FAILURE_COUNTER_TTL_SEC)
+    pipe.zadd(events_key, {event: now_ms})
+    pipe.zremrangebyscore(events_key, 0, cutoff_ms)
+    pipe.expire(events_key, _AGENT_FAILURE_COUNTER_TTL_SEC)
+    await pipe.execute()
+
+
+async def _read_agent_failure_counters(r: redis.Redis, discord_id: int) -> dict[str, Any]:
+    raw = await r.hgetall(_agent_failure_counter_redis_key(discord_id))
+    totals: dict[str, Any] = {}
+    for key, value in (raw or {}).items():
+        key = str(key)
+        try:
+            totals[key] = int(value)
+        except (TypeError, ValueError):
+            totals[key] = value
+
+    now_ms = int(time.time() * 1000)
+    seven_days_ago = now_ms - 7 * 24 * 60 * 60 * 1000
+    thirty_days_ago = now_ms - 30 * 24 * 60 * 60 * 1000
+    raw_events = await r.zrangebyscore(
+        _agent_failure_events_redis_key(discord_id),
+        thirty_days_ago,
+        "+inf",
+        withscores=True,
+    )
+    windows: dict[str, dict[str, int]] = {"24h": {}, "7d": {}, "30d": {}}
+    day_ago = now_ms - 24 * 60 * 60 * 1000
+    for member, score in raw_events or []:
+        text = member.decode("utf-8", errors="ignore") if isinstance(member, bytes) else str(member)
+        kind = text.split("|", 1)[0]
+        try:
+            when = int(float(score))
+        except (TypeError, ValueError):
+            continue
+        windows["30d"][kind] = windows["30d"].get(kind, 0) + 1
+        if when >= seven_days_ago:
+            windows["7d"][kind] = windows["7d"].get(kind, 0) + 1
+        if when >= day_ago:
+            windows["24h"][kind] = windows["24h"].get(kind, 0) + 1
+    return {"totals": totals, "windows": windows}
 
 def _legacy_update_notice_redis_key(discord_id: int, version: str) -> str:
     safe_version = version.replace(":", "_")
@@ -352,6 +426,10 @@ async def _try_bind_discord(
     bound = await conn.bind_discord(session_id, discord_id, profile, allow_takeover=allow_takeover)
     if bound:
         await mark_lcu_linked(r, discord_id)
+        agent = conn.agent_info(discord_id) or {}
+        version = str(agent.get("version") or "").strip()
+        if version:
+            await mark_lcu_agent_version(r, discord_id, version)
     return bound
 
 
@@ -2464,6 +2542,19 @@ async def _handle_agent_message(
         if discord_id is None or report is None:
             return
         await _remember_agent_diagnostic(websocket.app.state.redis, discord_id, report)
+        if report["category"] in {"relay", "relay_network"}:
+            code = str(report["code"] or "relay_diagnostic")
+            detail_lower = str(report.get("detail") or "").lower()
+            if code in {"connection_error", "hard_revive", "force_reconnect", "activity_timeout"}:
+                await _increment_agent_failure(websocket.app.state.redis, discord_id, code)
+            if "11001" in detail_lower or "dns" in detail_lower and "error" in detail_lower:
+                await _increment_agent_failure(websocket.app.state.redis, discord_id, "dns_failure")
+            if "10060" in detail_lower:
+                await _increment_agent_failure(websocket.app.state.redis, discord_id, "connect_timeout_10060")
+            if "10054" in detail_lower:
+                await _increment_agent_failure(websocket.app.state.redis, discord_id, "connection_reset_10054")
+            if "pong_timeout" in detail_lower:
+                await _increment_agent_failure(websocket.app.state.redis, discord_id, "pong_timeout")
         logger.info(
             "Agent diagnostic discord_id=%s category=%s code=%s version=%s release=%s "
             "channel=%s build=%s commit=%s report_id=%s occurred_at_ms=%s detail=%s",
@@ -2737,6 +2828,7 @@ async def _handle_agent_message(
             return
         r: redis.Redis = websocket.app.state.redis
         await mark_lcu_linked(r, discord_id)
+        await mark_lcu_agent_version(r, discord_id, info["version"])
         cached_status = conn.get_participant_status(discord_id)
         if cached_status is not None:
             await _forward_participant_status(conn, r, discord_id, cached_status)
@@ -2976,6 +3068,11 @@ async def ws_agent(
         await websocket.close(code=1008)
         return
     ws_token = auth_payload.get("ws_token")
+    raw_connection_id = auth_payload.get("connection_id")
+    try:
+        connection_id = str(uuid.UUID(str(raw_connection_id)))
+    except (TypeError, ValueError, AttributeError):
+        connection_id = f"legacy-{uuid.uuid4()}"
     if (
         not isinstance(ws_token, str)
         or len(ws_token) < 16
@@ -2992,7 +3089,9 @@ async def ws_agent(
         return
 
     conn: ConnectionManager = websocket.app.state.connections
-    attached = await conn.attach_session(session_id, websocket, ws_token)
+    attached = await conn.attach_session(
+        session_id, websocket, ws_token, connection_id=connection_id
+    )
 
     raw = await r.get(_session_redis_key(session_id))
     if raw is not None:
@@ -3014,8 +3113,24 @@ async def ws_agent(
 
     connected_at = time.monotonic()
     last_message_at = connected_at
+    last_non_ping_at = connected_at
     last_ping_at: float | None = None
+    last_pong_sent_at: float | None = None
     last_message_type = "auth"
+    received_count = 0
+    ping_count = 0
+    non_ping_count = 0
+    pong_sent_count = 0
+    handler_max_ms = 0
+    recent_messages: deque[tuple[int, str]] = deque(maxlen=12)
+    session_short = session_id[:8]
+    logger.info(
+        "Agent websocket accepted connection_id=%s session=%s discord_id=%s current=%s",
+        connection_id,
+        session_short,
+        conn.discord_id_for_ws(websocket) or "-",
+        conn.is_current_ws(websocket),
+    )
 
     try:
         while True:
@@ -3025,33 +3140,122 @@ async def ws_agent(
                 now = time.monotonic()
                 activity_age = now - last_message_at
                 if activity_age > AGENT_HEARTBEAT_STALE_SEC:
-                    logger.warning(
-                        "Agent activity timeout discord_id=%s age_ms=%s last_type=%s",
-                        conn.discord_id_for_ws(websocket) or "-",
-                        int(activity_age * 1000),
-                        last_message_type,
+                    discord_id = conn.discord_id_for_ws(websocket)
+                    last_ping_age_ms = (
+                        max(0, int((now - last_ping_at) * 1000))
+                        if last_ping_at is not None
+                        else -1
                     )
+                    last_non_ping_age_ms = max(0, int((now - last_non_ping_at) * 1000))
+                    last_pong_sent_age_ms = (
+                        max(0, int((now - last_pong_sent_at) * 1000))
+                        if last_pong_sent_at is not None
+                        else -1
+                    )
+                    recent_summary = ",".join(
+                        f"{kind}@-{max(0, int(now * 1000) - at_ms)}ms"
+                        for at_ms, kind in recent_messages
+                    ) or "-"
+                    timeout_detail = (
+                        f"connection_id={connection_id} session={session_short} "
+                        f"age_ms={int(activity_age * 1000)} "
+                        f"connected_ms={max(0, int((now - connected_at) * 1000))} "
+                        f"last_type={last_message_type} last_ping_age_ms={last_ping_age_ms} "
+                        f"last_non_ping_age_ms={last_non_ping_age_ms} "
+                        f"last_pong_sent_age_ms={last_pong_sent_age_ms} "
+                        f"received={received_count} pings={ping_count} non_ping={non_ping_count} "
+                        f"pongs_sent={pong_sent_count} handler_max_ms={handler_max_ms} "
+                        f"current={conn.is_current_ws(websocket)} recent={recent_summary}"
+                    )
+                    logger.warning(
+                        "Agent activity timeout discord_id=%s %s",
+                        discord_id or "-",
+                        timeout_detail,
+                    )
+                    if discord_id is not None:
+                        await _increment_agent_failure(r, discord_id, "activity_timeout")
+                        info = conn.agent_info(discord_id) or {}
+                        try:
+                            await _remember_agent_diagnostic(
+                                r,
+                                discord_id,
+                                {
+                                    "report_id": str(uuid.uuid4()),
+                                    "occurred_at_ms": int(time.time() * 1000),
+                                    "category": "relay",
+                                    "code": "activity_timeout",
+                                    "detail": timeout_detail,
+                                    "source": "relay",
+                                    "app_version": str(info.get("version") or "unknown")[:64],
+                                },
+                            )
+                        except Exception:
+                            logger.exception(
+                                "Agent activity timeout diagnostic 저장 실패 discord_id=%s connection_id=%s",
+                                discord_id,
+                                connection_id,
+                            )
                     await websocket.close(code=1001, reason="activity timeout")
                     return
                 continue
             now = time.monotonic()
             last_message_at = now
+            received_count += 1
             conn.mark_agent_activity(websocket)
             if len(msg.encode("utf-8")) > MAX_AGENT_MESSAGE_BYTES:
+                logger.warning(
+                    "Agent oversized frame discord_id=%s connection_id=%s session=%s bytes=%s",
+                    conn.discord_id_for_ws(websocket) or "-", connection_id, session_short, len(msg.encode("utf-8")),
+                )
                 await websocket.close(code=1009)
                 return
             if msg == "ping":
+                ping_count += 1
+                recent_messages.append((int(now * 1000), "ping"))
                 last_ping_at = now
                 last_message_type = "ping"
                 sid = conn.ws_session_id(websocket)
                 if sid:
                     await _refresh_session_ttl(r, sid)
-                await websocket.send_json({"type": "pong"})
+                pong_started = time.monotonic()
+                try:
+                    await asyncio.wait_for(
+                        websocket.send_json({"type": "pong"}),
+                        timeout=AGENT_WS_SEND_TIMEOUT_SEC,
+                    )
+                except Exception as exc:
+                    failed_did = conn.discord_id_for_ws(websocket)
+                    if failed_did is not None:
+                        await _increment_agent_failure(r, failed_did, "pong_send_failed")
+                    logger.warning(
+                        "Agent pong send failed discord_id=%s connection_id=%s session=%s "
+                        "ping_count=%s pong_sent=%s elapsed_ms=%s error=%s",
+                        conn.discord_id_for_ws(websocket) or "-",
+                        connection_id,
+                        session_short,
+                        ping_count,
+                        pong_sent_count,
+                        max(0, int((time.monotonic() - pong_started) * 1000)),
+                        redact_log_text(repr(exc))[:300],
+                    )
+                    raise
+                last_pong_sent_at = time.monotonic()
+                pong_sent_count += 1
+                pong_elapsed_ms = max(0, int((last_pong_sent_at - pong_started) * 1000))
+                if pong_elapsed_ms >= 500:
+                    logger.warning(
+                        "Agent pong send slow discord_id=%s connection_id=%s session=%s elapsed_ms=%s",
+                        conn.discord_id_for_ws(websocket) or "-", connection_id, session_short, pong_elapsed_ms,
+                    )
                 continue
+            non_ping_count += 1
+            last_non_ping_at = now
             last_message_type = _agent_message_type_for_log(msg)
+            recent_messages.append((int(now * 1000), last_message_type))
             handler_started = time.monotonic()
             await _handle_agent_message(websocket, conn, msg)
             handler_elapsed_ms = max(0, int((time.monotonic() - handler_started) * 1000))
+            handler_max_ms = max(handler_max_ms, handler_elapsed_ms)
             if handler_elapsed_ms >= 1_000:
                 logger.warning(
                     "Agent message handler slow discord_id=%s type=%s elapsed_ms=%s",
@@ -3071,10 +3275,25 @@ async def ws_agent(
             if last_ping_at is not None
             else -1
         )
+        last_non_ping_age_ms = max(0, int((disconnected_at - last_non_ping_at) * 1000))
+        last_pong_sent_age_ms = (
+            max(0, int((disconnected_at - last_pong_sent_at) * 1000))
+            if last_pong_sent_at is not None
+            else -1
+        )
+        recent_summary = ",".join(
+            f"{kind}@-{max(0, int(disconnected_at * 1000) - at_ms)}ms"
+            for at_ms, kind in recent_messages
+        ) or "-"
         disconnect_detail = (
+            f"connection_id={connection_id} session={session_short} "
             f"code={code if code is not None else 'unknown'} reason={reason or '-'} "
             f"connected_ms={connected_ms} idle_ms={idle_ms} "
-            f"last_ping_age_ms={last_ping_age_ms} last_type={last_message_type}"
+            f"last_ping_age_ms={last_ping_age_ms} last_non_ping_age_ms={last_non_ping_age_ms} "
+            f"last_pong_sent_age_ms={last_pong_sent_age_ms} last_type={last_message_type} "
+            f"received={received_count} pings={ping_count} non_ping={non_ping_count} "
+            f"pongs_sent={pong_sent_count} handler_max_ms={handler_max_ms} "
+            f"current={conn.is_current_ws(websocket)} recent={recent_summary}"
         )
         if discord_id is not None:
             info = conn.agent_info(discord_id) or {}
@@ -3098,14 +3317,9 @@ async def ws_agent(
                     discord_id,
                 )
         logger.info(
-            "Agent websocket disconnected discord_id=%s code=%s reason=%s connected_ms=%s idle_ms=%s last_ping_age_ms=%s last_type=%s",
+            "Agent websocket disconnected discord_id=%s %s",
             discord_id if discord_id is not None else "-",
-            code,
-            reason or "-",
-            connected_ms,
-            idle_ms,
-            last_ping_age_ms,
-            last_message_type,
+            disconnect_detail,
         )
     finally:
         offline = await conn.unregister_ws(websocket)
@@ -3350,6 +3564,7 @@ async def internal_participant_status(
     r: redis.Redis = request.app.state.redis
     linked = await lcu_linked_map(r, discord_ids)
     recent = await recent_lcu_data_map(r, discord_ids)
+    versions = await lcu_agent_version_map(r, discord_ids)
     for did in discord_ids:
         row = statuses.get(did)
         if row is None:
@@ -3363,6 +3578,10 @@ async def internal_participant_status(
             }
             statuses[did] = row
         row["lcu_linked"] = linked.get(did, False)
+        agent = conn.agent_info(did)
+        current_version = str(agent.get("version") or "").strip() if agent else ""
+        row["agent_version"] = current_version or versions.get(did)
+        row.update(conn.connection_quality(did))
         row.update(recent.get(did, {"recent_lcu_data": False, "last_lcu_data_at_ms": None}))
     return JSONResponse({"statuses": {str(k): v for k, v in statuses.items()}})
 
@@ -3380,12 +3599,68 @@ async def internal_online(
     body: dict[str, Any] = {
         "online": online,
         "allowed_actions": sorted(ALLOWED_ACTIONS),
+        "connection": conn.connection_quality(discord_id),
     }
     if online:
         agent = conn.agent_info(discord_id)
         if agent:
             body["agent"] = agent
     return JSONResponse(body)
+
+
+@app.post("/internal/force-reconnect/{discord_id}")
+async def internal_force_reconnect(
+    request: Request,
+    discord_id: int,
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    conn: ConnectionManager = request.app.state.connections
+    ok, detail = await conn.force_reconnect(discord_id, "operator_requested")
+    if ok:
+        await _increment_agent_failure(request.app.state.redis, discord_id, "force_reconnect_requested")
+    status = 200 if ok else (409 if detail == "cooldown" else 404 if detail == "offline" else 502)
+    return JSONResponse({"ok": ok, "detail": detail, "connection": conn.connection_quality(discord_id)}, status_code=status)
+
+
+@app.get("/internal/connection-health/{discord_id}")
+async def internal_connection_health(
+    request: Request,
+    discord_id: int,
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    conn: ConnectionManager = request.app.state.connections
+    counters = await _read_agent_failure_counters(request.app.state.redis, discord_id)
+    return JSONResponse({
+        "discord_id": discord_id,
+        "connection": conn.connection_quality(discord_id),
+        "failures_30d": counters,
+    })
+
+
+@app.get("/internal/connection-health")
+async def internal_connection_health_batch(
+    request: Request,
+    ids: str = Query(..., min_length=1, max_length=4096),
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    discord_ids = [int(part) for part in ids.split(",") if part.strip().isdigit()][:50]
+    if not discord_ids:
+        raise HTTPException(400, "ids required")
+    conn: ConnectionManager = request.app.state.connections
+    r: redis.Redis = request.app.state.redis
+    counters = await asyncio.gather(*(_read_agent_failure_counters(r, did) for did in discord_ids))
+    return JSONResponse({
+        "health": {
+            str(did): {
+                "connection": conn.connection_quality(did),
+                "failures": failure,
+            }
+            for did, failure in zip(discord_ids, counters, strict=True)
+        }
+    })
 
 
 @app.get("/internal/diagnostics/{discord_id}")

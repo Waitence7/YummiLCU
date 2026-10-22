@@ -281,6 +281,8 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.bind_discord("session-1", 42))
 
         with patch("relay.app.mark_lcu_linked", new=AsyncMock()), patch(
+            "relay.app.mark_lcu_agent_version", new=AsyncMock()
+        ) as mark_version, patch(
             "relay.app._forward_participant_status", new=AsyncMock()
         ) as forward_status:
             await _handle_agent_message(
@@ -300,6 +302,7 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(status)
         self.assertTrue(status["agent_online"])
         self.assertTrue(status["lcu_ready"])
+        mark_version.assert_awaited_once_with(websocket.app.state.redis, 42, "0.7.10")
         forward_status.assert_awaited_once()
         self.assertEqual(forward_status.await_args.args[2], 42)
         self.assertTrue(forward_status.await_args.args[3]["lcu_ready"])
