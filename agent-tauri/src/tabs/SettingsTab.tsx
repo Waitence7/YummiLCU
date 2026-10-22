@@ -6,6 +6,23 @@ import { Button, Card, TextInput, Toggle } from '../components/ui';
 import type { BetaReleaseInfo, Config, TrayHideEffect } from '../state/types';
 import { playTrayHideEffect, TRAY_HIDE_EFFECT_OPTIONS } from '../trayEffects';
 
+
+function numericVersionTuple(value: string): [number, number, number] | null {
+  const match = value.trim().match(/^(?:v)?(\d+)(?:\.(\d+))?(?:\.(\d+))?/i);
+  if (!match) return null;
+  return [Number(match[1]), Number(match[2] ?? 0), Number(match[3] ?? 0)];
+}
+
+function compareNumericVersions(left: string, right: string): number | null {
+  const a = numericVersionTuple(left);
+  const b = numericVersionTuple(right);
+  if (!a || !b) return null;
+  for (let i = 0; i < 3; i += 1) {
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+}
+
 export function SettingsTab({
   config,
   currentReleaseLabel,
@@ -171,6 +188,10 @@ function BetaDownloadCard({
     currentReleaseChannel === 'beta' &&
     Boolean(release?.releaseLabel) &&
     currentReleaseLabel === release?.releaseLabel;
+  const betaVersionComparison = release
+    ? compareNumericVersions(release.version || release.releaseLabel, currentReleaseLabel)
+    : null;
+  const betaIsOlder = betaVersionComparison !== null && betaVersionComparison < 0;
 
   return (
     <Card
@@ -199,20 +220,26 @@ function BetaDownloadCard({
               <Button
                 variant="primary"
                 className="px-2 py-1 text-[10px]"
-                disabled={loading || !release || applying || betaAlreadyInstalled || applyStarted}
+                disabled={loading || !release || applying || betaAlreadyInstalled || betaIsOlder || applyStarted}
                 onClick={() => void applyBeta()}
               >
                 {betaAlreadyInstalled
                   ? '베타 사용 중'
-                  : applying
-                    ? '적용 중…'
-                    : applyStarted
-                      ? '적용 시작됨'
-                      : '베타 적용하기'}
+                  : betaIsOlder
+                    ? '이전 베타'
+                    : applying
+                      ? '적용 중…'
+                      : applyStarted
+                        ? '적용 시작됨'
+                        : '베타 적용하기'}
               </Button>
             </div>
             <span className="text-[10px] text-indigo-700/80">
-              {release ? `build ${release.buildId}` : '서명된 manifest 기준'}
+              {release
+                ? betaIsOlder
+                  ? `현재 ${currentReleaseLabel}보다 이전 버전 · build ${release.buildId}`
+                  : `build ${release.buildId}`
+                : '서명된 manifest 기준'}
             </span>
           </div>
         </div>

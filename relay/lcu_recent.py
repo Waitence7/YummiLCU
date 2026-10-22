@@ -13,6 +13,7 @@ import redis.asyncio as redis
 
 LCU_RECENT_DATA_TTL_SEC = 30 * 60
 _LCU_RECENT_DATA_KEY = "lcu:recent_data:{discord_id}"
+LCU_LAST_DATA_AT_KEY = "lcu:last_data_at_ms"
 
 
 def _key(discord_id: int) -> str:
@@ -29,7 +30,11 @@ async def mark_recent_lcu_data(
     if uid <= 0:
         return
     timestamp_ms = int(occurred_at_ms if occurred_at_ms is not None else time.time() * 1000)
+    # Short TTL key keeps the existing "recent" semantics.
     await r.set(_key(uid), str(timestamp_ms), ex=LCU_RECENT_DATA_TTL_SEC)
+    # Permanent last-seen timestamp is for audit/history and never expires.
+    if hasattr(r, "zadd"):
+        await r.zadd(LCU_LAST_DATA_AT_KEY, {str(uid): timestamp_ms})
 
 
 async def recent_lcu_data_map(
@@ -40,16 +45,24 @@ async def recent_lcu_data_map(
     if not ids:
         return {}
     raw_values = await r.mget([_key(uid) for uid in ids])
+    if hasattr(r, "pipeline"):
+        pipe = r.pipeline()
+        for uid in ids:
+            pipe.zscore(LCU_LAST_DATA_AT_KEY, str(uid))
+        permanent_scores = await pipe.execute()
+    else:
+        permanent_scores = [None] * len(ids)
     out: dict[int, dict[str, int | bool | None]] = {}
-    for uid, raw in zip(ids, raw_values, strict=True):
-        last_at_ms: int | None = None
+    for uid, raw, score in zip(ids, raw_values, permanent_scores, strict=True):
+        recent_at_ms: int | None = None
         if raw is not None:
             try:
-                last_at_ms = int(raw)
+                recent_at_ms = int(raw)
             except (TypeError, ValueError):
-                last_at_ms = None
+                recent_at_ms = None
+        last_at_ms = int(score) if score is not None else recent_at_ms
         out[uid] = {
-            "recent_lcu_data": last_at_ms is not None,
+            "recent_lcu_data": recent_at_ms is not None,
             "last_lcu_data_at_ms": last_at_ms,
         }
     return out

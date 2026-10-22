@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from pydantic import BaseModel, Field
 
 from relay import auth, config
+from relay.audit_archive import append_archive_record
 from relay.actions import ALLOWED_ACTIONS, action_policy
 from relay.connections import (
     AGENT_HEARTBEAT_STALE_SEC,
@@ -37,11 +38,13 @@ from relay.http_diagnostics import upstream_error_detail
 from relay.lcu_linked import (
     is_lcu_linked,
     lcu_agent_version_map,
+    lcu_last_connected_map,
     lcu_linked_map,
     mark_lcu_agent_version,
     mark_lcu_linked,
 )
 from relay.lcu_recent import mark_recent_lcu_data, recent_lcu_data, recent_lcu_data_map
+from relay.lcu_audit import append_agent_history, agent_state_map, remember_agent_state
 from relay.logging_safety import redact_log_text
 
 logger = logging.getLogger("yummi_lcu.relay")
@@ -148,13 +151,12 @@ _AGENT_DIAGNOSTIC_CATEGORIES = frozenset({
     "session",
     "updater",
 })
-_AGENT_DIAGNOSTIC_TTL_SEC = 7 * 24 * 60 * 60
-_AGENT_DIAGNOSTIC_MAX_ENTRIES = 200
-_AGENT_LOG_TTL_SEC = 7 * 24 * 60 * 60
-_AGENT_LOG_MAX_ENTRIES = 200
+_AGENT_DIAGNOSTIC_TTL_SEC = 30 * 24 * 60 * 60
+_AGENT_DIAGNOSTIC_MAX_ENTRIES = 2000
+_AGENT_LOG_TTL_SEC = 30 * 24 * 60 * 60
+_AGENT_LOG_MAX_ENTRIES = 5000
 _AGENT_LOG_MAX_CONTENT_BYTES = 32 * 1024
 _AGENT_LOG_MAX_CHUNKS = 16
-_AGENT_FAILURE_COUNTER_TTL_SEC = 30 * 24 * 60 * 60
 _AGENT_LOG_SOURCES = frozenset({
     "ui",
     "flight_memory",
@@ -199,15 +201,12 @@ async def _increment_agent_failure(r: redis.Redis, discord_id: int, kind: str) -
     key = _agent_failure_counter_redis_key(discord_id)
     events_key = _agent_failure_events_redis_key(discord_id)
     now_ms = int(time.time() * 1000)
-    cutoff_ms = now_ms - (_AGENT_FAILURE_COUNTER_TTL_SEC * 1000)
     event = f"{safe}|{now_ms}|{uuid.uuid4()}"
     pipe = r.pipeline()
     pipe.hincrby(key, safe, 1)
     pipe.hset(key, f"last_{safe}_at_ms", now_ms)
-    pipe.expire(key, _AGENT_FAILURE_COUNTER_TTL_SEC)
+    # Failure counters/events are permanent operational audit records.
     pipe.zadd(events_key, {event: now_ms})
-    pipe.zremrangebyscore(events_key, 0, cutoff_ms)
-    pipe.expire(events_key, _AGENT_FAILURE_COUNTER_TTL_SEC)
     await pipe.execute()
 
 
@@ -2363,6 +2362,9 @@ async def _remember_agent_diagnostic(
 ) -> None:
     key = _agent_diagnostics_redis_key(discord_id)
     encoded = json.dumps(report, ensure_ascii=False, separators=(",", ":"))
+    await append_archive_record(discord_id, "diagnostic", report, occurred_at_ms=report.get("occurred_at_ms"))
+    if not hasattr(r, "lpush"):
+        return
     pipe = r.pipeline()
     pipe.lpush(key, encoded)
     pipe.ltrim(key, 0, _AGENT_DIAGNOSTIC_MAX_ENTRIES - 1)
@@ -2430,6 +2432,9 @@ async def _remember_agent_log_chunk(
 ) -> None:
     key = _agent_logs_redis_key(discord_id)
     encoded = json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
+    await append_archive_record(discord_id, "log_chunk", chunk, occurred_at_ms=chunk.get("occurred_at_ms"))
+    if not hasattr(r, "lpush"):
+        return
     pipe = r.pipeline()
     pipe.lpush(key, encoded)
     pipe.ltrim(key, 0, _AGENT_LOG_MAX_ENTRIES - 1)
@@ -2541,7 +2546,27 @@ async def _handle_agent_message(
         report = _agent_diagnostic_report(data)
         if discord_id is None or report is None:
             return
-        await _remember_agent_diagnostic(websocket.app.state.redis, discord_id, report)
+        r = websocket.app.state.redis
+        await _remember_agent_diagnostic(r, discord_id, report)
+        await remember_agent_state(
+            r, discord_id,
+            last_seen_at_ms=report["occurred_at_ms"],
+            last_diagnostic_at_ms=report["occurred_at_ms"],
+            last_diagnostic_category=report["category"],
+            last_diagnostic_code=report["code"],
+            agent_version=report["app_version"],
+            release_label=report["release_label"],
+            release_channel=report["release_channel"],
+            build_id=report["build_id"],
+            git_commit=report["git_commit"],
+        )
+        await append_agent_history(
+            r, discord_id, "diagnostic", occurred_at_ms=report["occurred_at_ms"],
+            category=report["category"], code=report["code"],
+            app_version=report["app_version"], release_label=report["release_label"],
+            release_channel=report["release_channel"], build_id=report["build_id"],
+            git_commit=report["git_commit"], detail=report["detail"],
+        )
         if report["category"] in {"relay", "relay_network"}:
             code = str(report["code"] or "relay_diagnostic")
             detail_lower = str(report.get("detail") or "").lower()
@@ -2577,7 +2602,26 @@ async def _handle_agent_message(
         chunk = _agent_log_chunk(data)
         if discord_id is None or chunk is None:
             return
-        await _remember_agent_log_chunk(websocket.app.state.redis, discord_id, chunk)
+        r = websocket.app.state.redis
+        await _remember_agent_log_chunk(r, discord_id, chunk)
+        await remember_agent_state(
+            r, discord_id,
+            last_seen_at_ms=chunk["occurred_at_ms"],
+            last_log_at_ms=chunk["occurred_at_ms"],
+            last_log_source=chunk["source"],
+            agent_version=chunk["app_version"],
+            release_label=chunk["release_label"],
+            release_channel=chunk["release_channel"],
+            build_id=chunk["build_id"],
+            git_commit=chunk["git_commit"],
+        )
+        await append_agent_history(
+            r, discord_id, "log_chunk", occurred_at_ms=chunk["occurred_at_ms"],
+            source=chunk["source"], batch_id=chunk["batch_id"],
+            chunk_index=chunk["chunk_index"], chunk_count=chunk["chunk_count"],
+            app_version=chunk["app_version"], build_id=chunk["build_id"],
+            git_commit=chunk["git_commit"], bytes=len(chunk["content"].encode("utf-8")),
+        )
         logger.info(
             "Agent log chunk discord_id=%s source=%s batch_id=%s chunk=%s/%s version=%s build=%s commit=%s bytes=%s",
             discord_id,
@@ -2597,6 +2641,39 @@ async def _handle_agent_message(
         report = _agent_update_report(data)
         if discord_id is None or report is None:
             return
+        r = websocket.app.state.redis
+        await _remember_agent_diagnostic(
+            r, discord_id,
+            {
+                "report_id": str(report.get("report_id") or uuid.uuid4()),
+                "occurred_at_ms": report["occurred_at_ms"],
+                "category": "updater",
+                "code": str(report["stage"]),
+                "detail": report["detail"],
+                "app_version": report["app_version"],
+                "release_label": report["release_label"],
+                "release_channel": report["release_channel"],
+                "build_id": report["build_id"],
+                "git_commit": report["git_commit"],
+            },
+        )
+        await remember_agent_state(
+            r, discord_id,
+            last_seen_at_ms=report["occurred_at_ms"],
+            last_update_at_ms=report["occurred_at_ms"],
+            last_update_stage=report["stage"],
+            agent_version=report["app_version"],
+            release_label=report["release_label"], release_channel=report["release_channel"],
+            build_id=report["build_id"], git_commit=report["git_commit"],
+            target_version=report["target_version"] or "",
+        )
+        await append_agent_history(
+            r, discord_id, "update", occurred_at_ms=report["occurred_at_ms"],
+            stage=report["stage"], app_version=report["app_version"],
+            target_version=report["target_version"] or "", release_label=report["release_label"],
+            release_channel=report["release_channel"], build_id=report["build_id"],
+            git_commit=report["git_commit"], detail=report["detail"],
+        )
         logger.info(
             "Agent update diagnostic discord_id=%s stage=%s version=%s target=%s release=%s channel=%s build=%s commit=%s occurred_at_ms=%s detail=%s",
             discord_id, report["stage"], report["app_version"], report["target_version"] or "-",
@@ -2612,6 +2689,39 @@ async def _handle_agent_message(
             return
         if not _should_accept_agent_error(discord_id, report):
             return
+        r = websocket.app.state.redis
+        await _remember_agent_diagnostic(
+            r, discord_id,
+            {
+                "report_id": report["report_id"],
+                "occurred_at_ms": report["occurred_at_ms"],
+                "category": "unexpected_error",
+                "code": report["code"],
+                "detail": report["summary"],
+                "app_version": report["app_version"],
+                "release_label": report["release_label"],
+                "release_channel": report["release_channel"],
+                "build_id": report["build_id"],
+                "git_commit": report["git_commit"],
+                "component": report["component"],
+            },
+        )
+        await remember_agent_state(
+            r, discord_id,
+            last_seen_at_ms=report["occurred_at_ms"],
+            last_error_at_ms=report["occurred_at_ms"],
+            last_error_component=report["component"], last_error_code=report["code"],
+            agent_version=report["app_version"], release_label=report["release_label"],
+            release_channel=report["release_channel"], build_id=report["build_id"],
+            git_commit=report["git_commit"],
+        )
+        await append_agent_history(
+            r, discord_id, "unexpected_error", occurred_at_ms=report["occurred_at_ms"],
+            component=report["component"], code=report["code"], summary=report["summary"],
+            app_version=report["app_version"], release_label=report["release_label"],
+            release_channel=report["release_channel"], build_id=report["build_id"],
+            git_commit=report["git_commit"],
+        )
         logger.error(
             "Agent unexpected error component=%s code=%s version=%s release=%s "
             "channel=%s build=%s commit=%s report_id=%s occurred_at_ms=%s summary=%s",
@@ -2829,6 +2939,32 @@ async def _handle_agent_message(
         r: redis.Redis = websocket.app.state.redis
         await mark_lcu_linked(r, discord_id)
         await mark_lcu_agent_version(r, discord_id, info["version"])
+        hello_at_ms = int(time.time() * 1000)
+        await remember_agent_state(
+            r,
+            discord_id,
+            status="connected",
+            last_seen_at_ms=hello_at_ms,
+            last_hello_at_ms=hello_at_ms,
+            agent_version=info["version"],
+            os=info["os"],
+            lcu_ready=info["lcu_ready"],
+            protocol_version=info["protocol_version"],
+            session_id=conn.ws_session_id(websocket) or "",
+            connection_id=conn.ws_connection_id(websocket) or "",
+        )
+        await append_agent_history(
+            r,
+            discord_id,
+            "agent_hello",
+            occurred_at_ms=hello_at_ms,
+            version=info["version"],
+            os=info["os"],
+            lcu_ready=info["lcu_ready"],
+            protocol_version=info["protocol_version"],
+            session_id=conn.ws_session_id(websocket) or "",
+            connection_id=conn.ws_connection_id(websocket) or "",
+        )
         cached_status = conn.get_participant_status(discord_id)
         if cached_status is not None:
             await _forward_participant_status(conn, r, discord_id, cached_status)
@@ -2881,6 +3017,16 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         await conn.forward_gameflow_update(discord_id, payload)
+        phase = str(payload.get("phase") or "")[:64]
+        now_ms = int(time.time() * 1000)
+        await remember_agent_state(
+            websocket.app.state.redis, discord_id,
+            last_seen_at_ms=now_ms, last_gameflow_at_ms=now_ms, gameflow_phase=phase,
+        )
+        await append_agent_history(
+            websocket.app.state.redis, discord_id, "gameflow",
+            occurred_at_ms=now_ms, phase=phase,
+        )
         _enqueue_tournament_broadcast_lcu(
             websocket.app, discord_id, "gameflow", payload
         )
@@ -3015,6 +3161,20 @@ async def _handle_agent_message(
             return
         stored = conn.set_participant_status(discord_id, payload)
         r: redis.Redis = websocket.app.state.redis
+        now_ms = int(time.time() * 1000)
+        await remember_agent_state(
+            r, discord_id,
+            last_seen_at_ms=now_ms, last_participant_status_at_ms=now_ms,
+            lcu_ready=bool(stored.get("lcu_ready")),
+            participant_status=str(stored.get("status") or "")[:64],
+            gameflow_phase=str(stored.get("phase") or "")[:64],
+        )
+        await append_agent_history(
+            r, discord_id, "participant_status", occurred_at_ms=now_ms,
+            lcu_ready=bool(stored.get("lcu_ready")),
+            status=str(stored.get("status") or "")[:64],
+            phase=str(stored.get("phase") or "")[:64],
+        )
         await _forward_participant_status(conn, r, discord_id, stored)
         return
 
@@ -3195,6 +3355,17 @@ async def ws_agent(
                                 discord_id,
                                 connection_id,
                             )
+                        timeout_at_ms = int(time.time() * 1000)
+                        await remember_agent_state(
+                            r, discord_id, status="activity_timeout",
+                            last_seen_at_ms=timeout_at_ms, last_disconnect_at_ms=timeout_at_ms,
+                            last_disconnect_code=1001, last_disconnect_reason="activity timeout",
+                            session_id=session_id, connection_id=connection_id,
+                        )
+                        await append_agent_history(
+                            r, discord_id, "activity_timeout", occurred_at_ms=timeout_at_ms,
+                            session_id=session_id, connection_id=connection_id, detail=timeout_detail,
+                        )
                     await websocket.close(code=1001, reason="activity timeout")
                     return
                 continue
@@ -3316,6 +3487,20 @@ async def ws_agent(
                     "Agent disconnect diagnostic 저장 실패 discord_id=%s",
                     discord_id,
                 )
+        if discord_id is not None:
+            disconnect_at_ms = int(time.time() * 1000)
+            await remember_agent_state(
+                r, discord_id, status="disconnected",
+                last_disconnect_at_ms=disconnect_at_ms, last_seen_at_ms=disconnect_at_ms,
+                last_disconnect_code=code if code is not None else "unknown",
+                last_disconnect_reason=reason or "", session_id=session_id,
+                connection_id=connection_id,
+            )
+            await append_agent_history(
+                r, discord_id, "disconnect", occurred_at_ms=disconnect_at_ms,
+                code=code if code is not None else "unknown", reason=reason or "",
+                session_id=session_id, connection_id=connection_id, detail=disconnect_detail,
+            )
         logger.info(
             "Agent websocket disconnected discord_id=%s %s",
             discord_id if discord_id is not None else "-",
@@ -3565,6 +3750,8 @@ async def internal_participant_status(
     linked = await lcu_linked_map(r, discord_ids)
     recent = await recent_lcu_data_map(r, discord_ids)
     versions = await lcu_agent_version_map(r, discord_ids)
+    last_connected = await lcu_last_connected_map(r, discord_ids)
+    audit_states = await agent_state_map(r, discord_ids)
     for did in discord_ids:
         row = statuses.get(did)
         if row is None:
@@ -3580,7 +3767,10 @@ async def internal_participant_status(
         row["lcu_linked"] = linked.get(did, False)
         agent = conn.agent_info(did)
         current_version = str(agent.get("version") or "").strip() if agent else ""
-        row["agent_version"] = current_version or versions.get(did)
+        audit_state = audit_states.get(did, {})
+        row["agent_version"] = current_version or versions.get(did) or audit_state.get("agent_version")
+        row["agent_audit"] = audit_state
+        row["last_agent_connected_at_ms"] = last_connected.get(did)
         row.update(conn.connection_quality(did))
         row.update(recent.get(did, {"recent_lcu_data": False, "last_lcu_data_at_ms": None}))
     return JSONResponse({"statuses": {str(k): v for k, v in statuses.items()}})
@@ -3660,6 +3850,33 @@ async def internal_connection_health_batch(
             }
             for did, failure in zip(discord_ids, counters, strict=True)
         }
+    })
+
+
+@app.get("/internal/audit/{discord_id}")
+async def internal_agent_audit(
+    request: Request,
+    discord_id: int,
+    limit: int = Query(100, ge=1, le=1000),
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    """Permanent per-user Agent state/lifecycle history. No TTL in Redis."""
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    r: redis.Redis = request.app.state.redis
+    states = await agent_state_map(r, [discord_id])
+    rows = await r.lrange(f"lcu:agent_history:v1:{int(discord_id)}", -limit, -1)
+    history: list[dict[str, Any]] = []
+    for raw in rows:
+        try:
+            item = json.loads(raw)
+        except (TypeError, json.JSONDecodeError):
+            continue
+        if isinstance(item, dict):
+            history.append(item)
+    return JSONResponse({
+        "discord_id": discord_id,
+        "state": states.get(discord_id, {}),
+        "history": history,
     })
 
 
