@@ -826,8 +826,6 @@ dependencies = [
 [[package]]
 name = "discord-presence"
 version = "3.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c8d811ebed75ede6c72a7b36fdcb832010298f77814cb3f63c1a7c9e6e8c192"
 dependencies = [
  "byteorder",
  "bytes",
@@ -5669,7 +5667,7 @@ dependencies = [
 
 [[package]]
 name = "yummi-lcu-tauri"
-version = "0.7.31"
+version = "0.7.32"
 dependencies = [
  "base64 0.22.1",
  "dirs",

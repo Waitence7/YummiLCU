@@ -1,0 +1,278 @@
+use super::{Connection, Socket};
+use crate::{
+    error::{DiscordError, Result},
+    event_handler::HandlerRegistry,
+    models::{
+        payload::Payload, rich_presence::SetActivityArgs, Command, ErrorEvent, Event, EventData,
+        Message, OpCode,
+    },
+    rate_limiter::RateLimiter,
+};
+use crossbeam_channel::{unbounded, Receiver, Sender, TryRecvError};
+use parking_lot::Mutex;
+use serde_json::Value as JsonValue;
+use std::{
+    io::ErrorKind,
+    sync::{atomic::Ordering, Arc},
+    thread,
+    time::{self, Duration},
+};
+
+type Tx = Sender<Message>;
+type Rx = Receiver<Message>;
+
+const RPC_RESPONSE_TIMEOUT: Duration = Duration::from_secs(3);
+
+// TODO: Refactor connection manager
+#[derive(Clone)]
+/// The connection manager for the Discord client.
+pub struct Manager {
+    connection: Arc<Option<Mutex<Socket>>>,
+    client_id: u64,
+    outbound: (Rx, Tx),
+    inbound: (Rx, Tx),
+    handshake_completed: bool,
+    event_handler_registry: Arc<HandlerRegistry>,
+    error_sleep: Duration,
+    connection_attempts: Arc<Mutex<Option<usize>>>,
+    pub(crate) rate_limiter: RateLimiter,
+}
+
+impl Manager {
+    pub(crate) fn new(
+        client_id: u64,
+        event_handler_registry: Arc<HandlerRegistry>,
+        error_sleep: Duration,
+        connection_attempts: Option<usize>,
+    ) -> Self {
+        let connection = Arc::new(None);
+        let (sender_o, receiver_o) = unbounded();
+        let (sender_i, receiver_i) = unbounded();
+
+        Self {
+            connection,
+            client_id,
+            handshake_completed: false,
+            inbound: (receiver_i, sender_i),
+            outbound: (receiver_o, sender_o),
+            event_handler_registry,
+            error_sleep,
+            connection_attempts: Arc::new(Mutex::new(connection_attempts)),
+            rate_limiter: RateLimiter::default(),
+        }
+    }
+
+    /// Start the connection manager
+    pub fn start(&mut self, rx: Receiver<()>) -> thread::JoinHandle<()> {
+        let mut manager_inner = self.clone();
+        let error_sleep = self.error_sleep;
+        let connection_attempts = self.connection_attempts.clone();
+        let rate_limiter = self.rate_limiter.clone();
+
+        thread::spawn(move || {
+            // TODO: Refactor so that JSON values are consistent across errors
+            send_and_receive_loop(
+                &mut manager_inner,
+                &rx,
+                error_sleep,
+                &connection_attempts,
+                &rate_limiter,
+            );
+        })
+    }
+
+    /// Send a message to the Discord client.
+    pub fn send(&self, message: Message) -> Result<()> {
+        self.outbound.1.send(message)?;
+
+        Ok(())
+    }
+
+    /// Receive a message from the Discord client.
+    pub fn recv(&self) -> Result<Message> {
+        self.inbound
+            .0
+            .recv_timeout(RPC_RESPONSE_TIMEOUT)
+            .map_err(DiscordError::from)
+    }
+
+    fn connect(&mut self) -> Result<()> {
+        if self.connection.is_some() {
+            return Ok(());
+        }
+
+        trace!("Connecting");
+
+        let mut new_connection = Socket::connect()?;
+
+        trace!("Performing handshake");
+        let msg = new_connection.handshake(self.client_id)?;
+        let payload: Payload<JsonValue> = serde_json::from_str(&msg.payload)?;
+
+        // TODO: Ensure it works without clone
+        // Only handle the ready event if the client was not already ready
+        if !crate::READY.load(std::sync::atomic::Ordering::Relaxed) {
+            trace!("Discord client is ready!");
+            crate::READY.store(true, Ordering::Relaxed);
+
+            self.event_handler_registry.handle(
+                Event::Ready,
+                Event::Ready.parse_data(into_error!(payload.data)?),
+            );
+        }
+
+        self.event_handler_registry
+            .handle(Event::Connected, EventData::None);
+
+        trace!("Handshake completed");
+
+        self.connection = Arc::new(Some(Mutex::new(new_connection)));
+
+        trace!("Connected");
+
+        Ok(())
+    }
+
+    fn disconnect(&mut self) {
+        self.handshake_completed = false;
+        self.connection = Arc::new(None);
+    }
+}
+
+fn send_and_receive_loop(
+    manager: &mut Manager,
+    rx: &Receiver<()>,
+    err_sleep: Duration,
+    connection_attempts: &Arc<Mutex<Option<usize>>>,
+    rate_limiter: &RateLimiter,
+) {
+    trace!("Starting sender loop");
+
+    let mut inbound = manager.inbound.1.clone();
+    let outbound = manager.outbound.0.clone();
+
+    loop {
+        match rx.try_recv() {
+            Ok(()) | Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {}
+        }
+
+        let connection = manager.connection.clone();
+
+        match *connection {
+            Some(ref conn) => {
+                // check if there's a queued activity that can be sent
+                if let Some(args) = rate_limiter.peek_queued() {
+                    trace!("Sending queued activity");
+                    let message = Message::new(
+                        OpCode::Frame,
+                        Payload::<SetActivityArgs>::with_nonce(
+                            Command::SetActivity,
+                            Some(args),
+                            None,
+                            None,
+                        ),
+                    );
+
+                    if let Ok(msg) = message {
+                        if conn.lock().send(&msg).is_ok() {
+                            rate_limiter.mark_sent();
+                            trace!("Queued activity sent successfully");
+                        } else {
+                            rate_limiter.release_send();
+                            error!("Failed to send queued activity, will retry later...");
+                        }
+                    } else {
+                        rate_limiter.drop_queued();
+                        error!("Failed to create message for queued activity, ignoring...");
+                    }
+                }
+
+                match send_and_receive(
+                    &mut conn.lock(),
+                    &manager.event_handler_registry,
+                    &mut inbound,
+                    &outbound,
+                ) {
+                    Err(DiscordError::IoError(ref err)) if err.kind() == ErrorKind::WouldBlock => {}
+                    Err(DiscordError::IoError(_) | DiscordError::ConnectionClosed) => {
+                        manager.disconnect();
+                        manager
+                            .event_handler_registry
+                            .handle(Event::Disconnected, EventData::None);
+                    }
+                    Err(DiscordError::TimeoutError(_)) => continue,
+                    Err(why) => trace!("discord error: {why}"),
+                    _ => {}
+                }
+
+                trace!("Finished send and receive loop iteration");
+
+                thread::sleep(time::Duration::from_millis(500));
+            }
+            None => match manager.connect() {
+                Err(err) => {
+                    manager.event_handler_registry.handle(
+                        Event::Error,
+                        crate::models::EventData::Error(ErrorEvent {
+                            code: None,
+                            message: Some(err.to_string()),
+                        }),
+                    );
+
+                    if err.should_break() {
+                        break;
+                    }
+                    error!("Failed to connect: {err:?}");
+
+                    let mut attempts = connection_attempts.lock();
+                    if let Some(ref mut attempts) = *attempts {
+                        if *attempts == 0 {
+                            break;
+                        }
+
+                        *attempts -= 1;
+                    }
+
+                    thread::sleep(err_sleep);
+                }
+                _ => manager.handshake_completed = true,
+            },
+        }
+    }
+}
+
+fn send_and_receive(
+    connection: &mut Socket,
+    event_handler_registry: &Arc<HandlerRegistry>,
+    inbound: &mut Tx,
+    outbound: &Rx,
+) -> Result<()> {
+    while let Ok(msg) = outbound.try_recv() {
+        trace!("Sending message");
+        connection.send(&msg)?;
+        trace!("Sent message");
+    }
+
+    trace!("Receiving from connection");
+    let msg = connection.recv()?;
+    trace!("Received from connection");
+
+    trace!("Received payload: {}", msg.payload);
+    let payload: Payload<JsonValue> = serde_json::from_str(&msg.payload)?;
+    trace!("Parsed payload");
+
+    if let Payload {
+        evt: Some(event), ..
+    } = &payload
+    {
+        trace!("Got event");
+        let event_data = event.parse_data(into_error!(payload.data.clone())?);
+        event_handler_registry.handle(*event, event_data);
+    } else {
+        trace!("Got message");
+        inbound.send(msg)?;
+    }
+
+    Ok(())
+}

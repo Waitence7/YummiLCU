@@ -18,7 +18,7 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
-    lcu::{lockfile_path, LcuClient},
+    lcu::{lockfile_path_nonblocking, LcuClient},
     state::{AppState, DiscordJoinResolution, DiscordPresenceMatchContext},
 };
 
@@ -292,8 +292,24 @@ impl PresenceSession {
 
 impl Drop for PresenceSession {
     fn drop(&mut self) {
-        self.clear();
+        // Never perform synchronous Discord IPC while an async task is being
+        // cancelled or unwound. The vendored connection manager exits when the
+        // stop sender is dropped, so dropping the client is enough here.
+        self.subscribed_to_join = false;
+        self.subscribed_to_join_request = false;
+        self.client.take();
     }
+}
+
+fn run_presence_blocking<T>(operation: impl FnOnce() -> T) -> T {
+    // Discord RPC is synchronous. block_in_place tells Tokio to hand other
+    // async work (relay heartbeat/watchdogs included) to another worker while
+    // this thread waits on the bounded IPC operation.
+    tokio::task::block_in_place(operation)
+}
+
+fn close_join_request_blocking(session: &mut PresenceSession, user_id: u64) -> Result<(), String> {
+    run_presence_blocking(|| session.close_join_request(user_id))
 }
 
 async fn set_activity_with_startup_retry(
@@ -301,14 +317,14 @@ async fn set_activity_with_startup_retry(
     snapshot: &PresenceSnapshot,
 ) -> Result<(), String> {
     for attempt in 0..DISCORD_STARTUP_RETRY_ATTEMPTS {
-        match session.set_activity(snapshot) {
+        match run_presence_blocking(|| session.set_activity(snapshot)) {
             Ok(()) => return Ok(()),
             Err(error) if error == DISCORD_STARTING_ERROR => {
                 if attempt + 1 < DISCORD_STARTUP_RETRY_ATTEMPTS {
                     sleep(DISCORD_STARTUP_RETRY_DELAY).await;
                     continue;
                 }
-                session.disconnect();
+                run_presence_blocking(|| session.disconnect());
                 return Err(
                     "Discord IPC 연결 준비 시간 초과 — Discord 실행 여부를 확인하세요".to_string(),
                 );
@@ -316,7 +332,7 @@ async fn set_activity_with_startup_retry(
             Err(error) => return Err(error),
         }
     }
-    session.disconnect();
+    run_presence_blocking(|| session.disconnect());
     Err("Discord IPC 연결 준비 시간 초과".to_string())
 }
 
@@ -509,7 +525,7 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
                     }
                 }
                 None => {
-                    session.clear();
+                    run_presence_blocking(|| session.clear());
                     last_presence_error = None;
                     delayed_phase_republish_at = None;
                     delayed_phase_key = None;
@@ -564,7 +580,7 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
         }
     }
 
-    session.clear();
+    run_presence_blocking(|| session.clear());
 }
 
 async fn handle_join_secret(state: &AppState, secret: &str) -> Result<(), String> {
@@ -577,7 +593,9 @@ async fn handle_join_secret(state: &AppState, secret: &str) -> Result<(), String
     let party_id =
         parse_join_secret(secret).ok_or_else(|| "Discord join secret 형식 오류".to_string())?;
     let config = state.config.read().await.clone();
-    let path = lockfile_path(&config).ok_or_else(|| "LCU lockfile을 찾을 수 없음".to_string())?;
+    let path = lockfile_path_nonblocking(&config)
+        .await?
+        .ok_or_else(|| "LCU lockfile을 찾을 수 없음".to_string())?;
     let client = LcuClient::from_lockfile(&path)
         .or_else(|_| LcuClient::from_lockfile_legacy(&path))
         .map_err(|error| format!("LCU 연결 준비 실패: {error}"))?;
@@ -716,7 +734,7 @@ async fn apply_join_resolution(
     if resolution.status == "nickname_missing" {
         let user_id = resolution.requester_discord_id;
         pending.remove(&user_id);
-        if let Err(error) = session.close_join_request(user_id) {
+        if let Err(error) = close_join_request_blocking(session, user_id) {
             state
                 .report_diagnostic(
                     "discord_presence",
@@ -759,7 +777,7 @@ async fn flush_pending_join_requests(
 
     for user_id in expired {
         pending.remove(&user_id);
-        if let Err(error) = session.close_join_request(user_id) {
+        if let Err(error) = close_join_request_blocking(session, user_id) {
             state
                 .report_diagnostic(
                     "discord_presence",
@@ -790,7 +808,7 @@ async fn flush_pending_join_requests(
         return Ok(());
     }
 
-    let Some(path) = lockfile_path(config) else {
+    let Some(path) = lockfile_path_nonblocking(config).await? else {
         return Ok(());
     };
     let client =
@@ -835,7 +853,7 @@ async fn flush_pending_join_requests(
         match client.invite_discord_requester(&riot_id).await {
             Ok(outcome) if outcome.ok => {
                 pending.remove(&user_id);
-                if let Err(error) = session.close_join_request(user_id) {
+                if let Err(error) = close_join_request_blocking(session, user_id) {
                     state
                         .report_diagnostic(
                             "discord_presence",
@@ -993,7 +1011,16 @@ async fn detect_presence(
     request_party: &PresenceParty,
     match_join_url: Option<String>,
 ) -> Option<PresenceSnapshot> {
-    if let Some(path) = lockfile_path(config) {
+    let lockfile = match lockfile_path_nonblocking(config).await {
+        Ok(path) => path,
+        Err(error) => {
+            state
+                .report_diagnostic("discord_presence", "lockfile_discovery_failed", &error)
+                .await;
+            None
+        }
+    };
+    if let Some(path) = lockfile {
         match LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path)) {
             Ok(client) => match client.gameflow_phase().await {
                 Ok(phase) => {

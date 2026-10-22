@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
 use crate::config::Config;
@@ -16,6 +17,33 @@ pub(crate) struct LockfileDiscovery {
 
 pub(crate) fn lockfile_path(config: &Config) -> Option<PathBuf> {
     discover_lockfile(config).path
+}
+
+const NONBLOCKING_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+pub(crate) async fn discover_lockfile_nonblocking(
+    config: &Config,
+) -> Result<LockfileDiscovery, String> {
+    let config = config.clone();
+    match tokio::time::timeout(
+        NONBLOCKING_DISCOVERY_TIMEOUT,
+        tokio::task::spawn_blocking(move || discover_lockfile(&config)),
+    )
+    .await
+    {
+        Ok(Ok(discovery)) => Ok(discovery),
+        Ok(Err(error)) => Err(format!("lockfile discovery worker failed: {error}")),
+        Err(_) => Err(format!(
+            "lockfile discovery timeout after {}ms",
+            NONBLOCKING_DISCOVERY_TIMEOUT.as_millis()
+        )),
+    }
+}
+
+pub(crate) async fn lockfile_path_nonblocking(config: &Config) -> Result<Option<PathBuf>, String> {
+    discover_lockfile_nonblocking(config)
+        .await
+        .map(|discovery| discovery.path)
 }
 
 pub(crate) fn discover_lockfile(config: &Config) -> LockfileDiscovery {

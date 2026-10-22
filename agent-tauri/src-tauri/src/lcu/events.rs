@@ -23,7 +23,7 @@ use uuid::Uuid;
 use crate::{config::Config, error::AgentError, state::AppState};
 
 use super::{
-    collect_replay_bundle, collect_replay_file, discover_lockfile, find_existing_replay_path,
+    collect_replay_bundle, collect_replay_file, find_existing_replay_path,
     LcuClient, LcuIdentity, LockfileDiscovery, RoflMatchHint,
 };
 
@@ -40,7 +40,6 @@ const LCU_SOCKET_RETRY_DELAY: Duration = Duration::from_secs(5);
 const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const GAMEFLOW_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(8);
 const LOCKFILE_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
-const LOCKFILE_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(2);
 const RECENT_MATCH_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
 const EOG_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const EOG_POSTGAME_RECOVERY_GRACE: Duration = Duration::from_secs(90);
@@ -1349,17 +1348,7 @@ fn is_expected_missing_lcu_endpoint(error: &AgentError) -> bool {
 }
 
 async fn discover_lockfile_nonblocking(config: &Config) -> Result<LockfileDiscovery, String> {
-    let config = config.clone();
-    match timeout(
-        LOCKFILE_DISCOVERY_TIMEOUT,
-        tokio::task::spawn_blocking(move || discover_lockfile(&config)),
-    )
-    .await
-    {
-        Ok(Ok(discovery)) => Ok(discovery),
-        Ok(Err(error)) => Err(format!("lockfile discovery worker failed: {error}")),
-        Err(error) => Err(format!("lockfile discovery timeout: {error}")),
-    }
+    super::lockfile::discover_lockfile_nonblocking(config).await
 }
 
 async fn wait_for_socket_retry(stop: &mut watch::Receiver<bool>) -> bool {

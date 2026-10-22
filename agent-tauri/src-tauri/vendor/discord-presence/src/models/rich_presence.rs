@@ -1,0 +1,272 @@
+use std::default::Default;
+
+use serde::Deserializer;
+
+use super::events::PartialUser;
+pub use activity_type::ActivityType;
+pub use display_type::DisplayType;
+
+mod activity_type;
+mod display_type;
+
+/// Args to set Discord activity
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SetActivityArgs {
+    pid: u32,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    activity: Option<Activity>,
+}
+
+impl SetActivityArgs {
+    /// Create a new `SetActivityArgs`
+    pub fn new<F>(f: F) -> Self
+    where
+        F: FnOnce(Activity) -> Activity,
+    {
+        Self {
+            activity: Some(f(Activity::new())),
+            ..Default::default()
+        }
+    }
+}
+
+impl Default for SetActivityArgs {
+    fn default() -> Self {
+        Self {
+            pid: std::process::id(),
+            activity: None,
+        }
+    }
+}
+
+/// Args to invite a player to join a game
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct SendActivityJoinInviteArgs {
+    /// The user to invite
+    pub user_id: String,
+}
+
+/// The args to close an activity request
+pub type CloseActivityRequestArgs = SendActivityJoinInviteArgs;
+
+impl SendActivityJoinInviteArgs {
+    #[must_use]
+    /// Create a new `SendActivityJoinInviteArgs`
+    pub fn new(user_id: u64) -> Self {
+        Self {
+            user_id: user_id.to_string(),
+        }
+    }
+}
+
+builder! {ActivityJoinEvent
+    secret: String,
+}
+
+builder! {ActivitySpectateEvent
+    secret: String,
+}
+
+builder! {ActivityJoinRequestEvent
+    user: PartialUser,
+}
+
+builder! {Activity
+    name: String => if feature = "unstable_name",
+    state: String,
+    details: String,
+    instance: bool,
+    status_display: DisplayType alias = "status_display_type",
+    activity_type: ActivityType alias = "type",
+    timestamps: ActivityTimestamps func,
+    assets: ActivityAssets func,
+    party: ActivityParty func,
+    secrets: ActivitySecrets func,
+    buttons: ActivityButton as array,
+}
+
+builder! {ActivityTimestamps
+    start: u64,
+    end: u64,
+}
+
+builder! {ActivityAssets
+    large_image: String,
+    large_text: String,
+    small_image: String,
+    small_text: String,
+}
+
+builder! {ActivityParty
+    id: String,
+    size: (u32, u32),
+}
+
+builder! {ActivitySecrets
+    join: String,
+    spectate: String,
+    game: String alias = "match",
+}
+
+// pub type ActivityButtons = Vec<ActivityButton>;
+
+// A probably overcomplicated way to convert the array of strings returned by Discord, into buttons
+fn deserialize_activity_button<'de, D>(data: D) -> Result<Vec<ActivityButton>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    use serde::de;
+    use std::fmt;
+
+    struct JsonStringVisitor;
+
+    impl<'de> de::Visitor<'de> for JsonStringVisitor {
+        type Value = Vec<ActivityButton>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str("a string containing the label for the button, or a json object with a label and url")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: de::SeqAccess<'de>,
+        {
+            use serde_json::Value;
+
+            let mut buttons = vec![];
+
+            while let Ok(Some(button)) = seq.next_element::<Value>() {
+                const EXPECTED: &str = "a string or an object with label and url";
+                let button = match button {
+                    Value::String(label) => {
+                        let label = label.trim().to_string();
+                        ActivityButton {
+                            label: Some(label),
+                            url: None,
+                        }
+                    }
+                    Value::Object(map) => serde_json::from_value(Value::Object(map))
+                        .map_err(|_| de::Error::invalid_value(de::Unexpected::Map, &EXPECTED))?,
+
+                    Value::Null => {
+                        return Err(de::Error::invalid_value(
+                            de::Unexpected::Other("null"),
+                            &EXPECTED,
+                        ));
+                    }
+                    Value::Bool(bool) => {
+                        return Err(de::Error::invalid_value(
+                            de::Unexpected::Bool(bool),
+                            &EXPECTED,
+                        ));
+                    }
+                    Value::Number(number) => {
+                        if let Some(number) = number.as_f64() {
+                            return Err(de::Error::invalid_value(
+                                de::Unexpected::Float(number),
+                                &EXPECTED,
+                            ));
+                        }
+                        if let Some(number) = number.as_i64() {
+                            return Err(de::Error::invalid_value(
+                                de::Unexpected::Signed(number),
+                                &EXPECTED,
+                            ));
+                        }
+
+                        if let Some(number) = number.as_u64() {
+                            return Err(de::Error::invalid_value(
+                                de::Unexpected::Unsigned(number),
+                                &EXPECTED,
+                            ));
+                        }
+
+                        unreachable!("Number type not expected here")
+                    }
+                    Value::Array(_) => {
+                        return Err(de::Error::invalid_value(de::Unexpected::Seq, &EXPECTED));
+                    }
+                };
+
+                buttons.push(button);
+            }
+
+            Ok(buttons)
+        }
+    }
+
+    data.deserialize_any(JsonStringVisitor)
+}
+
+builder! {ActivityButton
+    // Text shown on the button (1-32 characters)
+    label: String,
+    // URL opened when clicking the button (1-512 characters)
+    url: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json;
+
+    #[test]
+    fn can_serialize_full_activity() {
+        let expected = include_str!("../../tests/fixtures/activity_full.json");
+        let parsed_expected = serde_json::from_str::<Activity>(expected).unwrap();
+
+        let activity = Activity::new()
+            .state("rusting")
+            .details("detailed")
+            .instance(true)
+            .timestamps(|t| t.start(1000).end(2000))
+            .assets(|a| {
+                a.large_image("ferris")
+                    .large_text("Ferris")
+                    .small_image("rusting")
+                    .small_text("Rusting...")
+            })
+            .append_buttons(|button| button.label("Click Me!"))
+            .append_buttons(|button| button.label("Click Me Too!").url("https://example.com"))
+            .party(|p| p.id(String::from("party")).size((3, 6)))
+            .secrets(|s| {
+                s.join("025ed05c71f639de8bfaa0d679d7c94b2fdce12f")
+                    .spectate("e7eb30d2ee025ed05c71ea495f770b76454ee4e0")
+                    .game("4b2fdce12f639de8bfa7e3591b71a0d679d7c93f")
+            });
+
+        assert_eq!(parsed_expected, activity);
+    }
+
+    #[test]
+    fn can_serialize_empty_activity() {
+        let activity = Activity::new();
+        let json = serde_json::to_string(&activity).expect("Failed to serialize into String");
+        assert_eq![json, "{}"];
+    }
+
+    #[test]
+    fn can_serialize_activity_type() {
+        use super::*;
+
+        let activity = Activity::new().activity_type(ActivityType::Watching);
+        let json = serde_json::to_string(&activity).expect("Failed to serialize into String");
+
+        assert_eq![json, r#"{"type":3}"#];
+    }
+}
+
+#[cfg(test)]
+mod feature_tests {
+    #[cfg(feature = "unstable_name")]
+    #[test]
+    fn can_serialize_activity_name() {
+        use super::*;
+
+        let activity = Activity::new().name("Rusting");
+        let json = serde_json::to_string(&activity).expect("Failed to serialize into String");
+
+        assert_eq![json, r#"{"name":"Rusting"}"#];
+    }
+}

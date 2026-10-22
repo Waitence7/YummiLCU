@@ -5,7 +5,7 @@ use std::{
     panic::AssertUnwindSafe,
     path::PathBuf,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, OnceLock,
     },
     time::{Duration, Instant as StdInstant, SystemTime, UNIX_EPOCH},
@@ -30,7 +30,7 @@ use uuid::Uuid;
 use crate::{
     error::{AgentError, AgentResult},
     http_diagnostics::{safe_url, status_detail, transport_detail},
-    lcu::{lockfile_path, LcuClient, LcuEventPoller},
+    lcu::{lockfile_path, lockfile_path_nonblocking, LcuClient, LcuEventPoller},
     platform::{launch_league_client, league_game_process_ids, open_login_url},
     session,
     state::{AgentEvent, AppState, DiscordJoinResolution, DiscordPresenceMatchContext},
@@ -77,6 +77,7 @@ const RELAY_HARD_REVIVE_CONNECTED_AFTER: Duration = Duration::from_secs(45);
 const RELAY_HARD_REVIVE_CONNECTING_AFTER: Duration = Duration::from_secs(45);
 const RELAY_HARD_REVIVE_RECONNECTING_AFTER: Duration = Duration::from_secs(120);
 const RELAY_HARD_REVIVE_COOLDOWN: Duration = Duration::from_secs(60);
+const RELAY_NATIVE_WATCHDOG_STALE_AFTER: Duration = Duration::from_secs(90);
 
 static RELAY_PROGRESS_EPOCH: OnceLock<StdInstant> = OnceLock::new();
 static RELAY_PROGRESS_MS: AtomicU64 = AtomicU64::new(0);
@@ -110,6 +111,9 @@ static RELAY_HEARTBEAT_PHASE: AtomicU64 = AtomicU64::new(0);
 static RELAY_HEARTBEAT_WATCHDOG_TICK_COUNT: AtomicU64 = AtomicU64::new(0);
 static RELAY_LAST_HEARTBEAT_WATCHDOG_TICK_MS: AtomicU64 = AtomicU64::new(0);
 static RELAY_TRACE_THREAD: OnceLock<()> = OnceLock::new();
+static RELAY_NATIVE_WATCHDOG_ARMED: AtomicBool = AtomicBool::new(false);
+static RELAY_NATIVE_WATCHDOG_LAST_TICK_MS: AtomicU64 = AtomicU64::new(0);
+static RELAY_NATIVE_WATCHDOG_RESTARTING: AtomicBool = AtomicBool::new(false);
 
 const RELAY_TRACE_SAMPLE_INTERVAL: Duration = Duration::from_secs(5);
 const RELAY_TRACE_LOG_MAX_BYTES: u64 = 4 * 1024 * 1024;
@@ -337,6 +341,73 @@ fn append_relay_runtime_trace(snapshot: &str) -> std::io::Result<()> {
     writeln!(file, "{wall_ms} {snapshot}")
 }
 
+fn native_watchdog_tick() {
+    RELAY_NATIVE_WATCHDOG_LAST_TICK_MS.store(relay_progress_now_ms(), Ordering::Release);
+}
+
+#[cfg(windows)]
+fn schedule_native_agent_restart() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("current_exe failed: {error}"))?;
+    let executable = executable.to_string_lossy();
+    let command = format!(
+        "ping 127.0.0.1 -n 3 >nul & start \"\" \"{}\" --background",
+        executable.replace('"', "")
+    );
+    std::process::Command::new("cmd.exe")
+        .args(["/D", "/C", &command])
+        .creation_flags(0x08000000)
+        .spawn()
+        .map_err(|error| format!("restart helper spawn failed: {error}"))?;
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn schedule_native_agent_restart() -> Result<(), String> {
+    Err("native watchdog relaunch is only supported on Windows".into())
+}
+
+fn maybe_native_watchdog_restart() {
+    if !RELAY_NATIVE_WATCHDOG_ARMED.load(Ordering::Acquire) {
+        return;
+    }
+    let last_tick = RELAY_NATIVE_WATCHDOG_LAST_TICK_MS.load(Ordering::Acquire);
+    if last_tick == 0 {
+        return;
+    }
+    let age_ms = relay_progress_now_ms().saturating_sub(last_tick);
+    if age_ms < RELAY_NATIVE_WATCHDOG_STALE_AFTER.as_millis() as u64 {
+        return;
+    }
+    if RELAY_NATIVE_WATCHDOG_RESTARTING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    let detail = format!(
+        "native_runtime_watchdog_stale age_ms={} threshold_ms={} trace={}",
+        age_ms,
+        RELAY_NATIVE_WATCHDOG_STALE_AFTER.as_millis(),
+        relay_trace_snapshot()
+    );
+    let _ = append_relay_runtime_trace(&detail);
+    eprintln!("[yummi relay watchdog] {detail}");
+
+    match schedule_native_agent_restart() {
+        Ok(()) => {
+            // The helper waits before relaunching so the single-instance lock is
+            // released by the time the replacement process starts.
+            std::process::exit(78);
+        }
+        Err(error) => {
+            eprintln!("[yummi relay watchdog] self-restart scheduling failed: {error}");
+            RELAY_NATIVE_WATCHDOG_RESTARTING.store(false, Ordering::Release);
+            native_watchdog_tick();
+        }
+    }
+}
+
 fn ensure_relay_trace_thread_started() {
     RELAY_TRACE_THREAD.get_or_init(|| {
         let _ = std::thread::Builder::new()
@@ -346,6 +417,7 @@ fn ensure_relay_trace_thread_started() {
                 if let Err(error) = append_relay_runtime_trace(&relay_trace_snapshot()) {
                     eprintln!("[yummi relay trace] write failed: {error}");
                 }
+                maybe_native_watchdog_restart();
             });
     });
 }
@@ -864,6 +936,10 @@ impl RelaySupervisor {
         }
     }
 
+    pub(crate) fn note_native_watchdog_tick() {
+        native_watchdog_tick();
+    }
+
     pub(crate) async fn is_running(&self) -> bool {
         let control = self.control.lock().await;
         control
@@ -901,6 +977,8 @@ impl RelaySupervisor {
         user_initiated_login: bool,
     ) -> AgentResult<bool> {
         ensure_relay_trace_thread_started();
+        RELAY_NATIVE_WATCHDOG_ARMED.store(true, Ordering::Release);
+        native_watchdog_tick();
         let (generation, stop_rx) = {
             let mut control = state.relay.control.lock().await;
             let task_running = control
@@ -1179,6 +1257,7 @@ impl RelaySupervisor {
         let task = {
             let mut control = state.relay.control.lock().await;
             control.desired_running = false;
+            RELAY_NATIVE_WATCHDOG_ARMED.store(false, Ordering::Release);
             touch_relay_progress();
             control.generation = control.generation.wrapping_add(1);
             if let Some(stop_tx) = control.stop_tx.take() {
@@ -1282,6 +1361,7 @@ impl RelaySupervisor {
         // A deliberate server-side handover is not a transport failure. Keep
         // the app watchdog from restarting this displaced connection as well.
         control.desired_running = false;
+        RELAY_NATIVE_WATCHDOG_ARMED.store(false, Ordering::Release);
         touch_relay_progress();
         control.oauth_tx = None;
         true
@@ -3052,7 +3132,7 @@ async fn delete_uploaded_auto_replay(
     let monitoring_started = Instant::now();
     while monitoring_started.elapsed() < REPLAY_LOCAL_DELETE_DELAY {
         sleep(REPLAY_LOCAL_DELETE_MONITOR_INTERVAL).await;
-        if let Some(lockfile) = lockfile_path(config) {
+        if let Ok(Some(lockfile)) = lockfile_path_nonblocking(config).await {
             if let Ok(client) = LcuClient::from_lockfile(&lockfile)
                 .or_else(|_| LcuClient::from_lockfile_legacy(&lockfile))
             {

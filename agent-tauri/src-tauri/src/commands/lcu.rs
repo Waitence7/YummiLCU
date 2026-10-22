@@ -8,7 +8,7 @@ use crate::{
     lcu::{
         analyze_replay_fights, attach_cached_match_fights, empty_match_history,
         find_existing_replay_path, load_cached_match_fights, load_cached_match_history,
-        lockfile_path, remote_replay_analysis_job, remote_replay_analysis_viewer,
+        lockfile_path_nonblocking, remote_replay_analysis_job, remote_replay_analysis_viewer,
         replay_for_viewer, save_cached_match_fights, save_match_history_page,
         start_remote_replay_analysis, LcuClient, RoflMatchHint,
     },
@@ -19,7 +19,9 @@ use crate::{
 #[tauri::command]
 pub(crate) async fn recent_match(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let config = state.config.read().await.clone();
-    let path = lockfile_path(&config).ok_or("League Client가 실행 중이 아닙니다.")?;
+    let path = lockfile_path_nonblocking(&config)
+        .await?
+        .ok_or("League Client가 실행 중이 아닙니다.")?;
     let client = LcuClient::from_lockfile(&path)
         .or_else(|_| LcuClient::from_lockfile_legacy(&path))
         .map_err(|error| error.to_string())?;
@@ -31,7 +33,9 @@ pub(crate) async fn recent_match(state: State<'_, Arc<AppState>>) -> Result<Valu
 
 async fn history_client(state: &Arc<AppState>) -> Result<LcuClient, String> {
     let config = state.config.read().await.clone();
-    let path = lockfile_path(&config).ok_or("롤 클라이언트를 실행한 뒤 다시 확인하세요.")?;
+    let path = lockfile_path_nonblocking(&config)
+        .await?
+        .ok_or("롤 클라이언트를 실행한 뒤 다시 확인하세요.")?;
     LcuClient::from_lockfile(&path)
         .or_else(|_| LcuClient::from_lockfile_legacy(&path))
         .map_err(|error| error.to_string())

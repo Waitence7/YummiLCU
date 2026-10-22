@@ -8,7 +8,7 @@ use crate::{
     commands::agent::start_agent_inner,
     config::Config,
     discord_presence::watch_discord_presence,
-    lcu::{lockfile_path, LcuClient, LcuConnectionState},
+    lcu::{discover_lockfile_nonblocking, LcuClient, LcuConnectionState},
     platform::sync_windows_startup,
     relay::supervisor::RelaySupervisor,
     state::{AgentEvent, AppState},
@@ -367,6 +367,11 @@ async fn watch_relay_supervisor(app: AppHandle, state: Arc<AppState>) {
             break;
         }
 
+        // This tick is observed by a native std::thread watchdog. If the Tokio
+        // runtime stops scheduling altogether, that thread can relaunch the
+        // Agent without depending on this executor to recover itself.
+        RelaySupervisor::note_native_watchdog_tick();
+
         let hard_revived =
             match RelaySupervisor::hard_revive_if_unhealthy(app.clone(), state.clone()).await {
                 Ok(true) => true,
@@ -544,7 +549,16 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
         return LcuConnectionState::ClientStopped;
     }
     let config = state.config.read().await.clone();
-    let Some(path) = lockfile_path(&config) else {
+    let path = match discover_lockfile_nonblocking(&config).await {
+        Ok(discovery) => discovery.path,
+        Err(error) => {
+            state
+                .report_diagnostic("lcu", "lockfile_discovery_failed", &error)
+                .await;
+            None
+        }
+    };
+    let Some(path) = path else {
         return match LcuClient::probe_live_game().await {
             Ok(()) => LcuConnectionState::LoggedIn,
             Err(error) => {

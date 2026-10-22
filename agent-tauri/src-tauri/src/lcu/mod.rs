@@ -16,7 +16,10 @@ pub(crate) use fights::{
     save_cached_match_fights,
 };
 pub(crate) use history::{empty_match_history, load_cached_match_history, save_match_history_page};
-pub(crate) use lockfile::{discover_lockfile, lockfile_path, LockfileDiscovery};
+pub(crate) use lockfile::{
+    discover_lockfile_nonblocking, lockfile_path, lockfile_path_nonblocking,
+    LockfileDiscovery,
+};
 pub(crate) use remote_replay::{
     remote_replay_analysis_job, remote_replay_analysis_viewer, start_remote_replay_analysis,
 };

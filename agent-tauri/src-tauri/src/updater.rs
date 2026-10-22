@@ -23,7 +23,7 @@ use crate::{
     config::Config,
     error::{AgentError, AgentResult},
     http_diagnostics::{safe_url, status_detail, transport_detail},
-    lcu::{lockfile_path, LcuClient},
+    lcu::{lockfile_path_nonblocking, LcuClient},
     state::AppState,
 };
 
@@ -1046,7 +1046,7 @@ async fn wait_for_update_check(
 }
 
 async fn update_block_reason(config: &Config) -> Result<Option<String>, String> {
-    let Some(path) = lockfile_path(config) else {
+    let Some(path) = lockfile_path_nonblocking(config).await? else {
         return Ok(None);
     };
     let client = LcuClient::from_lockfile(&path)
