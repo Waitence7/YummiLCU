@@ -1496,7 +1496,7 @@ async fn run_supervisor(
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ConnectionEnd {
     Stopped,
     SessionConflict,
@@ -2908,6 +2908,7 @@ where
             }
         }
         IncomingMessage::Pong
+        | IncomingMessage::ForceReconnect { .. }
         | IncomingMessage::ServerHello { .. }
         | IncomingMessage::EventAck { .. }
         | IncomingMessage::LiveDeltaResend { .. }
