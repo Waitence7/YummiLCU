@@ -84,6 +84,24 @@ const BETA_INSTALLER_URL: &str =
     "https://yummi.duckdns.org/agent/releases/tauri/beta/latest-setup.exe";
 const AUTO_UPDATE_INITIAL_DELAY: Duration = Duration::from_secs(2);
 const AUTO_UPDATE_RECHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const AUTO_UPDATE_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(10),
+    Duration::from_secs(30),
+    Duration::from_secs(60),
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+];
+
+fn next_update_check_delay(consecutive_failures: &mut usize, check_succeeded: bool) -> Duration {
+    if check_succeeded {
+        *consecutive_failures = 0;
+        return AUTO_UPDATE_RECHECK_INTERVAL;
+    }
+    let delay =
+        AUTO_UPDATE_RETRY_DELAYS[(*consecutive_failures).min(AUTO_UPDATE_RETRY_DELAYS.len() - 1)];
+    *consecutive_failures = (*consecutive_failures + 1).min(AUTO_UPDATE_RETRY_DELAYS.len());
+    delay
+}
 
 #[cfg(windows)]
 struct WindowsUpdateMutex(windows::Win32::Foundation::HANDLE);
@@ -847,7 +865,9 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
     if !wait_for_update_check(&mut shutdown, AUTO_UPDATE_INITIAL_DELAY).await {
         return;
     }
+    let mut consecutive_failures = 0;
     loop {
+        let mut check_succeeded = true;
         let config = state.config.read().await.clone();
         if !config.check_updates_on_startup {
             state
@@ -858,7 +878,7 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
                 .report_update_diagnostic("blocked", "auto_update_enabled=false", None)
                 .await;
         } else if let Some(url) = config.update_manifest_url.clone() {
-            check_and_apply_update(&url, &config, &app, &state).await;
+            check_succeeded = check_and_apply_update(&url, &config, &app, &state).await;
             if *shutdown.borrow() {
                 return;
             }
@@ -867,7 +887,8 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
                 .report_update_diagnostic("blocked", "manifest_url_missing", None)
                 .await;
         }
-        if !wait_for_update_check(&mut shutdown, AUTO_UPDATE_RECHECK_INTERVAL).await {
+        let delay = next_update_check_delay(&mut consecutive_failures, check_succeeded);
+        if !wait_for_update_check(&mut shutdown, delay).await {
             return;
         }
     }
@@ -878,7 +899,7 @@ pub(crate) async fn check_and_apply_update(
     config: &Config,
     app: &AppHandle,
     state: &AppState,
-) {
+) -> bool {
     state
         .report_update_diagnostic("update_check", "scheduled", None)
         .await;
@@ -896,7 +917,7 @@ pub(crate) async fn check_and_apply_update(
             state
                 .report_unexpected_error("updater", "manifest_url_invalid", &summary)
                 .await;
-            return;
+            return false;
         }
     };
     if parsed.scheme() != "https"
@@ -921,7 +942,7 @@ pub(crate) async fn check_and_apply_update(
                 "manifest URL failed security validation",
             )
             .await;
-        return;
+        return false;
     }
     let client = match Client::builder()
         .https_only(true)
@@ -942,7 +963,7 @@ pub(crate) async fn check_and_apply_update(
             state
                 .report_unexpected_error("updater", "http_client_build_failed", &summary)
                 .await;
-            return;
+            return false;
         }
     };
     let bytes = match download_limited(&client, parsed, MAX_UPDATE_MANIFEST_BYTES).await {
@@ -961,7 +982,7 @@ pub(crate) async fn check_and_apply_update(
             state
                 .log(app, format!("자동 업데이트 확인 실패: {summary}"))
                 .await;
-            return;
+            return false;
         }
     };
     let manifest = match parse_signed_manifest(&bytes) {
@@ -988,7 +1009,7 @@ pub(crate) async fn check_and_apply_update(
                     )
                     .await;
             }
-            return;
+            return false;
         }
     };
     if let Some(target) = manifest.tauri.clone() {
@@ -1031,8 +1052,10 @@ pub(crate) async fn check_and_apply_update(
                     )),
                 )
                 .await;
+            return false;
         }
     }
+    true
 }
 
 async fn wait_for_update_check(
@@ -1081,6 +1104,32 @@ fn blocks_update_for_gameflow_phase(phase: &str) -> bool {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
+
+    #[test]
+    fn failed_update_checks_retry_quickly_then_stay_at_five_minutes() {
+        let mut failures = 0;
+        let delays: Vec<_> = (0..8)
+            .map(|_| next_update_check_delay(&mut failures, false).as_secs())
+            .collect();
+        assert_eq!(delays, [10, 30, 60, 120, 300, 300, 300, 300]);
+    }
+
+    #[test]
+    fn successful_update_check_resets_failure_backoff() {
+        let mut failures = 0;
+        for _ in 0..8 {
+            next_update_check_delay(&mut failures, false);
+        }
+        assert_eq!(
+            next_update_check_delay(&mut failures, true),
+            AUTO_UPDATE_RECHECK_INTERVAL
+        );
+        assert_eq!(failures, 0);
+        assert_eq!(
+            next_update_check_delay(&mut failures, false),
+            Duration::from_secs(10)
+        );
+    }
 
     #[test]
     fn update_manifest_keeps_public_schema() {
