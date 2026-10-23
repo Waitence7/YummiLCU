@@ -40,7 +40,7 @@ use super::{
     command_auth,
     protocol::{
         Action, AgentDiagnosticReport, AgentEventMessage, AgentHelloMessage, AgentLogChunk,
-        AuthMessage, CommandResult, IncomingMessage, OAuthCodeMessage, PongMessage,
+        AuthMessage, CommandResult, DeviceProofMessage, IncomingMessage, OAuthCodeMessage, PongMessage,
         UnexpectedErrorReport, UpdateDiagnosticReport, MAX_RELAY_MESSAGE_BYTES,
     },
 };
@@ -1746,14 +1746,29 @@ async fn connect_once(
         .log(app, format!("Relay WebSocket 연결 성공 connection_id={connection_id}"))
         .await;
 
+    let device_identity = session::load_or_create_device_identity()?;
+    let device_public_key = device_identity.public_key_b64();
+    let device_fingerprint = device_identity.fingerprint();
     send_relay_message(
         &mut websocket,
         Message::Text(
-            serde_json::to_string(&AuthMessage::new(&session.ws_token, &connection_id))?.into(),
+            serde_json::to_string(&AuthMessage::new(
+                &session.ws_token,
+                &connection_id,
+                device_identity.device_id(),
+                &device_public_key,
+            ))?
+            .into(),
         ),
         "Relay 인증 메시지 전송 실패",
     )
     .await?;
+    state
+        .record_flight(
+            "device_identity",
+            format!("advertised fingerprint={}", &device_fingerprint[..16]),
+        )
+        .await;
     state.log(app, "Relay 인증 메시지 전송 완료").await;
     if *stop_rx.borrow() {
         let _ = websocket.close(None).await;
@@ -2178,6 +2193,32 @@ async fn connect_once(
                                     )
                                     .await;
                                 let _ = lcu_poll_worker.live_game_resync.send(()).await;
+                            }
+                            IncomingMessage::DeviceChallenge { challenge_id, nonce } => {
+                                let signature = device_identity.sign_challenge(
+                                    challenge_id,
+                                    nonce,
+                                    &session.session_id,
+                                    &connection_id,
+                                );
+                                let proof = DeviceProofMessage::new(
+                                    challenge_id,
+                                    device_identity.device_id(),
+                                    &device_public_key,
+                                    signature,
+                                );
+                                send_shared_relay_message(
+                                    &writer,
+                                    Message::Text(serde_json::to_string(&proof)?.into()),
+                                    "기기 인증 proof 전송 실패",
+                                )
+                                .await?;
+                                state
+                                    .record_flight(
+                                        "device_identity",
+                                        format!("proof_sent challenge={}", &challenge_id[..8]),
+                                    )
+                                    .await;
                             }
                             IncomingMessage::ServerHello { protocol_version, capabilities } => {
                                 durable_replay_enabled = *protocol_version >= 1
@@ -3143,6 +3184,7 @@ where
         IncomingMessage::Pong
         | IncomingMessage::ForceReconnect { .. }
         | IncomingMessage::ServerHello { .. }
+        | IncomingMessage::DeviceChallenge { .. }
         | IncomingMessage::EventAck { .. }
         | IncomingMessage::LiveDeltaResend { .. }
         | IncomingMessage::LiveDeltaResync { .. }

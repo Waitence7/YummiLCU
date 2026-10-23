@@ -8,8 +8,10 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
@@ -28,6 +30,47 @@ pub(crate) struct Session {
     relay_base_url: String,
 }
 
+#[derive(Serialize, Deserialize)]
+struct StoredDeviceIdentity {
+    device_id: String,
+    private_key: String,
+}
+
+pub(crate) struct DeviceIdentity {
+    device_id: String,
+    signing_key: SigningKey,
+}
+
+impl DeviceIdentity {
+    pub(crate) fn device_id(&self) -> &str {
+        &self.device_id
+    }
+
+    pub(crate) fn public_key_b64(&self) -> String {
+        B64.encode(self.signing_key.verifying_key().to_bytes())
+    }
+
+    pub(crate) fn fingerprint(&self) -> String {
+        let digest = Sha256::digest(self.signing_key.verifying_key().to_bytes());
+        digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    pub(crate) fn sign_challenge(
+        &self,
+        challenge_id: &str,
+        nonce: &str,
+        session_id: &str,
+        connection_id: &str,
+    ) -> String {
+        let public_key = self.public_key_b64();
+        let message = format!(
+            "yummi-device-proof-v1\0{challenge_id}\0{nonce}\0{session_id}\0{connection_id}\0{}\0{public_key}",
+            self.device_id
+        );
+        B64.encode(self.signing_key.sign(message.as_bytes()).to_bytes())
+    }
+}
+
 impl Drop for Session {
     fn drop(&mut self) {
         // The token is generated as ASCII; NUL replacement preserves String invariants.
@@ -36,6 +79,7 @@ impl Drop for Session {
 }
 
 const MAX_SESSION_FILE_BYTES: u64 = 64 * 1024;
+const MAX_DEVICE_IDENTITY_FILE_BYTES: u64 = 16 * 1024;
 
 fn data_dir() -> PathBuf {
     dirs::data_local_dir()
@@ -49,6 +93,130 @@ fn path() -> PathBuf {
 
 fn auto_login_suppression_path() -> PathBuf {
     data_dir().join("manual-logout.flag")
+}
+
+fn device_identity_path() -> PathBuf {
+    data_dir().join("device-identity.json")
+}
+
+fn save_device_identity(identity: &StoredDeviceIdentity) -> AgentResult<()> {
+    let path = device_identity_path();
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(AgentError::Session(
+            "기기 인증 키 저장 경로가 올바르지 않습니다.".into(),
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut plain = serde_json::to_vec(identity)?;
+    let encrypted = dpapi::protect(&plain);
+    plain.fill(0);
+    let encrypted =
+        encrypted.ok_or_else(|| AgentError::Session("DPAPI 기기 인증 키 암호화 실패".into()))?;
+    let serialized = serde_json::to_vec(&json!({"V": 1, "Payload": encrypted}))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| AgentError::Session("기기 인증 키 저장 경로 오류".into()))?;
+    let temporary = parent.join(format!(".device-identity-{}.tmp", Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = fs::File::options()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&serialized)?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)
+    })();
+    if let Err(error) = result {
+        let _ = fs::remove_file(&temporary);
+        return Err(AgentError::Session(format!(
+            "기기 인증 키 저장 실패: {error}"
+        )));
+    }
+    Ok(())
+}
+
+fn decode_device_identity(mut stored: StoredDeviceIdentity) -> AgentResult<DeviceIdentity> {
+    Uuid::parse_str(&stored.device_id)
+        .map_err(|_| AgentError::Session("기기 ID가 올바르지 않습니다.".into()))?;
+    let mut raw = B64
+        .decode(stored.private_key.trim())
+        .map_err(|_| AgentError::Session("기기 인증 키 형식이 올바르지 않습니다.".into()))?;
+    unsafe { stored.private_key.as_bytes_mut().fill(0) };
+    if raw.len() != 32 {
+        raw.fill(0);
+        return Err(AgentError::Session(
+            "기기 인증 키 길이가 올바르지 않습니다.".into(),
+        ));
+    }
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&raw);
+    raw.fill(0);
+    let signing_key = SigningKey::from_bytes(&seed);
+    seed.fill(0);
+    Ok(DeviceIdentity {
+        device_id: stored.device_id,
+        signing_key,
+    })
+}
+
+pub(crate) fn load_or_create_device_identity() -> AgentResult<DeviceIdentity> {
+    let path = device_identity_path();
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) => {
+            if !metadata.is_file()
+                || metadata.file_type().is_symlink()
+                || metadata.len() > MAX_DEVICE_IDENTITY_FILE_BYTES
+            {
+                return Err(AgentError::Session(
+                    "기기 인증 키 파일이 올바르지 않습니다.".into(),
+                ));
+            }
+            let mut raw = Vec::new();
+            fs::File::open(&path)?
+                .take(MAX_DEVICE_IDENTITY_FILE_BYTES + 1)
+                .read_to_end(&mut raw)?;
+            if raw.len() as u64 > MAX_DEVICE_IDENTITY_FILE_BYTES {
+                return Err(AgentError::Session(
+                    "기기 인증 키 파일이 너무 큽니다.".into(),
+                ));
+            }
+            let wrapper: Value = serde_json::from_slice(&raw)?;
+            raw.fill(0);
+            let payload = wrapper
+                .get("Payload")
+                .and_then(Value::as_str)
+                .ok_or_else(|| AgentError::Session("기기 인증 키 payload가 없습니다.".into()))?;
+            let mut plain = dpapi::unprotect(payload)
+                .ok_or_else(|| AgentError::Session("기기 인증 키 DPAPI 복호화 실패".into()))?;
+            let stored = serde_json::from_slice::<StoredDeviceIdentity>(&plain);
+            plain.fill(0);
+            decode_device_identity(stored?)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let mut seed = [0u8; 32];
+            getrandom::fill(&mut seed).map_err(|error| {
+                AgentError::Session(format!("기기 인증 키 난수 생성 실패: {error}"))
+            })?;
+            let signing_key = SigningKey::from_bytes(&seed);
+            seed.fill(0);
+            let identity = DeviceIdentity {
+                device_id: Uuid::new_v4().to_string(),
+                signing_key,
+            };
+            let mut private_key = identity.signing_key.to_bytes();
+            let mut stored = StoredDeviceIdentity {
+                device_id: identity.device_id.clone(),
+                private_key: B64.encode(private_key),
+            };
+            private_key.fill(0);
+            save_device_identity(&stored)?;
+            unsafe { stored.private_key.as_bytes_mut().fill(0) };
+            Ok(identity)
+        }
+        Err(error) => Err(AgentError::Session(error.to_string())),
+    }
 }
 
 pub(crate) fn auto_login_suppressed() -> bool {

@@ -44,6 +44,8 @@ pub(crate) enum IncomingMessage {
         #[serde(default)]
         capabilities: BTreeMap<String, bool>,
     },
+    #[serde(rename = "device_challenge")]
+    DeviceChallenge { challenge_id: String, nonce: String },
     #[serde(rename = "event_ack")]
     EventAck { event_id: String },
     #[serde(rename = "live_delta_resend")]
@@ -146,6 +148,16 @@ impl IncomingMessage {
                         .any(|key| key.is_empty() || key.len() > 64) =>
             {
                 Err("invalid Relay server hello")
+            }
+            Self::DeviceChallenge {
+                challenge_id,
+                nonce,
+            } if Uuid::parse_str(challenge_id).is_err()
+                || nonce.len() < 32
+                || nonce.len() > 256
+                || !nonce.is_ascii() =>
+            {
+                Err("invalid device challenge")
             }
             Self::SessionBound {
                 discord_id,
@@ -342,14 +354,52 @@ pub(crate) struct AuthMessage<'a> {
     message_type: &'static str,
     ws_token: &'a str,
     connection_id: &'a str,
+    device_proof_version: u8,
+    device_id: &'a str,
+    device_public_key: &'a str,
 }
 
 impl<'a> AuthMessage<'a> {
-    pub(crate) fn new(ws_token: &'a str, connection_id: &'a str) -> Self {
+    pub(crate) fn new(
+        ws_token: &'a str,
+        connection_id: &'a str,
+        device_id: &'a str,
+        device_public_key: &'a str,
+    ) -> Self {
         Self {
             message_type: "auth",
             ws_token,
             connection_id,
+            device_proof_version: 1,
+            device_id,
+            device_public_key,
+        }
+    }
+}
+
+#[derive(Serialize)]
+pub(crate) struct DeviceProofMessage<'a> {
+    #[serde(rename = "type")]
+    message_type: &'static str,
+    challenge_id: &'a str,
+    device_id: &'a str,
+    device_public_key: &'a str,
+    signature: String,
+}
+
+impl<'a> DeviceProofMessage<'a> {
+    pub(crate) fn new(
+        challenge_id: &'a str,
+        device_id: &'a str,
+        device_public_key: &'a str,
+        signature: String,
+    ) -> Self {
+        Self {
+            message_type: "device_proof",
+            challenge_id,
+            device_id,
+            device_public_key,
+            signature,
         }
     }
 }

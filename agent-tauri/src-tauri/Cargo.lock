@@ -5674,6 +5674,7 @@ dependencies = [
  "discord-presence",
  "ed25519-dalek",
  "futures-util",
+ "getrandom 0.3.4",
  "native-tls",
  "reqwest 0.12.28",
  "ruzstd",

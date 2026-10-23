@@ -14,6 +14,7 @@ class OAuthAutoBindTests(unittest.IsolatedAsyncioTestCase):
         session_id = "12345678-1234-1234-1234-123456789012"
         redis = SimpleNamespace(
             getdel=AsyncMock(return_value=session_id),
+            get=AsyncMock(return_value=None),
             set=AsyncMock(),
             delete=AsyncMock(),
         )

@@ -43,6 +43,9 @@ class ConnectionManager:
         self._ws_session: dict[int, str] = {}  # id(ws) -> session_id (인증 전)
         self._ws_session_id: dict[int, str] = {}  # id(ws) -> session_id (TTL 갱신용)
         self._ws_connection_id: dict[int, str] = {}
+        self._ws_device_challenge: dict[int, dict[str, str]] = {}
+        self._ws_device_fingerprint: dict[int, str] = {}
+        self._ws_device_id: dict[int, str] = {}
         self._ws_last_heartbeat: dict[int, float] = {}
         self._last_disconnect_at: dict[int, float] = {}
         self._reconnect_count: dict[int, int] = {}
@@ -238,6 +241,9 @@ class ConnectionManager:
                 del self._active_session_ws[session_id]
         self._ws_session_id.pop(wid, None)
         self._ws_connection_id.pop(wid, None)
+        self._ws_device_challenge.pop(wid, None)
+        self._ws_device_fingerprint.pop(wid, None)
+        self._ws_device_id.pop(wid, None)
         self._ws_last_heartbeat.pop(wid, None)
 
     def session_ws_token(self, session_id: str) -> str | None:
@@ -252,6 +258,53 @@ class ConnectionManager:
 
     def ws_connection_id(self, ws: WebSocket) -> str | None:
         return self._ws_connection_id.get(id(ws))
+
+    def set_device_challenge(
+        self,
+        ws: WebSocket,
+        *,
+        challenge_id: str,
+        nonce: str,
+        device_id: str,
+        public_key: str,
+    ) -> None:
+        self._ws_device_challenge[id(ws)] = {
+            "challenge_id": challenge_id,
+            "nonce": nonce,
+            "device_id": device_id,
+            "public_key": public_key,
+            "issued_at_ms": str(int(time.time() * 1000)),
+        }
+
+    def device_challenge_for_ws(self, ws: WebSocket) -> dict[str, str] | None:
+        challenge = self._ws_device_challenge.get(id(ws))
+        return dict(challenge) if challenge is not None else None
+
+    def device_proof_required_for_ws(self, ws: WebSocket) -> bool:
+        return id(ws) in self._ws_device_challenge
+
+    def mark_device_verified(
+        self, ws: WebSocket, *, fingerprint: str, device_id: str
+    ) -> None:
+        wid = id(ws)
+        self._ws_device_fingerprint[wid] = fingerprint
+        self._ws_device_id[wid] = device_id
+        self._ws_device_challenge.pop(wid, None)
+
+    def device_fingerprint_for_ws(self, ws: WebSocket) -> str | None:
+        return self._ws_device_fingerprint.get(id(ws))
+
+    def device_id_for_ws(self, ws: WebSocket) -> str | None:
+        return self._ws_device_id.get(id(ws))
+
+    def agent_info_for_ws(self, ws: WebSocket) -> dict[str, Any] | None:
+        wid = id(ws)
+        discord_id = self._ws_discord.get(wid)
+        if discord_id is not None:
+            info = self._agent_info.get(discord_id)
+            return dict(info) if info is not None else None
+        info = self._pending_agent_info_by_ws.get(wid)
+        return dict(info) if info is not None else None
 
     def _cancel_pending_for_discord_locked(self, discord_id: int) -> None:
         for key in [k for k in self._pending_results if k[0] == discord_id]:

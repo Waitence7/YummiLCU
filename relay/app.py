@@ -8,6 +8,9 @@ LCU Relay FastAPI — OAuth, 에이전트 WebSocket, 봇 internal HTTP.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
 import html
 import json
 import logging
@@ -25,6 +28,8 @@ import redis.asyncio as redis
 from fastapi import FastAPI, Header, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from relay import auth, config
 from relay.audit_archive import append_archive_record
@@ -57,9 +62,10 @@ OAUTH_LINK_PENDING_KEY = "relay:oauth_link_pending:{session_id}"
 DISCORD_PROFILE_KEY = "relay:discord_profile:{session_id}"
 DISCORD_USER_PROFILE_KEY = "relay:discord_user_profile:{discord_id}"
 SESSION_AUTH_SOURCE_KEY = "relay:session_auth_source:{session_id}"
-DEVICE_SEEN_KEY = "relay:device_seen:{discord_id}:{session_id}"
-DEVICE_TRUSTED_KEY = "relay:device_trusted:{discord_id}:{session_id}"
-NEW_DEVICE_NOTICE_KEY = "relay:new_device_notice:{discord_id}:{session_id}"
+SESSION_DEVICE_FINGERPRINT_KEY = "relay:session_device_fingerprint:{session_id}"
+DEVICE_SEEN_KEY = "relay:device_seen:{discord_id}:{device_key}"
+DEVICE_TRUSTED_KEY = "relay:device_trusted:{discord_id}:{device_key}"
+NEW_DEVICE_NOTICE_KEY = "relay:new_device_notice:{discord_id}:{device_key}"
 OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
 OAUTH_LINK_CODE_TTL_SEC = 600
@@ -293,34 +299,62 @@ def _session_auth_source_redis_key(session_id: str) -> str:
     return SESSION_AUTH_SOURCE_KEY.format(session_id=session_id)
 
 
-def _device_seen_redis_key(discord_id: int, session_id: str) -> str:
-    return DEVICE_SEEN_KEY.format(discord_id=int(discord_id), session_id=session_id)
+def _session_device_fingerprint_redis_key(session_id: str) -> str:
+    return SESSION_DEVICE_FINGERPRINT_KEY.format(session_id=session_id)
 
 
-def _device_trusted_redis_key(discord_id: int, session_id: str) -> str:
-    return DEVICE_TRUSTED_KEY.format(discord_id=int(discord_id), session_id=session_id)
+def _device_seen_redis_key(discord_id: int, device_key: str) -> str:
+    return DEVICE_SEEN_KEY.format(discord_id=int(discord_id), device_key=device_key)
 
 
-def _new_device_notice_redis_key(discord_id: int, session_id: str) -> str:
-    return NEW_DEVICE_NOTICE_KEY.format(discord_id=int(discord_id), session_id=session_id)
+def _device_trusted_redis_key(discord_id: int, device_key: str) -> str:
+    return DEVICE_TRUSTED_KEY.format(discord_id=int(discord_id), device_key=device_key)
+
+
+def _new_device_notice_redis_key(discord_id: int, device_key: str) -> str:
+    return NEW_DEVICE_NOTICE_KEY.format(discord_id=int(discord_id), device_key=device_key)
+
+
+async def _session_device_key(r: redis.Redis, session_id: str) -> str:
+    fingerprint = await r.get(_session_device_fingerprint_redis_key(session_id))
+    if isinstance(fingerprint, bytes):
+        fingerprint = fingerprint.decode("ascii", errors="ignore")
+    if isinstance(fingerprint, str) and re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return fingerprint
+    # Backward compatibility for pre-device-key Agents. Existing Redis trust keys
+    # were keyed directly by session UUID, so preserve that namespace until old
+    # clients age out.
+    return session_id
 
 
 async def _mark_device_trusted(r: redis.Redis, discord_id: int, session_id: str) -> None:
     now_ms = str(int(time.time() * 1000))
+    device_key = await _session_device_key(r, session_id)
     # These keys are independent markers; avoid requiring Redis pipeline support
     # so lightweight test doubles and degraded clients can use the same path.
-    await r.set(_device_seen_redis_key(discord_id, session_id), now_ms)
-    await r.set(_device_trusted_redis_key(discord_id, session_id), now_ms)
+    await r.set(_device_seen_redis_key(discord_id, device_key), now_ms)
+    await r.set(_device_trusted_redis_key(discord_id, device_key), now_ms)
 
 
 async def _session_trust_level(r: redis.Redis, discord_id: int, session_id: str) -> str:
-    if await r.exists(_device_trusted_redis_key(discord_id, session_id)):
+    device_key = await _session_device_key(r, session_id)
+    if await r.exists(_device_trusted_redis_key(discord_id, device_key)):
+        return "trusted"
+    if device_key != session_id and await r.exists(
+        _device_trusted_redis_key(discord_id, session_id)
+    ):
+        await _mark_device_trusted(r, discord_id, session_id)
         return "trusted"
     source = await r.get(_session_auth_source_redis_key(session_id))
+    if isinstance(source, bytes):
+        source = source.decode("utf-8", errors="ignore")
     if source == "auto":
         return "new_device"
-    # Missing source is a pre-feature session that could only have been created
-    # through the old Discord OAuth/link flow, so preserve it as trusted.
+    # OAuth and pre-feature sessions are already ownership-authenticated. When a
+    # device-key capable Agent first upgrades, enroll its verified fingerprint so
+    # future session rotation no longer defines device identity.
+    if device_key != session_id:
+        await _mark_device_trusted(r, discord_id, session_id)
     return "trusted"
 
 
@@ -365,6 +399,7 @@ async def _refresh_session_ttl(r: redis.Redis, session_id: str) -> None:
     pipe.expire(_status_redis_key(session_id), ttl)
     pipe.expire(_ws_token_redis_key(session_id), ttl)
     pipe.expire(_session_auth_source_redis_key(session_id), ttl)
+    pipe.expire(_session_device_fingerprint_redis_key(session_id), ttl)
     await pipe.execute()
 
 
@@ -1532,7 +1567,8 @@ async def _send_new_device_login_notice(
     riot_id: str | None,
     source: str,
 ) -> None:
-    notice_key = _new_device_notice_redis_key(discord_id, session_id)
+    device_key = await _session_device_key(r, session_id)
+    notice_key = _new_device_notice_redis_key(discord_id, device_key)
     if await r.exists(notice_key):
         return
     await conn.send_bot_event(
@@ -1544,6 +1580,7 @@ async def _send_new_device_login_notice(
             "auth_source": source,
             "logged_in_at_ms": int(time.time() * 1000),
             "device_session_id": session_id,
+            "device_fingerprint": device_key if device_key != session_id else None,
         }
     )
 
@@ -2657,6 +2694,57 @@ def _agent_update_report(data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _verify_device_proof_payload(
+    challenge: dict[str, str],
+    data: dict[str, Any],
+    *,
+    session_id: str,
+    connection_id: str,
+) -> tuple[str, str] | None:
+    challenge_id = data.get("challenge_id")
+    device_id = data.get("device_id")
+    public_key_b64 = data.get("device_public_key")
+    signature_b64 = data.get("signature")
+    if (
+        not isinstance(challenge_id, str)
+        or challenge_id != challenge.get("challenge_id")
+        or not isinstance(device_id, str)
+        or device_id != challenge.get("device_id")
+        or not isinstance(public_key_b64, str)
+        or public_key_b64 != challenge.get("public_key")
+        or not isinstance(signature_b64, str)
+    ):
+        return None
+    try:
+        uuid.UUID(device_id)
+        public_key = base64.b64decode(public_key_b64, validate=True)
+        signature = base64.b64decode(signature_b64, validate=True)
+    except (ValueError, TypeError, binascii.Error):
+        return None
+    if len(public_key) != 32 or len(signature) != 64:
+        return None
+    nonce = challenge.get("nonce")
+    issued_at_ms = challenge.get("issued_at_ms")
+    if not isinstance(nonce, str) or not isinstance(issued_at_ms, str):
+        return None
+    try:
+        challenge_age_ms = int(time.time() * 1000) - int(issued_at_ms)
+    except ValueError:
+        return None
+    if challenge_age_ms < -5_000 or challenge_age_ms > 30_000:
+        return None
+    message = (
+        "yummi-device-proof-v1\0"
+        f"{challenge_id}\0{nonce}\0{session_id}\0{connection_id}\0"
+        f"{device_id}\0{public_key_b64}"
+    ).encode("utf-8")
+    try:
+        Ed25519PublicKey.from_public_bytes(public_key).verify(signature, message)
+    except (InvalidSignature, ValueError):
+        return None
+    return hashlib.sha256(public_key).hexdigest(), device_id
+
+
 def _should_accept_agent_error(discord_id: int, report: dict[str, Any]) -> bool:
     now = time.monotonic()
     fingerprint = "|".join((
@@ -2694,6 +2782,80 @@ async def _handle_agent_message(
 
     msg_type = data.get("type")
     if not isinstance(msg_type, str):
+        return
+    if msg_type == "device_proof":
+        challenge = conn.device_challenge_for_ws(websocket)
+        session_id = conn.ws_session_id(websocket)
+        connection_id = conn.ws_connection_id(websocket)
+        if challenge is None or not session_id or not connection_id:
+            await websocket.close(code=1008)
+            return
+        verified = _verify_device_proof_payload(
+            challenge,
+            data,
+            session_id=session_id,
+            connection_id=connection_id,
+        )
+        if verified is None:
+            logger.warning(
+                "기기 challenge 서명 검증 실패 session=%s connection_id=%s",
+                session_id[:8],
+                connection_id,
+            )
+            await websocket.close(code=1008)
+            return
+        fingerprint, device_id = verified
+        conn.mark_device_verified(
+            websocket, fingerprint=fingerprint, device_id=device_id
+        )
+        r: redis.Redis = websocket.app.state.redis
+        await r.set(
+            _session_device_fingerprint_redis_key(session_id),
+            fingerprint,
+            ex=config.relay_session_ttl_sec(),
+        )
+        raw_discord_id = await r.get(_session_redis_key(session_id))
+        if raw_discord_id is not None:
+            try:
+                saved_discord_id = int(raw_discord_id)
+            except (TypeError, ValueError):
+                saved_discord_id = 0
+            if saved_discord_id > 0:
+                legacy_notice_key = _new_device_notice_redis_key(
+                    saved_discord_id, session_id
+                )
+                fingerprint_notice_key = _new_device_notice_redis_key(
+                    saved_discord_id, fingerprint
+                )
+                if await r.exists(legacy_notice_key) and not await r.exists(
+                    fingerprint_notice_key
+                ):
+                    await r.set(
+                        fingerprint_notice_key, "1", ex=30 * 24 * 60 * 60
+                    )
+                trust_level = await _session_trust_level(
+                    r, saved_discord_id, session_id
+                )
+                await _try_bind_discord(
+                    conn,
+                    r,
+                    session_id,
+                    saved_discord_id,
+                    trust_level=trust_level,
+                )
+                if conn.ws_session_id(websocket) is None:
+                    return
+        logger.info(
+            "기기 challenge 검증 완료 session=%s fingerprint=%s",
+            session_id[:8],
+            fingerprint[:16],
+        )
+        info = conn.agent_info_for_ws(websocket)
+        if info is not None:
+            replay = {"type": "agent_hello", **info}
+            await _handle_agent_message(
+                websocket, conn, json.dumps(replay, separators=(",", ":"))
+            )
         return
     if msg_type in _LCU_DATA_MESSAGE_TYPES:
         discord_id = conn.discord_id_for_ws(websocket)
@@ -3099,6 +3261,10 @@ async def _handle_agent_message(
         await websocket.send_json(_server_hello(info))
         discord_id = await conn.set_agent_info_for_ws(websocket, info)
         r: redis.Redis = websocket.app.state.redis
+        if conn.device_challenge_for_ws(websocket) is not None:
+            # A device-key capable Agent must prove possession of its private key
+            # before any saved-session bind or PUUID-based automatic login.
+            return
         auto_login_riot_id: str | None = None
         auto_login_source = "unknown"
         if discord_id is None and info.get("lcu_ready") is True:
@@ -3123,6 +3289,7 @@ async def _handle_agent_message(
                         )
                         return
                     ttl = config.relay_session_ttl_sec()
+                    device_key = await _session_device_key(r, session_id)
                     pipe = r.pipeline()
                     pipe.set(
                         _session_redis_key(session_id),
@@ -3132,7 +3299,7 @@ async def _handle_agent_message(
                     pipe.set(_status_redis_key(session_id), "ok", ex=ttl)
                     pipe.set(_session_auth_source_redis_key(session_id), "auto", ex=ttl)
                     pipe.set(
-                        _device_seen_redis_key(resolved_discord_id, session_id),
+                        _device_seen_redis_key(resolved_discord_id, device_key),
                         str(int(time.time() * 1000)),
                         nx=True,
                     )
@@ -3501,8 +3668,44 @@ async def ws_agent(
         session_id, websocket, ws_token, connection_id=connection_id
     )
 
+    proof_version = auth_payload.get("device_proof_version")
+    raw_device_id = auth_payload.get("device_id")
+    raw_device_public_key = auth_payload.get("device_public_key")
+    has_device_proof_fields = any(
+        value is not None
+        for value in (proof_version, raw_device_id, raw_device_public_key)
+    )
+    device_proof_required = False
+    if has_device_proof_fields:
+        try:
+            device_id = str(uuid.UUID(str(raw_device_id)))
+            public_key = base64.b64decode(raw_device_public_key, validate=True)
+        except (TypeError, ValueError, AttributeError, binascii.Error):
+            await websocket.close(code=1008)
+            return
+        if proof_version != 1 or len(public_key) != 32:
+            await websocket.close(code=1008)
+            return
+        challenge_id = str(uuid.uuid4())
+        nonce = secrets.token_urlsafe(32)
+        conn.set_device_challenge(
+            websocket,
+            challenge_id=challenge_id,
+            nonce=nonce,
+            device_id=device_id,
+            public_key=raw_device_public_key,
+        )
+        await websocket.send_json(
+            {
+                "type": "device_challenge",
+                "challenge_id": challenge_id,
+                "nonce": nonce,
+            }
+        )
+        device_proof_required = True
+
     raw = await r.get(_session_redis_key(session_id))
-    if raw is not None:
+    if raw is not None and not device_proof_required:
         try:
             discord_id = int(raw)
             trust_level = await _session_trust_level(r, discord_id, session_id)
@@ -3814,8 +4017,9 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
                 session_id = str(uuid.UUID(raw_session_id))
             except ValueError:
                 return
+            device_key = await _session_device_key(r, session_id)
             await r.set(
-                _new_device_notice_redis_key(raw_id, session_id),
+                _new_device_notice_redis_key(raw_id, device_key),
                 "1",
                 ex=30 * 24 * 60 * 60,
             )
@@ -3922,7 +4126,8 @@ async def ws_bot(websocket: WebSocket) -> None:
     # A new-device login can happen while the bot WS is temporarily offline.
     # Retry any unacknowledged login notices as soon as the bot reconnects.
     for discord_id, session_id, info in conn.active_new_device_logins():
-        if await r.exists(_new_device_notice_redis_key(discord_id, session_id)):
+        device_key = await _session_device_key(r, session_id)
+        if await r.exists(_new_device_notice_redis_key(discord_id, device_key)):
             continue
         await _send_new_device_login_notice(
             conn,
