@@ -307,10 +307,10 @@ def _new_device_notice_redis_key(discord_id: int, session_id: str) -> str:
 
 async def _mark_device_trusted(r: redis.Redis, discord_id: int, session_id: str) -> None:
     now_ms = str(int(time.time() * 1000))
-    pipe = r.pipeline()
-    pipe.set(_device_seen_redis_key(discord_id, session_id), now_ms)
-    pipe.set(_device_trusted_redis_key(discord_id, session_id), now_ms)
-    await pipe.execute()
+    # These keys are independent markers; avoid requiring Redis pipeline support
+    # so lightweight test doubles and degraded clients can use the same path.
+    await r.set(_device_seen_redis_key(discord_id, session_id), now_ms)
+    await r.set(_device_trusted_redis_key(discord_id, session_id), now_ms)
 
 
 async def _session_trust_level(r: redis.Redis, discord_id: int, session_id: str) -> str:
