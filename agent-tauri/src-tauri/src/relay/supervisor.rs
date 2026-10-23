@@ -55,6 +55,9 @@ const COMMAND_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
 
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(10);
 const RELAY_SEND_TIMEOUT: Duration = Duration::from_secs(10);
+// Presence match-context refreshes are advisory. They must never sit on the
+// shared WebSocket writer long enough to delay the independent heartbeat.
+const PRESENCE_CONTEXT_SEND_TIMEOUT: Duration = Duration::from_secs(1);
 const SESSION_CONFLICT_CLOSE_CODE: u16 = 4009;
 const SESSION_RESTORE_TIMEOUT: Duration = Duration::from_secs(5);
 const LCU_WORKER_TICK_INTERVAL: Duration = Duration::from_secs(1);
@@ -2643,11 +2646,28 @@ async fn connect_once(
                         )? else {
                             continue;
                         };
-                        send_shared_relay_message(
+                        match try_send_presence_context_message(
                             &writer,
                             Message::Text(event.text.into()),
-                            "Discord Presence 내전 조회 요청 전송 실패",
-                        ).await?;
+                        ).await? {
+                            PresenceContextSendOutcome::Sent => {}
+                            PresenceContextSendOutcome::WriterBusy => {
+                                state
+                                    .record_flight(
+                                        "discord_presence_context",
+                                        "refresh_send_skipped writer_busy",
+                                    )
+                                    .await;
+                            }
+                            PresenceContextSendOutcome::TimedOut => {
+                                state
+                                    .record_flight(
+                                        "discord_presence_context",
+                                        "refresh_send_skipped send_timeout",
+                                    )
+                                    .await;
+                            }
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         state
@@ -3770,8 +3790,12 @@ where
     RELAY_LAST_SEND_KIND.store(kind, Ordering::Release);
     RELAY_LAST_SEND_START_MS.store(started_at, Ordering::Release);
 
+    // One logical send gets one timeout budget. Previously lock acquisition
+    // could consume 10s and the actual socket write another 10s, allowing a
+    // single message to block the shared writer for ~20s.
+    let deadline = Instant::now() + RELAY_SEND_TIMEOUT;
     let lock_started = Instant::now();
-    let mut guard = match timeout(RELAY_SEND_TIMEOUT, websocket.lock()).await {
+    let mut guard = match tokio::time::timeout_at(deadline, websocket.lock()).await {
         Ok(guard) => {
             RELAY_SEND_LOCKED_COUNT.fetch_add(1, Ordering::AcqRel);
             RELAY_LAST_SEND_LOCKED_MS.store(relay_progress_now_ms(), Ordering::Release);
@@ -3792,7 +3816,7 @@ where
     };
     let lock_wait_ms = lock_started.elapsed().as_millis();
     let send_started = Instant::now();
-    match timeout(RELAY_SEND_TIMEOUT, guard.send(message)).await {
+    match tokio::time::timeout_at(deadline, guard.send(message)).await {
         Ok(Ok(())) => {
             RELAY_SEND_OK_COUNT.fetch_add(1, Ordering::AcqRel);
             RELAY_LAST_SEND_OK_MS.store(relay_progress_now_ms(), Ordering::Release);
@@ -3822,6 +3846,63 @@ where
                 )
                 .into(),
             ))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PresenceContextSendOutcome {
+    Sent,
+    WriterBusy,
+    TimedOut,
+}
+
+async fn try_send_presence_context_message<S>(
+    websocket: &SharedRelayWriter<S>,
+    message: Message,
+) -> AgentResult<PresenceContextSendOutcome>
+where
+    S: futures_util::Sink<Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    // Never queue behind another writer user. Presence refreshes are repeated
+    // periodically, so a busy writer is a safe reason to drop this refresh.
+    let Ok(mut guard) = websocket.try_lock() else {
+        return Ok(PresenceContextSendOutcome::WriterBusy);
+    };
+
+    let kind = relay_send_kind("Discord Presence 내전 조회 요청 전송 실패");
+    RELAY_SEND_STARTED_COUNT.fetch_add(1, Ordering::AcqRel);
+    RELAY_LAST_SEND_KIND.store(kind, Ordering::Release);
+    RELAY_LAST_SEND_START_MS.store(relay_progress_now_ms(), Ordering::Release);
+    RELAY_SEND_LOCKED_COUNT.fetch_add(1, Ordering::AcqRel);
+    RELAY_LAST_SEND_LOCKED_MS.store(relay_progress_now_ms(), Ordering::Release);
+
+    match timeout(PRESENCE_CONTEXT_SEND_TIMEOUT, guard.send(message)).await {
+        Ok(Ok(())) => {
+            RELAY_SEND_OK_COUNT.fetch_add(1, Ordering::AcqRel);
+            RELAY_LAST_SEND_OK_MS.store(relay_progress_now_ms(), Ordering::Release);
+            touch_relay_network_progress();
+            Ok(PresenceContextSendOutcome::Sent)
+        }
+        Ok(Err(error)) => {
+            RELAY_SEND_FAIL_COUNT.fetch_add(1, Ordering::AcqRel);
+            RELAY_LAST_SEND_FAIL_MS.store(relay_progress_now_ms(), Ordering::Release);
+            Err(AgentError::Relay(
+                format!(
+                    "Discord Presence 내전 조회 요청 전송 실패: websocket send error={error} trace={}",
+                    relay_trace_snapshot(),
+                )
+                .into(),
+            ))
+        }
+        Err(_) => {
+            // A Presence refresh timeout is not a connection-fatal condition.
+            // Heartbeat owns connection-health decisions and will reconnect if
+            // the socket is genuinely wedged.
+            RELAY_SEND_FAIL_COUNT.fetch_add(1, Ordering::AcqRel);
+            RELAY_LAST_SEND_FAIL_MS.store(relay_progress_now_ms(), Ordering::Release);
+            Ok(PresenceContextSendOutcome::TimedOut)
         }
     }
 }
@@ -4090,6 +4171,21 @@ mod tests {
                 assert!(*stop_rx.borrow());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn presence_context_refresh_drops_immediately_when_writer_is_busy() {
+        let writer = Arc::new(Mutex::new(futures_util::sink::drain::<Message>()));
+        let _guard = writer.lock().await;
+
+        let result = try_send_presence_context_message(
+            &writer,
+            Message::Text("presence-refresh".into()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, PresenceContextSendOutcome::WriterBusy);
     }
 
     #[test]

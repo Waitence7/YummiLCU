@@ -388,17 +388,6 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
 
         retry_pending_join_lookups(&state, &mut pending_join_requests).await;
 
-        if Instant::now() >= next_match_context_refresh {
-            let queued = state.request_discord_presence_context();
-            state
-                .record_flight(
-                    "discord_presence_context",
-                    format!("refresh_requested relay_receiver={queued}"),
-                )
-                .await;
-            next_match_context_refresh = Instant::now() + MATCH_CONTEXT_REFRESH_INTERVAL;
-        }
-
         let match_join_url = state
             .discord_presence_match()
             .await
@@ -433,6 +422,27 @@ pub(crate) async fn watch_discord_presence(app: AppHandle, state: Arc<AppState>)
             match_join_url,
         )
         .await;
+        let context_refresh_now = Instant::now();
+        if snapshot.is_some() {
+            if context_refresh_now >= next_match_context_refresh {
+                let queued = state.request_discord_presence_context();
+                state
+                    .record_flight(
+                        "discord_presence_context",
+                        format!("refresh_requested relay_receiver={queued}"),
+                    )
+                    .await;
+                next_match_context_refresh = context_refresh_now + MATCH_CONTEXT_REFRESH_INTERVAL;
+            }
+        } else {
+            // Do not generate Relay traffic while League Presence is inactive.
+            // Also make the first refresh immediate when League becomes active
+            // again instead of waiting for the old periodic deadline.
+            next_match_context_refresh = context_refresh_now;
+            if state.discord_presence_match().await.is_some() {
+                state.set_discord_presence_match(None).await;
+            }
+        }
         let phase_changed = match (&last_snapshot, &snapshot) {
             (Some(previous), Some(current)) => previous.phase_key != current.phase_key,
             (None, Some(_)) => true,
