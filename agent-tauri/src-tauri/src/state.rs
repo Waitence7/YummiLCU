@@ -39,6 +39,7 @@ pub(crate) struct UiState {
     discord_id: Option<u64>,
     discord_name: Option<String>,
     discord_avatar: Option<String>,
+    trust_level: String,
     logs: VecDeque<String>,
     oauth_pending: bool,
     update_message: Option<String>,
@@ -60,6 +61,7 @@ impl UiState {
             discord_id: None,
             discord_name: None,
             discord_avatar: None,
+            trust_level: "unauthenticated".into(),
             logs: VecDeque::new(),
             oauth_pending: false,
             update_message: None,
@@ -344,6 +346,7 @@ impl AppState {
         discord_id: Option<u64>,
         discord_name: Option<String>,
         discord_avatar: Option<String>,
+        trust_level: Option<String>,
     ) {
         let lcu_state = *self.lcu_state.read().await;
         {
@@ -352,6 +355,11 @@ impl AppState {
             ui.discord_id = discord_id;
             ui.discord_name = discord_name;
             ui.discord_avatar = discord_avatar;
+            ui.trust_level = match trust_level.as_deref() {
+                Some("new_device") => "new_device",
+                _ => "trusted",
+            }
+            .into();
             ui.status = connected_status_for_lcu(lcu_state).into();
         }
         self.emit(app).await;
@@ -573,6 +581,7 @@ impl AppState {
             ui.discord_id = None;
             ui.discord_name = None;
             ui.discord_avatar = None;
+            ui.trust_level = "unauthenticated".into();
             ui.status = "Discord 로그아웃됨 — 연결 시작을 눌러 로그인하세요.".into();
         }
         *self.discord_presence_match.write().await = None;

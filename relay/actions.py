@@ -13,17 +13,18 @@ class ActionPolicy:
     help: str
     timeout_sec: float = 30.0
     list_limits: tuple[tuple[str, int], ...] = ()
+    allow_new_device: bool = False
 
 
 ACTION_POLICIES: dict[str, ActionPolicy] = {
-    "ping": ActionPolicy("연결 테스트"),
-    "accept_match": ActionPolicy("매치 수락 (레디체크)"),
+    "ping": ActionPolicy("연결 테스트", allow_new_device=True),
+    "accept_match": ActionPolicy("매치 수락 (레디체크)", allow_new_device=True),
     "decline_match": ActionPolicy("매치 거절 (레디체크)"),
     "reconnect": ActionPolicy("게임 재접속"),
     "dodge": ActionPolicy("닷지 (LP 감소) + 옵션 시 매칭 중지"),
     "queue_start": ActionPolicy("매칭 큐 시작"),
     "queue_cancel": ActionPolicy("매칭 큐 취소"),
-    "leave_lobby": ActionPolicy("로비 나가기"),
+    "leave_lobby": ActionPolicy("로비 나가기", allow_new_device=True),
     "party_ready": ActionPolicy("파티 준비 ON"),
     "champ_reroll": ActionPolicy("챔프 리롤"),
     "champ_select_action": ActionPolicy("밴/픽 확정"),
@@ -39,15 +40,21 @@ ACTION_POLICIES: dict[str, ActionPolicy] = {
     "launch_client": ActionPolicy("롤 클라이언트 실행", timeout_sec=300.0),
     "play_ranked_solo": ActionPolicy("롤 실행 + 솔랭 매칭", timeout_sec=300.0),
     "play_normal_draft": ActionPolicy("롤 실행 + 일반(비공개 선택) 매칭", timeout_sec=300.0),
-    "create_ranked_lobby": ActionPolicy("솔랭 로비만 생성"),
-    "create_normal_lobby": ActionPolicy("일반(비공개 선택) 로비만 생성"),
+    "create_ranked_lobby": ActionPolicy("솔랭 로비만 생성", allow_new_device=True),
+    "create_normal_lobby": ActionPolicy("일반(비공개 선택) 로비만 생성", allow_new_device=True),
     "invite_party_members": ActionPolicy(
         "모집 확정 멤버 파티 초대 (payload.riot_ids)",
         list_limits=(("riot_ids", 20),),
+        allow_new_device=True,
     ),
     "check_party_members": ActionPolicy(
         "LCU 로비 참가 여부 확인 (payload.check_riot_ids)",
         list_limits=(("check_riot_ids", 20),),
+        allow_new_device=True,
+    ),
+    "kick_party_member": ActionPolicy(
+        "파티원 강퇴 (payload.summoner_id)",
+        allow_new_device=True,
     ),
 }
 

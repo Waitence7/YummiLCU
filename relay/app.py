@@ -56,6 +56,10 @@ WS_TOKEN_KEY = "relay:ws_token:{session_id}"
 OAUTH_LINK_PENDING_KEY = "relay:oauth_link_pending:{session_id}"
 DISCORD_PROFILE_KEY = "relay:discord_profile:{session_id}"
 DISCORD_USER_PROFILE_KEY = "relay:discord_user_profile:{discord_id}"
+SESSION_AUTH_SOURCE_KEY = "relay:session_auth_source:{session_id}"
+DEVICE_SEEN_KEY = "relay:device_seen:{discord_id}:{session_id}"
+DEVICE_TRUSTED_KEY = "relay:device_trusted:{discord_id}:{session_id}"
+NEW_DEVICE_NOTICE_KEY = "relay:new_device_notice:{discord_id}:{session_id}"
 OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
 OAUTH_LINK_CODE_TTL_SEC = 600
@@ -285,6 +289,41 @@ def _discord_user_profile_redis_key(discord_id: int) -> str:
     return DISCORD_USER_PROFILE_KEY.format(discord_id=int(discord_id))
 
 
+def _session_auth_source_redis_key(session_id: str) -> str:
+    return SESSION_AUTH_SOURCE_KEY.format(session_id=session_id)
+
+
+def _device_seen_redis_key(discord_id: int, session_id: str) -> str:
+    return DEVICE_SEEN_KEY.format(discord_id=int(discord_id), session_id=session_id)
+
+
+def _device_trusted_redis_key(discord_id: int, session_id: str) -> str:
+    return DEVICE_TRUSTED_KEY.format(discord_id=int(discord_id), session_id=session_id)
+
+
+def _new_device_notice_redis_key(discord_id: int, session_id: str) -> str:
+    return NEW_DEVICE_NOTICE_KEY.format(discord_id=int(discord_id), session_id=session_id)
+
+
+async def _mark_device_trusted(r: redis.Redis, discord_id: int, session_id: str) -> None:
+    now_ms = str(int(time.time() * 1000))
+    pipe = r.pipeline()
+    pipe.set(_device_seen_redis_key(discord_id, session_id), now_ms)
+    pipe.set(_device_trusted_redis_key(discord_id, session_id), now_ms)
+    await pipe.execute()
+
+
+async def _session_trust_level(r: redis.Redis, discord_id: int, session_id: str) -> str:
+    if await r.exists(_device_trusted_redis_key(discord_id, session_id)):
+        return "trusted"
+    source = await r.get(_session_auth_source_redis_key(session_id))
+    if source == "auto":
+        return "new_device"
+    # Missing source is a pre-feature session that could only have been created
+    # through the old Discord OAuth/link flow, so preserve it as trusted.
+    return "trusted"
+
+
 def _discord_profile(user: dict[str, Any], discord_id: int) -> dict[str, str]:
     """Tauri UI에 표시할 공개 Discord 프로필만 보관한다. 토큰은 저장하지 않는다."""
     name = str(user.get("global_name") or user.get("username") or "Discord 사용자").strip()[:64]
@@ -325,6 +364,7 @@ async def _refresh_session_ttl(r: redis.Redis, session_id: str) -> None:
     pipe.expire(_session_redis_key(session_id), ttl)
     pipe.expire(_status_redis_key(session_id), ttl)
     pipe.expire(_ws_token_redis_key(session_id), ttl)
+    pipe.expire(_session_auth_source_redis_key(session_id), ttl)
     await pipe.execute()
 
 
@@ -371,6 +411,8 @@ async def _complete_oauth_link(
 
     ttl = config.relay_session_ttl_sec()
     await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
+    await r.set(_session_auth_source_redis_key(session_id), "oauth", ex=ttl)
+    await _mark_device_trusted(r, discord_id, session_id)
     profile = pending.get("profile") if isinstance(pending.get("profile"), dict) else {}
     encoded_profile = json.dumps(profile)
     await r.set(_discord_profile_redis_key(session_id), encoded_profile, ex=ttl)
@@ -390,8 +432,9 @@ async def _try_bind_discord(
     discord_id: int,
     *,
     allow_takeover: bool = False,
+    trust_level: str = "trusted",
 ) -> bool:
-    """OAuth 완료 후 ws_token 이 일치하는 에이전트 WS 만 discord_id 에 바인딩."""
+    """검증된 세션만 discord_id에 바인딩하고 기기 신뢰 등급을 함께 고정한다."""
     ws_token = conn.session_ws_token(session_id)
     if not ws_token:
         return False
@@ -422,7 +465,13 @@ async def _try_bind_discord(
         # Keep a Discord-id keyed copy so Relay restarts/new sessions can restore
         # display metadata without requiring another OAuth round-trip.
         await r.set(_discord_user_profile_redis_key(discord_id), json.dumps(profile))
-    bound = await conn.bind_discord(session_id, discord_id, profile, allow_takeover=allow_takeover)
+    bound = await conn.bind_discord(
+        session_id,
+        discord_id,
+        profile,
+        allow_takeover=allow_takeover,
+        trust_level=trust_level,
+    )
     if bound:
         await mark_lcu_linked(r, discord_id)
         agent = conn.agent_info(discord_id) or {}
@@ -519,9 +568,9 @@ async def _read_ws_auth_payload(websocket: WebSocket) -> dict[str, Any] | None:
         return None
     try:
         data = json.loads(msg)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    return data if isinstance(data, dict) and isinstance(data.get("type"), str) else None
 
 
 @asynccontextmanager
@@ -836,6 +885,8 @@ async def auth_callback(
     ttl = config.relay_session_ttl_sec()
     profile = _discord_profile(user or {}, discord_id)
     await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
+    await r.set(_session_auth_source_redis_key(session_id), "oauth", ex=ttl)
+    await _mark_device_trusted(r, discord_id, session_id)
     encoded_profile = json.dumps(profile)
     await r.set(_discord_profile_redis_key(session_id), encoded_profile, ex=ttl)
     if profile:
@@ -1219,7 +1270,8 @@ async def auth_status(request: Request, session_id: str = Query(..., min_length=
     if not conn.has_active_session_ws(session_id):
         return JSONResponse({"status": "pending"})
     # WS가 아직 없을 수 있음 — ws_token 검증 후 bind 시도
-    await _try_bind_discord(conn, r, session_id, discord_id)
+    trust_level = await _session_trust_level(r, discord_id, session_id)
+    await _try_bind_discord(conn, r, session_id, discord_id, trust_level=trust_level)
     await _refresh_session_ttl(r, session_id)
     return JSONResponse({"status": "ok"})
 
@@ -1409,6 +1461,91 @@ async def _resolve_discord_presence_match_context(
         "invite_code": invite_code.strip().upper(),
         "discord_guild_id": guild_id,
     }
+
+
+async def _resolve_lcu_auto_login_identity(
+    http: aiohttp.ClientSession,
+    *,
+    puuid: str | None,
+    riot_id: str | None,
+) -> tuple[int, str | None, str] | None:
+    """Resolve LCU identity through the internal API; ambiguous identities fail closed."""
+    if not puuid and not riot_id:
+        return None
+    token = config.tournament_bot_internal_token()
+    if not token:
+        logger.warning("YUMMI_BOT_INTERNAL_TOKEN 미설정 — LCU 자동 로그인 조회 불가")
+        return None
+    url = f"{config.tournament_api_base_url()}/api/bot/lcu/resolve-identity"
+    body: dict[str, str] = {}
+    if puuid:
+        body["puuid"] = puuid
+    if riot_id:
+        body["riotId"] = riot_id
+    try:
+        async with http.post(
+            url,
+            headers={"x-internal-bot-token": token},
+            json=body,
+        ) as res:
+            if res.status >= 400:
+                logger.warning(
+                    "LCU 자동 로그인 identity 조회 실패 status=%s detail=%s",
+                    res.status,
+                    await upstream_error_detail(res),
+                )
+                return None
+            try:
+                payload = await res.json(content_type=None)
+            except Exception as exc:
+                logger.warning(
+                    "LCU 자동 로그인 identity 응답 JSON 파싱 실패 error=%s",
+                    type(exc).__name__,
+                )
+                return None
+    except Exception:
+        logger.exception("LCU 자동 로그인 identity 조회 예외")
+        return None
+    if not isinstance(payload, dict) or payload.get("status") != "resolved":
+        return None
+    raw_discord_id = payload.get("discordUserId")
+    try:
+        discord_id = int(raw_discord_id)
+    except (TypeError, ValueError):
+        return None
+    if discord_id <= 0:
+        return None
+    resolved_riot_id = payload.get("riotId")
+    if not isinstance(resolved_riot_id, str) or not resolved_riot_id.strip():
+        resolved_riot_id = riot_id
+    source = payload.get("source")
+    source = source if source in {"puuid", "riot_id"} else "unknown"
+    return discord_id, resolved_riot_id.strip()[:128] if isinstance(resolved_riot_id, str) else None, source
+
+
+async def _send_new_device_login_notice(
+    conn: ConnectionManager,
+    r: redis.Redis,
+    *,
+    discord_id: int,
+    session_id: str,
+    riot_id: str | None,
+    source: str,
+) -> None:
+    notice_key = _new_device_notice_redis_key(discord_id, session_id)
+    if await r.exists(notice_key):
+        return
+    await conn.send_bot_event(
+        {
+            "type": "new_device_login",
+            "discord_id": int(discord_id),
+            "riot_id": riot_id[:128] if isinstance(riot_id, str) else None,
+            "os": "windows",
+            "auth_source": source,
+            "logged_in_at_ms": int(time.time() * 1000),
+            "device_session_id": session_id,
+        }
+    )
 
 
 async def _resolve_discord_join_riot_id(
@@ -1767,6 +1904,28 @@ def _agent_hello_info(data: dict[str, Any]) -> dict[str, Any]:
     lcu_ready = data.get("lcu_ready")
     protocol_version = data.get("protocol_version", 0)
     raw_capabilities = data.get("capabilities", {})
+    raw_puuid = data.get("puuid")
+    raw_riot_id = data.get("riot_id")
+    raw_bound_discord_id = data.get("bound_discord_id")
+    puuid = (
+        raw_puuid.strip()[:256]
+        if isinstance(raw_puuid, str) and raw_puuid.strip()
+        else None
+    )
+    riot_id = (
+        raw_riot_id.strip()[:128]
+        if isinstance(raw_riot_id, str)
+        and raw_riot_id.strip()
+        and "#" in raw_riot_id
+        else None
+    )
+    bound_discord_id = (
+        int(raw_bound_discord_id)
+        if isinstance(raw_bound_discord_id, int)
+        and not isinstance(raw_bound_discord_id, bool)
+        and raw_bound_discord_id > 0
+        else None
+    )
     has_invalid_fields = (
         not isinstance(version, str)
         or not isinstance(os_name, str)
@@ -1802,6 +1961,9 @@ def _agent_hello_info(data: dict[str, Any]) -> dict[str, Any]:
         and protocol_version >= 0
         else 0,
         "capabilities": capabilities,
+        "puuid": puuid,
+        "riot_id": riot_id,
+        "bound_discord_id": bound_discord_id,
     }
 
 
@@ -2525,12 +2687,14 @@ async def _handle_agent_message(
 ) -> None:
     try:
         data = json.loads(msg)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError, ValueError):
         return
     if not isinstance(data, dict):
         return
 
     msg_type = data.get("type")
+    if not isinstance(msg_type, str):
+        return
     if msg_type in _LCU_DATA_MESSAGE_TYPES:
         discord_id = conn.discord_id_for_ws(websocket)
         payload = data.get("payload", data.get("data"))
@@ -2934,9 +3098,93 @@ async def _handle_agent_message(
         info = _agent_hello_info(data)
         await websocket.send_json(_server_hello(info))
         discord_id = await conn.set_agent_info_for_ws(websocket, info)
+        r: redis.Redis = websocket.app.state.redis
+        auto_login_riot_id: str | None = None
+        auto_login_source = "unknown"
+        if discord_id is None and info.get("lcu_ready") is True:
+            session_id = conn.ws_session_id(websocket)
+            if session_id:
+                resolved = await _resolve_lcu_auto_login_identity(
+                    websocket.app.state.http,
+                    puuid=info.get("puuid"),
+                    riot_id=info.get("riot_id"),
+                )
+                if resolved is not None:
+                    resolved_discord_id, auto_login_riot_id, auto_login_source = resolved
+                    pinned_discord_id = info.get("bound_discord_id")
+                    if (
+                        isinstance(pinned_discord_id, int)
+                        and pinned_discord_id > 0
+                        and pinned_discord_id != resolved_discord_id
+                    ):
+                        logger.warning(
+                            "LCU 자동 로그인 차단: 저장된 Discord 바인딩과 현재 LCU identity 불일치 session=%s",
+                            session_id[:8],
+                        )
+                        return
+                    ttl = config.relay_session_ttl_sec()
+                    pipe = r.pipeline()
+                    pipe.set(
+                        _session_redis_key(session_id),
+                        str(resolved_discord_id),
+                        ex=ttl,
+                    )
+                    pipe.set(_status_redis_key(session_id), "ok", ex=ttl)
+                    pipe.set(_session_auth_source_redis_key(session_id), "auto", ex=ttl)
+                    pipe.set(
+                        _device_seen_redis_key(resolved_discord_id, session_id),
+                        str(int(time.time() * 1000)),
+                        nx=True,
+                    )
+                    await pipe.execute()
+                    trust_level = await _session_trust_level(
+                        r, resolved_discord_id, session_id
+                    )
+                    bound = await _try_bind_discord(
+                        conn,
+                        r,
+                        session_id,
+                        resolved_discord_id,
+                        trust_level=trust_level,
+                    )
+                    if bound:
+                        discord_id = resolved_discord_id
+                        logger.info(
+                            "LCU 자동 로그인 완료 discord_id=%s session=%s trust=%s source=%s",
+                            discord_id,
+                            session_id[:8],
+                            trust_level,
+                            auto_login_source,
+                        )
+                        if trust_level == "new_device":
+                            await _send_new_device_login_notice(
+                                conn,
+                                r,
+                                discord_id=discord_id,
+                                session_id=session_id,
+                                riot_id=auto_login_riot_id or info.get("riot_id"),
+                                source=auto_login_source,
+                            )
+                    else:
+                        logger.info(
+                            "LCU 자동 로그인 보류: 기존 정상 Agent 연결 유지 discord_id=%s session=%s",
+                            resolved_discord_id,
+                            session_id[:8],
+                        )
+                        return
         if discord_id is None:
             return
-        r: redis.Redis = websocket.app.state.redis
+        session_id = conn.ws_session_id(websocket) or ""
+        trust_level = conn.trust_level_for_discord(discord_id)
+        if trust_level == "new_device" and session_id:
+            await _send_new_device_login_notice(
+                conn,
+                r,
+                discord_id=discord_id,
+                session_id=session_id,
+                riot_id=auto_login_riot_id or info.get("riot_id"),
+                source=auto_login_source if auto_login_source != "unknown" else "restored",
+            )
         await mark_lcu_linked(r, discord_id)
         await mark_lcu_agent_version(r, discord_id, info["version"])
         hello_at_ms = int(time.time() * 1000)
@@ -3197,7 +3445,7 @@ def _agent_message_type_for_log(msg: str) -> str:
     """Return only a bounded message type for diagnostics; never log payload fields."""
     try:
         data = json.loads(msg)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError, ValueError):
         return "unknown"
     if not isinstance(data, dict):
         return "unknown"
@@ -3257,14 +3505,25 @@ async def ws_agent(
     if raw is not None:
         try:
             discord_id = int(raw)
+            trust_level = await _session_trust_level(r, discord_id, session_id)
             if attached:
-                await _try_bind_discord(conn, r, session_id, discord_id)
+                await _try_bind_discord(
+                    conn,
+                    r,
+                    session_id,
+                    discord_id,
+                    trust_level=trust_level,
+                )
                 if conn.ws_session_id(websocket) is None:
                     # A competing saved session was closed and removed by
                     # bind_discord; do not receive again on that closed socket.
                     return
             else:
-                await websocket.send_json({"type": "session_bound", "discord_id": discord_id})
+                await websocket.send_json({
+                    "type": "session_bound",
+                    "discord_id": discord_id,
+                    "trust_level": trust_level,
+                })
         except ValueError:
             logger.warning(
                 "Relay session discord_id 값 오류 session=%s",
@@ -3523,12 +3782,14 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
         return
     try:
         data = json.loads(msg)
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError, ValueError):
         return
     if not isinstance(data, dict):
         return
 
     msg_type = data.get("type")
+    if not isinstance(msg_type, str):
+        return
     if msg_type == "guild_match_eog_persisted":
         event_id = _relay_event_id(data)
         if event_id is not None:
@@ -3539,6 +3800,25 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
         version = data.get("version")
         if isinstance(raw_id, int) and raw_id > 0 and version == "0.7.0":
             await r.set(_legacy_update_notice_redis_key(raw_id, version), "1")
+        return
+
+    if msg_type == "new_device_login_notice_sent":
+        raw_id = data.get("discord_id")
+        raw_session_id = data.get("device_session_id")
+        if (
+            isinstance(raw_id, int)
+            and raw_id > 0
+            and isinstance(raw_session_id, str)
+        ):
+            try:
+                session_id = str(uuid.UUID(raw_session_id))
+            except ValueError:
+                return
+            await r.set(
+                _new_device_notice_redis_key(raw_id, session_id),
+                "1",
+                ex=30 * 24 * 60 * 60,
+            )
         return
 
     if msg_type == "subscribe_party":
@@ -3639,6 +3919,19 @@ async def ws_bot(websocket: WebSocket) -> None:
     conn: ConnectionManager = websocket.app.state.connections
     r: redis.Redis = websocket.app.state.redis
     await conn.register_bot_ws(websocket)
+    # A new-device login can happen while the bot WS is temporarily offline.
+    # Retry any unacknowledged login notices as soon as the bot reconnects.
+    for discord_id, session_id, info in conn.active_new_device_logins():
+        if await r.exists(_new_device_notice_redis_key(discord_id, session_id)):
+            continue
+        await _send_new_device_login_notice(
+            conn,
+            r,
+            discord_id=discord_id,
+            session_id=session_id,
+            riot_id=info.get("riot_id") if isinstance(info.get("riot_id"), str) else None,
+            source="bot_reconnect",
+        )
 
     try:
         while True:
@@ -3700,6 +3993,17 @@ async def internal_command(
     conn: ConnectionManager = request.app.state.connections
     if not conn.is_online(body.discord_id):
         raise HTTPException(404, "agent not connected")
+    trust_level = conn.trust_level_for_discord(body.discord_id)
+    if trust_level == "new_device" and not policy.allow_new_device:
+        raise HTTPException(403, "action not allowed for new device")
+    if body.action == "kick_party_member":
+        summoner_id = body.payload.get("summoner_id")
+        if (
+            not isinstance(summoner_id, int)
+            or isinstance(summoner_id, bool)
+            or summoner_id <= 0
+        ):
+            raise HTTPException(400, "summoner_id required")
     req_id = secrets.token_hex(8)
     pending = conn.register_pending_result(body.discord_id, req_id)
     ok = await conn.send_command(

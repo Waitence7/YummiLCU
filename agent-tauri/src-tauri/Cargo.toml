@@ -40,5 +40,6 @@ tauri-plugin-single-instance = "2"
 [profile.release]
 lto = true
 codegen-units = 1
-panic = "abort"
+# Keep background-task catch_unwind and relay recovery active in shipped builds.
+panic = "unwind"
 strip = true

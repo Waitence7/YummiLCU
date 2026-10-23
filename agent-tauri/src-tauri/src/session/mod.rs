@@ -37,11 +37,45 @@ impl Drop for Session {
 
 const MAX_SESSION_FILE_BYTES: u64 = 64 * 1024;
 
-fn path() -> PathBuf {
+fn data_dir() -> PathBuf {
     dirs::data_local_dir()
         .unwrap_or_else(std::env::temp_dir)
         .join("YummiAgent")
-        .join("relay-session.json")
+}
+
+fn path() -> PathBuf {
+    data_dir().join("relay-session.json")
+}
+
+fn auto_login_suppression_path() -> PathBuf {
+    data_dir().join("manual-logout.flag")
+}
+
+pub(crate) fn auto_login_suppressed() -> bool {
+    fs::symlink_metadata(auto_login_suppression_path())
+        .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink())
+}
+
+pub(crate) fn suppress_auto_login() -> AgentResult<()> {
+    let path = auto_login_suppression_path();
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(AgentError::Session(
+            "자동 로그인 억제 경로가 올바르지 않습니다.".into(),
+        ));
+    }
+    fs::write(path, b"manual-logout\n")?;
+    Ok(())
+}
+
+pub(crate) fn clear_auto_login_suppression() -> AgentResult<()> {
+    match fs::remove_file(auto_login_suppression_path()) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(AgentError::Session(error.to_string())),
+    }
 }
 
 pub(crate) fn create(config: &Config) -> Session {

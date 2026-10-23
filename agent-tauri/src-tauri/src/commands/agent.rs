@@ -23,6 +23,7 @@ pub(crate) async fn start_agent(
     state
         .report_diagnostic("command", "manual_start", "user requested relay start")
         .await;
+    session::clear_auto_login_suppression().map_err(|error| error.to_string())?;
     RelaySupervisor::start_user_requested(app, state.inner().clone())
         .await
         .map_err(|error| error.to_string())
@@ -54,6 +55,7 @@ pub(crate) async fn logout(app: AppHandle, state: State<'_, Arc<AppState>>) -> R
         .await;
     RelaySupervisor::stop(&app, state.inner()).await;
     session::remove().map_err(|error| error.to_string())?;
+    session::suppress_auto_login().map_err(|error| error.to_string())?;
     state.mark_logged_out(&app).await;
     state.log(&app, "Discord 로그아웃 완료").await;
     Ok(())

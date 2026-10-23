@@ -39,6 +39,7 @@ class ConnectionManager:
         self._session_ws: dict[str, WebSocket] = {}
         self._session_ws_token: dict[str, str] = {}  # session_id -> ws_token (에이전트만 보유)
         self._ws_discord: dict[int, int] = {}  # id(ws) -> discord_id
+        self._ws_trust: dict[int, str] = {}  # id(ws) -> trusted | new_device
         self._ws_session: dict[int, str] = {}  # id(ws) -> session_id (인증 전)
         self._ws_session_id: dict[int, str] = {}  # id(ws) -> session_id (TTL 갱신용)
         self._ws_connection_id: dict[int, str] = {}
@@ -115,8 +116,11 @@ class ConnectionManager:
         profile: dict[str, str] | None = None,
         *,
         allow_takeover: bool = False,
+        trust_level: str = "trusted",
     ) -> bool:
         """세션을 바인딩하되 다른 정상 연결의 인계는 명시적 OAuth만 허용합니다."""
+        if trust_level not in {"trusted", "new_device"}:
+            raise ValueError("invalid trust_level")
         replaced: WebSocket | None = None
         rejected = False
         async with self._lock:
@@ -151,6 +155,7 @@ class ConnectionManager:
                     replaced = prev
                 self._by_discord[discord_id] = ws
                 self._ws_discord[id(ws)] = discord_id
+                self._ws_trust[id(ws)] = trust_level
                 pending_agent_info = self._pending_agent_info_by_ws.pop(id(ws), None)
                 info = dict(pending_agent_info or {})
                 if profile:
@@ -180,7 +185,11 @@ class ConnectionManager:
             except Exception:
                 logger.warning("교체된 Discord Agent WebSocket 종료 실패")
         try:
-            payload: dict[str, Any] = {"type": "session_bound", "discord_id": int(discord_id)}
+            payload: dict[str, Any] = {
+                "type": "session_bound",
+                "discord_id": int(discord_id),
+                "trust_level": trust_level,
+            }
             if profile:
                 if profile.get("name"):
                     payload["discord_name"] = profile["name"]
@@ -210,6 +219,7 @@ class ConnectionManager:
     def _drop_ws_locked(self, ws: WebSocket) -> None:
         wid = id(ws)
         did = self._ws_discord.pop(wid, None)
+        self._ws_trust.pop(wid, None)
         self._pending_agent_info_by_ws.pop(wid, None)
         if did is not None:
             if self._by_discord.get(did) is ws:
@@ -302,6 +312,24 @@ class ConnectionManager:
 
     def discord_id_for_ws(self, ws: WebSocket) -> int | None:
         return self._ws_discord.get(id(ws))
+
+    def trust_level_for_discord(self, discord_id: int) -> str | None:
+        ws = self._by_discord.get(int(discord_id))
+        if ws is None or not self._ws_is_fresh(ws):
+            return None
+        return self._ws_trust.get(id(ws), "trusted")
+
+    def active_new_device_logins(self) -> list[tuple[int, str, dict[str, Any]]]:
+        rows: list[tuple[int, str, dict[str, Any]]] = []
+        for discord_id, ws in self._by_discord.items():
+            wid = id(ws)
+            if not self._ws_is_fresh(ws) or self._ws_trust.get(wid) != "new_device":
+                continue
+            session_id = self._ws_session_id.get(wid)
+            if not session_id:
+                continue
+            rows.append((discord_id, session_id, dict(self._agent_info.get(discord_id) or {})))
+        return rows
 
     def is_current_ws(self, ws: WebSocket) -> bool:
         """Whether this socket is still the authoritative socket for its Discord id/session."""

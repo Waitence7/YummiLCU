@@ -562,9 +562,13 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
         return match LcuClient::probe_live_game().await {
             Ok(()) => LcuConnectionState::LoggedIn,
             Err(error) => {
-                state
-                    .report_diagnostic("lcu", "live_client_probe_failed", error.to_string())
-                    .await;
+                // No lockfile and no live game is normal when League is closed.
+                // Retain the first failure on transition from an active state.
+                if state.lcu_state().await != LcuConnectionState::ClientStopped {
+                    state
+                        .report_diagnostic("lcu", "live_client_probe_failed", error.to_string())
+                        .await;
+                }
                 LcuConnectionState::ClientStopped
             }
         };

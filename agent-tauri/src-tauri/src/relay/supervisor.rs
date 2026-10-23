@@ -369,18 +369,46 @@ fn schedule_native_agent_restart() -> Result<(), String> {
     Err("native watchdog relaunch is only supported on Windows".into())
 }
 
-fn maybe_native_watchdog_restart() {
-    if !RELAY_NATIVE_WATCHDOG_ARMED.load(Ordering::Acquire) {
-        return;
+#[derive(Default)]
+struct NativeWatchdogObservation {
+    last_sample_ms: Option<u64>,
+    stale_since_ms: Option<u64>,
+}
+
+impl NativeWatchdogObservation {
+    fn should_restart(&mut self, now_ms: u64, last_tick_ms: u64, armed: bool) -> bool {
+        // A suspended PC (or a stalled native thread) must not be mistaken for
+        // an executor freeze. Require fresh, consecutive observations first.
+        let sample_gap = self
+            .last_sample_ms
+            .replace(now_ms)
+            .map(|last| now_ms.saturating_sub(last));
+        let max_gap_ms = RELAY_TRACE_SAMPLE_INTERVAL.as_millis() as u64 * 3;
+        if !armed
+            || last_tick_ms == 0
+            || now_ms.saturating_sub(last_tick_ms)
+                < RELAY_NATIVE_WATCHDOG_STALE_AFTER.as_millis() as u64
+            || sample_gap.is_none_or(|gap| gap > max_gap_ms)
+        {
+            self.stale_since_ms = None;
+            return false;
+        }
+        let stale_since = *self.stale_since_ms.get_or_insert(now_ms);
+        now_ms.saturating_sub(stale_since) >= max_gap_ms
     }
+}
+
+fn maybe_native_watchdog_restart(observation: &mut NativeWatchdogObservation) {
     let last_tick = RELAY_NATIVE_WATCHDOG_LAST_TICK_MS.load(Ordering::Acquire);
-    if last_tick == 0 {
+    let now_ms = relay_progress_now_ms();
+    if !observation.should_restart(
+        now_ms,
+        last_tick,
+        RELAY_NATIVE_WATCHDOG_ARMED.load(Ordering::Acquire),
+    ) {
         return;
     }
-    let age_ms = relay_progress_now_ms().saturating_sub(last_tick);
-    if age_ms < RELAY_NATIVE_WATCHDOG_STALE_AFTER.as_millis() as u64 {
-        return;
-    }
+    let age_ms = now_ms.saturating_sub(last_tick);
     if RELAY_NATIVE_WATCHDOG_RESTARTING.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -394,6 +422,13 @@ fn maybe_native_watchdog_restart() {
     let _ = append_relay_runtime_trace(&detail);
     eprintln!("[yummi relay watchdog] {detail}");
 
+    // Diagnostic disk I/O above can be slow; recheck recovery/stop before exit.
+    if !RELAY_NATIVE_WATCHDOG_ARMED.load(Ordering::Acquire)
+        || RELAY_NATIVE_WATCHDOG_LAST_TICK_MS.load(Ordering::Acquire) != last_tick
+    {
+        RELAY_NATIVE_WATCHDOG_RESTARTING.store(false, Ordering::Release);
+        return;
+    }
     match schedule_native_agent_restart() {
         Ok(()) => {
             // The helper waits before relaunching so the single-instance lock is
@@ -410,14 +445,27 @@ fn maybe_native_watchdog_restart() {
 
 fn ensure_relay_trace_thread_started() {
     RELAY_TRACE_THREAD.get_or_init(|| {
+        // Measure executor scheduling independently of recovery operations,
+        // which may await a control lock, UI event, or disk operation.
+        tokio::spawn(async {
+            let mut ticks = interval(Duration::from_secs(10));
+            ticks.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            loop {
+                ticks.tick().await;
+                native_watchdog_tick();
+            }
+        });
         let _ = std::thread::Builder::new()
             .name("yummi-relay-trace".into())
-            .spawn(|| loop {
-                std::thread::sleep(RELAY_TRACE_SAMPLE_INTERVAL);
-                if let Err(error) = append_relay_runtime_trace(&relay_trace_snapshot()) {
-                    eprintln!("[yummi relay trace] write failed: {error}");
+            .spawn(|| {
+                let mut observation = NativeWatchdogObservation::default();
+                loop {
+                    std::thread::sleep(RELAY_TRACE_SAMPLE_INTERVAL);
+                    if let Err(error) = append_relay_runtime_trace(&relay_trace_snapshot()) {
+                        eprintln!("[yummi relay trace] write failed: {error}");
+                    }
+                    maybe_native_watchdog_restart(&mut observation);
                 }
-                maybe_native_watchdog_restart();
             });
     });
 }
@@ -977,8 +1025,6 @@ impl RelaySupervisor {
         user_initiated_login: bool,
     ) -> AgentResult<bool> {
         ensure_relay_trace_thread_started();
-        RELAY_NATIVE_WATCHDOG_ARMED.store(true, Ordering::Release);
-        native_watchdog_tick();
         let (generation, stop_rx) = {
             let mut control = state.relay.control.lock().await;
             let task_running = control
@@ -994,6 +1040,10 @@ impl RelaySupervisor {
             } else if !watchdog_restart_allowed(control.desired_running, task_running) {
                 return Ok(false);
             }
+            // Only an accepted start can arm process-level recovery. Periodic
+            // restart_if_desired calls must not rearm a manually stopped Agent.
+            RELAY_NATIVE_WATCHDOG_ARMED.store(true, Ordering::Release);
+            native_watchdog_tick();
             control.task.take();
             control.generation = control.generation.wrapping_add(1);
             let generation = control.generation;
@@ -1594,6 +1644,54 @@ impl ConnectionEnd {
     }
 }
 
+async fn lcu_identity_for_relay(
+    config: &crate::config::Config,
+) -> (Option<String>, Option<String>) {
+    let discovery_config = config.clone();
+    let client = COMMAND_DISK_IO
+        .run(COMMAND_DISK_TIMEOUT, move || {
+            let path = lockfile_path(&discovery_config)
+                .ok_or_else(|| AgentError::Lcu("LCU 미연결".into()))?;
+            LcuClient::from_lockfile(&path).or_else(|_| LcuClient::from_lockfile_legacy(&path))
+        })
+        .await;
+    let Ok(Ok(client)) = client else {
+        return (None, None);
+    };
+    let Ok(summoner) = client.current_summoner().await else {
+        return (None, None);
+    };
+    let puuid = summoner
+        .get("puuid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 256)
+        .map(str::to_owned);
+    let game_name = summoner
+        .get("gameName")
+        .or_else(|| summoner.get("riotIdGameName"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let tag_line = summoner
+        .get("tagLine")
+        .or_else(|| summoner.get("riotIdTagLine"))
+        .or_else(|| summoner.get("riotIdTagline"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let riot_id = match (game_name, tag_line) {
+        (Some(game_name), Some(tag_line)) => Some(format!("{game_name}#{tag_line}")),
+        _ => summoner
+            .get("displayName")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.contains('#') && value.len() <= 128)
+            .map(str::to_owned),
+    };
+    (puuid, riot_id)
+}
+
 async fn connect_once(
     app: &AppHandle,
     state: &Arc<AppState>,
@@ -1661,7 +1759,18 @@ async fn connect_once(
         let _ = websocket.close(None).await;
         return Ok(ConnectionEnd::Stopped);
     }
-    let hello = AgentHelloMessage::new(state.lcu_state().await.is_ready());
+    let lcu_ready = state.lcu_state().await.is_ready();
+    let (puuid, riot_id) = if lcu_ready && !session::auto_login_suppressed() {
+        lcu_identity_for_relay(config).await
+    } else {
+        (None, None)
+    };
+    let hello = AgentHelloMessage::new(
+        lcu_ready,
+        session.bound_discord_id,
+        puuid,
+        riot_id,
+    );
     send_relay_message(
         &mut websocket,
         Message::Text(serde_json::to_string(&hello)?.into()),
@@ -1886,6 +1995,8 @@ async fn connect_once(
     diagnostic_log_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut live_game_announced = false;
     let mut session_bound = false;
+    let mut session_new_device = false;
+    let mut last_identity_hello_at: Option<Instant> = None;
     let mut durable_replay_enabled = false;
     let mut unexpected_error_reports_enabled = false;
     let mut update_diagnostics_enabled = false;
@@ -2109,7 +2220,7 @@ async fn connect_once(
                                     }
                                 }
                             }
-                            IncomingMessage::SessionBound { discord_id, .. } => {
+                            IncomingMessage::SessionBound { discord_id, trust_level, .. } => {
                                 let Some(discord_id) = *discord_id else {
                                     return Err(AgentError::Relay(
                                         "Relay session_bound에 Discord ID가 없습니다.".into(),
@@ -2139,16 +2250,19 @@ async fn connect_once(
                                     return Ok(ConnectionEnd::Stopped);
                                 }
                                 *needs_login = false;
+                                let is_new_device = trust_level.as_deref() == Some("new_device");
                                 handle_incoming(
                                     app,
                                     state,
                                     &writer,
                                     incoming,
                                     false,
+                                    is_new_device,
                                     &lcu_poll_worker.live_game_polling,
                                 )
                                 .await?;
                                 session_bound = true;
+                                session_new_device = is_new_device;
                                 if diagnostic_log_chunks_enabled {
                                     diagnostic_log_initial_sync_pending = true;
                                 }
@@ -2205,7 +2319,15 @@ async fn connect_once(
                                     let command_writer = Arc::clone(&writer);
                                     let polling = lcu_poll_worker.live_game_polling.clone();
                                     command_tasks.spawn(async move {
-                                        handle_incoming(&command_app, &command_state, &command_writer, incoming, session_bound, &polling).await
+                                        handle_incoming(
+                                            &command_app,
+                                            &command_state,
+                                            &command_writer,
+                                            incoming,
+                                            session_bound,
+                                            session_new_device,
+                                            &polling,
+                                        ).await
                                     });
                                 }
                             }
@@ -2215,6 +2337,7 @@ async fn connect_once(
                                 &writer,
                                 incoming,
                                 session_bound,
+                                session_new_device,
                                 &lcu_poll_worker.live_game_polling,
                             ).await?,
                         }
@@ -2500,6 +2623,29 @@ async fn connect_once(
             }
             _ = watchdog.tick() => {
                 mark_relay_branch(12);
+                if !session_bound
+                    && !session::auto_login_suppressed()
+                    && state.lcu_state().await.is_ready()
+                    && last_identity_hello_at
+                        .is_none_or(|last| last.elapsed() >= Duration::from_secs(5))
+                {
+                    last_identity_hello_at = Some(Instant::now());
+                    let (puuid, riot_id) = lcu_identity_for_relay(config).await;
+                    if puuid.is_some() || riot_id.is_some() {
+                        let hello = AgentHelloMessage::new(
+                            true,
+                            session.bound_discord_id,
+                            puuid,
+                            riot_id,
+                        );
+                        send_shared_relay_message(
+                            &writer,
+                            Message::Text(serde_json::to_string(&hello)?.into()),
+                            "Relay identity hello 전송 실패",
+                        ).await?;
+                        state.record_flight("relay", "lcu_identity_hello_sent").await;
+                    }
+                }
                 if should_start_login(session_bound, login_opened, auth_started.elapsed()) {
                     *needs_login = true;
                     login_opened = true;
@@ -2756,6 +2902,7 @@ async fn handle_incoming<S>(
     websocket: &SharedRelayWriter<S>,
     incoming: IncomingMessage,
     session_bound: bool,
+    session_new_device: bool,
     live_game_polling: &watch::Sender<bool>,
 ) -> AgentResult<()>
 where
@@ -2768,9 +2915,14 @@ where
             request_id,
             payload,
         } => {
-            if !command_is_authorized(session_bound) {
-                let result =
-                    CommandResult::failure(request_id, "Relay 인증이 완료되지 않았습니다.");
+            let parsed_action = Action::parse(&action);
+            if !command_is_authorized(session_bound, session_new_device, parsed_action) {
+                let message = if session_bound {
+                    "신규 기기 자동 로그인 상태에서 허용되지 않은 LCU 명령입니다."
+                } else {
+                    "Relay 인증이 완료되지 않았습니다."
+                };
+                let result = CommandResult::failure(request_id, message);
                 send_shared_relay_message(
                     websocket,
                     Message::Text(serde_json::to_string(&result)?.into()),
@@ -2804,7 +2956,6 @@ where
                 }
             };
 
-            let parsed_action = Action::parse(&action);
             let action_label = parsed_action.map(Action::as_str).unwrap_or("unknown");
             let result = match parsed_action {
                 None => CommandResult::failure(request_id, "unknown action"),
@@ -2911,6 +3062,7 @@ where
             username,
             discord_avatar,
             avatar_url,
+            trust_level,
         } => {
             state
                 .apply_session_bound(
@@ -2918,6 +3070,7 @@ where
                     discord_id,
                     discord_name.or(username),
                     safe_avatar_url(discord_avatar.or(avatar_url)),
+                    trust_level,
                 )
                 .await;
         }
@@ -2998,8 +3151,13 @@ where
     Ok(())
 }
 
-fn command_is_authorized(session_bound: bool) -> bool {
+fn command_is_authorized(
+    session_bound: bool,
+    session_new_device: bool,
+    action: Option<Action>,
+) -> bool {
     session_bound
+        && (!session_new_device || action.is_some_and(Action::allowed_on_new_device))
 }
 
 fn safe_avatar_url(value: Option<String>) -> Option<String> {
@@ -3219,6 +3377,7 @@ async fn check_replay_upload_needed(
     game_id: &str,
 ) -> AgentResult<bool> {
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(30))
         .build()
@@ -3304,6 +3463,7 @@ async fn upload_replay_file(
     }
 
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(5 * 60))
         .build()
@@ -3735,6 +3895,61 @@ async fn wait_for_retry(stop_rx: &mut watch::Receiver<bool>, delay: Duration) ->
 mod tests {
     use super::*;
 
+    #[test]
+    fn native_watchdog_does_not_exit_on_resume_before_runtime_ticks() {
+        let mut observer = NativeWatchdogObservation::default();
+        assert!(!observer.should_restart(10_000, 9_000, true));
+        // Native thread wakes before Tokio after ten minutes of suspension.
+        assert!(!observer.should_restart(610_000, 9_000, true));
+        assert!(!observer.should_restart(615_000, 9_000, true));
+        assert!(!observer.should_restart(620_000, 619_000, true));
+        assert!(!observer.should_restart(625_000, 624_000, true));
+    }
+
+    #[test]
+    fn native_watchdog_restarts_a_continuously_stalled_runtime() {
+        let mut observer = NativeWatchdogObservation::default();
+        for now in (5_000..110_000).step_by(5_000) {
+            assert!(
+                !observer.should_restart(now, 1, true),
+                "early restart at {now}"
+            );
+        }
+        assert!(observer.should_restart(110_000, 1, true));
+    }
+
+    #[test]
+    fn native_watchdog_cancels_restart_when_runtime_recovers() {
+        let mut observer = NativeWatchdogObservation::default();
+        for now in (5_000..110_000).step_by(5_000) {
+            assert!(!observer.should_restart(now, 1, true));
+        }
+        assert!(!observer.should_restart(110_000, 109_000, true));
+    }
+
+    #[test]
+    fn native_watchdog_cancels_confirmation_after_native_thread_stall() {
+        let mut observer = NativeWatchdogObservation::default();
+        for now in (5_000..110_000).step_by(5_000) {
+            assert!(!observer.should_restart(now, 1, true));
+        }
+        assert!(!observer.should_restart(300_000, 1, true));
+        for now in [305_000, 310_000, 315_000] {
+            assert!(!observer.should_restart(now, 1, true));
+        }
+        assert!(observer.should_restart(320_000, 1, true));
+    }
+
+    #[test]
+    fn native_watchdog_never_restarts_stopped_or_uninitialized_agent() {
+        for (armed, tick) in [(false, 1), (true, 0)] {
+            let mut observer = NativeWatchdogObservation::default();
+            for now in (5_000..300_000).step_by(5_000) {
+                assert!(!observer.should_restart(now, tick, armed));
+            }
+        }
+    }
+
     fn test_replay_buffer() -> DurableReplayBuffer {
         DurableReplayBuffer {
             pending: VecDeque::new(),
@@ -3927,8 +4142,11 @@ mod tests {
 
     #[test]
     fn commands_require_session_binding() {
-        assert!(!command_is_authorized(false));
-        assert!(command_is_authorized(true));
+        assert!(!command_is_authorized(false, false, Some(Action::Ping)));
+        assert!(command_is_authorized(true, false, None));
+        assert!(command_is_authorized(true, true, Some(Action::AcceptMatch)));
+        assert!(!command_is_authorized(true, true, Some(Action::QueueStart)));
+        assert!(!command_is_authorized(true, true, None));
     }
 
     #[test]

@@ -243,6 +243,21 @@ impl LcuClient {
         }
     }
 
+    pub(super) async fn kick_party_member(&self, payload: &Value) -> AgentResult<ActionOutcome> {
+        let summoner_id = payload
+            .get("summoner_id")
+            .and_then(Value::as_i64)
+            .filter(|value| *value > 0)
+            .ok_or_else(|| AgentError::Lcu("summoner_id가 필요합니다.".into()))?;
+        self.request(
+            Method::POST,
+            &format!("/lol-lobby/v2/lobby/members/{summoner_id}/kick"),
+            None,
+        )
+        .await?;
+        Ok(ActionOutcome::success("파티원 강퇴 완료"))
+    }
+
     pub(super) async fn check_party_members(&self, payload: &Value) -> AgentResult<ActionOutcome> {
         let lobby = self.request(Method::GET, LOBBY_ENDPOINT, None).await?;
         if !lobby_is_open(&lobby) {

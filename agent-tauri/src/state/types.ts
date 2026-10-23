@@ -51,6 +51,7 @@ export type AgentState = {
   discord_id?: number | null;
   discord_name?: string | null;
   discord_avatar?: string | null;
+  trust_level?: 'unauthenticated' | 'new_device' | 'trusted' | string;
   logs: string[];
   oauth_pending: boolean;
   update_message?: string | null;
@@ -81,6 +82,7 @@ export const initialState: AgentState = {
   status: '연결 시작 → Discord 로그인',
   relay: false,
   lcu: false,
+  trust_level: 'unauthenticated',
   logs: [],
   oauth_pending: false,
   update_message: null,

@@ -174,6 +174,7 @@ impl LcuClient {
             Action::ClaimAllRewards => return self.claim_all_rewards().await,
             Action::InvitePartyMembers => return self.invite_party_members(payload).await,
             Action::CheckPartyMembers => return self.check_party_members(payload).await,
+            Action::KickPartyMember => return self.kick_party_member(payload).await,
             _ => {}
         }
 

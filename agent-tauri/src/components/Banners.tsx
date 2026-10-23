@@ -11,6 +11,14 @@ export function Banners({
   return (
     <>
       {state.oauth_pending && <OAuthBanner onLogin={onDiscordLogin} />}
+      {state.trust_level === 'new_device' && (
+        <div
+          role="status"
+          className="border-b border-violet-200 bg-violet-50 px-4 py-2 text-[11px] text-violet-700"
+        >
+          <span className="font-medium">신규 기기 자동 로그인</span> · 메뉴 조회, 로비 생성, 파티 초대/강퇴, 매칭 수락 사용 가능 · 큐 시작 및 계정/보안 변경 제한
+        </div>
+      )}
       {state.update_message && (
         <div
           role="status"

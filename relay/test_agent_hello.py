@@ -6,9 +6,11 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from relay import config
+from relay.actions import action_policy
 from relay.app import (
     MAX_WS_AUTH_MESSAGE_BYTES,
     _agent_hello_info,
+    _agent_message_type_for_log,
     _agent_error_report,
     _agent_diagnostic_report,
     _agent_log_chunk,
@@ -25,6 +27,34 @@ from relay.connections import AGENT_SESSION_CONFLICT_CLOSE_CODE, ConnectionManag
 
 
 class AgentHelloTests(unittest.TestCase):
+    def test_invalid_message_types_do_not_disconnect_agent(self) -> None:
+        for value in ([], {}, None, 42, True):
+            with self.subTest(value=value):
+                asyncio.run(_handle_agent_message(
+                    SimpleNamespace(), ConnectionManager(), json.dumps({"type": value})
+                ))
+
+    def test_excessively_nested_json_is_ignored_at_all_ws_entrypoints(self) -> None:
+        message = '{"type":' + '[' * 2000 + '0' + ']' * 2000 + '}'
+        ws = SimpleNamespace(receive_text=AsyncMock(return_value=message))
+        self.assertIsNone(asyncio.run(_read_ws_auth_payload(ws)))
+        self.assertEqual(_agent_message_type_for_log(message), "unknown")
+        asyncio.run(_handle_agent_message(ws, ConnectionManager(), message))
+        asyncio.run(_handle_bot_message(ConnectionManager(), AsyncMock(), message))
+
+    def test_json_recursion_errors_are_contained(self) -> None:
+        ws = SimpleNamespace(receive_text=AsyncMock(return_value="{}"))
+        with patch("relay.app.json.loads", side_effect=RecursionError):
+            self.assertIsNone(asyncio.run(_read_ws_auth_payload(ws)))
+            self.assertEqual(_agent_message_type_for_log("{}"), "unknown")
+            asyncio.run(_handle_agent_message(ws, ConnectionManager(), "{}"))
+            asyncio.run(_handle_bot_message(ConnectionManager(), AsyncMock(), "{}"))
+
+    def test_oversized_json_integer_is_ignored(self) -> None:
+        message = '{"type":' + '1' * 5000 + '}'
+        self.assertEqual(_agent_message_type_for_log(message), "unknown")
+        asyncio.run(_handle_agent_message(SimpleNamespace(), ConnectionManager(), message))
+
     def tearDown(self) -> None:
         _agent_error_last_by_discord.clear()
         _agent_error_recent.clear()
@@ -59,6 +89,47 @@ class AgentHelloTests(unittest.TestCase):
         self.assertEqual(info["protocol_version"], 0)
         self.assertEqual(info["capabilities"], {})
         self.assertTrue(info["lcu_ready"])
+
+    def test_agent_hello_normalizes_lcu_identity_without_logging_secrets(self) -> None:
+        info = _agent_hello_info(
+            {
+                "type": "agent_hello",
+                "version": "0.7.32",
+                "os": "windows",
+                "lcu_ready": True,
+                "protocol_version": 1,
+                "capabilities": {},
+                "bound_discord_id": 42,
+                "puuid": "  puuid-123  ",
+                "riot_id": " Name#KR1 ",
+            }
+        )
+
+        self.assertEqual(info["bound_discord_id"], 42)
+        self.assertEqual(info["puuid"], "puuid-123")
+        self.assertEqual(info["riot_id"], "Name#KR1")
+
+    def test_new_device_action_policy_is_narrow(self) -> None:
+        for action in (
+            "ping",
+            "accept_match",
+            "leave_lobby",
+            "create_ranked_lobby",
+            "create_normal_lobby",
+            "invite_party_members",
+            "check_party_members",
+            "kick_party_member",
+        ):
+            with self.subTest(action=action):
+                policy = action_policy(action)
+                self.assertIsNotNone(policy)
+                self.assertTrue(policy.allow_new_device)
+
+        for action in ("queue_start", "champ_select_action", "dodge", "set_status"):
+            with self.subTest(action=action):
+                policy = action_policy(action)
+                self.assertIsNotNone(policy)
+                self.assertFalse(policy.allow_new_device)
 
     def test_server_hello_negotiates_only_mutual_capabilities(self) -> None:
         hello = _server_hello(

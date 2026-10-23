@@ -15,6 +15,8 @@ const MAX_ANALYSIS_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 
 fn client() -> AgentResult<reqwest::Client> {
     reqwest::Client::builder()
+        // Custom session headers must never be forwarded to redirect targets.
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(Duration::from_secs(15))
         .timeout(Duration::from_secs(5 * 60))
         .build()
@@ -120,4 +122,37 @@ pub(crate) async fn remote_replay_analysis_viewer(
             AgentError::Relay(format!("ROFL 서버 재생 데이터 조회 연결 실패: {error}"))
         })?;
     response_json(response, "ROFL 서버 재생 데이터 조회").await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    #[tokio::test]
+    async fn authenticated_analysis_does_not_follow_redirects() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 4096];
+            let size = socket.read(&mut request).unwrap();
+            assert!(String::from_utf8_lossy(&request[..size]).contains("x-yummi-ws-token"));
+            socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/leak\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+        });
+        let response = client()
+            .unwrap()
+            .get(format!("http://{address}/analysis"))
+            .header("x-yummi-ws-token", "test-session-secret")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+        assert!(response_json(response, "test").await.is_err());
+        server.join().unwrap();
+    }
 }

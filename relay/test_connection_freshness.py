@@ -37,6 +37,27 @@ class AgentConnectionFreshnessTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await manager.bind_discord("session-1", 1234))
         return manager
 
+    async def test_new_device_trust_is_attached_to_active_connection(self) -> None:
+        websocket = _WebSocketStub()
+        manager = ConnectionManager()
+        await manager.attach_session("session-new", websocket, "token-new")
+        self.assertTrue(
+            await manager.bind_discord(
+                "session-new",
+                1234,
+                trust_level="new_device",
+            )
+        )
+        self.assertEqual(manager.trust_level_for_discord(1234), "new_device")
+        session_bound = next(
+            payload for payload in websocket.payloads if payload.get("type") == "session_bound"
+        )
+        self.assertEqual(session_bound.get("trust_level"), "new_device")
+        rows = manager.active_new_device_logins()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0][0], 1234)
+        self.assertEqual(rows[0][1], "session-new")
+
     async def test_online_requires_fresh_heartbeat(self) -> None:
         websocket = _WebSocketStub()
         manager = await self._bound(websocket)
@@ -145,7 +166,11 @@ class AgentConnectionFreshnessTests(unittest.IsolatedAsyncioTestCase):
 
         duplicate = _WebSocketStub()
         duplicate.app = SimpleNamespace(state=SimpleNamespace(
-            redis=SimpleNamespace(get=AsyncMock(side_effect=get)), connections=manager,
+            redis=SimpleNamespace(
+                get=AsyncMock(side_effect=get),
+                exists=AsyncMock(return_value=0),
+            ),
+            connections=manager,
         ))
         duplicate.accept = AsyncMock()
         duplicate.receive_text = AsyncMock(side_effect=[

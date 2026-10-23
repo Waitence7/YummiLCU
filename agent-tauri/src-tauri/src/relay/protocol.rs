@@ -27,6 +27,7 @@ pub(crate) enum IncomingMessage {
         username: Option<String>,
         discord_avatar: Option<String>,
         avatar_url: Option<String>,
+        trust_level: Option<String>,
     },
     #[serde(rename = "pong")]
     Pong,
@@ -152,6 +153,7 @@ impl IncomingMessage {
                 username,
                 discord_avatar,
                 avatar_url,
+                trust_level,
             } if discord_id.is_some_and(|value| value == 0)
                 || [discord_name, username]
                     .into_iter()
@@ -160,7 +162,10 @@ impl IncomingMessage {
                 || [discord_avatar, avatar_url]
                     .into_iter()
                     .flatten()
-                    .any(|value| value.len() > 2_048) =>
+                    .any(|value| value.len() > 2_048)
+                || trust_level
+                    .as_deref()
+                    .is_some_and(|value| !matches!(value, "trusted" | "new_device")) =>
             {
                 Err("invalid Relay session metadata")
             }
@@ -198,6 +203,7 @@ pub(crate) enum Action {
     PlayNormalDraft,
     InvitePartyMembers,
     CheckPartyMembers,
+    KickPartyMember,
 }
 
 impl Action {
@@ -230,6 +236,7 @@ impl Action {
             "play_normal_draft" => Self::PlayNormalDraft,
             "invite_party_members" => Self::InvitePartyMembers,
             "check_party_members" => Self::CheckPartyMembers,
+            "kick_party_member" => Self::KickPartyMember,
             _ => return None,
         })
     }
@@ -263,11 +270,26 @@ impl Action {
             Self::PlayNormalDraft => "play_normal_draft",
             Self::InvitePartyMembers => "invite_party_members",
             Self::CheckPartyMembers => "check_party_members",
+            Self::KickPartyMember => "kick_party_member",
         }
     }
 
     pub(crate) const fn is_background(self) -> bool {
         matches!(self, Self::CheckPartyMembers)
+    }
+
+    pub(crate) const fn allowed_on_new_device(self) -> bool {
+        matches!(
+            self,
+            Self::Ping
+                | Self::AcceptMatch
+                | Self::LeaveLobby
+                | Self::CreateRankedLobby
+                | Self::CreateNormalLobby
+                | Self::InvitePartyMembers
+                | Self::CheckPartyMembers
+                | Self::KickPartyMember
+        )
     }
 }
 
@@ -566,10 +588,21 @@ pub(crate) struct AgentHelloMessage {
     lcu_ready: bool,
     protocol_version: u32,
     capabilities: AgentCapabilities,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bound_discord_id: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    puuid: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    riot_id: Option<String>,
 }
 
 impl AgentHelloMessage {
-    pub(crate) const fn new(lcu_ready: bool) -> Self {
+    pub(crate) fn new(
+        lcu_ready: bool,
+        bound_discord_id: Option<u64>,
+        puuid: Option<String>,
+        riot_id: Option<String>,
+    ) -> Self {
         Self {
             message_type: "agent_hello",
             version: env!("CARGO_PKG_VERSION"),
@@ -577,6 +610,9 @@ impl AgentHelloMessage {
             lcu_ready,
             protocol_version: 1,
             capabilities: AgentCapabilities::current(),
+            bound_discord_id,
+            puuid: puuid.filter(|value| !value.is_empty() && value.len() <= 256),
+            riot_id: riot_id.filter(|value| !value.is_empty() && value.len() <= 128),
         }
     }
 }
@@ -824,7 +860,13 @@ mod tests {
 
     #[test]
     fn agent_hello_serializes_current_capabilities() {
-        let value = serde_json::to_value(AgentHelloMessage::new(true)).unwrap();
+        let value = serde_json::to_value(AgentHelloMessage::new(
+            true,
+            Some(42),
+            Some("puuid".into()),
+            Some("name#tag".into()),
+        ))
+        .unwrap();
 
         assert_eq!(value["type"], "agent_hello");
         assert_eq!(value["version"], env!("CARGO_PKG_VERSION"));
@@ -924,11 +966,53 @@ mod tests {
             "create_normal_lobby",
             "invite_party_members",
             "check_party_members",
+            "kick_party_member",
         ];
         for action_name in relay_actions {
             let action = Action::parse(action_name).expect("Relay action must remain supported");
             assert_eq!(action.as_str(), action_name);
         }
         assert_eq!(Action::parse("arbitrary_http"), None);
+    }
+
+    #[test]
+    fn new_device_actions_are_explicitly_limited() {
+        for action_name in [
+            "ping",
+            "accept_match",
+            "leave_lobby",
+            "create_ranked_lobby",
+            "create_normal_lobby",
+            "invite_party_members",
+            "check_party_members",
+            "kick_party_member",
+        ] {
+            let action = Action::parse(action_name).unwrap();
+            assert!(action.allowed_on_new_device(), "{action_name}");
+        }
+        for action_name in ["queue_start", "champ_select_action", "dodge", "set_status"] {
+            let action = Action::parse(action_name).unwrap();
+            assert!(!action.allowed_on_new_device(), "{action_name}");
+        }
+    }
+
+    #[test]
+    fn session_bound_accepts_only_known_trust_levels() {
+        let parsed = IncomingMessage::parse(
+            r#"{"type":"session_bound","discord_id":42,"trust_level":"new_device"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed,
+            IncomingMessage::SessionBound {
+                discord_id: Some(42),
+                trust_level: Some(ref level),
+                ..
+            } if level == "new_device"
+        ));
+        assert!(IncomingMessage::parse(
+            r#"{"type":"session_bound","discord_id":42,"trust_level":"root"}"#
+        )
+        .is_err());
     }
 }
