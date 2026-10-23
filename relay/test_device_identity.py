@@ -9,6 +9,8 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from relay.app import (
     _device_trusted_redis_key,
+    _mask_ip,
+    _trusted_proxy_client_ip,
     _session_auth_source_redis_key,
     _session_device_fingerprint_redis_key,
     _session_trust_level,
@@ -136,6 +138,29 @@ class DeviceTrustTests(unittest.IsolatedAsyncioTestCase):
             await _session_trust_level(redis, discord_id, second_session),
             "trusted",
         )
+
+
+class ClientIpTests(unittest.TestCase):
+    class _Client:
+        def __init__(self, host: str) -> None:
+            self.host = host
+
+    class _Ws:
+        def __init__(self, peer: str, headers: dict[str, str]) -> None:
+            self.client = ClientIpTests._Client(peer)
+            self.headers = headers
+
+    def test_trusted_private_proxy_uses_forwarded_public_ip(self) -> None:
+        ws = self._Ws("172.18.0.4", {"x-forwarded-for": "8.8.4.4, 172.18.0.4"})
+        self.assertEqual(_trusted_proxy_client_ip(ws), "8.8.4.4")
+
+    def test_public_peer_cannot_spoof_forwarded_ip(self) -> None:
+        ws = self._Ws("8.8.8.8", {"x-forwarded-for": "1.1.1.1"})
+        self.assertEqual(_trusted_proxy_client_ip(ws), "8.8.8.8")
+
+    def test_ip_masking_keeps_only_coarse_network(self) -> None:
+        self.assertEqual(_mask_ip("8.8.8.8"), "8.8.8.0/24")
+        self.assertEqual(_mask_ip("2001:4860:4860::8888"), "2001:4860:4860::/56")
 
 
 if __name__ == "__main__":

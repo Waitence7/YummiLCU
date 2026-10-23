@@ -12,6 +12,7 @@ import base64
 import binascii
 import hashlib
 import html
+import ipaddress
 import json
 import logging
 import re
@@ -66,6 +67,7 @@ SESSION_DEVICE_FINGERPRINT_KEY = "relay:session_device_fingerprint:{session_id}"
 DEVICE_SEEN_KEY = "relay:device_seen:{discord_id}:{device_key}"
 DEVICE_TRUSTED_KEY = "relay:device_trusted:{discord_id}:{device_key}"
 NEW_DEVICE_NOTICE_KEY = "relay:new_device_notice:{discord_id}:{device_key}"
+DEVICE_ID_FINGERPRINT_KEY = "relay:device_id_fingerprint:{discord_id}:{device_id}"
 OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
 OAUTH_LINK_CODE_TTL_SEC = 600
@@ -313,6 +315,77 @@ def _device_trusted_redis_key(discord_id: int, device_key: str) -> str:
 
 def _new_device_notice_redis_key(discord_id: int, device_key: str) -> str:
     return NEW_DEVICE_NOTICE_KEY.format(discord_id=int(discord_id), device_key=device_key)
+
+
+def _device_id_fingerprint_redis_key(discord_id: int, device_id: str) -> str:
+    return DEVICE_ID_FINGERPRINT_KEY.format(discord_id=int(discord_id), device_id=device_id)
+
+
+def _trusted_proxy_client_ip(websocket: WebSocket) -> str | None:
+    """Return the public client IP only when proxy headers came from a private/loopback peer."""
+    peer = websocket.client.host if websocket.client else ""
+    try:
+        peer_ip = ipaddress.ip_address(peer)
+        trusted_peer = peer_ip.is_private or peer_ip.is_loopback
+    except ValueError:
+        trusted_peer = False
+    candidate = None
+    if trusted_peer:
+        forwarded = websocket.headers.get("x-forwarded-for")
+        if forwarded:
+            candidate = forwarded.split(",", 1)[0].strip()
+        if not candidate:
+            candidate = websocket.headers.get("x-real-ip")
+    if not candidate:
+        candidate = peer
+    try:
+        parsed = ipaddress.ip_address(candidate)
+    except ValueError:
+        return None
+    if parsed.is_private or parsed.is_loopback or parsed.is_link_local:
+        return None
+    return str(parsed)
+
+
+def _mask_ip(ip: str | None) -> str | None:
+    if not ip:
+        return None
+    try:
+        parsed = ipaddress.ip_address(ip)
+    except ValueError:
+        return None
+    if parsed.version == 4:
+        return str(ipaddress.ip_network(f"{parsed}/24", strict=False).network_address) + "/24"
+    return str(ipaddress.ip_network(f"{parsed}/56", strict=False).network_address) + "/56"
+
+
+async def _lookup_ip_geo(http: aiohttp.ClientSession, ip: str | None) -> dict[str, str | None]:
+    result: dict[str, str | None] = {"region": None, "city": None, "isp": None, "asn": None}
+    if not ip:
+        return result
+    try:
+        async with http.get(f"https://ipwho.is/{ip}", timeout=aiohttp.ClientTimeout(total=2.5)) as res:
+            if res.status != 200:
+                return result
+            payload = await res.json(content_type=None)
+    except Exception:
+        return result
+    if not isinstance(payload, dict) or payload.get("success") is False:
+        return result
+    connection = payload.get("connection") if isinstance(payload.get("connection"), dict) else {}
+    for key in ("region", "city"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            result[key] = value.strip()[:80]
+    isp = connection.get("isp")
+    asn = connection.get("asn")
+    if isinstance(isp, str) and isp.strip():
+        result["isp"] = isp.strip()[:120]
+    if isinstance(asn, int):
+        result["asn"] = f"AS{asn}"
+    elif isinstance(asn, str) and asn.strip():
+        result["asn"] = asn.strip()[:32]
+    return result
 
 
 async def _session_device_key(r: redis.Redis, session_id: str) -> str:
@@ -1562,6 +1635,8 @@ async def _send_new_device_login_notice(
     conn: ConnectionManager,
     r: redis.Redis,
     *,
+    http: aiohttp.ClientSession,
+    websocket: WebSocket | None,
     discord_id: int,
     session_id: str,
     riot_id: str | None,
@@ -1570,7 +1645,37 @@ async def _send_new_device_login_notice(
     device_key = await _session_device_key(r, session_id)
     notice_key = _new_device_notice_redis_key(discord_id, device_key)
     if await r.exists(notice_key):
+        logger.info("LCU 신규 기기 재접속 알림 생략 discord_id=%s session=%s fingerprint=%s reason=already_notified", discord_id, session_id[:8], device_key[:16])
         return
+    ip = _trusted_proxy_client_ip(websocket) if websocket is not None else None
+    geo = await _lookup_ip_geo(http, ip)
+    device_id = conn.device_id_for_ws(websocket) if websocket is not None else None
+    fingerprint = conn.device_fingerprint_for_ws(websocket) if websocket is not None else None
+    mismatch = False
+    if device_id and fingerprint:
+        id_key = _device_id_fingerprint_redis_key(discord_id, device_id)
+        previous = await r.get(id_key)
+        if isinstance(previous, bytes):
+            previous = previous.decode("ascii", errors="ignore")
+        mismatch = isinstance(previous, str) and bool(previous) and previous != fingerprint
+        await r.set(id_key, fingerprint)
+    audit = {
+        "session": session_id[:8],
+        "fingerprint": fingerprint[:16] if fingerprint else None,
+        "device_id": device_id[:8] if device_id else None,
+        "masked_ip": _mask_ip(ip),
+        "region": geo.get("region"),
+        "city": geo.get("city"),
+        "isp": geo.get("isp"),
+        "asn": geo.get("asn"),
+        "device_id_fingerprint_mismatch": mismatch,
+        "reason": "first_notice_for_untrusted_fingerprint",
+    }
+    await append_archive_record(discord_id, "new_device_login", audit)
+    logger.info(
+        "LCU 신규 기기 판정 discord_id=%s session=%s fingerprint=%s ip=%s region=%s city=%s isp=%s mismatch=%s",
+        discord_id, session_id[:8], (fingerprint or "-")[:16], _mask_ip(ip) or "-", geo.get("region") or "-", geo.get("city") or "-", geo.get("isp") or "-", mismatch,
+    )
     await conn.send_bot_event(
         {
             "type": "new_device_login",
@@ -1581,6 +1686,10 @@ async def _send_new_device_login_notice(
             "logged_in_at_ms": int(time.time() * 1000),
             "device_session_id": session_id,
             "device_fingerprint": device_key if device_key != session_id else None,
+            "approx_region": geo.get("region"),
+            "approx_city": geo.get("city"),
+            "isp": geo.get("isp"),
+            "asn": geo.get("asn"),
         }
     )
 
@@ -3327,6 +3436,8 @@ async def _handle_agent_message(
                             await _send_new_device_login_notice(
                                 conn,
                                 r,
+                                http=websocket.app.state.http,
+                                websocket=websocket,
                                 discord_id=discord_id,
                                 session_id=session_id,
                                 riot_id=auto_login_riot_id or info.get("riot_id"),
@@ -3347,6 +3458,8 @@ async def _handle_agent_message(
             await _send_new_device_login_notice(
                 conn,
                 r,
+                http=websocket.app.state.http,
+                websocket=websocket,
                 discord_id=discord_id,
                 session_id=session_id,
                 riot_id=auto_login_riot_id or info.get("riot_id"),
@@ -4132,6 +4245,8 @@ async def ws_bot(websocket: WebSocket) -> None:
         await _send_new_device_login_notice(
             conn,
             r,
+            http=websocket.app.state.http,
+            websocket=None,
             discord_id=discord_id,
             session_id=session_id,
             riot_id=info.get("riot_id") if isinstance(info.get("riot_id"), str) else None,
