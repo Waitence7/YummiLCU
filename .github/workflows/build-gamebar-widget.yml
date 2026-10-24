@@ -17,7 +17,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: yummi-gamebar-${{ github.ref }}
+  group: yummi-gamebar-widget-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
