@@ -55,6 +55,13 @@
     <PackageReference Include="Microsoft.Gaming.XboxGameBar"><Version>7.2.240903001</Version></PackageReference>
     <PackageReference Include="Microsoft.NETCore.UniversalWindowsPlatform"><Version>6.2.14</Version></PackageReference>
   </ItemGroup>
+  <ItemGroup>
+    <Reference Include="Windows" Condition="Exists('$(WindowsSdkDir)UnionMetadata\$(TargetPlatformVersion)\Facade\Windows.winmd')">
+      <HintPath>$(WindowsSdkDir)UnionMetadata\$(TargetPlatformVersion)\Facade\Windows.winmd</HintPath>
+      <IsWinMDFile>true</IsWinMDFile>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
   <PropertyGroup><XboxGameBar-Platform>x64</XboxGameBar-Platform></PropertyGroup>
   <Import Project="$(MSBuildExtensionsPath)\Microsoft\WindowsXaml\v$(VisualStudioVersion)\Microsoft.Windows.UI.Xaml.CSharp.targets" />
 </Project>
