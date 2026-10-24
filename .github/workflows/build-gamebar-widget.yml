@@ -131,6 +131,8 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
           CERT_THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
+          SELF_SIGNED: ${{ steps.signing.outputs.self_signed }}
+          PUBLIC_CERT_PATH: ${{ steps.signing.outputs.public_cert_path }}
         run: |
           $root = Resolve-Path agent-tauri/gamebar-widget
           $package = Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -in '.appx', '.msix' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
@@ -138,10 +140,29 @@ jobs:
 
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { throw "signtool.exe not found" }
-          & $signtool.FullName sign /sha1 $env:CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $package.FullName
-          if ($LASTEXITCODE -ne 0) { throw "AppX signing failed" }
-          & $signtool.FullName verify /pa /v $package.FullName
-          if ($LASTEXITCODE -ne 0) { throw "AppX signature verification failed" }
+          $signOutput = & $signtool.FullName sign /sha1 $env:CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $package.FullName 2>&1
+          $signExitCode = $LASTEXITCODE
+          $signOutput | Write-Host
+          if ($signExitCode -ne 0) {
+            $detail = (($signOutput | Select-Object -Last 12) -join ' | ').Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Host "::error title=Game Bar AppX signing::$detail"
+            throw "AppX signing failed with exit code $signExitCode"
+          }
+
+          # signtool /pa validates certificate trust as well as the package signature.
+          # The generated sideload certificate is intentionally not machine-trusted,
+          # so trust it only in this runner user's TrustedPeople store for verification.
+          if ($env:SELF_SIGNED -eq 'true' -and $env:PUBLIC_CERT_PATH -and (Test-Path $env:PUBLIC_CERT_PATH)) {
+            Import-Certificate -FilePath $env:PUBLIC_CERT_PATH -CertStoreLocation Cert:\CurrentUser\TrustedPeople | Out-Null
+          }
+          $verifyOutput = & $signtool.FullName verify /pa /v $package.FullName 2>&1
+          $verifyExitCode = $LASTEXITCODE
+          $verifyOutput | Write-Host
+          if ($verifyExitCode -ne 0) {
+            $detail = (($verifyOutput | Select-Object -Last 12) -join ' | ').Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Host "::error title=Game Bar AppX verification::$detail"
+            throw "AppX signature verification failed with exit code $verifyExitCode"
+          }
 
           $stage = Join-Path $env:RUNNER_TEMP "gamebar-overlay"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -196,4 +217,7 @@ jobs:
           CERT_PATH: ${{ steps.signing.outputs.cert_path }}
         run: |
           if ($env:CERT_PATH) { Remove-Item $env:CERT_PATH -Force -ErrorAction SilentlyContinue }
-          if ($env:CERT_THUMBPRINT) { Remove-Item "Cert:\CurrentUser\My\$env:CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue }
+          if ($env:CERT_THUMBPRINT) {
+            Remove-Item "Cert:\CurrentUser\My\$env:CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+            Remove-Item "Cert:\CurrentUser\TrustedPeople\$env:CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+          }
