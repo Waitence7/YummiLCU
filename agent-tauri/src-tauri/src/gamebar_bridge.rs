@@ -240,14 +240,13 @@ fn pipe_server(state: Arc<AppState>) {
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{CloseHandle, HLOCAL, INVALID_HANDLE_VALUE},
+            Foundation::{CloseHandle, LocalFree, HLOCAL, INVALID_HANDLE_VALUE},
             Security::{
                 Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
                 PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
             },
             Storage::FileSystem::{FlushFileBuffers, WriteFile, PIPE_ACCESS_OUTBOUND},
             System::{
-                Memory::LocalFree,
                 Pipes::{
                     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
                     PIPE_TYPE_BYTE, PIPE_WAIT,
@@ -329,14 +328,13 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
     use windows::{
         core::PCWSTR,
         Win32::{
-            Foundation::{CloseHandle, HLOCAL, INVALID_HANDLE_VALUE},
+            Foundation::{CloseHandle, LocalFree, HLOCAL, INVALID_HANDLE_VALUE},
             Security::{
                 Authorization::ConvertStringSecurityDescriptorToSecurityDescriptorW,
                 PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
             },
             Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile, PIPE_ACCESS_DUPLEX},
             System::{
-                Memory::LocalFree,
                 Pipes::{
                     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
                     PIPE_TYPE_BYTE, PIPE_WAIT,
