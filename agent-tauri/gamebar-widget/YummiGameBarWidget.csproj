@@ -56,8 +56,8 @@
     <PackageReference Include="Microsoft.NETCore.UniversalWindowsPlatform"><Version>6.2.14</Version></PackageReference>
   </ItemGroup>
   <ItemGroup>
-    <Reference Include="Windows" Condition="Exists('$(WindowsSdkDir)UnionMetadata\$(TargetPlatformVersion)\Facade\Windows.winmd')">
-      <HintPath>$(WindowsSdkDir)UnionMetadata\$(TargetPlatformVersion)\Facade\Windows.winmd</HintPath>
+    <Reference Include="Windows" Condition="Exists('$(WindowsSdkDir)UnionMetadata\$(TargetPlatformVersion)\Windows.winmd')">
+      <HintPath>$(WindowsSdkDir)UnionMetadata\$(TargetPlatformVersion)\Windows.winmd</HintPath>
       <IsWinMDFile>true</IsWinMDFile>
       <Private>false</Private>
     </Reference>
