@@ -236,6 +236,15 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(windows)]
+fn named_pipe_connected(result: windows::core::Result<()>) -> bool {
+    const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
+    match result {
+        Ok(()) => true,
+        Err(error) => error.code().0 == ERROR_PIPE_CONNECTED_HRESULT,
+    }
+}
+
+#[cfg(windows)]
 fn pipe_server(state: Arc<AppState>) {
     use windows::{
         core::PCWSTR,
@@ -305,7 +314,7 @@ fn pipe_server(state: Arc<AppState>) {
             continue;
         }
 
-        let connected = unsafe { ConnectNamedPipe(pipe, None) }.is_ok();
+        let connected = named_pipe_connected(unsafe { ConnectNamedPipe(pipe, None) });
         if connected {
             let mut payload =
                 serde_json::to_vec(&state.gamebar_snapshot()).unwrap_or_else(|_| b"{}".to_vec());
@@ -391,7 +400,7 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
             continue;
         }
 
-        if unsafe { ConnectNamedPipe(pipe, None) }.is_ok() {
+        if named_pipe_connected(unsafe { ConnectNamedPipe(pipe, None) }) {
             let mut buffer = [0u8; MAX_REQUEST_BYTES];
             let mut read = 0u32;
             let read_result = unsafe { ReadFile(pipe, Some(&mut buffer), Some(&mut read), None) };
