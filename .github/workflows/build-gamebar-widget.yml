@@ -164,7 +164,7 @@ jobs:
           if ($verifyExitCode -ne 0) {
             $verifyText = ($verifyOutput -join "`n")
             $expectedSelfSignedTrustFailure = $env:SELF_SIGNED -eq 'true' -and
-              $verifyText -match '(?i)root certificate which is not trusted by the trust provider'
+              $verifyText -match '(?i)root\s+certificate\s+which\s+is\s+not\s+trusted\s+by\s+the\s+trust\s+provider'
             if ($expectedSelfSignedTrustFailure) {
               Write-Warning "AppX signature is present; trust-chain failure is expected for the bundled self-signed sideload certificate."
             } else {
