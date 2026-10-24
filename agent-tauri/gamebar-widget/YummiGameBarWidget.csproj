@@ -55,9 +55,9 @@
     <PackageReference Include="Microsoft.Gaming.XboxGameBar"><Version>7.2.240903001</Version></PackageReference>
     <PackageReference Include="Microsoft.NETCore.UniversalWindowsPlatform"><Version>6.2.14</Version></PackageReference>
   </ItemGroup>
-  <ItemGroup>
-    <Reference Include="Windows" Condition="Exists('$(WindowsSdkDir)UnionMetadata\$(TargetPlatformVersion)\Windows.winmd')">
-      <HintPath>$(WindowsSdkDir)UnionMetadata\$(TargetPlatformVersion)\Windows.winmd</HintPath>
+  <ItemGroup Condition="'$(GameBarWindowsWinmd)' != ''">
+    <Reference Include="Windows">
+      <HintPath>$(GameBarWindowsWinmd)</HintPath>
       <IsWinMDFile>true</IsWinMDFile>
       <Private>false</Private>
     </Reference>

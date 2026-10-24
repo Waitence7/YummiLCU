@@ -97,7 +97,18 @@ jobs:
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
             -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
           if (-not $msbuild) { throw "MSBuild not found" }
+          $unionRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\UnionMetadata"
+          $windowsWinmd = Get-ChildItem $unionRoot -Recurse -Filter Windows.winmd -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\10\.0\.19041\.0\\Windows\.winmd$' } |
+            Select-Object -First 1
+          if (-not $windowsWinmd) {
+            $windowsWinmd = Get-ChildItem $unionRoot -Recurse -Filter Windows.winmd -File -ErrorAction SilentlyContinue |
+              Sort-Object FullName -Descending | Select-Object -First 1
+          }
+          if (-not $windowsWinmd) { throw "Windows.winmd not found under $unionRoot" }
+          Write-Host "Using Windows metadata: $($windowsWinmd.FullName)"
           & $msbuild agent-tauri/gamebar-widget/YummiGameBarWidget.csproj `
+            /p:GameBarWindowsWinmd="$($windowsWinmd.FullName)" `
             /restore `
             /p:Configuration=Release `
             /p:Platform=x64 `
