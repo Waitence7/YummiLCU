@@ -121,7 +121,7 @@
     <Border
         x:Name="FriendOnlineToast"
         Grid.RowSpan="5"
-        Panel.ZIndex="100"
+        Canvas.ZIndex="100"
         HorizontalAlignment="Right"
         VerticalAlignment="Top"
         Width="265"
