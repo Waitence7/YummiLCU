@@ -157,9 +157,9 @@ jobs:
 
           # signtool /pa validates certificate trust as well as the package signature.
           # The generated sideload certificate is intentionally not machine-trusted,
-          # so trust it only in this runner user's TrustedPeople store for verification.
+          # so trust it only in this runner user's Root store for verification.
           if ($env:SELF_SIGNED -eq 'true' -and $env:PUBLIC_CERT_PATH -and (Test-Path $env:PUBLIC_CERT_PATH)) {
-            Import-Certificate -FilePath $env:PUBLIC_CERT_PATH -CertStoreLocation Cert:\CurrentUser\TrustedPeople | Out-Null
+            Import-Certificate -FilePath $env:PUBLIC_CERT_PATH -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
           }
           $verifyOutput = & $signtool.FullName verify /pa /v $package.FullName 2>&1
           $verifyExitCode = $LASTEXITCODE
@@ -226,4 +226,5 @@ jobs:
           if ($env:CERT_THUMBPRINT) {
             Remove-Item "Cert:\CurrentUser\My\$env:CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
             Remove-Item "Cert:\CurrentUser\TrustedPeople\$env:CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
+            Remove-Item "Cert:\CurrentUser\Root\$env:CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue
           }
