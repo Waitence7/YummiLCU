@@ -32,7 +32,7 @@ jobs:
       version: ${{ steps.meta.outputs.version }}
       artifact_name: ${{ steps.pack.outputs.artifact_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Resolve version
         id: meta
@@ -99,6 +99,7 @@ jobs:
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
             -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
           if (-not $msbuild) { throw "MSBuild not found" }
+          $buildLog = Join-Path $env:RUNNER_TEMP "yummi-gamebar-msbuild.log"
           & $msbuild agent-tauri/gamebar-widget/YummiGameBarWidget.csproj `
             /restore `
             /p:Configuration=Release `
@@ -107,8 +108,23 @@ jobs:
             /p:UapAppxPackageBuildMode=SideloadOnly `
             /p:AppxBundle=Never `
             /p:AppxPackageSigningEnabled=false `
+            /fl `
+            "/flp:logfile=$buildLog;verbosity=normal" `
             /m
-          if ($LASTEXITCODE -ne 0) { throw "Game Bar MSBuild failed" }
+          $buildExitCode = $LASTEXITCODE
+          if ($buildExitCode -ne 0) {
+            $errors = if (Test-Path $buildLog) {
+              Get-Content $buildLog | Where-Object { $_ -match '(?i)(: error |error [A-Z]+[0-9]+:|error MSB[0-9]+:)' } | Select-Object -Unique -First 8
+            } else { @() }
+            if ($errors.Count -eq 0 -and (Test-Path $buildLog)) {
+              $errors = Get-Content $buildLog -Tail 40 | Select-Object -First 8
+            }
+            foreach ($line in $errors) {
+              $annotation = $line.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+              Write-Host "::error title=Game Bar MSBuild::$annotation"
+            }
+            throw "Game Bar MSBuild failed with exit code $buildExitCode"
+          }
 
       - name: Sign package and make standalone download
         id: pack
