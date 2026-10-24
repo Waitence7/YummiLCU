@@ -168,6 +168,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             });
 
             tray::setup(app)?;
+            crate::gamebar_bridge::start(app.handle().clone(), update_state.clone());
             crate::commands::window::start_window_ui_watchdog(
                 app.handle().clone(),
                 update_state.clone(),

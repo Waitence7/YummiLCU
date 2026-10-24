@@ -319,6 +319,25 @@ impl LcuClient {
             .await
     }
 
+    pub(crate) async fn lobby(&self) -> AgentResult<Value> {
+        self.request(Method::GET, "/lol-lobby/v2/lobby", None).await
+    }
+
+    pub(crate) async fn friends(&self) -> AgentResult<Value> {
+        self.request(Method::GET, "/lol-chat/v1/friends", None)
+            .await
+    }
+
+    pub(crate) async fn set_status_message(&self, status_message: &str) -> AgentResult<()> {
+        self.request(
+            Method::PUT,
+            "/lol-chat/v1/me",
+            Some(json!({ "statusMessage": status_message })),
+        )
+        .await
+        .map(|_| ())
+    }
+
     pub(crate) async fn gameflow_watch_phase(&self) -> AgentResult<Option<String>> {
         let value = self
             .request(Method::GET, GAMEFLOW_WATCH_ENDPOINT, None)
@@ -702,7 +721,8 @@ mod tests {
                 "stats": {"win": true},
                 "timeline": {"lane": "BOTTOM", "role": "DUO_SUPPORT"}
             }]
-        })).unwrap();
+        }))
+        .unwrap();
         let participant = &compact["participants"][0];
         assert_eq!(participant["lane"], "BOTTOM");
         assert_eq!(participant["role"], "DUO_SUPPORT");

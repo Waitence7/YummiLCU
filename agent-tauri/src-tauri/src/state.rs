@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
-    sync::Arc,
+    sync::{Arc, RwLock as StdRwLock},
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
@@ -100,6 +100,29 @@ fn installed_at() -> Option<u64> {
         .map(|value| value.as_secs())
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub(crate) struct GameBarSnapshot {
+    pub(crate) connected: bool,
+    pub(crate) riot_id: Option<String>,
+    pub(crate) phase: String,
+    pub(crate) party_members: Vec<String>,
+    pub(crate) online_friends: Vec<String>,
+    pub(crate) updated_at_ms: u64,
+}
+
+impl Default for GameBarSnapshot {
+    fn default() -> Self {
+        Self {
+            connected: false,
+            riot_id: None,
+            phase: "Offline".into(),
+            party_members: Vec::new(),
+            online_friends: Vec::new(),
+            updated_at_ms: 0,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) enum AgentEvent {
     LcuStateChanged(LcuConnectionState),
@@ -137,6 +160,7 @@ pub(crate) struct AppState {
     discord_presence_match: RwLock<Option<DiscordPresenceMatchContext>>,
     recent_unexpected_errors: Mutex<HashMap<String, Instant>>,
     recent_diagnostics: Mutex<HashMap<String, Instant>>,
+    gamebar_snapshot: StdRwLock<GameBarSnapshot>,
 }
 
 impl AppState {
@@ -166,6 +190,7 @@ impl AppState {
             discord_presence_match: RwLock::new(None),
             recent_unexpected_errors: Mutex::new(HashMap::new()),
             recent_diagnostics: Mutex::new(HashMap::new()),
+            gamebar_snapshot: StdRwLock::new(GameBarSnapshot::default()),
         }
     }
 
@@ -416,6 +441,19 @@ impl AppState {
 
     pub(crate) async fn lcu_state(&self) -> LcuConnectionState {
         *self.lcu_state.read().await
+    }
+
+    pub(crate) fn gamebar_snapshot(&self) -> GameBarSnapshot {
+        self.gamebar_snapshot
+            .read()
+            .map(|snapshot| snapshot.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn set_gamebar_snapshot(&self, snapshot: GameBarSnapshot) {
+        if let Ok(mut current) = self.gamebar_snapshot.write() {
+            *current = snapshot;
+        }
     }
 
     pub(crate) fn shutdown_receiver(&self) -> watch::Receiver<bool> {
