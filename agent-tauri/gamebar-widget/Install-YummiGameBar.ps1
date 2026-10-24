@@ -6,6 +6,12 @@ $package = Get-ChildItem $PSScriptRoot -File |
   Select-Object -First 1
 if (-not $package) { throw 'Yummi Game Bar package not found.' }
 
+$certificate = Join-Path $PSScriptRoot 'Yummi-GameBar-Overlay.cer'
+if (Test-Path $certificate) {
+  Write-Host '오버레이 서명 인증서를 현재 사용자 TrustedPeople에 등록합니다.'
+  Import-Certificate -FilePath $certificate -CertStoreLocation 'Cert:\CurrentUser\TrustedPeople' | Out-Null
+}
+
 $depsDir = Join-Path $PSScriptRoot 'Dependencies'
 $deps = @()
 if (Test-Path $depsDir) {

@@ -53,14 +53,31 @@ jobs:
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           APPX_VERSION: ${{ steps.meta.outputs.appx_version }}
         run: |
-          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
-            throw "WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD are required for Game Bar sideload packages"
+          $certPath = ""
+          $publicCertPath = Join-Path $env:RUNNER_TEMP "Yummi-GameBar-Overlay.cer"
+          if ($env:WINDOWS_CERTIFICATE -and $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            $certPath = Join-Path $env:RUNNER_TEMP "yummi-gamebar.pfx"
+            [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+            $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+            $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+            if (-not $cert) { throw "failed to import signing certificate" }
+            "self_signed=false" >> $env:GITHUB_OUTPUT
+          } else {
+            Write-Warning "WINDOWS_CERTIFICATE is not configured; creating a self-signed sideload certificate for this overlay build."
+            $cert = New-SelfSignedCertificate `
+              -Type Custom `
+              -Subject "CN=Yummi Game Bar Overlay" `
+              -FriendlyName "Yummi Game Bar Overlay" `
+              -KeyAlgorithm RSA `
+              -KeyLength 2048 `
+              -HashAlgorithm SHA256 `
+              -KeyUsage DigitalSignature `
+              -TextExtension @("2.5.29.37={text}1.3.6.1.5.5.7.3.3") `
+              -CertStoreLocation Cert:\CurrentUser\My `
+              -NotAfter (Get-Date).AddYears(5)
+            Export-Certificate -Cert $cert -FilePath $publicCertPath -Type CERT | Out-Null
+            "self_signed=true" >> $env:GITHUB_OUTPUT
           }
-          $certPath = Join-Path $env:RUNNER_TEMP "yummi-gamebar.pfx"
-          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
-          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
-          $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
-          if (-not $cert) { throw "failed to import signing certificate" }
           $publisher = $cert.Subject
           if (-not $publisher) { throw "certificate subject is empty" }
 
@@ -71,6 +88,7 @@ jobs:
 
           "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
           "cert_path=$certPath" >> $env:GITHUB_OUTPUT
+          "public_cert_path=$publicCertPath" >> $env:GITHUB_OUTPUT
           Write-Host "Game Bar publisher: $publisher"
           Write-Host "Game Bar version: $env:APPX_VERSION"
 
@@ -117,6 +135,10 @@ jobs:
 
           Copy-Item agent-tauri/gamebar-widget/Install-YummiGameBar.ps1 (Join-Path $stage 'Install-YummiGameBar.ps1') -Force
           Copy-Item agent-tauri/gamebar-widget/README.md (Join-Path $stage 'README.md') -Force
+          $publicCert = "${{ steps.signing.outputs.public_cert_path }}"
+          if ("${{ steps.signing.outputs.self_signed }}" -eq "true" -and $publicCert -and (Test-Path $publicCert)) {
+            Copy-Item $publicCert (Join-Path $stage 'Yummi-GameBar-Overlay.cer') -Force
+          }
 
           $zipName = "Yummi-GameBar-Overlay-$env:VERSION.zip"
           Compress-Archive -Path "$stage\*" -DestinationPath $zipName -Force
