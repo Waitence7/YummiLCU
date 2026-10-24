@@ -22,9 +22,11 @@ if (Test-Path $certificate) {
     exit 0
   }
 
-  Write-Host '오버레이 서명 인증서를 LocalMachine\\TrustedPeople에 등록합니다.'
-  $imported = Import-Certificate -FilePath $certificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople'
-  if (-not $imported) { throw '오버레이 서명 인증서를 신뢰 저장소에 등록하지 못했습니다.' }
+  Write-Host '오버레이 서명 인증서를 LocalMachine\TrustedPeople 및 LocalMachine\Root에 등록합니다.'
+  $trustedPeople = Import-Certificate -FilePath $certificate -CertStoreLocation 'Cert:\LocalMachine\TrustedPeople'
+  if (-not $trustedPeople) { throw '오버레이 서명 인증서를 TrustedPeople에 등록하지 못했습니다.' }
+  $trustedRoot = Import-Certificate -FilePath $certificate -CertStoreLocation 'Cert:\LocalMachine\Root'
+  if (-not $trustedRoot) { throw '오버레이 서명 인증서를 Trusted Root에 등록하지 못했습니다.' }
 }
 
 $depsDir = Join-Path $PSScriptRoot 'Dependencies'
