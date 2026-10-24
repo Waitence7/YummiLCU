@@ -34,6 +34,7 @@ $deps = @()
 if (Test-Path $depsDir) {
   $deps = @(Get-ChildItem $depsDir -Recurse -File |
     Where-Object { $_.Extension -in '.appx', '.msix' } |
+    Where-Object { $_.FullName -notmatch '(?i)\\(arm|arm64)\\' -and $_.Name -notmatch '(?i)_(arm|arm64)_' } |
     Select-Object -ExpandProperty FullName)
 }
 
