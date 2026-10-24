@@ -140,7 +140,13 @@ jobs:
 
           $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $signtool) { throw "signtool.exe not found" }
-          $signOutput = & $signtool.FullName sign /sha1 $env:CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $package.FullName 2>&1
+          if ($env:SELF_SIGNED -eq 'true') {
+            # A local sideload certificate does not need a public timestamp and
+            # avoiding the network keeps CI deterministic.
+            $signOutput = & $signtool.FullName sign /sha1 $env:CERT_THUMBPRINT /fd SHA256 $package.FullName 2>&1
+          } else {
+            $signOutput = & $signtool.FullName sign /sha1 $env:CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $package.FullName 2>&1
+          }
           $signExitCode = $LASTEXITCODE
           $signOutput | Write-Host
           if ($signExitCode -ne 0) {
