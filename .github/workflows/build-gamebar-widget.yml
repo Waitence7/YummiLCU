@@ -167,6 +167,9 @@ jobs:
               $verifyText -match '(?i)root\s+certificate\s+which\s+is\s+not\s+trusted\s+by\s+the\s+trust\s+provider'
             if ($expectedSelfSignedTrustFailure) {
               Write-Warning "AppX signature is present; trust-chain failure is expected for the bundled self-signed sideload certificate."
+              # GitHub's PowerShell wrapper exits with the last native process code.
+              # The expected SignTool trust result is handled above, so clear it.
+              $global:LASTEXITCODE = 0
             } else {
               $detail = (($verifyOutput | Select-Object -Last 12) -join ' | ').Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
               Write-Host "::error title=Game Bar AppX verification::$detail"
