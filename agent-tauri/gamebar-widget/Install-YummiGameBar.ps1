@@ -34,15 +34,33 @@ $deps = @()
 if (Test-Path $depsDir) {
   $deps = @(Get-ChildItem $depsDir -Recurse -File |
     Where-Object { $_.Extension -in '.appx', '.msix' } |
-    Where-Object { $_.FullName -notmatch '(?i)\\(arm|arm64)\\' -and $_.Name -notmatch '(?i)_(arm|arm64)_' } |
-    Select-Object -ExpandProperty FullName)
+    Where-Object { $_.FullName -notmatch '(?i)\\(arm|arm64|x86)\\' -and $_.Name -notmatch '(?i)_(arm|arm64|x86)_' })
 }
 
-if ($deps.Count -gt 0) {
-  Add-AppxPackage -Path $package.FullName -DependencyPath $deps -ForceApplicationShutdown:$Force
-} else {
-  Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force
+# Framework packages are shared by many Windows apps. Reinstalling an already
+# installed framework can stall AppX deployment while those apps are running.
+$missingDeps = @()
+foreach ($dep in $deps) {
+  $name = $null
+  if ($dep.Name -match '^Microsoft\.NET\.Native\.Framework\.2\.2') { $name = 'Microsoft.NET.Native.Framework.2.2' }
+  elseif ($dep.Name -match '^Microsoft\.NET\.Native\.Runtime\.2\.2') { $name = 'Microsoft.NET.Native.Runtime.2.2' }
+  elseif ($dep.Name -match '^Microsoft\.VCLibs\.x64\.14\.00') { $name = 'Microsoft.VCLibs.140.00' }
+
+  $installed = if ($name) { Get-AppxPackage -Name $name -ErrorAction SilentlyContinue } else { $null }
+  if ($installed) {
+    Write-Host "이미 설치된 의존성 건너뜀: $($dep.Name)" -ForegroundColor DarkGray
+  } else {
+    $missingDeps += $dep.FullName
+  }
 }
+
+foreach ($depPath in $missingDeps) {
+  Write-Host "의존성 설치: $([IO.Path]::GetFileName($depPath))"
+  Add-AppxPackage -Path $depPath -ForceApplicationShutdown:$Force
+}
+
+Write-Host '유미 Game Bar 오버레이를 설치합니다.'
+Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force
 
 Write-Host ''
 Write-Host '설치 완료. Win+G > 위젯 메뉴 > 유미 LCU 에서 실행하세요.' -ForegroundColor Green
