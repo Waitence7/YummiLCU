@@ -86,6 +86,10 @@ jobs:
       PUBLIC_KEY_SECRET: ${{ secrets.YUMMI_AGENT_MANIFEST_PUBLIC_KEY }}
       CERT_THUMBPRINT_VAR: ${{ vars.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
       CERT_THUMBPRINT_SECRET: ${{ secrets.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
+      # GitHub-hosted Windows runner is 4 vCPU. Keep Cargo saturated without oversubscribing it.
+      CARGO_BUILD_JOBS: 4
+      CARGO_INCREMENTAL: 0
+      CARGO_TARGET_DIR: ${{ github.workspace }}/agent-tauri/src-tauri/target
     steps:
       - uses: actions/checkout@v4
 
@@ -217,6 +221,9 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: agent-tauri/src-tauri
+          cache-targets: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install frontend dependencies
         working-directory: agent-tauri
@@ -230,7 +237,9 @@ jobs:
 
       - name: Rust tests
         working-directory: agent-tauri/src-tauri
-        run: cargo test --locked
+        # Use the same explicit Windows target as the release build so Cargo/rust-cache
+        # reuse the target namespace instead of splitting host/debug and target/release trees.
+        run: cargo test --locked --target x86_64-pc-windows-msvc --jobs $env:CARGO_BUILD_JOBS
 
       - name: Build Tauri bundles
         working-directory: agent-tauri
