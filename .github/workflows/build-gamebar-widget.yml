@@ -193,6 +193,7 @@ jobs:
           }
 
           Copy-Item agent-tauri/gamebar-widget/Install-YummiGameBar.ps1 (Join-Path $stage 'Install-YummiGameBar.ps1') -Force
+          Copy-Item agent-tauri/gamebar-widget/Install-YummiGameBar.cmd (Join-Path $stage 'Install-YummiGameBar.cmd') -Force
           Copy-Item agent-tauri/gamebar-widget/README.md (Join-Path $stage 'README.md') -Force
           $publicCert = "${{ steps.signing.outputs.public_cert_path }}"
           if ("${{ steps.signing.outputs.self_signed }}" -eq "true" -and $publicCert -and (Test-Path $publicCert)) {
