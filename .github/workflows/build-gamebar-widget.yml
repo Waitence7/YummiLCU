@@ -1,0 +1,159 @@
+name: Build Game Bar Overlay (Windows)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "오버레이 버전 (비우면 agent-tauri/package.json 사용)"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "agent-tauri/gamebar-widget/**"
+      - ".github/workflows/build-gamebar-widget.yml"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: yummi-gamebar-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      artifact_name: ${{ steps.pack.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        id: meta
+        run: |
+          $sourceVersion = (Get-Content agent-tauri/package.json -Raw | ConvertFrom-Json).version
+          $requested = "${{ github.event.inputs.version }}".Trim()
+          $version = if ($requested) { $requested } else { $sourceVersion }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "version must be x.y.z" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "appx_version=$version.0" >> $env:GITHUB_OUTPUT
+
+      - name: Restore UWP packages
+        run: |
+          dotnet restore agent-tauri/gamebar-widget/YummiGameBarWidget.csproj
+
+      - name: Prepare package identity and signing certificate
+        id: signing
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          APPX_VERSION: ${{ steps.meta.outputs.appx_version }}
+        run: |
+          if (-not $env:WINDOWS_CERTIFICATE -or -not $env:WINDOWS_CERTIFICATE_PASSWORD) {
+            throw "WINDOWS_CERTIFICATE and WINDOWS_CERTIFICATE_PASSWORD are required for Game Bar sideload packages"
+          }
+          $certPath = Join-Path $env:RUNNER_TEMP "yummi-gamebar.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          if (-not $cert) { throw "failed to import signing certificate" }
+          $publisher = $cert.Subject
+          if (-not $publisher) { throw "certificate subject is empty" }
+
+          [xml]$manifest = Get-Content agent-tauri/gamebar-widget/Package.appxmanifest
+          $manifest.Package.Identity.Publisher = $publisher
+          $manifest.Package.Identity.Version = $env:APPX_VERSION
+          $manifest.Save((Resolve-Path agent-tauri/gamebar-widget/Package.appxmanifest))
+
+          "thumbprint=$($cert.Thumbprint)" >> $env:GITHUB_OUTPUT
+          "cert_path=$certPath" >> $env:GITHUB_OUTPUT
+          Write-Host "Game Bar publisher: $publisher"
+          Write-Host "Game Bar version: $env:APPX_VERSION"
+
+      - name: Build sideload package
+        run: |
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe | Select-Object -First 1
+          if (-not $msbuild) { throw "MSBuild not found" }
+          & $msbuild agent-tauri/gamebar-widget/YummiGameBarWidget.csproj `
+            /restore `
+            /p:Configuration=Release `
+            /p:Platform=x64 `
+            /p:GenerateAppxPackageOnBuild=true `
+            /p:UapAppxPackageBuildMode=SideloadOnly `
+            /p:AppxBundle=Never `
+            /p:AppxPackageSigningEnabled=false `
+            /m
+          if ($LASTEXITCODE -ne 0) { throw "Game Bar MSBuild failed" }
+
+      - name: Sign package and make standalone download
+        id: pack
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          CERT_THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
+        run: |
+          $root = Resolve-Path agent-tauri/gamebar-widget
+          $package = Get-ChildItem $root -Recurse -File | Where-Object { $_.Extension -in '.appx', '.msix' } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $package) { throw "Game Bar app package not found" }
+
+          $signtool = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $signtool) { throw "signtool.exe not found" }
+          & $signtool.FullName sign /sha1 $env:CERT_THUMBPRINT /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 $package.FullName
+          if ($LASTEXITCODE -ne 0) { throw "AppX signing failed" }
+          & $signtool.FullName verify /pa /v $package.FullName
+          if ($LASTEXITCODE -ne 0) { throw "AppX signature verification failed" }
+
+          $stage = Join-Path $env:RUNNER_TEMP "gamebar-overlay"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          $packageName = "Yummi-GameBar-Overlay-$env:VERSION$($package.Extension)"
+          Copy-Item $package.FullName (Join-Path $stage $packageName) -Force
+
+          $dependencies = Get-ChildItem $root -Recurse -Directory -Filter Dependencies -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($dependencies) { Copy-Item $dependencies.FullName (Join-Path $stage 'Dependencies') -Recurse -Force }
+
+          Copy-Item agent-tauri/gamebar-widget/Install-YummiGameBar.ps1 (Join-Path $stage 'Install-YummiGameBar.ps1') -Force
+          Copy-Item agent-tauri/gamebar-widget/README.md (Join-Path $stage 'README.md') -Force
+
+          $zipName = "Yummi-GameBar-Overlay-$env:VERSION.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $zipName -Force
+          "artifact_name=$zipName" >> $env:GITHUB_OUTPUT
+          "package_name=$packageName" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: yummi-gamebar-overlay-${{ steps.meta.outputs.version }}
+          path: |
+            ${{ steps.pack.outputs.artifact_name }}
+          retention-days: 14
+
+      - name: Upload to matching GitHub release when available
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          ZIP: ${{ steps.pack.outputs.artifact_name }}
+        run: |
+          $stableTag = "v$env:VERSION"
+          $betaMeta = Get-Content agent-tauri/beta-release.json -Raw | ConvertFrom-Json
+          $betaTag = if ($betaMeta.version -eq $env:VERSION) { "v$env:VERSION-beta.$($betaMeta.number)" } else { $null }
+          $tag = $null
+          if (gh release view $stableTag --repo $env:GITHUB_REPOSITORY 2>$null) { $tag = $stableTag }
+          elseif ($betaTag -and (gh release view $betaTag --repo $env:GITHUB_REPOSITORY 2>$null)) { $tag = $betaTag }
+          if ($tag) {
+            gh release upload $tag $env:ZIP --repo $env:GITHUB_REPOSITORY --clobber
+            Write-Host "Uploaded Game Bar overlay to $tag"
+          } else {
+            Write-Host "No matching release exists yet; artifact is available from this workflow run."
+          }
+
+      - name: Cleanup certificate
+        if: always()
+        env:
+          CERT_THUMBPRINT: ${{ steps.signing.outputs.thumbprint }}
+          CERT_PATH: ${{ steps.signing.outputs.cert_path }}
+        run: |
+          if ($env:CERT_PATH) { Remove-Item $env:CERT_PATH -Force -ErrorAction SilentlyContinue }
+          if ($env:CERT_THUMBPRINT) { Remove-Item "Cert:\CurrentUser\My\$env:CERT_THUMBPRINT" -Force -ErrorAction SilentlyContinue }
