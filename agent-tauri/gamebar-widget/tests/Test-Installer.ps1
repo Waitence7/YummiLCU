@@ -48,6 +48,48 @@ try {
   $argsSeen = @(& ([scriptblock]::Create($line)))
   if (($argsSeen -join '|') -cne 'LoopbackExempt|-a|-n=YummiGameBarWidget_test') { throw "Invalid native argv: $argsSeen" }
   Write-Host 'PASS: loopback package family is one complete native argument'
+
+  # Exercise the production permission branch without changing OS settings.
+  $tokens = $null
+  $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($source, [ref]$tokens, [ref]$errors)
+  if ($errors.Count) { throw 'Installer syntax errors' }
+  $branch = $ast.Find({ param($node) $node -is [Management.Automation.Language.IfStatementAst] -and $node.Extent.Text.StartsWith('if ($installedOverlay -and') }, $true)
+  if (-not $branch) { throw 'Loopback permission branch not found' }
+  $body = $branch.Clauses[0].Item2.Extent.Text
+  $body = $body.Substring(1, $body.Length - 2).Replace('& $loopbackTool', 'Invoke-LoopbackTool').Replace('& "$env:SystemRoot\System32\CheckNetIsolation.exe"', 'Invoke-LoopbackTool')
+  function Invoke-LoopbackTool {
+    $script:LoopbackCalls += ($args -join '|')
+    $global:LASTEXITCODE = 0
+    if ($args -contains '-s') { return $script:LoopbackListing }
+  }
+  function Restart-InstallerElevated {
+    param([string]$InstallerPath)
+    $script:ElevationRequested = $true
+    throw 'TEST_ELEVATION_REQUEST'
+  }
+  $isAdmin = $false
+  $script:LoopbackListing = @('Name: yummigamebarwidget_test')
+  $script:LoopbackCalls = @()
+  $script:ElevationRequested = $false
+  & ([scriptblock]::Create($body))
+  if ($script:ElevationRequested -or ($script:LoopbackCalls -join ',') -ne 'LoopbackExempt|-s') { throw 'Existing exemption must skip elevation and writes' }
+  Write-Host 'PASS: standard-user update reuses an existing loopback exemption'
+
+  $script:LoopbackListing = @('Name: YummiGameBarWidget_test_other')
+  $script:LoopbackCalls = @()
+  try { & ([scriptblock]::Create($body)); throw 'Expected elevation request' } catch {
+    if ($_.Exception.Message -ne 'TEST_ELEVATION_REQUEST') { throw }
+  }
+  if (-not $script:ElevationRequested -or ($script:LoopbackCalls -join ',') -ne 'LoopbackExempt|-s') { throw 'Missing exemption must elevate before writes' }
+  Write-Host 'PASS: missing exemption requests elevation before registration'
+
+  $isAdmin = $true
+  $script:LoopbackCalls = @()
+  $script:ElevationRequested = $false
+  & ([scriptblock]::Create($body))
+  if ($script:ElevationRequested -or ($script:LoopbackCalls -join ',') -ne 'LoopbackExempt|-s,LoopbackExempt|-a|-n=YummiGameBarWidget_test') { throw 'Administrator must register the missing exemption' }
+  Write-Host 'PASS: administrator registers only a missing exemption'
 } finally {
   # Only remove this test's newly created GUID directory.
   if ((Split-Path -Parent $root) -eq [IO.Path]::GetTempPath().TrimEnd('\')) {

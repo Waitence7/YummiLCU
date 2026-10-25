@@ -25,6 +25,33 @@ trap {
   exit 1
 }
 
+function Restart-InstallerElevated {
+  param([string]$InstallerPath)
+  # Release the transcript before the elevated process opens the same log.
+  if ($script:TranscriptStarted) {
+    Stop-Transcript | Out-Null
+    $script:TranscriptStarted = $false
+  }
+  $quote = [char]34
+  $forceArg = if ($Force) { ' -Force' } else { '' }
+  $skipArg = if ($SkipAutoUpdateSetup) { ' -SkipAutoUpdateSetup' } else { '' }
+  $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + $quote + $InstallerPath + $quote + $forceArg + $skipArg + ' -LogPath ' + $quote + $LogPath + $quote
+  $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
+  if ($process.ExitCode -ne 0) {
+    if (Test-Path $logPath) {
+      Write-Host ''
+      Write-Host '관리자 설치 로그:' -ForegroundColor Yellow
+      Get-Content $logPath | ForEach-Object { Write-Host $_ }
+    }
+    throw "관리자 설치 프로세스가 종료 코드 $($process.ExitCode)로 실패했습니다. 로그: $logPath"
+  }
+  exit 0
+}
+
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+$isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+
 $package = Get-ChildItem $PSScriptRoot -File |
   Where-Object { $_.Extension -in '.appx', '.msix' } |
   Select-Object -First 1
@@ -41,32 +68,9 @@ if (Test-Path $certificate) {
   if ($certificateAlreadyTrusted) {
     Write-Host "이미 신뢰된 오버레이 인증서 사용: $thumbprint" -ForegroundColor DarkGray
   } else {
-    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-    $principal = New-Object Security.Principal.WindowsPrincipal($identity)
-    $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-
     if (-not $isAdmin) {
       Write-Host '오버레이 인증서는 최초 1회만 관리자 권한으로 등록합니다.' -ForegroundColor Yellow
-      $scriptPath = $MyInvocation.MyCommand.Path
-      # Release the transcript before the elevated process opens the same log.
-      if ($script:TranscriptStarted) {
-        Stop-Transcript | Out-Null
-        $script:TranscriptStarted = $false
-      }
-      $quote = [char]34
-      $forceArg = if ($Force) { ' -Force' } else { '' }
-      $skipArg = if ($SkipAutoUpdateSetup) { ' -SkipAutoUpdateSetup' } else { '' }
-      $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + $quote + $scriptPath + $quote + $forceArg + $skipArg + ' -LogPath ' + $quote + $LogPath + $quote
-      $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
-      if ($process.ExitCode -ne 0) {
-        if (Test-Path $logPath) {
-          Write-Host ''
-          Write-Host '관리자 설치 로그:' -ForegroundColor Yellow
-          Get-Content $logPath | ForEach-Object { Write-Host $_ }
-        }
-        throw "관리자 설치 프로세스가 종료 코드 $($process.ExitCode)로 실패했습니다. 로그: $logPath"
-      }
-      exit 0
+      Restart-InstallerElevated -InstallerPath $PSCommandPath
     }
 
     Write-Host '오버레이 서명 인증서를 최초 1회 등록합니다.'
@@ -119,8 +123,21 @@ Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceU
 # bridge when cross-package named pipes are unavailable on a Windows build.
 $installedOverlay = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($installedOverlay -and $installedOverlay.PackageFamilyName) {
-  & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -a ('-n=' + $installedOverlay.PackageFamilyName) | Out-Null
-  if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption registration failed: $LASTEXITCODE" }
+  $loopbackTool = "$env:SystemRoot\System32\CheckNetIsolation.exe"
+  $loopbackEntries = & $loopbackTool LoopbackExempt -s
+  if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption query failed: $LASTEXITCODE" }
+  $familyPattern = '(?i)(?<![A-Za-z0-9_])' + [regex]::Escape($installedOverlay.PackageFamilyName) + '(?![A-Za-z0-9_])'
+  $alreadyExempt = ($loopbackEntries -join "`n") -match $familyPattern
+  if ($alreadyExempt) {
+    Write-Host 'Game Bar loopback exemption already registered.' -ForegroundColor DarkGray
+  } else {
+    if (-not $isAdmin) {
+      Write-Host 'Game Bar loopback setup requires administrator permission.' -ForegroundColor Yellow
+      Restart-InstallerElevated -InstallerPath $PSCommandPath
+    }
+    & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -a ('-n=' + $installedOverlay.PackageFamilyName) | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption registration failed: $LASTEXITCODE" }
+  }
 }
 
 Write-Host ''
