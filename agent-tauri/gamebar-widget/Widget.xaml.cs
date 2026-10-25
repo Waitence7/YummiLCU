@@ -53,7 +53,13 @@ namespace YummiGameBarWidget
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
-                await FitToDisplayAsync();
+                // Game Bar owns the saved size, position and pin state. Fit only
+                // a fresh install; never overwrite the user's restored layout.
+                if (HudPreferences.NeedsInitialFit)
+                {
+                    await FitToDisplayAsync();
+                    if (resizeAccepted) HudPreferences.MarkInitialFitDone();
+                }
                 UpdateInputState();
                 timer.Start();
                 await RefreshAsync();
@@ -159,12 +165,10 @@ namespace YummiGameBarWidget
 
         private async void DisplayModeChanged(XboxGameBarWidget sender, object args)
         {
-            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () =>
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                // The home bar reserves screen space while it is open. Fit the
-                // pinned HUD again when that chrome is no longer on screen.
-                if (!HudPreferences.CompactLayout && widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
-                    await FitToDisplayAsync();
+                // Opening/closing Game Bar must not resize or recenter a layout
+                // that the user positioned and pinned through the host UI.
                 UpdateDisplayState();
                 UpdateInputState();
             });

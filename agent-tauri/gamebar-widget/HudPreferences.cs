@@ -33,6 +33,16 @@ namespace YummiGameBarWidget
         {
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("HudFitRequest", out value) && value is long ? (long)value : 0; }
         }
+        internal static bool NeedsInitialFit
+        {
+            get
+            {
+                object value;
+                bool fitted = ApplicationData.Current.LocalSettings.Values.TryGetValue("HudInitialFitDone", out value) && value is bool && (bool)value;
+                return !fitted && FitRequest == 0;
+            }
+        }
+        internal static void MarkInitialFitDone() { Set("HudInitialFitDone", true); }
         internal static void RequestFit()
         {
             Set("HudCompactLayout", false);
