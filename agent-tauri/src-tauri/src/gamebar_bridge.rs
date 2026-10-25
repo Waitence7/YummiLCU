@@ -23,7 +23,7 @@ const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 #[cfg(windows)]
 const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 #[cfg(windows)]
-const GAMEBAR_RELEASES_API: &str = "https://api.github.com/repos/Waitence7/YummiLCU/releases?per_page=15";
+const GAMEBAR_RELEASES_API: &str = "https://api.github.com/repos/Waitence7/YummiLCU/releases?per_page=100";
 #[cfg(windows)]
 const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
@@ -560,6 +560,35 @@ struct GameBarUpdateState {
     release_tag: String,
 }
 
+fn parse_gamebar_release_version(tag: &str) -> Option<(u64, u64, u64)> {
+    let raw = tag.strip_prefix("gamebar-v")?;
+    let mut parts = raw.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+fn select_gamebar_manifest(releases: &Value) -> Option<(String, String)> {
+    releases.as_array()?.iter().filter_map(|release| {
+        if release.get("draft").and_then(Value::as_bool).unwrap_or(false) {
+            return None;
+        }
+        let tag = release.get("tag_name")?.as_str()?;
+        let version = parse_gamebar_release_version(tag)?;
+        let manifest_url = release.get("assets")?.as_array()?.iter().find_map(|asset| {
+            (asset.get("name")?.as_str()? == "gamebar-version.json")
+                .then(|| asset.get("browser_download_url")?.as_str().map(str::to_owned))
+                .flatten()
+        })?;
+        Some((version, tag.to_owned(), manifest_url))
+    }).max_by_key(|(version, _, _)| *version)
+      .map(|(_, tag, url)| (tag, url))
+}
+
 #[cfg(windows)]
 async fn check_overlay_update() -> Result<(), String> {
     use std::{env, fs, path::PathBuf, process::Command};
@@ -583,14 +612,8 @@ async fn check_overlay_update() -> Result<(), String> {
         .map_err(|e| format!("Game Bar 릴리즈 조회 실패: {e}"))?
         .error_for_status().map_err(|e| format!("Game Bar 릴리즈 응답 실패: {e}"))?
         .json().await.map_err(|e| format!("Game Bar 릴리즈 JSON 실패: {e}"))?;
-    let manifest_url = releases.as_array().and_then(|items| items.iter().find_map(|release| {
-        if release.get("draft").and_then(Value::as_bool).unwrap_or(false) { return None; }
-        release.get("assets")?.as_array()?.iter().find_map(|asset| {
-            if asset.get("name")?.as_str()? == "gamebar-version.json" {
-                asset.get("browser_download_url")?.as_str().map(str::to_owned)
-            } else { None }
-        })
-    })).ok_or_else(|| "서명된 Game Bar manifest를 찾지 못했습니다.".to_owned())?;
+    let (selected_release_tag, manifest_url) = select_gamebar_manifest(&releases)
+        .ok_or_else(|| "서명된 Game Bar manifest를 찾지 못했습니다.".to_owned())?;
 
     let response = client.get(&manifest_url).send().await.map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?
         .error_for_status().map_err(|e| format!("Game Bar manifest 응답 실패: {e}"))?;
@@ -605,14 +628,19 @@ async fn check_overlay_update() -> Result<(), String> {
         .and_then(|v| v.as_str().map(str::to_owned)).ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
     verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
     let target: GameBarUpdateTarget = serde_json::from_value(payload).map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
+    let selected_version = selected_release_tag.strip_prefix("gamebar-v").unwrap_or_default();
+    if target.release_tag != selected_release_tag || target.version != selected_version {
+        return Err("Game Bar manifest 버전이 선택된 릴리즈와 일치하지 않습니다.".into());
+    }
 
     if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
     }
     if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 { return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into()); }
     let parsed = url::Url::parse(&target.url).map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
+    let expected_release_path = format!("/Waitence7/YummiLCU/releases/download/{}/", selected_release_tag);
     if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") ||
-       !parsed.path().starts_with("/Waitence7/YummiLCU/releases/download/") ||
+       !parsed.path().starts_with(&expected_release_path) ||
        !parsed.path().ends_with(".zip") {
         return Err("Game Bar 다운로드 URL이 허용되지 않았습니다.".into());
     }
@@ -695,9 +723,25 @@ fn wide_null(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        lobby_riot_ids, online_friend_riot_ids, riot_id_from_summoner, validate_status_message,
+        lobby_riot_ids, online_friend_riot_ids, parse_gamebar_release_version, riot_id_from_summoner,
+        select_gamebar_manifest, validate_status_message,
     };
     use serde_json::json;
+
+
+    #[test]
+    fn selects_highest_gamebar_release_independent_of_api_order() {
+        let releases = json!([
+            {"tag_name":"v0.8.0-beta.3","draft":false,"assets":[{"name":"agent-version.json","browser_download_url":"https://example.invalid/agent"}]},
+            {"tag_name":"gamebar-v0.1.9","draft":false,"assets":[{"name":"gamebar-version.json","browser_download_url":"https://example.invalid/0.1.9"}]},
+            {"tag_name":"gamebar-v0.1.11","draft":false,"assets":[{"name":"gamebar-version.json","browser_download_url":"https://example.invalid/0.1.11"}]},
+            {"tag_name":"gamebar-v0.1.10","draft":false,"assets":[{"name":"gamebar-version.json","browser_download_url":"https://example.invalid/0.1.10"}]}
+        ]);
+        let (tag, url) = select_gamebar_manifest(&releases).unwrap();
+        assert_eq!(tag, "gamebar-v0.1.11");
+        assert_eq!(url, "https://example.invalid/0.1.11");
+        assert_eq!(parse_gamebar_release_version(&tag), Some((0, 1, 11)));
+    }
 
     #[test]
     fn formats_current_riot_id() {
