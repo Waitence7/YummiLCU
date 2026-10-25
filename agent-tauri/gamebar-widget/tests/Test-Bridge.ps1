@@ -1,0 +1,66 @@
+param([string]$Source = (Join-Path (Split-Path -Parent $PSScriptRoot) 'NativePipeClient.cs'))
+$ErrorActionPreference = 'Stop'
+$harness = @'
+using System;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+namespace YummiGameBarWidget {
+public static class BridgeTests {
+  public static string ReadLiveSnapshot() {
+    return NativePipeClient.ReadSnapshotAsync().GetAwaiter().GetResult();
+  }
+  public static void Run() { RunAsync().GetAwaiter().GetResult(); }
+  private static async Task RunAsync() {
+    string name = @"LOCAL\YummiBridgeTest-" + Guid.NewGuid().ToString("N");
+    using (var server = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous)) {
+      var connected = server.WaitForConnectionAsync();
+      using (var client = NativePipeClient.Open(name, FileAccess.Read)) {
+        await connected;
+        string expected = "{\"connected\":true,\"text\":\"\uD55C\uAE00\"}";
+        byte[] bytes = Encoding.UTF8.GetBytes(expected + "\n");
+        var read = NativePipeClient.ReadLineAsync(client, CancellationToken.None);
+        for (int i = 0; i < bytes.Length; i++) { await server.WriteAsync(bytes, i, 1); await server.FlushAsync(); }
+        if (await read != expected) throw new Exception("Chunked UTF-8 frame was corrupted");
+      }
+    }
+    Console.WriteLine("PASS: native pipe and chunked UTF-8 frame");
+    name = @"LOCAL\YummiBridgeTimeout-" + Guid.NewGuid().ToString("N");
+    using (var server = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous)) {
+      var connected = server.WaitForConnectionAsync();
+      using (var client = NativePipeClient.Open(name, FileAccess.Read)) {
+        await connected;
+        using (var cancel = new CancellationTokenSource(100)) {
+          bool cancelled = false;
+          try { await NativePipeClient.ReadLineAsync(client, cancel.Token); }
+          catch (OperationCanceledException) { cancelled = true; }
+          if (!cancelled) throw new Exception("Silent server did not cancel");
+        }
+      }
+    }
+    bool oversized = false;
+    using (var data = new MemoryStream(new byte[65537])) {
+      try { await NativePipeClient.ReadLineAsync(data, CancellationToken.None); }
+      catch (IOException) { oversized = true; }
+    }
+    if (!oversized) throw new Exception("Oversized response accepted");
+    bool incomplete = false;
+    using (var data = new MemoryStream(Encoding.UTF8.GetBytes("{}"))) {
+      try { await NativePipeClient.ReadLineAsync(data, CancellationToken.None); }
+      catch (EndOfStreamException) { incomplete = true; }
+    }
+    if (!incomplete) throw new Exception("Incomplete frame accepted");
+  }
+}
+}
+'@
+$harness = [regex]::Replace($harness, '(?m)^using .*;\r?\n', '')
+Add-Type -TypeDefinition ((Get-Content $Source -Raw) + "`n" + $harness)
+[YummiGameBarWidget.BridgeTests]::Run()
+Write-Output 'PASS: native pipe handle, chunked UTF-8, cancellation, frame size and incomplete response'
+if ($env:YUMMI_TEST_LIVE_BRIDGE -eq '1') {
+  $snapshot = [YummiGameBarWidget.BridgeTests]::ReadLiveSnapshot() | ConvertFrom-Json
+  [pscustomobject]@{NativeBridge='Ok';Connected=$snapshot.connected;Phase=$snapshot.phase} | ConvertTo-Json -Compress
+}

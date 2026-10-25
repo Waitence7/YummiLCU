@@ -1,6 +1,6 @@
 using System;
 using System.IO;
-using System.IO.Pipes;
+using System.Threading;
 using System.Text;
 using System.Threading.Tasks;
 using Microsoft.Gaming.XboxGameBar;
@@ -47,14 +47,13 @@ namespace YummiGameBarWidget
 
         private static async Task<string> SendCommandAsync(string payload)
         {
-            using (var pipe = new NamedPipeClientStream(".", CommandPipeName, PipeDirection.InOut, PipeOptions.Asynchronous))
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+            using (var pipe = NativePipeClient.Open(CommandPipeName, FileAccess.ReadWrite))
             {
-                await pipe.ConnectAsync(1000);
                 using (var writer = new StreamWriter(pipe, new UTF8Encoding(false), 1024, true) { AutoFlush = true })
-                using (var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, true))
                 {
                     await writer.WriteLineAsync(payload);
-                    var line = await reader.ReadLineAsync();
+                    var line = await NativePipeClient.ReadLineAsync(pipe, timeout.Token);
                     if (string.IsNullOrWhiteSpace(line)) throw new IOException("empty command response");
                     return line;
                 }

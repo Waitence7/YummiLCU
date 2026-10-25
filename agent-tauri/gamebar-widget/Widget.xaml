@@ -23,6 +23,8 @@
         </StackPanel>
         <TextBlock x:Name="RiotIdText" Text="League 클라이언트를 기다리는 중" FontSize="13" Foreground="White" TextTrimming="CharacterEllipsis"/>
         <TextBlock x:Name="PartyText" Text="파티 정보 없음" FontSize="11" Foreground="#BDB1D0" TextWrapping="Wrap"/>
+        <TextBlock x:Name="DisplayText" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
+        <TextBlock x:Name="InputText" FontSize="10" Foreground="#BDB1D0" TextWrapping="Wrap"/>
         <TextBlock x:Name="BridgeText" Text="유미 에이전트 연결 확인 중…" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
       </StackPanel>
     </Border>

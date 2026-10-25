@@ -60,6 +60,11 @@ jobs:
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File agent-tauri/gamebar-widget/tests/Test-Installer.ps1
           if ($LASTEXITCODE -ne 0) { throw "Game Bar installer regression checks failed" }
 
+      - name: Verify Game Bar pipe bridge
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File agent-tauri/gamebar-widget/tests/Test-Bridge.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Game Bar bridge regression checks failed" }
+
       - name: Restore UWP packages
         run: |
           dotnet restore agent-tauri/gamebar-widget/YummiGameBarWidget.csproj
