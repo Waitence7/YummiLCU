@@ -61,7 +61,7 @@
                 <Button Grid.Column="1" Content="열기" Padding="12,4" FontSize="11" Click="YoutubeLoadButton_Click"/>
               </Grid>
 
-              <Border Height="168" Background="#FF000000" CornerRadius="6">
+              <Border Height="200" Background="#FF000000" CornerRadius="6">
                 <WebView x:Name="YoutubeWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" NavigationCompleted="YoutubeWebView_NavigationCompleted"/>
               </Border>
 
