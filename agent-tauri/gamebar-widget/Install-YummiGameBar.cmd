@@ -16,7 +16,7 @@ if not exist "%INSTALL_PS1%" (
   echo from inside the ZIP file.
   echo.
   echo 1. Close this window.
-  echo 2. Right-click Yummi-GameBar-Overlay-0.8.0.zip and choose "Extract All...".
+  echo 2. Right-click Yummi-GameBar-Overlay-*.zip and choose "Extract All...".
   echo 3. Open the extracted folder.
   echo 4. Run Install-YummiGameBar.cmd again.
   echo.
