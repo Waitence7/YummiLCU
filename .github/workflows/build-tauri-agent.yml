@@ -6,6 +6,8 @@ on:
     paths:
       - "agent-tauri/**"
       - "!agent-tauri/gamebar-widget/**"
+      - ".github/workflows/build-tauri-agent.yml"
+      - "scripts/publish-agent-release.sh"
   workflow_dispatch:
     inputs:
       version:
@@ -53,6 +55,7 @@ permissions:
 jobs:
   relay-tests:
     name: Relay protocol contract
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release(agent-beta):') }}
     runs-on: ubuntu-slim
     steps:
       - uses: actions/checkout@v4
@@ -69,7 +72,7 @@ jobs:
         run: uv run --frozen python -m unittest discover -s relay -p "test_*.py"
 
   build:
-    needs: relay-tests
+    if: ${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'release(agent-beta):') }}
     runs-on: windows-latest
     permissions:
       contents: read
@@ -140,16 +143,29 @@ jobs:
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
           $channel = $env:DISPATCH_CHANNEL
           $betaNumber = $env:DISPATCH_BETA_NUMBER
+          $isPush = "${{ github.event_name }}" -eq "push"
+          $isBetaReleasePush = $isPush -and $env:COMMIT_MESSAGE.StartsWith("release(agent-beta):")
+          $isStableReleasePush = $isPush -and $env:COMMIT_MESSAGE.StartsWith("release(agent):")
           if (-not $channel) {
-            if ($env:COMMIT_MESSAGE.StartsWith("release(agent-beta):")) {
+            if ($isBetaReleasePush) {
               $channel = "beta"
-            } else {
+            } elseif ($isStableReleasePush) {
               $channel = "stable"
+            } else {
+              # Normal main builds are signed once as the *next* beta candidate.
+              # A later release(agent-beta) commit promotes this exact artifact
+              # instead of compiling the same source a second time.
+              $betaMeta = Get-Content agent-tauri/beta-release.json -Raw | ConvertFrom-Json
+              if ($betaMeta.version -ne $version) {
+                throw "beta-release.json version $($betaMeta.version) does not match source version $version"
+              }
+              $channel = "beta"
+              $betaNumber = [string]([int]$betaMeta.number + 1)
             }
           }
 
           if ($channel -eq "beta") {
-            if ("${{ github.event_name }}" -eq "push") {
+            if ($isBetaReleasePush) {
               if ($env:COMMIT_MESSAGE -notmatch '^release\(agent-beta\):\s*([0-9]+\.[0-9]+\.[0-9]+)-beta\.([1-9][0-9]*)\s*$') {
                 throw "Beta release commit must be: release(agent-beta): <version>-beta.<number>"
               }
@@ -258,12 +274,8 @@ jobs:
           $nsis = Get-ChildItem "$releaseRoot/bundle/nsis" -Filter "*.exe" -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
-          $msi = Get-ChildItem "$releaseRoot/bundle/msi" -Filter "*.msi" -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending |
-            Select-Object -First 1
           "exe=$exe" >> $env:GITHUB_OUTPUT
           if ($nsis) { "nsis=$($nsis.FullName)" >> $env:GITHUB_OUTPUT }
-          if ($msi) { "msi=$($msi.FullName)" >> $env:GITHUB_OUTPUT }
 
       - name: Code sign Windows artifacts
         if: github.event_name != 'pull_request'
@@ -273,7 +285,6 @@ jobs:
         run: |
           $files = @("${{ steps.artifacts.outputs.exe }}")
           if ("${{ steps.artifacts.outputs.nsis }}") { $files += "${{ steps.artifacts.outputs.nsis }}" }
-          if ("${{ steps.artifacts.outputs.msi }}") { $files += "${{ steps.artifacts.outputs.msi }}" }
 
           if (-not $env:WINDOWS_CERTIFICATE) {
             if ($env:YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT) {
@@ -358,24 +369,22 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push' && !startsWith(github.event.head_commit.message, 'release(agent):') && !startsWith(github.event.head_commit.message, 'release(agent-beta):')
         with:
-          name: YummiLcuTauri-build
+          name: agent-candidate
           path: |
             ${{ steps.manifest.outputs.zip }}
-            ${{ steps.artifacts.outputs.nsis }}
-            ${{ steps.artifacts.outputs.msi }}
+            ${{ steps.manifest.outputs.setup }}
             agent-version.json
-          if-no-files-found: warn
+          if-no-files-found: error
           retention-days: 7
 
       - uses: actions/upload-artifact@v4
-        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.event.head_commit.message, 'release(agent):') || startsWith(github.event.head_commit.message, 'release(agent-beta):')))
+        if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release(agent):'))
         with:
           name: agent-release
           path: |
             ${{ steps.manifest.outputs.zip }}
             agent-version.json
             ${{ steps.manifest.outputs.setup }}
-            ${{ steps.artifacts.outputs.msi }}
           if-no-files-found: warn
           retention-days: 7
 
@@ -436,8 +445,8 @@ jobs:
 
   publish-and-deploy:
     name: Publish and deploy agent release
-    needs: build
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && (startsWith(github.event.head_commit.message, 'release(agent):') || startsWith(github.event.head_commit.message, 'release(agent-beta):')))
+    needs: [relay-tests, build]
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release(agent):'))
     runs-on: ubuntu-slim
     permissions:
       actions: read
@@ -448,126 +457,89 @@ jobs:
           name: agent-release
           path: release
 
-      - name: Publish immutable release
+      - uses: actions/checkout@v4
+
+      - name: Publish GitHub release and update server
         env:
           GH_TOKEN: ${{ github.token }}
-          TARGET_SHA: ${{ github.sha }}
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
           RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
           RELEASE_LABEL: ${{ needs.build.outputs.release_label }}
+          TARGET_SHA: ${{ github.sha }}
+        shell: bash
+        run: scripts/publish-agent-release.sh release
+
+  promote-beta:
+    name: Promote verified beta candidate
+    if: github.event_name == 'push' && startsWith(github.event.head_commit.message, 'release(agent-beta):')
+    runs-on: ubuntu-slim
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Resolve beta candidate
+        id: candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         shell: bash
         run: |
           set -euo pipefail
-          version="$(jq -r '.version' release/agent-version.json)"
-          test -n "$version"
-          test "$version" != "null"
-          installer="release/Yummi-LCU-Agent-${version}-setup.exe"
-          archive="release/tauri-${version}.zip"
-          test -s "$installer"
-          test -s "$archive"
-          cp "$installer" release/Yummi-LCU-Agent-latest-setup.exe
-          cp "$archive" release/tauri-latest.zip
+          version="$(jq -r '.version' agent-tauri/beta-release.json)"
+          beta_number="$(jq -r '.number' agent-tauri/beta-release.json)"
+          release_label="${version}-beta.${beta_number}"
+          expected_message="release(agent-beta): ${release_label}"
+          test "$COMMIT_MESSAGE" = "$expected_message"
+          source_sha="$(git rev-parse HEAD^)"
+          source_short="${source_sha:0:7}"
 
-          tag="v${version}"
-          if [ "$RELEASE_CHANNEL" != "stable" ]; then tag="v${RELEASE_LABEL}"; fi
-          if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            args=(
-              "$tag"
-              --target "$TARGET_SHA"
-              --title "Yummi LCU Agent ${RELEASE_LABEL}"
-              --notes "Yummi LCU Agent ${RELEASE_LABEL}."
-            )
-            if [ "$RELEASE_CHANNEL" != "stable" ]; then args+=(--prerelease); fi
-            gh release create "${args[@]}" --repo "$GITHUB_REPOSITORY"
-          fi
-          gh release upload "$tag" \
-            "$installer" \
-            release/Yummi-LCU-Agent-latest-setup.exe \
-            "$archive" \
-            release/tauri-latest.zip \
-            release/agent-version.json \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          echo "Waiting for verified candidate from $source_short ($release_label)"
+          run_id=""
+          deadline=$((SECONDS + 1200))
+          while [ $SECONDS -lt $deadline ]; do
+            runs="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/build-tauri-agent.yml/runs?head_sha=${source_sha}&event=push&per_page=20")"
+            run_id="$(jq -r '.workflow_runs[0].id // empty' <<<"$runs")"
+            status="$(jq -r '.workflow_runs[0].status // empty' <<<"$runs")"
+            conclusion="$(jq -r '.workflow_runs[0].conclusion // empty' <<<"$runs")"
+            if [ "$status" = "completed" ] && [ "$conclusion" = "success" ] && [ -n "$run_id" ]; then break; fi
+            if [ "$status" = "completed" ] && [ "$conclusion" != "success" ]; then
+              echo "Candidate CI completed with conclusion=$conclusion" >&2
+              exit 1
+            fi
+            run_id=""
+            sleep 10
+          done
+          test -n "$run_id" || { echo "Timed out waiting for candidate CI for $source_sha" >&2; exit 1; }
 
-      - name: Stage update manifest
-        env:
-          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
-          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
-        run: |
-          set -euo pipefail
-          test -s "release/agent-version.json"
-          test -n "$AGENT_DEPLOY_TOKEN"
-          route_channel=""
-          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
-          curl --fail-with-body --silent --show-error --retry 3 \
-            -X PUT \
-            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data-binary "@release/agent-version.json" \
-            "https://yummi.duckdns.org/agent-deploy/manifest${route_channel}"
-
-      - name: Stage latest installer
-        env:
-          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
-          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
-        run: |
-          set -euo pipefail
-          installer="release/Yummi-LCU-Agent-${RELEASE_VERSION}-setup.exe"
-          test -s "$installer"
-          test -n "$AGENT_DEPLOY_TOKEN"
-          route_channel=""
-          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
-          curl --fail-with-body --silent --show-error --retry 3 \
-            -X PUT \
-            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary "@$installer" \
-            "https://yummi.duckdns.org/agent-deploy/installer${route_channel}/${RELEASE_VERSION}"
-
-      - name: Verify archive and publish update
-        env:
-          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
-          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
-        run: |
-          set -euo pipefail
-          archive="release/tauri-${RELEASE_VERSION}.zip"
-          test -s "$archive"
-          test -n "$AGENT_DEPLOY_TOKEN"
-          route_channel=""
-          if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
-          curl --fail-with-body --silent --show-error --retry 3 \
-            -X PUT \
-            -H "Authorization: Bearer $AGENT_DEPLOY_TOKEN" \
-            -H "Content-Type: application/zip" \
-            --data-binary "@$archive" \
-            "https://yummi.duckdns.org/agent-deploy/archive${route_channel}/${RELEASE_VERSION}"
-
-      - name: Verify public update files
-        env:
-          RELEASE_VERSION: ${{ needs.build.outputs.version }}
-          RELEASE_CHANNEL: ${{ needs.build.outputs.channel }}
-          RELEASE_LABEL: ${{ needs.build.outputs.release_label }}
-          BUILD_ID: ${{ needs.build.outputs.build_id }}
-        run: |
-          set -euo pipefail
-          if [ "$RELEASE_CHANNEL" = "stable" ]; then
-            manifest_url="https://yummi.duckdns.org/agent/version.json"
-            release_subdir=""
-          else
-            manifest_url="https://yummi.duckdns.org/agent/releases/tauri/${RELEASE_CHANNEL}/version.json"
-            release_subdir="/${RELEASE_CHANNEL}"
-          fi
-          manifest="$(curl --fail --silent --show-error --retry 3 "$manifest_url")"
+          rm -rf release
+          mkdir -p release
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name agent-candidate --dir release
+          test -s release/agent-version.json
+          build_id="$(jq -r '.tauri.buildId' release/agent-version.json)"
           jq -e \
-            --arg version "$RELEASE_VERSION" \
-            --arg channel "$RELEASE_CHANNEL" \
-            --arg release_label "$RELEASE_LABEL" \
-            --arg build_id "$BUILD_ID" \
-            '.tauri.version == $version and .version == $version and .tauri.channel == $channel and .tauri.releaseLabel == $release_label and .tauri.buildId == $build_id' \
-            <<<"$manifest" >/dev/null
-          curl --fail --silent --show-error --retry 3 --head \
-            "https://yummi.duckdns.org/agent/releases/tauri${release_subdir}/tauri-${RELEASE_VERSION}.zip" >/dev/null
-          curl --fail --silent --show-error --retry 3 --head \
-            "https://yummi.duckdns.org/agent/releases/tauri${release_subdir}/latest-setup.exe" >/dev/null
+            --arg version "$version" \
+            --arg label "$release_label" \
+            --arg commit "$source_short" \
+            '.version == $version and .tauri.version == $version and .tauri.channel == "beta" and .tauri.releaseLabel == $label and .tauri.commit == $commit' \
+            release/agent-version.json >/dev/null
+          test -s "release/Yummi-LCU-Agent-${version}-setup.exe"
+          test -s "release/tauri-${version}.zip"
+
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "release_label=$release_label" >> "$GITHUB_OUTPUT"
+          echo "build_id=$build_id" >> "$GITHUB_OUTPUT"
+          echo "candidate_run_id=$run_id" >> "$GITHUB_OUTPUT"
+
+      - name: Publish promoted beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_CHANNEL: beta
+          RELEASE_LABEL: ${{ steps.candidate.outputs.release_label }}
+          TARGET_SHA: ${{ steps.candidate.outputs.source_sha }}
+        shell: bash
+        run: scripts/publish-agent-release.sh release
