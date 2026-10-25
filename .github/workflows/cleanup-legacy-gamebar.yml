@@ -1,0 +1,31 @@
+name: Cleanup legacy Game Bar assets
+
+on:
+  push:
+    paths:
+      - ".github/workflows/cleanup-legacy-gamebar.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete legacy Game Bar 0.8.0 assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          for tag in v0.8.0-beta.1 v0.8.0-beta.2; do
+            release="$(gh api "repos/$repo/releases/tags/$tag")"
+            mapfile -t assets < <(jq -r '.assets[] | select(.name == "Yummi-GameBar-Overlay-0.8.0.zip" or .name == "gamebar-version.json") | [.id, .name] | @tsv' <<<"$release")
+            for item in "${assets[@]}"; do
+              id="${item%%$'\t'*}"
+              name="${item#*$'\t'}"
+              echo "Deleting $tag / $name ($id)"
+              gh api -X DELETE "repos/$repo/releases/assets/$id"
+            done
+          done
