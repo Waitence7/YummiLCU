@@ -11,6 +11,8 @@
         <TextBlock Text="HUD 불투명도" Foreground="White"/>
         <Slider x:Name="HudOpacitySlider" Minimum="10" Maximum="100" StepFrequency="5" Value="100" ValueChanged="HudOpacitySlider_ValueChanged"/>
       </StackPanel>
+      <Button x:Name="CompactHudButton" Content="핀·위치 조절용으로 줄이기" Click="CompactHudButton_Click" Padding="16,8"/>
+      <TextBlock Text="핀이나 제목줄이 안 보이면 먼저 작게 줄여 주세요. HUD 제목줄에서 핀을 켠 뒤 아래 버튼으로 다시 확대할 수 있습니다." Foreground="#BDB1D0" TextWrapping="Wrap"/>
       <Button x:Name="FitHudButton" Content="Game Bar 최대 크기로 맞추기" Click="FitHudButton_Click" Padding="16,8"/>
       <TextBlock x:Name="PreferenceStatusText" Foreground="#CDBDE8" TextWrapping="Wrap"/>
       <TextBlock Text="설정은 Game Bar를 연 상태에서 조작할 수 있습니다. 게임 클릭 통과는 Game Bar 상단의 클릭 통과 버튼에서 켜 주세요." Foreground="#BDB1D0" TextWrapping="Wrap"/>

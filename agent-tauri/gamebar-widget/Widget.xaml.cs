@@ -185,8 +185,8 @@ namespace YummiGameBarWidget
                 var host = widget.WindowBounds;
                 // Display dimensions and Game Bar size requests are DIPs. A
                 // provisional activation-view size is not a DPI conversion.
-                var width = Math.Max(minimum.Width, Math.Min(maximum.Width, displayWidth));
-                var height = Math.Max(minimum.Height, Math.Min(maximum.Height, displayHeight));
+                var width = HudPreferences.CompactLayout ? minimum.Width : Math.Max(minimum.Width, Math.Min(maximum.Width, displayWidth));
+                var height = HudPreferences.CompactLayout ? minimum.Height : Math.Max(minimum.Height, Math.Min(maximum.Height, displayHeight));
                 // Keep the manifest's minimum size: Game Bar must be able to fit
                 // the content around its chrome and home bar.
                 fitTargetWidth = width;
@@ -249,6 +249,7 @@ namespace YummiGameBarWidget
                 {
                     ["version"] = JsonValue.CreateStringValue(version.Major + "." + version.Minor + "." + version.Build + "." + version.Revision),
                     ["bridge"] = JsonValue.CreateStringValue(bridgeStatus),
+                    ["compactLayout"] = JsonValue.CreateBooleanValue(HudPreferences.CompactLayout),
                     ["hudVisible"] = JsonValue.CreateBooleanValue(HudPreferences.Visible),
                     ["hudOpacity"] = JsonValue.CreateNumberValue(HudPreferences.Opacity),
                     ["coverageTint"] = JsonValue.CreateBooleanValue(HudPreferences.CoverageTint),

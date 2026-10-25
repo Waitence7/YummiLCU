@@ -25,11 +25,24 @@ namespace YummiGameBarWidget
             }
             set { Set("HudOpacity", Math.Max(0.1, Math.Min(1.0, value))); }
         }
+        internal static bool CompactLayout
+        {
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("HudCompactLayout", out value) && value is bool && (bool)value; }
+        }
         internal static long FitRequest
         {
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("HudFitRequest", out value) && value is long ? (long)value : 0; }
         }
-        internal static void RequestFit() { Set("HudFitRequest", DateTimeOffset.UtcNow.Ticks); }
+        internal static void RequestFit()
+        {
+            Set("HudCompactLayout", false);
+            Set("HudFitRequest", DateTimeOffset.UtcNow.Ticks);
+        }
+        internal static void RequestCompact()
+        {
+            Set("HudCompactLayout", true);
+            Set("HudFitRequest", DateTimeOffset.UtcNow.Ticks);
+        }
 
         private static void Set(string key, object value)
         {

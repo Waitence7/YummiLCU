@@ -41,6 +41,11 @@ namespace YummiGameBarWidget
         {
             if (preferencesLoaded) HudPreferences.Opacity = args.NewValue / 100;
         }
+        private void CompactHudButton_Click(object sender, RoutedEventArgs args)
+        {
+            HudPreferences.RequestCompact();
+            PreferenceStatusText.Text = "HUD를 가운데의 작은 크기로 줄입니다. 제목줄에서 핀과 위치를 조절해 주세요.";
+        }
         private void FitHudButton_Click(object sender, RoutedEventArgs args)
         {
             HudPreferences.RequestFit();
