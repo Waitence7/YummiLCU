@@ -17,6 +17,14 @@ namespace YummiGameBarWidget
             Suspending += (_, __) => widgets.Clear();
         }
 
+        protected override void OnLaunched(LaunchActivatedEventArgs args)
+        {
+            // This package has no standalone UI. Never activate a foreground
+            // window, and never terminate an existing Game Bar widget session.
+            if (!args.PrelaunchActivated && widgets.Count == 0)
+                Exit();
+        }
+
         protected override void OnActivated(IActivatedEventArgs args)
         {
             if (args.Kind != ActivationKind.Protocol || !(args is IProtocolActivatedEventArgs protocol) || protocol.Uri.Scheme != "ms-gamebarwidget")
