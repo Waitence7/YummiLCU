@@ -14,12 +14,6 @@ public static class BridgeTests {
   }
   public static void Run() { RunAsync().GetAwaiter().GetResult(); }
   private static async Task RunAsync() {
-    if (HudGeometry.TargetInHostUnits(1440, 1440, 720, 640, 7680) != 2880)
-      throw new Exception("Host-to-XAML scale was not applied");
-    if (HudGeometry.TargetInHostUnits(1440, 1440, 1440, 640, 7680) != 1440)
-      throw new Exception("Matching coordinate spaces must keep the display size");
-    if (HudGeometry.TargetInHostUnits(1440, 1440, 720, 640, 2000) != 2000)
-      throw new Exception("Host size constraint was ignored");
     int probes = 0;
     var fitted = await HudGeometry.FitLargestAsync(1440, 900, 640, 360, (w, h) => {
       probes++;

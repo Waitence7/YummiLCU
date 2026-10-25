@@ -181,12 +181,10 @@ namespace YummiGameBarWidget
                 var minimum = widget.MinWindowSize;
                 var maximum = widget.MaxWindowSize;
                 var host = widget.WindowBounds;
-                // Before first layout, Window.Current.Bounds may describe the
-                // activation window rather than the hosted XAML content.
-                var contentWidth = ActualWidth > 0 ? ActualWidth : host.Width;
-                var contentHeight = ActualHeight > 0 ? ActualHeight : host.Height;
-                var width = HudGeometry.TargetInHostUnits(displayWidth, host.Width, contentWidth, minimum.Width, maximum.Width);
-                var height = HudGeometry.TargetInHostUnits(displayHeight, host.Height, contentHeight, minimum.Height, maximum.Height);
+                // Display dimensions and Game Bar size requests are DIPs. A
+                // provisional activation-view size is not a DPI conversion.
+                var width = Math.Max(minimum.Width, Math.Min(maximum.Width, displayWidth));
+                var height = Math.Max(minimum.Height, Math.Min(maximum.Height, displayHeight));
                 // Keep the manifest's minimum size: Game Bar must be able to fit
                 // the content around its chrome and home bar.
                 var result = await HudGeometry.FitLargestAsync(width, height, minimum.Width, minimum.Height,
