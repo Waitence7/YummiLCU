@@ -89,6 +89,15 @@ foreach ($depPath in $missingDeps) {
 Write-Host '유미 Game Bar 오버레이를 설치합니다.'
 Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force
 
+# UWP/Game Bar widgets are AppContainer processes. Enable the documented
+# localhost exemption so the overlay can reach the full-trust Agent fallback
+# bridge when cross-package named pipes are unavailable on a Windows build.
+$installedOverlay = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($installedOverlay -and $installedOverlay.PackageFamilyName) {
+  & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -a -n=$installedOverlay.PackageFamilyName | Out-Null
+  if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption registration failed: $LASTEXITCODE" }
+}
+
 Write-Host ''
 Write-Host '설치 완료. Win+G > 위젯 메뉴 > 유미 LCU 에서 실행하세요.' -ForegroundColor Green
 

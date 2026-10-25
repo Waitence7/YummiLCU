@@ -2,6 +2,8 @@ use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
+#[cfg(windows)]
+use std::{io::Write, net::TcpListener};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -26,6 +28,8 @@ const GAMEBAR_RELEASES_API: &str = "https://api.github.com/repos/Waitence7/Yummi
 const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
 const MAX_GAMEBAR_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
+#[cfg(windows)]
+const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:47658";
 
 pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     let watcher_state = state.clone();
@@ -39,6 +43,12 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
         std::thread::Builder::new()
             .name("yummi-gamebar-pipe".into())
             .spawn(move || pipe_server(snapshot_state))
+            .ok();
+
+        let tcp_state = state.clone();
+        std::thread::Builder::new()
+            .name("yummi-gamebar-loopback".into())
+            .spawn(move || loopback_snapshot_server(tcp_state))
             .ok();
 
         let update_state = state.clone();
@@ -276,6 +286,23 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+
+#[cfg(windows)]
+fn loopback_snapshot_server(state: Arc<AppState>) {
+    let listener = match TcpListener::bind(GAMEBAR_LOOPBACK_ADDR) {
+        Ok(listener) => listener,
+        Err(_) => return,
+    };
+
+    for incoming in listener.incoming() {
+        let Ok(mut stream) = incoming else { continue };
+        let mut payload = serde_json::to_vec(&state.gamebar_snapshot()).unwrap_or_else(|_| b"{}".to_vec());
+        payload.push(b'\n');
+        let _ = stream.write_all(&payload);
+        let _ = stream.flush();
+    }
 }
 
 #[cfg(windows)]

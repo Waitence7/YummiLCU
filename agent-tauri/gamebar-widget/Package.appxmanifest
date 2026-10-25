@@ -5,6 +5,9 @@
   <Properties><DisplayName>유미 LCU</DisplayName><PublisherDisplayName>Yummi</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
   <Dependencies><TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.18362.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
   <Resources><Resource Language="x-generate" /></Resources>
+  <Capabilities>
+    <Capability Name="privateNetworkClientServer" />
+  </Capabilities>
   <Applications>
     <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="YummiGameBarWidget.App">
       <uap:VisualElements DisplayName="유미 LCU" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" Description="유미 LCU Xbox Game Bar 오버레이" BackgroundColor="transparent">

@@ -8,6 +8,9 @@ using System.Threading.Tasks;
 using Microsoft.Gaming.XboxGameBar;
 using Windows.Data.Json;
 using Windows.Graphics.Display;
+using Windows.Networking;
+using Windows.Networking.Sockets;
+using Windows.Storage.Streams;
 using Windows.UI;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
@@ -22,6 +25,7 @@ namespace YummiGameBarWidget
         private readonly DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         private XboxGameBarWidget widget;
         private bool refreshing;
+        private string resizeState = "화면 크기 확인 중";
 
         public Widget()
         {
@@ -51,13 +55,18 @@ namespace YummiGameBarWidget
                 var scale = Math.Max(1.0, display.RawPixelsPerViewPixel);
                 var width = Math.Max(640, display.ScreenWidthInRawPixels / scale);
                 var height = Math.Max(360, display.ScreenHeightInRawPixels / scale);
-                widget.MaxWindowSize = new Windows.Foundation.Size(width, height);
-                await widget.TryResizeWindowAsync(new Windows.Foundation.Size(width, height));
+                var full = new Windows.Foundation.Size(width, height);
+                widget.MinWindowSize = full;
+                widget.MaxWindowSize = full;
+                var resized = await widget.TryResizeWindowAsync(full);
                 await widget.CenterWindowAsync();
+                resizeState = resized
+                    ? $"화면 맞춤 {Math.Round(width)}×{Math.Round(height)}"
+                    : "Game Bar가 전체 화면 크기 요청을 제한함";
             }
-            catch
+            catch (Exception ex)
             {
-                // Experimental: keep manifest size if Game Bar rejects full-display resize.
+                resizeState = "화면 맞춤 실패: " + ex.GetType().Name;
             }
         }
 
@@ -67,19 +76,42 @@ namespace YummiGameBarWidget
             refreshing = true;
             try
             {
-                using (var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.In, PipeOptions.Asynchronous))
+                string line = null;
+                try
                 {
-                    await pipe.ConnectAsync(650);
-                    using (var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, false))
+                    using (var pipe = new NamedPipeClientStream(".", PipeName, PipeDirection.In, PipeOptions.Asynchronous))
                     {
-                        var line = await reader.ReadLineAsync();
-                        if (string.IsNullOrWhiteSpace(line)) throw new IOException("empty bridge response");
-                        Apply(JsonObject.Parse(line));
+                        await pipe.ConnectAsync(250);
+                        using (var reader = new StreamReader(pipe, Encoding.UTF8, false, 4096, false))
+                            line = await reader.ReadLineAsync();
                     }
                 }
+                catch
+                {
+                    line = await ReadLoopbackSnapshotAsync();
+                }
+
+                if (string.IsNullOrWhiteSpace(line)) throw new IOException("empty bridge response");
+                Apply(JsonObject.Parse(line));
             }
-            catch { SetOffline(); }
+            catch (Exception ex) { SetOffline(ex); }
             finally { refreshing = false; }
+        }
+
+
+        private async Task<string> ReadLoopbackSnapshotAsync()
+        {
+            using (var socket = new StreamSocket())
+            {
+                await socket.ConnectAsync(new HostName("127.0.0.1"), "47658");
+                using (var reader = new DataReader(socket.InputStream))
+                {
+                    reader.InputStreamOptions = InputStreamOptions.Partial;
+                    var loaded = await reader.LoadAsync(16 * 1024);
+                    if (loaded == 0) return null;
+                    return reader.ReadString(reader.UnconsumedBufferLength).Trim();
+                }
+            }
         }
 
         private void Apply(JsonObject json)
@@ -94,16 +126,16 @@ namespace YummiGameBarWidget
             PhaseText.Text = phase;
             RiotIdText.Text = string.IsNullOrWhiteSpace(riotId) ? (connected ? "Riot ID 확인 중" : "League 클라이언트를 기다리는 중") : riotId;
             PartyText.Text = party.Count == 0 ? "파티 정보 없음" : string.Join(" · ", party.Take(5));
-            BridgeText.Text = connected ? "LCU 연결됨 · 전체 화면 HUD 실험" : "유미 에이전트 연결됨 · League 대기 중";
+            BridgeText.Text = (connected ? "LCU 연결됨" : "유미 에이전트 연결됨 · League 대기 중") + " · " + resizeState;
             StatusDot.Fill = new SolidColorBrush(connected ? Color.FromArgb(255, 86, 221, 139) : Color.FromArgb(255, 122, 106, 134));
         }
 
-        private void SetOffline()
+        private void SetOffline(Exception error)
         {
             PhaseText.Text = "Offline";
             RiotIdText.Text = "유미 LCU Agent를 실행해 주세요";
             PartyText.Text = "파티 정보 없음";
-            BridgeText.Text = "에이전트 연결 안 됨";
+            BridgeText.Text = "에이전트 연결 안 됨 · " + error.GetType().Name + " · " + resizeState;
             StatusDot.Fill = new SolidColorBrush(Color.FromArgb(255, 122, 106, 134));
         }
     }
