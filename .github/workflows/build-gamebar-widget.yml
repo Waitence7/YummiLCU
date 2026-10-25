@@ -190,11 +190,12 @@ jobs:
             New-Item -ItemType Directory -Force -Path $destDeps | Out-Null
             Get-ChildItem $dependencies.FullName -Recurse -File |
               Where-Object { $_.Extension -in '.appx', '.msix' } |
-              Where-Object { $_.FullName -notmatch '(?i)\\(arm|arm64)\\' -and $_.Name -notmatch '(?i)_(arm|arm64)_' } |
+              Where-Object { $_.FullName -notmatch '(?i)\\(arm|arm64|x86)\\' -and $_.Name -notmatch '(?i)_(arm|arm64|x86)_' } |
               ForEach-Object { Copy-Item $_.FullName (Join-Path $destDeps $_.Name) -Force }
           }
 
           Copy-Item agent-tauri/gamebar-widget/Install-YummiGameBar.ps1 (Join-Path $stage 'Install-YummiGameBar.ps1') -Force
+          Copy-Item agent-tauri/gamebar-widget/Update-YummiGameBar.ps1 (Join-Path $stage 'Update-YummiGameBar.ps1') -Force
           Copy-Item agent-tauri/gamebar-widget/Install-YummiGameBar.cmd (Join-Path $stage 'Install-YummiGameBar.cmd') -Force
           Copy-Item agent-tauri/gamebar-widget/README.md (Join-Path $stage 'README.md') -Force
           $publicCert = "${{ steps.signing.outputs.public_cert_path }}"
