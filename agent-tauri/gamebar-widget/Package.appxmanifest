@@ -26,6 +26,8 @@
               </GameBarWidget>
             </uap3:Properties>
           </uap3:AppExtension>
+        </uap3:Extension>
+        <uap3:Extension Category="windows.appExtension">
           <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiLCUController" DisplayName="유미 LCU 컨트롤" Description="유미 LCU 설정을 여는 작은 컨트롤러" PublicFolder="GameBar">
             <uap3:Properties>
               <GameBarWidget Type="Standard">
@@ -40,6 +42,8 @@
               </GameBarWidget>
             </uap3:Properties>
           </uap3:AppExtension>
+        </uap3:Extension>
+        <uap3:Extension Category="windows.appExtension">
           <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiLCUSettings" DisplayName="유미 LCU 설정" Description="유미 LCU HUD 설정" PublicFolder="GameBar">
             <uap3:Properties>
               <GameBarWidget Type="Settings">
