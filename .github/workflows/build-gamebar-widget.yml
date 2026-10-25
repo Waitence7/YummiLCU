@@ -43,7 +43,9 @@ jobs:
           $version = if ($requested) { $requested } else { $sourceVersion }
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "version must be x.y.z" }
           "version=$version" >> $env:GITHUB_OUTPUT
-          "appx_version=$version.0" >> $env:GITHUB_OUTPUT
+          $build = [int]$env:GITHUB_RUN_NUMBER
+          if ($build -lt 0 -or $build -gt 65535) { throw "GitHub run number $build cannot be used as AppX build version" }
+          "appx_version=$version.$build" >> $env:GITHUB_OUTPUT
 
       - name: Restore UWP packages
         run: |

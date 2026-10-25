@@ -24,10 +24,23 @@ if (Test-Path $certificate) {
     if (-not $isAdmin) {
       Write-Host '오버레이 인증서는 최초 1회만 관리자 권한으로 등록합니다.' -ForegroundColor Yellow
       $scriptPath = $MyInvocation.MyCommand.Path
-      $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $scriptPath + '"'))
-      if ($Force) { $arguments += '-Force' }
+      $logPath = Join-Path $env:TEMP 'Yummi-GameBar-install.log'
+      Remove-Item $logPath -Force -ErrorAction SilentlyContinue
+      $escapedScript = $scriptPath.Replace("'", "''")
+      $escapedLog = $logPath.Replace("'", "''")
+      $forceArg = if ($Force) { ' -Force' } else { '' }
+      $skipArg = if ($SkipAutoUpdateSetup) { ' -SkipAutoUpdateSetup' } else { '' }
+      $command = "& '$escapedScript'$forceArg$skipArg *>&1 | Tee-Object -FilePath '$escapedLog'; exit `$LASTEXITCODE"
+      $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
       $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
-      if ($process.ExitCode -ne 0) { throw "관리자 설치 프로세스가 종료 코드 $($process.ExitCode)로 실패했습니다." }
+      if ($process.ExitCode -ne 0) {
+        if (Test-Path $logPath) {
+          Write-Host ''
+          Write-Host '관리자 설치 로그:' -ForegroundColor Yellow
+          Get-Content $logPath | ForEach-Object { Write-Host $_ }
+        }
+        throw "관리자 설치 프로세스가 종료 코드 $($process.ExitCode)로 실패했습니다. 로그: $logPath"
+      }
       exit 0
     }
 
