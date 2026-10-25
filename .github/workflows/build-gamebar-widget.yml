@@ -7,6 +7,11 @@ on:
         description: "오버레이 버전 (비우면 gamebar-widget/version.json 사용)"
         required: false
         default: ""
+      deploy:
+        description: "전용 GitHub Release에 배포"
+        required: false
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
@@ -230,7 +235,8 @@ jobs:
             gamebar-version.json
           retention-days: 14
 
-      - name: Upload to matching GitHub release when available
+      - name: Deploy Game Bar release
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.meta.outputs.version }}
@@ -241,7 +247,7 @@ jobs:
             gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Yummi Game Bar Overlay $env:VERSION" --notes "Yummi Game Bar Overlay $env:VERSION." --prerelease
           }
           gh release upload $tag $env:ZIP gamebar-version.json --repo $env:GITHUB_REPOSITORY --clobber
-          Write-Host "Uploaded Game Bar overlay + signed manifest to $tag"
+          Write-Host "Deployed Game Bar overlay + signed manifest to $tag"
 
       - name: Cleanup certificate
         if: always()
