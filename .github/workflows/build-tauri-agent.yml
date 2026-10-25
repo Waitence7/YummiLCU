@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - "agent-tauri/**"
+      - "!agent-tauri/gamebar-widget/**"
   workflow_dispatch:
     inputs:
       version:
