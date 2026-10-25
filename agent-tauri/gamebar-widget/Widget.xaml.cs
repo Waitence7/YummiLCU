@@ -467,7 +467,7 @@ namespace YummiGameBarWidget
             hudDragPointerId = null;
         }
 
-        private static bool IsInteractiveHudElement(DependencyObject source)
+        private bool IsInteractiveHudElement(DependencyObject source)
         {
             for (var current = source; current != null; current = VisualTreeHelper.GetParent(current))
             {
