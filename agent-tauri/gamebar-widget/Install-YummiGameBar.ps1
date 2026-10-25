@@ -91,9 +91,9 @@ if (-not $SkipAutoUpdateSetup) {
 
       $taskName = 'Yummi Game Bar Overlay Updater'
       $taskCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$updaterTarget`" -Quiet"
-      & schtasks.exe /Create /TN $taskName /TR $taskCommand /SC HOURLY /MO 6 /F | Out-Null
+      & schtasks.exe /Create /TN $taskName /TR $taskCommand /SC MINUTE /MO 5 /F | Out-Null
       if ($LASTEXITCODE -eq 0) {
-        Write-Host '오버레이 자동 업데이트 등록 완료 (6시간마다 확인).' -ForegroundColor DarkGray
+        Write-Host '오버레이 자동 업데이트 등록 완료 (5분마다 확인).' -ForegroundColor DarkGray
       } else {
         Write-Warning '예약 작업 등록에 실패했습니다. 로그인 시 자동 확인으로 대체합니다.'
         $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
