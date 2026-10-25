@@ -99,7 +99,7 @@ namespace YummiGameBarWidget
                         if (request != lastFitRequest)
                         {
                             lastFitRequest = request;
-                            _ = FitToDisplayAsync();
+                            _ = FitToDisplayAsync(HudPreferences.CompactLayout);
                         }
                     }
                     catch { }
@@ -163,14 +163,14 @@ namespace YummiGameBarWidget
             {
                 // The home bar reserves screen space while it is open. Fit the
                 // pinned HUD again when that chrome is no longer on screen.
-                if (widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                if (!HudPreferences.CompactLayout && widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
                     await FitToDisplayAsync();
                 UpdateDisplayState();
                 UpdateInputState();
             });
         }
 
-        private async Task FitToDisplayAsync()
+        private async Task FitToDisplayAsync(bool centerForPinSetup = false)
         {
             if (widget == null || fittingDisplay) return;
             fittingDisplay = true;
@@ -198,7 +198,7 @@ namespace YummiGameBarWidget
                 fittedHeight = result.Height;
                 // Compact mode deliberately brings the titlebar back on screen.
                 // Expanding must preserve the position chosen by the user.
-                if (HudPreferences.CompactLayout) await widget.CenterWindowAsync();
+                if (centerForPinSetup) await widget.CenterWindowAsync();
                 UpdateDisplayState();
             }
             catch (Exception ex)
