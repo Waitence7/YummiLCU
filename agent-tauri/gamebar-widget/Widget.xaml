@@ -65,7 +65,9 @@
               </Grid>
 
               <Border Height="200" Background="#FF000000" CornerRadius="6">
-                <WebView x:Name="YoutubeWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" NavigationCompleted="YoutubeWebView_NavigationCompleted"/>
+                <Grid x:Name="YoutubeWebHost">
+                  <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
+                </Grid>
               </Border>
 
               <Grid ColumnSpacing="6">
@@ -74,11 +76,13 @@
                   <ColumnDefinition Width="Auto"/>
                   <ColumnDefinition Width="Auto"/>
                   <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <Button Content="▶" Width="36" Padding="4" Click="YoutubePlayButton_Click" ToolTipService.ToolTip="재생"/>
                 <Button Grid.Column="1" Content="Ⅱ" Width="36" Padding="4" Click="YoutubePauseButton_Click" ToolTipService.ToolTip="일시정지"/>
                 <TextBlock Grid.Column="2" Text="볼륨" FontSize="10" Foreground="#BDB1D0" VerticalAlignment="Center" Margin="4,0"/>
                 <Slider x:Name="YoutubeVolumeSlider" Grid.Column="3" Minimum="0" Maximum="100" Value="60" ValueChanged="YoutubeVolumeSlider_ValueChanged"/>
+                <Button Grid.Column="4" Content="로그인" Padding="8,4" FontSize="10" Click="YoutubeLoginButton_Click" ToolTipService.ToolTip="YouTube 로그인 / 봇 확인"/>
               </Grid>
               <TextBlock x:Name="YoutubeStatusText" Text="링크를 입력하면 영상이 표시됩니다" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
             </StackPanel>

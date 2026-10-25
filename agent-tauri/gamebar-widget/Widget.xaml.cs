@@ -48,6 +48,10 @@ namespace YummiGameBarWidget
         private bool youtubeCollapsed;
         private bool youtubePlaying;
         private double youtubeVolume = 60;
+        private Microsoft.UI.Xaml.Controls.WebView2 youtubeWebView2;
+        private bool youtubeWebView2Unavailable;
+        private bool youtubeUsingFallback;
+        private string youtubePendingPlayerUrl;
         private readonly TranslateTransform hudPanelTransform = new TranslateTransform();
         private uint? hudDragPointerId;
         private Windows.Foundation.Point hudDragStartPoint;
@@ -123,7 +127,8 @@ namespace YummiGameBarWidget
             if (args.VirtualKey == VirtualKey.Space && youtubeReady && YoutubeBody.Visibility == Visibility.Visible)
             {
                 var focused = FocusManager.GetFocusedElement() as DependencyObject;
-                if (focused is TextBox || focused is WebView) return;
+                if (focused is TextBox || focused is WebView ||
+                    (youtubeWebView2 != null && focused == youtubeWebView2)) return;
                 args.Handled = true;
                 _ = ToggleYoutubePlaybackAsync();
             }
@@ -466,7 +471,8 @@ namespace YummiGameBarWidget
         {
             for (var current = source; current != null; current = VisualTreeHelper.GetParent(current))
             {
-                if (current is TextBox || current is Button || current is Slider || current is WebView)
+                if (current is TextBox || current is Button || current is Slider || current is WebView ||
+                    (youtubeWebView2 != null && current == youtubeWebView2))
                     return true;
                 if (current is Border border && border.Name == "HudPanel") break;
             }
@@ -579,22 +585,119 @@ namespace YummiGameBarWidget
             youtubeReady = false;
             youtubePlaying = false;
             YoutubeStatusText.Text = "YouTube 플레이어 불러오는 중…";
-            var playerUrl = "https://yummi.duckdns.org/gamebar/youtube-player.html?v=" +
+            youtubePendingPlayerUrl = "https://yummi.duckdns.org/gamebar/youtube-player.html?v=" +
                 Uri.EscapeDataString(videoId) + "&volume=" + ((int)Math.Round(youtubeVolume)).ToString();
-            YoutubeWebView.Navigate(new Uri(playerUrl));
-            await Task.CompletedTask;
+
+            if (await EnsureYoutubeWebView2Async())
+            {
+                youtubeUsingFallback = false;
+                YoutubeFallbackWebView.Visibility = Visibility.Collapsed;
+                youtubeWebView2.Visibility = Visibility.Visible;
+                youtubeWebView2.Source = new Uri(youtubePendingPlayerUrl);
+                return;
+            }
+
+            NavigateYoutubeFallback(youtubePendingPlayerUrl);
         }
 
-        private void YoutubeWebView_NavigationCompleted(WebView sender, WebViewNavigationCompletedEventArgs args)
+        private async Task<bool> EnsureYoutubeWebView2Async()
+        {
+            if (youtubeWebView2Unavailable) return false;
+            if (youtubeWebView2 != null && youtubeWebView2.CoreWebView2 != null) return true;
+
+            try
+            {
+                if (youtubeWebView2 == null)
+                {
+                    EnsureWinUiResources();
+                    youtubeWebView2 = new Microsoft.UI.Xaml.Controls.WebView2
+                    {
+                        HorizontalAlignment = HorizontalAlignment.Stretch,
+                        VerticalAlignment = VerticalAlignment.Stretch
+                    };
+                    youtubeWebView2.NavigationCompleted += YoutubeWebView2_NavigationCompleted;
+                    YoutubeWebHost.Children.Insert(0, youtubeWebView2);
+                }
+
+                await youtubeWebView2.EnsureCoreWebView2Async();
+                if (youtubeWebView2.CoreWebView2 == null) throw new InvalidOperationException("CoreWebView2 is unavailable");
+                youtubeWebView2.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
+                youtubeWebView2.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                youtubeWebView2.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                youtubeWebView2Unavailable = true;
+                youtubeUsingFallback = true;
+                if (youtubeWebView2 != null) youtubeWebView2.Visibility = Visibility.Collapsed;
+                YoutubeStatusText.Text = "WebView2 사용 불가 · 기본 플레이어로 전환 · " + ErrorCode(ex);
+                App.LogStage("youtube-webview2-fallback-" + ErrorCode(ex));
+                return false;
+            }
+        }
+
+        private static void EnsureWinUiResources()
+        {
+            var resources = Application.Current.Resources;
+            foreach (var dictionary in resources.MergedDictionaries)
+            {
+                if (dictionary is Microsoft.UI.Xaml.Controls.XamlControlsResources) return;
+            }
+            resources.MergedDictionaries.Add(new Microsoft.UI.Xaml.Controls.XamlControlsResources());
+        }
+
+        private void NavigateYoutubeFallback(string playerUrl)
+        {
+            youtubeUsingFallback = true;
+            YoutubeFallbackWebView.Visibility = Visibility.Visible;
+            YoutubeFallbackWebView.Navigate(new Uri(playerUrl));
+        }
+
+        private void YoutubeWebView2_NavigationCompleted(
+            Microsoft.UI.Xaml.Controls.WebView2 sender,
+            Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs args)
         {
             if (!args.IsSuccess)
             {
                 youtubeReady = false;
-                YoutubeStatusText.Text = "YouTube 플레이어를 불러오지 못했습니다";
+                YoutubeStatusText.Text = "YouTube 페이지를 불러오지 못했습니다 · WebView2 " + args.WebErrorStatus;
                 return;
             }
             youtubeReady = true;
-            YoutubeStatusText.Text = "영상 준비됨 · Game Bar가 열려 있을 때 조작할 수 있습니다";
+            var host = sender.Source == null ? "" : sender.Source.Host;
+            YoutubeStatusText.Text = host.EndsWith("youtube.com", StringComparison.OrdinalIgnoreCase)
+                ? "YouTube 로그인/확인 화면 · 완료 후 링크를 다시 열어 주세요"
+                : "영상 준비됨 · WebView2 세션 사용 중";
+        }
+
+        private void YoutubeFallbackWebView_NavigationCompleted(WebView sender, WebViewNavigationCompletedEventArgs args)
+        {
+            if (!args.IsSuccess)
+            {
+                youtubeReady = false;
+                YoutubeStatusText.Text = "기본 YouTube 플레이어를 불러오지 못했습니다";
+                return;
+            }
+            youtubeReady = true;
+            YoutubeStatusText.Text = "영상 준비됨 · 기본 WebView fallback";
+        }
+
+        private async void YoutubeLoginButton_Click(object sender, RoutedEventArgs e)
+        {
+            youtubeReady = false;
+            youtubePlaying = false;
+            YoutubeStatusText.Text = "YouTube 로그인/봇 확인 페이지 여는 중…";
+            if (await EnsureYoutubeWebView2Async())
+            {
+                youtubeUsingFallback = false;
+                YoutubeFallbackWebView.Visibility = Visibility.Collapsed;
+                youtubeWebView2.Visibility = Visibility.Visible;
+                youtubeWebView2.Source = new Uri("https://www.youtube.com/");
+                return;
+            }
+
+            YoutubeStatusText.Text = "WebView2가 없어 로그인 세션을 열 수 없습니다 · 기본 플레이어만 사용 가능";
         }
 
         private async void YoutubePlayButton_Click(object sender, RoutedEventArgs e)
@@ -622,10 +725,18 @@ namespace YummiGameBarWidget
         private async void YoutubeVolumeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
         {
             youtubeVolume = e.NewValue;
-            if (!youtubeReady || YoutubeWebView == null) return;
+            if (!youtubeReady) return;
             try
             {
-                await YoutubeWebView.InvokeScriptAsync("yummiSetVolume", new[] { ((int)Math.Round(youtubeVolume)).ToString() });
+                var volume = ((int)Math.Round(youtubeVolume)).ToString();
+                if (!youtubeUsingFallback && youtubeWebView2 != null && youtubeWebView2.CoreWebView2 != null)
+                {
+                    await youtubeWebView2.ExecuteScriptAsync("window.yummiSetVolume && window.yummiSetVolume(" + volume + ");");
+                }
+                else if (youtubeUsingFallback)
+                {
+                    await YoutubeFallbackWebView.InvokeScriptAsync("yummiSetVolume", new[] { volume });
+                }
             }
             catch { }
         }
@@ -646,7 +757,14 @@ namespace YummiGameBarWidget
             }
             try
             {
-                await YoutubeWebView.InvokeScriptAsync(functionName, new string[0]);
+                if (!youtubeUsingFallback && youtubeWebView2 != null && youtubeWebView2.CoreWebView2 != null)
+                {
+                    await youtubeWebView2.ExecuteScriptAsync("window." + functionName + " && window." + functionName + "();");
+                }
+                else
+                {
+                    await YoutubeFallbackWebView.InvokeScriptAsync(functionName, new string[0]);
+                }
                 YoutubeStatusText.Text = actionLabel;
                 return true;
             }
