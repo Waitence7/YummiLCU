@@ -16,8 +16,11 @@ namespace YummiGameBarWidget
 
         public App()
         {
-            ApplicationViewSwitcher.DisableShowingMainViewOnActivation();
+            LogStage("constructor");
             InitializeComponent();
+            LogStage("xaml-initialized");
+            ApplicationViewSwitcher.DisableShowingMainViewOnActivation();
+            LogStage("main-view-suppressed");
             UnhandledException += (_, e) => LogFailure("unhandled", e.Exception);
             Suspending += (_, __) => widgets.Clear();
         }
@@ -26,6 +29,7 @@ namespace YummiGameBarWidget
         {
             try
             {
+                LogStage("activation-" + args.Kind);
                 if (args.Kind != ActivationKind.Protocol || !(args is IProtocolActivatedEventArgs protocol) || protocol.Uri.Scheme != "ms-gamebarwidget")
                     return;
 
@@ -33,6 +37,7 @@ namespace YummiGameBarWidget
                 if (widgetArgs == null || !widgetArgs.IsLaunchActivation)
                     return;
 
+                LogStage("widget-" + widgetArgs.AppExtensionId);
                 var frame = new Frame();
                 Window.Current.Content = frame;
                 var widget = new XboxGameBarWidget(widgetArgs, Window.Current.CoreWindow, frame);
@@ -57,12 +62,24 @@ namespace YummiGameBarWidget
                 var extensionId = widgetArgs.AppExtensionId;
                 Window.Current.Closed += (sender, closedArgs) => widgets.TryRemove(extensionId, out var removedWidget);
                 Window.Current.Activate();
+                LogStage("active-" + extensionId);
             }
             catch (Exception ex)
             {
                 LogFailure("activation", ex);
                 throw;
             }
+        }
+
+        internal static void LogStage(string stage)
+        {
+            try
+            {
+                var path = Path.Combine(ApplicationData.Current.LocalFolder.Path, "widget-startup.log");
+                if (File.Exists(path) && new FileInfo(path).Length > 16384) File.WriteAllText(path, "");
+                File.AppendAllText(path, $"[{DateTimeOffset.Now:O}] {stage}{Environment.NewLine}");
+            }
+            catch { }
         }
 
         private static void LogFailure(string stage, Exception error)

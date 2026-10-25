@@ -44,6 +44,7 @@ namespace YummiGameBarWidget
             timer.Tick += async (_, __) => await RefreshAsync();
             Loaded += async (_, __) =>
             {
+                App.LogStage("hud-loaded");
                 Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
@@ -52,6 +53,7 @@ namespace YummiGameBarWidget
                 UpdateInputState();
                 timer.Start();
                 await RefreshAsync();
+                App.LogStage("hud-ready");
             };
             Unloaded += (_, __) =>
             {
