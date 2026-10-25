@@ -87,7 +87,7 @@ foreach ($depPath in $missingDeps) {
 }
 
 Write-Host '유미 Game Bar 오버레이를 설치합니다.'
-Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force
+Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceUpdateFromAnyVersion
 
 # UWP/Game Bar widgets are AppContainer processes. Enable the documented
 # localhost exemption so the overlay can reach the full-trust Agent fallback
