@@ -30,7 +30,10 @@
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
           <Ellipse x:Name="StatusDot" Grid.Column="0" Width="10" Height="10" Fill="#7A6A86" Margin="0,0,8,0" VerticalAlignment="Center"/>
-          <TextBlock Grid.Column="1" Text="유미 LCU" FontSize="17" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
+          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
+            <TextBlock Text="유미 LCU" FontSize="17" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
+            <TextBlock x:Name="VersionText" Text="v-" FontSize="10" Foreground="#9687AA" VerticalAlignment="Center" Margin="0,3,0,0"/>
+          </StackPanel>
           <TextBlock x:Name="PhaseText" Grid.Column="2" Text="Offline" FontSize="11" Foreground="#CDBDE8" Margin="10,4,0,0" VerticalAlignment="Center"/>
           <Button x:Name="HudResetPositionButton" Grid.Column="3" Content="↺" Width="28" Height="26" Padding="0" FontSize="13" Click="HudResetPositionButton_Click" ToolTipService.ToolTip="HUD 위치 초기화"/>
         </Grid>

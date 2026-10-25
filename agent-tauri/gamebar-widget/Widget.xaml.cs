@@ -59,6 +59,7 @@ namespace YummiGameBarWidget
         public Widget()
         {
             InitializeComponent();
+            SetVersionText();
             HudPanel.RenderTransform = hudPanelTransform;
             RestoreHudPanelPosition();
             SizeChanged += (_, __) => ClampHudPanelPosition();
@@ -89,6 +90,20 @@ namespace YummiGameBarWidget
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
                 timer.Stop();
             };
+        }
+
+
+        private void SetVersionText()
+        {
+            try
+            {
+                var version = Package.Current.Id.Version;
+                VersionText.Text = "v" + version.Major + "." + version.Minor + "." + version.Build;
+            }
+            catch
+            {
+                VersionText.Text = "v?";
+            }
         }
 
         private void CoreWindowKeyDown(CoreWindow sender, KeyEventArgs args)
