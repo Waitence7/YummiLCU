@@ -36,7 +36,7 @@ namespace YummiGameBarWidget
         private string lastSavedStatus;
         private string bridgeStatus = "checking";
         private string bridgeError = "";
-        private bool coverageTintEnabled;
+        private long lastFitRequest;
 
         public Widget()
         {
@@ -45,6 +45,9 @@ namespace YummiGameBarWidget
             Loaded += async (_, __) =>
             {
                 Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
+                ApplicationData.Current.DataChanged += PreferencesChanged;
+                lastFitRequest = HudPreferences.FitRequest;
+                ApplyPreferences();
                 await FitToDisplayAsync();
                 UpdateInputState();
                 timer.Start();
@@ -53,21 +56,50 @@ namespace YummiGameBarWidget
             Unloaded += (_, __) =>
             {
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
+                ApplicationData.Current.DataChanged -= PreferencesChanged;
                 timer.Stop();
             };
         }
 
-        private async void CoreWindowKeyDown(CoreWindow sender, KeyEventArgs args)
+        private void CoreWindowKeyDown(CoreWindow sender, KeyEventArgs args)
         {
             if (args.VirtualKey != VirtualKey.F8 || args.KeyStatus.WasKeyDown) return;
-            coverageTintEnabled = !coverageTintEnabled;
-            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
-            {
-                RootGrid.Background = coverageTintEnabled
-                    ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
-                    : new SolidColorBrush(Colors.Transparent);
-            });
+            // CoreWindow raises this on the view dispatcher. Handle the event
+            // before returning; its WinRT args must not be used after an await.
             args.Handled = true;
+            HudPreferences.CoverageTint = !HudPreferences.CoverageTint;
+            ApplyPreferences();
+        }
+
+        private void ApplyPreferences()
+        {
+            HudPanel.Visibility = HudPreferences.Visible ? Visibility.Visible : Visibility.Collapsed;
+            HudPanel.Opacity = HudPreferences.Opacity;
+            RootGrid.Background = HudPreferences.CoverageTint
+                ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
+                : new SolidColorBrush(Colors.Transparent);
+        }
+
+        private async void PreferencesChanged(ApplicationData sender, object args)
+        {
+            try
+            {
+                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+                {
+                    try
+                    {
+                        ApplyPreferences();
+                        var request = HudPreferences.FitRequest;
+                        if (request != lastFitRequest)
+                        {
+                            lastFitRequest = request;
+                            _ = FitToDisplayAsync();
+                        }
+                    }
+                    catch { }
+                });
+            }
+            catch { }
         }
 
         protected override void OnNavigatedTo(NavigationEventArgs e)
@@ -184,6 +216,9 @@ namespace YummiGameBarWidget
                 {
                     ["version"] = JsonValue.CreateStringValue(version.Major + "." + version.Minor + "." + version.Build + "." + version.Revision),
                     ["bridge"] = JsonValue.CreateStringValue(bridgeStatus),
+                    ["hudVisible"] = JsonValue.CreateBooleanValue(HudPreferences.Visible),
+                    ["hudOpacity"] = JsonValue.CreateNumberValue(HudPreferences.Opacity),
+                    ["coverageTint"] = JsonValue.CreateBooleanValue(HudPreferences.CoverageTint),
                     ["error"] = JsonValue.CreateStringValue(bridgeError),
                     ["pinned"] = JsonValue.CreateBooleanValue(widget.Pinned),
                     ["clickThroughEnabled"] = JsonValue.CreateBooleanValue(widget.ClickThroughEnabled),
@@ -252,8 +287,8 @@ namespace YummiGameBarWidget
         private void Apply(JsonObject json)
         {
             bool connected = json.GetNamedBoolean("connected", false);
-            string phase = json.GetNamedString("phase", connected ? "Unknown" : "Offline");
-            string riotId = json.GetNamedString("riot_id", "");
+            string phase = SnapshotJson.String(json, "phase", connected ? "Unknown" : "Offline");
+            string riotId = SnapshotJson.String(json, "riot_id");
             var party = new List<string>();
             if (json.ContainsKey("party_members") && json["party_members"].ValueType == JsonValueType.Array)
                 foreach (var value in json.GetNamedArray("party_members")) if (value.ValueType == JsonValueType.String) party.Add(value.GetString());

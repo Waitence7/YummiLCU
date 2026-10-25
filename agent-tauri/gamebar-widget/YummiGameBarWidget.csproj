@@ -39,6 +39,8 @@
     <Compile Include="App.xaml.cs"><DependentUpon>App.xaml</DependentUpon></Compile>
     <Compile Include="NativePipeClient.cs" />
     <Compile Include="HudGeometry.cs" />
+    <Compile Include="SnapshotJson.cs" />
+    <Compile Include="HudPreferences.cs" />
     <Compile Include="Widget.xaml.cs"><DependentUpon>Widget.xaml</DependentUpon></Compile>
     <Compile Include="Controller.xaml.cs"><DependentUpon>Controller.xaml</DependentUpon></Compile>
     <Compile Include="Settings.xaml.cs"><DependentUpon>Settings.xaml</DependentUpon></Compile>

@@ -65,6 +65,11 @@ jobs:
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File agent-tauri/gamebar-widget/tests/Test-Bridge.ps1
           if ($LASTEXITCODE -ne 0) { throw "Game Bar bridge regression checks failed" }
 
+      - name: Verify nullable Agent snapshot JSON
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File agent-tauri/gamebar-widget/tests/Test-SnapshotJson.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Game Bar JSON regression checks failed" }
+
       - name: Restore UWP packages
         run: |
           dotnet restore agent-tauri/gamebar-widget/YummiGameBarWidget.csproj

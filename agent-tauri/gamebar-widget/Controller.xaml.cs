@@ -13,11 +13,14 @@ namespace YummiGameBarWidget
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             widget = e.Parameter as XboxGameBarWidget;
+            if (widget != null) widget.PinningSupported = false;
             base.OnNavigatedTo(e);
         }
         private async void OpenSettingsButton_Click(object sender, RoutedEventArgs e)
         {
-            if (widget != null) await widget.ActivateSettingsAsync();
+            if (widget == null) return;
+            try { await widget.ActivateSettingsAsync(); }
+            catch { OpenSettingsButton.Content = "Win+G에서 설정을 다시 열어 주세요"; }
         }
     }
 }

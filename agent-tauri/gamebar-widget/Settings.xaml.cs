@@ -7,6 +7,7 @@ using Microsoft.Gaming.XboxGameBar;
 using Windows.Data.Json;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
+using Windows.UI.Xaml.Controls.Primitives;
 using Windows.UI.Xaml.Navigation;
 
 namespace YummiGameBarWidget
@@ -16,7 +17,36 @@ namespace YummiGameBarWidget
         private const string CommandPipeName = @"LOCAL\YummiLcuGameBarCommandV1";
         private XboxGameBarWidget widget;
 
-        public Settings() { InitializeComponent(); }
+        private bool preferencesLoaded;
+        public Settings()
+        {
+            InitializeComponent();
+            Loaded += (_, __) =>
+            {
+                HudVisibleToggle.IsOn = HudPreferences.Visible;
+                CoverageTintToggle.IsOn = HudPreferences.CoverageTint;
+                HudOpacitySlider.Value = HudPreferences.Opacity * 100;
+                preferencesLoaded = true;
+            };
+        }
+        private void HudVisibleToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (preferencesLoaded) HudPreferences.Visible = HudVisibleToggle.IsOn;
+        }
+        private void CoverageTintToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (preferencesLoaded) HudPreferences.CoverageTint = CoverageTintToggle.IsOn;
+        }
+        private void HudOpacitySlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs args)
+        {
+            if (preferencesLoaded) HudPreferences.Opacity = args.NewValue / 100;
+        }
+        private void FitHudButton_Click(object sender, RoutedEventArgs args)
+        {
+            HudPreferences.RequestFit();
+            PreferenceStatusText.Text = "화면 맞춤을 요청했습니다.";
+        }
+
 
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {

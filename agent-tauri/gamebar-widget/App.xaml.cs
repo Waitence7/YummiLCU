@@ -1,20 +1,22 @@
 using System;
-using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.IO;
 using Microsoft.Gaming.XboxGameBar;
 using Windows.ApplicationModel.Activation;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.Storage;
+using Windows.UI.ViewManagement;
 
 namespace YummiGameBarWidget
 {
     sealed partial class App : Application
     {
-        private readonly Dictionary<string, XboxGameBarWidget> widgets = new Dictionary<string, XboxGameBarWidget>();
+        private readonly ConcurrentDictionary<string, XboxGameBarWidget> widgets = new ConcurrentDictionary<string, XboxGameBarWidget>();
 
         public App()
         {
+            ApplicationViewSwitcher.DisableShowingMainViewOnActivation();
             InitializeComponent();
             UnhandledException += (_, e) => LogFailure("unhandled", e.Exception);
             Suspending += (_, __) => widgets.Clear();
@@ -53,7 +55,7 @@ namespace YummiGameBarWidget
                 }
 
                 var extensionId = widgetArgs.AppExtensionId;
-                Window.Current.Closed += (_, __) => widgets.Remove(extensionId);
+                Window.Current.Closed += (_, __) => widgets.TryRemove(extensionId, out _);
                 Window.Current.Activate();
             }
             catch (Exception ex)

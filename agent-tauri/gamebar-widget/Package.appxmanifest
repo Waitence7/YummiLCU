@@ -36,7 +36,7 @@
             <uap3:Properties>
               <GameBarWidget Type="Standard">
                 <HomeMenuVisible>true</HomeMenuVisible>
-                <PinningSupported>true</PinningSupported>
+                <PinningSupported>false</PinningSupported>
                 <SettingsSupported AppExtensionId="YummiLCUSettings" />
                 <Window>
                   <AllowForegroundTransparency>true</AllowForegroundTransparency>
