@@ -92,12 +92,11 @@ if (-not $SkipAutoUpdateSetup) {
       # The Yummi LCU Agent owns periodic overlay update checks.
       # Keep only the updater files here; no scheduled task is required.
       Write-Host '오버레이 자동 업데이트 준비 완료 (Yummi LCU Agent가 5분마다 확인).' -ForegroundColor DarkGray
-    } catch {
-        Write-Host '초기 업데이트 상태 기록은 건너뜁니다.' -ForegroundColor DarkGray
-      }
+    } else {
+      Write-Warning '오버레이 updater 스크립트를 찾지 못했습니다.'
     }
   }
   catch {
-    Write-Warning "자동 업데이트 등록 실패: $($_.Exception.Message)"
+    Write-Warning "자동 업데이트 준비 실패: $($_.Exception.Message)"
   }
 }
