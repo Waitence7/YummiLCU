@@ -191,7 +191,7 @@ fn manifest_public_key() -> AgentResult<[u8; 32]> {
     decode_base64_fixed("manifest public key", raw)
 }
 
-fn verify_tauri_manifest_signature(target: &Value, signature: &str) -> AgentResult<()> {
+pub(crate) fn verify_manifest_payload_signature(target: &Value, signature: &str) -> AgentResult<()> {
     let public_key = manifest_public_key()?;
     verify_tauri_manifest_signature_with_key(target, signature, &public_key)
 }
@@ -223,7 +223,7 @@ fn parse_signed_manifest(bytes: &[u8]) -> AgentResult<UpdateManifest> {
         .remove("signature")
         .and_then(|value| value.as_str().map(ToOwned::to_owned))
         .ok_or_else(|| AgentError::Update("업데이트 manifest 서명이 없습니다.".into()))?;
-    verify_tauri_manifest_signature(&tauri_value, &signature)?;
+    verify_manifest_payload_signature(&tauri_value, &signature)?;
     let mut target: UpdateTarget = serde_json::from_value(tauri_value)?;
     target.signature = Some(signature);
     Ok(UpdateManifest {

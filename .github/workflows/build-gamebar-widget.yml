@@ -11,6 +11,7 @@ on:
     branches: [main]
     paths:
       - "agent-tauri/gamebar-widget/**"
+      - "scripts/sync-gamebar-version.mjs"
       - ".github/workflows/build-gamebar-widget.yml"
 
 permissions:
@@ -208,11 +209,26 @@ jobs:
           "artifact_name=$zipName" >> $env:GITHUB_OUTPUT
           "package_name=$packageName" >> $env:GITHUB_OUTPUT
 
+      - name: Build signed Game Bar update manifest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+          VERSION: ${{ steps.meta.outputs.version }}
+          ZIP: ${{ steps.pack.outputs.artifact_name }}
+        run: |
+          if (-not $env:YUMMI_AGENT_MANIFEST_SIGNING_KEY) { throw "YUMMI_AGENT_MANIFEST_SIGNING_KEY is required" }
+          $stableTag = "v$env:VERSION"
+          $betaMeta = Get-Content agent-tauri/beta-release.json -Raw | ConvertFrom-Json
+          $betaTag = if ($betaMeta.version -eq $env:VERSION) { "v$env:VERSION-beta.$($betaMeta.number)" } else { $null }
+          $tag = if (gh release view $stableTag --repo $env:GITHUB_REPOSITORY 2>$null) { $stableTag } elseif ($betaTag) { $betaTag } else { $stableTag }
+          node scripts/sync-gamebar-version.mjs --zip $env:ZIP --out gamebar-version.json --version $env:VERSION --release-tag $tag --build-id "$env:GITHUB_RUN_NUMBER" --commit "$($env:GITHUB_SHA.Substring(0,7))"
+
       - uses: actions/upload-artifact@v4
         with:
           name: yummi-gamebar-overlay-${{ steps.meta.outputs.version }}
           path: |
             ${{ steps.pack.outputs.artifact_name }}
+            gamebar-version.json
           retention-days: 14
 
       - name: Upload to matching GitHub release when available
@@ -228,8 +244,8 @@ jobs:
           if (gh release view $stableTag --repo $env:GITHUB_REPOSITORY 2>$null) { $tag = $stableTag }
           elseif ($betaTag -and (gh release view $betaTag --repo $env:GITHUB_REPOSITORY 2>$null)) { $tag = $betaTag }
           if ($tag) {
-            gh release upload $tag $env:ZIP --repo $env:GITHUB_REPOSITORY --clobber
-            Write-Host "Uploaded Game Bar overlay to $tag"
+            gh release upload $tag $env:ZIP gamebar-version.json --repo $env:GITHUB_REPOSITORY --clobber
+            Write-Host "Uploaded Game Bar overlay + signed manifest to $tag"
           } else {
             Write-Host "No matching release exists yet; artifact is available from this workflow run."
           }

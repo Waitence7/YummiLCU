@@ -3,19 +3,29 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 use tauri::AppHandle;
 use tokio::time::sleep;
 
 use crate::{
     lcu::{discover_lockfile_nonblocking, LcuClient},
     state::{AppState, GameBarSnapshot},
+    updater::verify_manifest_payload_signature,
 };
 
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 #[cfg(windows)]
 const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+#[cfg(windows)]
+const GAMEBAR_RELEASES_API: &str = "https://api.github.com/repos/Waitence7/YummiLCU/releases?per_page=15";
+#[cfg(windows)]
+const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
+#[cfg(windows)]
+const MAX_GAMEBAR_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 
 pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     let watcher_state = state.clone();
@@ -62,7 +72,7 @@ async fn watch_overlay_updates(state: Arc<AppState>) {
 
         // Missing updater simply means the overlay has never been installed.
         // Keep this silent so Agent users who do not use Game Bar are unaffected.
-        let _ = start_overlay_update_check();
+        let _ = check_overlay_update().await;
 
         tokio::select! {
             _ = sleep(OVERLAY_UPDATE_INTERVAL) => {},
@@ -471,10 +481,10 @@ fn handle_command(_app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
         .unwrap_or_default();
 
     if command == "check_overlay_update" {
-        return match start_overlay_update_check() {
-            Ok(()) => json_response(true, "오버레이 업데이트 확인을 시작했습니다."),
-            Err(error) => json_response(false, &error),
-        };
+        tauri::async_runtime::spawn(async move {
+            let _ = check_overlay_update().await;
+        });
+        return json_response(true, "오버레이 업데이트 확인을 시작했습니다.");
     }
     if command != "set_status_message" {
         return json_response(false, "허용되지 않은 명령입니다.");
@@ -495,28 +505,112 @@ fn handle_command(_app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
 }
 
 #[cfg(windows)]
-fn start_overlay_update_check() -> Result<(), String> {
-    use std::{env, path::PathBuf, process::Command};
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GameBarUpdateTarget {
+    version: String,
+    release_tag: String,
+    build_id: String,
+    commit: String,
+    url: String,
+    sha256: String,
+    size: u64,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Deserialize, Serialize, Default)]
+struct GameBarUpdateState {
+    build_id: String,
+    sha256: String,
+    release_tag: String,
+}
+
+#[cfg(windows)]
+async fn check_overlay_update() -> Result<(), String> {
+    use std::{env, fs, path::PathBuf, process::Command};
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
     let local_app_data = env::var_os("LOCALAPPDATA")
         .ok_or_else(|| "LOCALAPPDATA를 찾지 못했습니다.".to_owned())?;
-    let updater = PathBuf::from(local_app_data)
-        .join("Yummi")
-        .join("GameBarUpdater")
-        .join("Update-YummiGameBar.ps1");
+    let updater_dir = PathBuf::from(local_app_data).join("Yummi").join("GameBarUpdater");
+    let updater = updater_dir.join("Update-YummiGameBar.ps1");
     if !updater.is_file() {
-        return Err("오버레이 updater가 설치되어 있지 않습니다. 최신 오버레이를 한 번 다시 설치해 주세요.".to_owned());
+        return Ok(());
     }
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .user_agent("Yummi-LCU-Agent-GameBar-Updater")
+        .build()
+        .map_err(|e| format!("Game Bar 업데이트 클라이언트 생성 실패: {e}"))?;
+    let releases: Value = client.get(GAMEBAR_RELEASES_API).send().await
+        .map_err(|e| format!("Game Bar 릴리즈 조회 실패: {e}"))?
+        .error_for_status().map_err(|e| format!("Game Bar 릴리즈 응답 실패: {e}"))?
+        .json().await.map_err(|e| format!("Game Bar 릴리즈 JSON 실패: {e}"))?;
+    let manifest_url = releases.as_array().and_then(|items| items.iter().find_map(|release| {
+        if release.get("draft").and_then(Value::as_bool).unwrap_or(false) { return None; }
+        release.get("assets")?.as_array()?.iter().find_map(|asset| {
+            if asset.get("name")?.as_str()? == "gamebar-version.json" {
+                asset.get("browser_download_url")?.as_str().map(str::to_owned)
+            } else { None }
+        })
+    })).ok_or_else(|| "서명된 Game Bar manifest를 찾지 못했습니다.".to_owned())?;
+
+    let response = client.get(&manifest_url).send().await.map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?
+        .error_for_status().map_err(|e| format!("Game Bar manifest 응답 실패: {e}"))?;
+    if response.content_length().unwrap_or(0) > MAX_GAMEBAR_MANIFEST_BYTES as u64 {
+        return Err("Game Bar manifest가 너무 큽니다.".into());
+    }
+    let bytes = response.bytes().await.map_err(|e| format!("Game Bar manifest 읽기 실패: {e}"))?;
+    if bytes.len() > MAX_GAMEBAR_MANIFEST_BYTES { return Err("Game Bar manifest가 너무 큽니다.".into()); }
+    let root: Value = serde_json::from_slice(&bytes).map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
+    let mut payload = root.get("gamebar").cloned().ok_or_else(|| "Game Bar manifest에 gamebar 블록이 없습니다.".to_owned())?;
+    let signature = payload.as_object_mut().and_then(|o| o.remove("signature"))
+        .and_then(|v| v.as_str().map(str::to_owned)).ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
+    verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
+    let target: GameBarUpdateTarget = serde_json::from_value(payload).map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
+
+    if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
+    }
+    if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 { return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into()); }
+    let parsed = url::Url::parse(&target.url).map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
+    if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") ||
+       !parsed.path().starts_with("/Waitence7/YummiLCU/releases/download/") ||
+       !parsed.path().ends_with(".zip") {
+        return Err("Game Bar 다운로드 URL이 허용되지 않았습니다.".into());
+    }
+
+    let state_path = updater_dir.join("state.json");
+    if let Ok(raw) = fs::read_to_string(&state_path) {
+        if let Ok(state) = serde_json::from_str::<GameBarUpdateState>(&raw) {
+            if state.build_id == target.build_id && state.sha256.eq_ignore_ascii_case(&target.sha256) { return Ok(()); }
+        }
+    }
+
+    let response = client.get(&target.url).send().await.map_err(|e| format!("Game Bar ZIP 다운로드 실패: {e}"))?
+        .error_for_status().map_err(|e| format!("Game Bar ZIP 응답 실패: {e}"))?;
+    if response.content_length().unwrap_or(target.size) != target.size { return Err("Game Bar ZIP 크기가 manifest와 다릅니다.".into()); }
+    let archive = response.bytes().await.map_err(|e| format!("Game Bar ZIP 읽기 실패: {e}"))?;
+    if archive.len() as u64 != target.size || archive.len() > MAX_GAMEBAR_ARCHIVE_BYTES { return Err("Game Bar ZIP 크기 검증 실패".into()); }
+    let actual = format!("{:x}", Sha256::digest(&archive));
+    if !actual.eq_ignore_ascii_case(&target.sha256) { return Err("Game Bar ZIP SHA256 검증 실패".into()); }
+
+    fs::create_dir_all(&updater_dir).map_err(|e| format!("Game Bar updater 폴더 생성 실패: {e}"))?;
+    let zip_path = updater_dir.join("verified-update.zip");
+    fs::write(&zip_path, &archive).map_err(|e| format!("검증된 Game Bar ZIP 저장 실패: {e}"))?;
 
     Command::new("powershell.exe")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&updater)
+        .arg("-PackagePath").arg(&zip_path)
+        .arg("-ExpectedSha256").arg(&target.sha256)
+        .arg("-BuildId").arg(&target.build_id)
+        .arg("-ReleaseTag").arg(&target.release_tag)
         .arg("-Quiet")
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|error| format!("업데이트 확인 실행 실패: {error}"))?;
+        .spawn().map_err(|e| format!("Game Bar 설치 실행 실패: {e}"))?;
     Ok(())
 }
 
