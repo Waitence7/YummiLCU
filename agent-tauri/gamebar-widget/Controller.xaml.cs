@@ -1,3 +1,4 @@
+using System;
 using Microsoft.Gaming.XboxGameBar;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
