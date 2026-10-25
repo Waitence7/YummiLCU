@@ -196,7 +196,9 @@ namespace YummiGameBarWidget
                 resizeAccepted = result.Accepted;
                 fittedWidth = result.Width;
                 fittedHeight = result.Height;
-                await widget.CenterWindowAsync();
+                // Compact mode deliberately brings the titlebar back on screen.
+                // Expanding must preserve the position chosen by the user.
+                if (HudPreferences.CompactLayout) await widget.CenterWindowAsync();
                 UpdateDisplayState();
             }
             catch (Exception ex)
@@ -247,6 +249,7 @@ namespace YummiGameBarWidget
                 var version = Package.Current.Id.Version;
                 var status = new JsonObject
                 {
+                    ["processId"] = JsonValue.CreateNumberValue(Windows.System.Diagnostics.ProcessDiagnosticInfo.GetForCurrentProcess().ProcessId),
                     ["version"] = JsonValue.CreateStringValue(version.Major + "." + version.Minor + "." + version.Build + "." + version.Revision),
                     ["bridge"] = JsonValue.CreateStringValue(bridgeStatus),
                     ["compactLayout"] = JsonValue.CreateBooleanValue(HudPreferences.CompactLayout),
