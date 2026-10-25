@@ -14,6 +14,22 @@ public static class BridgeTests {
   }
   public static void Run() { RunAsync().GetAwaiter().GetResult(); }
   private static async Task RunAsync() {
+    if (HudGeometry.ToLogicalPixels(2880, 2) != 1440 || HudGeometry.ToLogicalPixels(1800, 2) != 900 ||
+        HudGeometry.ToLogicalPixels(1920, 1) != 1920 || HudGeometry.ToLogicalPixels(1080, 1) != 1080 ||
+        HudGeometry.ToLogicalPixels(3840, 1.5) != 2560 || HudGeometry.ToLogicalPixels(2160, 1.5) != 1440)
+      throw new Exception("Physical display dimensions must account for100/150/200 percent scaling");
+    foreach (double scale in new double[] { 0, -1, double.NaN, double.PositiveInfinity }) {
+      bool invalid = false;
+      try { HudGeometry.ToLogicalPixels(1920, scale); }
+      catch (ArgumentOutOfRangeException) { invalid = true; }
+      if (!invalid) throw new Exception("Invalid display scale must not cause a resize");
+    }
+    var largeDisplay = await HudGeometry.FitLargestAsync(
+      HudGeometry.ToLogicalPixels(3840, 1.5), HudGeometry.ToLogicalPixels(2160, 1.5),
+      640, 360, (w,h) => Task.FromResult(w <= 2500 && h <= 1360));
+    if (!largeDisplay.Accepted || largeDisplay.Width != 2500 || largeDisplay.Height != 1360)
+      throw new Exception("A different display must converge to its own allowed bounds");
+    Console.WriteLine("PASS:100/150/200 percent display scaling and larger display limits");
     int probes = 0;
     var fitted = await HudGeometry.FitLargestAsync(1440, 900, 640, 360, (w, h) => {
       probes++;

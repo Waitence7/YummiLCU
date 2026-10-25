@@ -53,8 +53,14 @@ namespace YummiGameBarWidget
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
-                // Game Bar places the large initial view from the manifest and
-                // restores saved layouts. Resize only on an explicit GUI request.
+                // Start large, then adapt once to this display. Never overwrite
+                // a pinned, explicitly configured or previously initialized layout.
+                if (!HudPreferences.InitialFitDone)
+                {
+                    bool adapt = HudPreferences.FitRequest == 0 && !widget.Pinned;
+                    HudPreferences.MarkInitialFitDone();
+                    if (adapt) await FitToDisplayAsync();
+                }
                 UpdateInputState();
                 timer.Start();
                 await RefreshAsync();
@@ -214,9 +220,9 @@ namespace YummiGameBarWidget
         private void UpdateDisplayMetrics()
         {
             var display = DisplayInformation.GetForCurrentView();
-            displayScale = Math.Max(1.0, display.RawPixelsPerViewPixel);
-            displayWidth = display.ScreenWidthInRawPixels / displayScale;
-            displayHeight = display.ScreenHeightInRawPixels / displayScale;
+            displayScale = display.RawPixelsPerViewPixel;
+            displayWidth = HudGeometry.ToLogicalPixels(display.ScreenWidthInRawPixels, displayScale);
+            displayHeight = HudGeometry.ToLogicalPixels(display.ScreenHeightInRawPixels, displayScale);
         }
 
         private void UpdateDisplayState()

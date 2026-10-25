@@ -5,6 +5,13 @@ namespace YummiGameBarWidget
 {
     internal static class HudGeometry
     {
+        internal static double ToLogicalPixels(double physicalPixels, double scale)
+        {
+            if (physicalPixels <= 0 || scale <= 0 || double.IsNaN(scale) || double.IsInfinity(scale))
+                throw new ArgumentOutOfRangeException("display", "Display size and scale must be valid.");
+            return physicalPixels / scale;
+        }
+
         internal struct FitResult
         {
             internal double Width;
