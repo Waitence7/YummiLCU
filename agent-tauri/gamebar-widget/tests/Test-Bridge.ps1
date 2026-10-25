@@ -14,6 +14,12 @@ public static class BridgeTests {
   }
   public static void Run() { RunAsync().GetAwaiter().GetResult(); }
   private static async Task RunAsync() {
+    if (HudGeometry.TargetInHostUnits(1440, 1440, 720, 640, 7680) != 2880)
+      throw new Exception("Host-to-XAML scale was not applied");
+    if (HudGeometry.TargetInHostUnits(1440, 1440, 1440, 640, 7680) != 1440)
+      throw new Exception("Matching coordinate spaces must keep the display size");
+    if (HudGeometry.TargetInHostUnits(1440, 1440, 720, 640, 2000) != 2000)
+      throw new Exception("Host size constraint was ignored");
     string name = @"LOCAL\YummiBridgeTest-" + Guid.NewGuid().ToString("N");
     using (var server = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous)) {
       var connected = server.WaitForConnectionAsync();
@@ -57,7 +63,9 @@ public static class BridgeTests {
 }
 '@
 $harness = [regex]::Replace($harness, '(?m)^using .*;\r?\n', '')
-Add-Type -TypeDefinition ((Get-Content $Source -Raw) + "`n" + $harness)
+$geometry = Get-Content (Join-Path (Split-Path -Parent $Source) 'HudGeometry.cs') -Raw
+$geometry = [regex]::Replace($geometry, '(?m)^using .*;\r?\n', '')
+Add-Type -TypeDefinition ((Get-Content $Source -Raw) + "`n" + $geometry + "`n" + $harness)
 [YummiGameBarWidget.BridgeTests]::Run()
 Write-Output 'PASS: native pipe handle, chunked UTF-8, cancellation, frame size and incomplete response'
 if ($env:YUMMI_TEST_LIVE_BRIDGE -eq '1') {

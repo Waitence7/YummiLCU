@@ -28,6 +28,9 @@ namespace YummiGameBarWidget
         private bool refreshing;
         private double displayWidth;
         private double displayHeight;
+        private double displayScale = 1;
+        private bool fittingDisplay;
+        private bool resizeAccepted;
         private readonly SemaphoreSlim statusWrite = new SemaphoreSlim(1, 1);
         private string lastSavedStatus;
         private string bridgeStatus = "checking";
@@ -55,7 +58,7 @@ namespace YummiGameBarWidget
                 widget.WindowBoundsChanged += WidgetStateChanged;
                 widget.PinnedChanged += WidgetStateChanged;
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
-                widget.GameBarDisplayModeChanged += WidgetStateChanged;
+                widget.GameBarDisplayModeChanged += DisplayModeChanged;
             }
             base.OnNavigatedTo(e);
         }
@@ -67,7 +70,7 @@ namespace YummiGameBarWidget
                 widget.WindowBoundsChanged -= WidgetStateChanged;
                 widget.PinnedChanged -= WidgetStateChanged;
                 widget.ClickThroughEnabledChanged -= WidgetStateChanged;
-                widget.GameBarDisplayModeChanged -= WidgetStateChanged;
+                widget.GameBarDisplayModeChanged -= DisplayModeChanged;
             }
             base.OnNavigatedFrom(e);
         }
@@ -81,22 +84,40 @@ namespace YummiGameBarWidget
             });
         }
 
+        private async void DisplayModeChanged(XboxGameBarWidget sender, object args)
+        {
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () =>
+            {
+                // The home bar reserves screen space while it is open. Fit the
+                // pinned HUD again when that chrome is no longer on screen.
+                if (widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                    await FitToDisplayAsync();
+                UpdateDisplayState();
+                UpdateInputState();
+            });
+        }
+
         private async Task FitToDisplayAsync()
         {
-            if (widget == null) return;
+            if (widget == null || fittingDisplay) return;
+            fittingDisplay = true;
             try
             {
                 var display = DisplayInformation.GetForCurrentView();
-                var scale = Math.Max(1.0, display.RawPixelsPerViewPixel);
-                displayWidth = display.ScreenWidthInRawPixels / scale;
-                displayHeight = display.ScreenHeightInRawPixels / scale;
+                displayScale = Math.Max(1.0, display.RawPixelsPerViewPixel);
+                displayWidth = display.ScreenWidthInRawPixels / displayScale;
+                displayHeight = display.ScreenHeightInRawPixels / displayScale;
                 var minimum = widget.MinWindowSize;
                 var maximum = widget.MaxWindowSize;
-                var width = Math.Max(minimum.Width, Math.Min(maximum.Width, displayWidth));
-                var height = Math.Max(minimum.Height, Math.Min(maximum.Height, displayHeight));
+                var host = widget.WindowBounds;
+                var content = Window.Current.Bounds;
+                var contentWidth = ActualWidth > 0 ? ActualWidth : content.Width;
+                var contentHeight = ActualHeight > 0 ? ActualHeight : content.Height;
+                var width = HudGeometry.TargetInHostUnits(displayWidth, host.Width, contentWidth, minimum.Width, maximum.Width);
+                var height = HudGeometry.TargetInHostUnits(displayHeight, host.Height, contentHeight, minimum.Height, maximum.Height);
                 // Keep the manifest's minimum size: Game Bar must be able to fit
                 // the content around its chrome and home bar.
-                await widget.TryResizeWindowAsync(new Windows.Foundation.Size(width, height));
+                resizeAccepted = await widget.TryResizeWindowAsync(new Windows.Foundation.Size(width, height));
                 await widget.CenterWindowAsync();
                 UpdateDisplayState();
             }
@@ -104,6 +125,7 @@ namespace YummiGameBarWidget
             {
                 DisplayText.Text = "화면 맞춤 실패 · " + ErrorCode(ex);
             }
+            finally { fittingDisplay = false; }
         }
 
         private void UpdateDisplayState()
@@ -111,10 +133,11 @@ namespace YummiGameBarWidget
             if (widget == null) return;
             var bounds = widget.WindowBounds;
             if (bounds.Width <= 0 || bounds.Height <= 0) return;
-            bool fillsDisplay = displayWidth > 0 && displayHeight > 0 &&
-                Math.Abs(bounds.Width - displayWidth) <= 2 && Math.Abs(bounds.Height - displayHeight) <= 2;
-            DisplayText.Text = (fillsDisplay ? "전체 화면 " : "Game Bar 표시 영역 ") +
-                Math.Round(bounds.Width) + "×" + Math.Round(bounds.Height);
+            // Dimensions alone do not establish screen coverage or position.
+            // Report the rendered XAML size and host position without claiming
+            // fullscreen success from a matching pair of numbers.
+            DisplayText.Text = "HUD 표시 " + Math.Round(ActualWidth) + "×" + Math.Round(ActualHeight) +
+                " · 위치 " + Math.Round(bounds.X) + "," + Math.Round(bounds.Y);
         }
 
         private void UpdateInputState()
@@ -145,6 +168,12 @@ namespace YummiGameBarWidget
                     ["pinned"] = JsonValue.CreateBooleanValue(widget.Pinned),
                     ["clickThroughEnabled"] = JsonValue.CreateBooleanValue(widget.ClickThroughEnabled),
                     ["displayMode"] = JsonValue.CreateStringValue(widget.GameBarDisplayMode.ToString()),
+                    ["x"] = JsonValue.CreateNumberValue(bounds.X),
+                    ["y"] = JsonValue.CreateNumberValue(bounds.Y),
+                    ["contentWidth"] = JsonValue.CreateNumberValue(ActualWidth),
+                    ["contentHeight"] = JsonValue.CreateNumberValue(ActualHeight),
+                    ["displayScale"] = JsonValue.CreateNumberValue(displayScale),
+                    ["resizeAccepted"] = JsonValue.CreateBooleanValue(resizeAccepted),
                     ["width"] = JsonValue.CreateNumberValue(bounds.Width),
                     ["height"] = JsonValue.CreateNumberValue(bounds.Height),
                     ["displayWidth"] = JsonValue.CreateNumberValue(displayWidth),
