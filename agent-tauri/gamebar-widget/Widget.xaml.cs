@@ -564,8 +564,9 @@ namespace YummiGameBarWidget
             youtubeReady = false;
             youtubePlaying = false;
             YoutubeStatusText.Text = "YouTube 플레이어 불러오는 중…";
-            var html = BuildYoutubePlayerHtml(videoId, (int)Math.Round(youtubeVolume));
-            YoutubeWebView.NavigateToString(html);
+            var playerUrl = "https://yummi.duckdns.org/gamebar/youtube-player.html?v=" +
+                Uri.EscapeDataString(videoId) + "&volume=" + ((int)Math.Round(youtubeVolume)).ToString();
+            YoutubeWebView.Navigate(new Uri(playerUrl));
             await Task.CompletedTask;
         }
 
@@ -669,34 +670,6 @@ namespace YummiGameBarWidget
                 }
             }
             return candidate != null && Regex.IsMatch(candidate, "^[A-Za-z0-9_-]{11}$") ? candidate : null;
-        }
-
-        private static string BuildYoutubePlayerHtml(string videoId, int volume)
-        {
-            return @"<!doctype html>
-<html>
-<head>
-<meta name='viewport' content='width=device-width,height=device-height,initial-scale=1,maximum-scale=1'>
-<style>html,body,#player{margin:0;width:100%;height:100%;overflow:hidden;background:#000}iframe{display:block}</style>
-</head>
-<body>
-<div id='player'></div>
-<script>
-var player;
-function onYouTubeIframeAPIReady(){
-  player=new YT.Player('player',{
-    width:'100%',height:'100%',videoId:'" + videoId + @"',
-    playerVars:{playsinline:1,rel:0,modestbranding:1},
-    events:{onReady:function(e){e.target.setVolume(" + Math.Max(0, Math.Min(100, volume)) + @");}}
-  });
-}
-function yummiPlay(){if(player&&player.playVideo)player.playVideo();}
-function yummiPause(){if(player&&player.pauseVideo)player.pauseVideo();}
-function yummiSetVolume(v){if(player&&player.setVolume)player.setVolume(parseInt(v)||0);}
-var tag=document.createElement('script');tag.src='https://www.youtube.com/iframe_api';document.head.appendChild(tag);
-</script>
-</body>
-</html>";
         }
 
         private static string ErrorCode(Exception error)
