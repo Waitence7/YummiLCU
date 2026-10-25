@@ -109,6 +109,7 @@ namespace YummiGameBarWidget
             widget = e.Parameter as XboxGameBarWidget;
             if (widget != null)
             {
+                widget.SettingsClicked += WidgetSettingsClicked;
                 widget.WindowBoundsChanged += WidgetStateChanged;
                 widget.PinnedChanged += WidgetStateChanged;
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
@@ -121,12 +122,26 @@ namespace YummiGameBarWidget
         {
             if (widget != null)
             {
+                widget.SettingsClicked -= WidgetSettingsClicked;
                 widget.WindowBoundsChanged -= WidgetStateChanged;
                 widget.PinnedChanged -= WidgetStateChanged;
                 widget.ClickThroughEnabledChanged -= WidgetStateChanged;
                 widget.GameBarDisplayModeChanged -= DisplayModeChanged;
             }
             base.OnNavigatedFrom(e);
+        }
+
+        private async void WidgetSettingsClicked(XboxGameBarWidget sender, object args)
+        {
+            try
+            {
+                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () =>
+                {
+                    try { await widget.ActivateSettingsAsync(); }
+                    catch { InputText.Text = "설정을 열지 못했습니다. Game Bar에서 다시 열어 주세요."; }
+                });
+            }
+            catch { }
         }
 
         private async void WidgetStateChanged(XboxGameBarWidget sender, object args)
