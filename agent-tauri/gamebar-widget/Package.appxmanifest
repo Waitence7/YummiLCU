@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3" xmlns:uap6="http://schemas.microsoft.com/appx/manifest/uap/windows10/6" IgnorableNamespaces="uap uap3 uap6 mp">
-  <Identity Name="YummiGameBarWidget" Publisher="CN=Yummi" Version="0.1.30.0" />
+  <Identity Name="YummiGameBarWidget" Publisher="CN=Yummi" Version="0.1.31.0" />
   <mp:PhoneIdentity PhoneProductId="ca6c501b-e740-4ac7-8ef8-6f34cbcbbd3d" PhonePublisherId="00000000-0000-0000-0000-000000000000" />
   <Properties><DisplayName>유미 LCU</DisplayName><PublisherDisplayName>Yummi</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
   <Dependencies><TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.18362.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
@@ -60,6 +60,28 @@
                 </Window>
               </GameBarWidget>
             </uap3:Properties>
+          </uap3:AppExtension>
+        </uap3:Extension>
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiYouTube" DisplayName="유미 YouTube" Description="게임 위에 YouTube 영상만 표시합니다" PublicFolder="GameBar">
+            <uap3:Properties><GameBarWidget Type="Standard">
+              <HomeMenuVisible>true</HomeMenuVisible><PinningSupported>true</PinningSupported>
+              <SettingsSupported AppExtensionId="YummiYouTubeSettings" />
+              <Window><AllowForegroundTransparency>false</AllowForegroundTransparency>
+                <Size><Height>405</Height><Width>720</Width><MinHeight>180</MinHeight><MinWidth>320</MinWidth><MaxHeight>2160</MaxHeight><MaxWidth>3840</MaxWidth></Size>
+                <ResizeSupported><Horizontal>true</Horizontal><Vertical>true</Vertical></ResizeSupported>
+              </Window>
+            </GameBarWidget></uap3:Properties>
+          </uap3:AppExtension>
+        </uap3:Extension>
+        <uap3:Extension Category="windows.appExtension">
+          <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiYouTubeSettings" DisplayName="유미 YouTube 설정" Description="유미 YouTube 위젯 설정" PublicFolder="GameBar">
+            <uap3:Properties><GameBarWidget Type="Settings">
+              <Window><AllowForegroundTransparency>false</AllowForegroundTransparency>
+                <Size><Height>430</Height><Width>420</Width><MinHeight>360</MinHeight><MinWidth>360</MinWidth><MaxHeight>700</MaxHeight><MaxWidth>620</MaxWidth></Size>
+                <ResizeSupported><Horizontal>true</Horizontal><Vertical>true</Vertical></ResizeSupported>
+              </Window>
+            </GameBarWidget></uap3:Properties>
           </uap3:AppExtension>
         </uap3:Extension>
       </Extensions>

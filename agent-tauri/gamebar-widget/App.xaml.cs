@@ -51,6 +51,12 @@ namespace YummiGameBarWidget
                     case "YummiLCUSettings":
                         frame.Navigate(typeof(Settings), widget);
                         break;
+                    case "YummiYouTube":
+                        frame.Navigate(typeof(YoutubeWidget), widget);
+                        break;
+                    case "YummiYouTubeSettings":
+                        frame.Navigate(typeof(YoutubeSettings), widget);
+                        break;
                     default:
                         widget.Close();
                         return;

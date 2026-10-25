@@ -44,6 +44,9 @@
     <Compile Include="Widget.xaml.cs"><DependentUpon>Widget.xaml</DependentUpon></Compile>
     <Compile Include="Controller.xaml.cs"><DependentUpon>Controller.xaml</DependentUpon></Compile>
     <Compile Include="Settings.xaml.cs"><DependentUpon>Settings.xaml</DependentUpon></Compile>
+    <Compile Include="YoutubePreferences.cs" />
+    <Compile Include="YoutubeWidget.xaml.cs"><DependentUpon>YoutubeWidget.xaml</DependentUpon></Compile>
+    <Compile Include="YoutubeSettings.xaml.cs"><DependentUpon>YoutubeSettings.xaml</DependentUpon></Compile>
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
   <ItemGroup><AppxManifest Include="Package.appxmanifest"><SubType>Designer</SubType></AppxManifest></ItemGroup>
@@ -58,6 +61,8 @@
     <Page Include="Widget.xaml"><Generator>MSBuild:Compile</Generator><SubType>Designer</SubType></Page>
     <Page Include="Controller.xaml"><Generator>MSBuild:Compile</Generator><SubType>Designer</SubType></Page>
     <Page Include="Settings.xaml"><Generator>MSBuild:Compile</Generator><SubType>Designer</SubType></Page>
+    <Page Include="YoutubeWidget.xaml"><Generator>MSBuild:Compile</Generator><SubType>Designer</SubType></Page>
+    <Page Include="YoutubeSettings.xaml"><Generator>MSBuild:Compile</Generator><SubType>Designer</SubType></Page>
   </ItemGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.Gaming.XboxGameBar"><Version>7.2.240903001</Version></PackageReference>
