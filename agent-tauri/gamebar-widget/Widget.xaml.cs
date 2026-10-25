@@ -53,13 +53,8 @@ namespace YummiGameBarWidget
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
-                // Game Bar owns the saved size, position and pin state. Fit only
-                // a fresh install; never overwrite the user's restored layout.
-                if (HudPreferences.NeedsInitialFit)
-                {
-                    await FitToDisplayAsync();
-                    if (resizeAccepted) HudPreferences.MarkInitialFitDone();
-                }
+                // Game Bar places the large initial view from the manifest and
+                // restores saved layouts. Resize only on an explicit GUI request.
                 UpdateInputState();
                 timer.Start();
                 await RefreshAsync();
