@@ -411,7 +411,7 @@ namespace YummiGameBarWidget
             var point = e.GetCurrentPoint(RootGrid);
             if (!point.Properties.IsLeftButtonPressed)
             {
-                EndHudPanelDrag(e.Pointer);
+                EndHudPanelDrag(e);
                 return;
             }
 
@@ -424,7 +424,7 @@ namespace YummiGameBarWidget
         private void HudDragHandle_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
             if (hudDragPointerId != e.Pointer.PointerId) return;
-            EndHudPanelDrag(e.Pointer);
+            EndHudPanelDrag(e);
             SnapHudPanelToNearestCorner();
             SaveHudPanelPosition();
             e.Handled = true;
@@ -433,7 +433,7 @@ namespace YummiGameBarWidget
         private void HudDragHandle_PointerCanceled(object sender, PointerRoutedEventArgs e)
         {
             if (hudDragPointerId != e.Pointer.PointerId) return;
-            EndHudPanelDrag(e.Pointer);
+            EndHudPanelDrag(e);
         }
 
         private void HudDragHandle_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
@@ -441,9 +441,9 @@ namespace YummiGameBarWidget
             if (hudDragPointerId == e.Pointer.PointerId) hudDragPointerId = null;
         }
 
-        private void EndHudPanelDrag(Windows.UI.Input.Pointer pointer)
+        private void EndHudPanelDrag(PointerRoutedEventArgs e)
         {
-            HudDragHandle.ReleasePointerCapture(pointer);
+            HudDragHandle.ReleasePointerCapture(e.Pointer);
             hudDragPointerId = null;
         }
 
