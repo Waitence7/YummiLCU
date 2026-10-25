@@ -14,6 +14,8 @@ use crate::{
 
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
+#[cfg(windows)]
+const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     let watcher_state = state.clone();
@@ -29,6 +31,11 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
             .spawn(move || pipe_server(snapshot_state))
             .ok();
 
+        let update_state = state.clone();
+        tauri::async_runtime::spawn(async move {
+            watch_overlay_updates(update_state).await;
+        });
+
         std::thread::Builder::new()
             .name("yummi-gamebar-command-pipe".into())
             .spawn(move || command_pipe_server(app, state))
@@ -39,6 +46,32 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     {
         let _ = app;
         let _ = state;
+    }
+}
+
+
+#[cfg(windows)]
+async fn watch_overlay_updates(state: Arc<AppState>) {
+    let mut shutdown = state.shutdown_receiver();
+
+    // Check once immediately after Agent startup, then every five minutes.
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+
+        // Missing updater simply means the overlay has never been installed.
+        // Keep this silent so Agent users who do not use Game Bar are unaffected.
+        let _ = start_overlay_update_check();
+
+        tokio::select! {
+            _ = sleep(OVERLAY_UPDATE_INTERVAL) => {},
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
     }
 }
 

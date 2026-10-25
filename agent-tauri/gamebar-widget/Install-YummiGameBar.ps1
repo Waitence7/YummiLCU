@@ -89,40 +89,10 @@ if (-not $SkipAutoUpdateSetup) {
       New-Item -ItemType Directory -Force -Path $updaterDir | Out-Null
       Copy-Item $updaterSource $updaterTarget -Force
 
-      $taskName = 'Yummi Game Bar Overlay Updater'
-      $taskCommand = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$updaterTarget`" -Quiet"
-      & schtasks.exe /Create /TN $taskName /TR $taskCommand /SC MINUTE /MO 5 /F | Out-Null
-      if ($LASTEXITCODE -eq 0) {
-        Write-Host '오버레이 자동 업데이트 등록 완료 (5분마다 확인).' -ForegroundColor DarkGray
-      } else {
-        Write-Warning '예약 작업 등록에 실패했습니다. 로그인 시 자동 확인으로 대체합니다.'
-        $runKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'
-        New-Item -Path $runKey -Force | Out-Null
-        Set-ItemProperty -Path $runKey -Name 'YummiGameBarUpdater' -Value $taskCommand
-      }
-
-      # Record the currently installed release asset so the updater does not
-      # immediately reinstall the same build. A first check is still safe if
-      # this request fails (for example while offline).
-      try {
-        $headers = @{ 'User-Agent' = 'Yummi-GameBar-Updater'; 'Accept' = 'application/vnd.github+json' }
-        $releases = Invoke-RestMethod -Uri 'https://api.github.com/repos/Waitence7/YummiLCU/releases?per_page=15' -Headers $headers -TimeoutSec 15
-        foreach ($release in $releases) {
-          if ($release.draft) { continue }
-          $asset = @($release.assets | Where-Object { $_.name -like 'Yummi-GameBar-Overlay-*.zip' }) | Select-Object -First 1
-          if ($asset) {
-            $fingerprint = if ($asset.digest) { [string]$asset.digest } else { "$($asset.id):$($asset.updated_at):$($asset.size)" }
-            [pscustomobject]@{
-              fingerprint = $fingerprint
-              asset_id = $asset.id
-              asset_name = $asset.name
-              release_tag = $release.tag_name
-              installed_at = (Get-Date).ToString('o')
-            } | ConvertTo-Json | Set-Content -Path (Join-Path $updaterDir 'state.json') -Encoding UTF8
-            break
-          }
-        }
-      } catch {
+      # The Yummi LCU Agent owns periodic overlay update checks.
+      # Keep only the updater files here; no scheduled task is required.
+      Write-Host '오버레이 자동 업데이트 준비 완료 (Yummi LCU Agent가 5분마다 확인).' -ForegroundColor DarkGray
+    } catch {
         Write-Host '초기 업데이트 상태 기록은 건너뜁니다.' -ForegroundColor DarkGray
       }
     }
