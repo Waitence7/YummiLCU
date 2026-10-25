@@ -62,7 +62,7 @@
               </Grid>
 
               <Border Height="168" Background="#FF000000" CornerRadius="6">
-                <WebView x:Name="YoutubeWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" NavigationCompleted="YoutubeWebView_NavigationCompleted"/>
+                <WebView x:Name="YoutubeWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" NavigationCompleted="YoutubeWebView_NavigationCompleted" ScriptNotify="YoutubeWebView_ScriptNotify"/>
               </Border>
 
               <Grid ColumnSpacing="6">
