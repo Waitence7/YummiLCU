@@ -55,7 +55,7 @@ namespace YummiGameBarWidget
                 }
 
                 var extensionId = widgetArgs.AppExtensionId;
-                Window.Current.Closed += (_, __) => widgets.TryRemove(extensionId, out _);
+                Window.Current.Closed += (sender, closedArgs) => widgets.TryRemove(extensionId, out var removedWidget);
                 Window.Current.Activate();
             }
             catch (Exception ex)
