@@ -180,10 +180,7 @@ namespace YummiGameBarWidget
             fittingDisplay = true;
             try
             {
-                var display = DisplayInformation.GetForCurrentView();
-                displayScale = Math.Max(1.0, display.RawPixelsPerViewPixel);
-                displayWidth = display.ScreenWidthInRawPixels / displayScale;
-                displayHeight = display.ScreenHeightInRawPixels / displayScale;
+                UpdateDisplayMetrics();
                 var minimum = widget.MinWindowSize;
                 var maximum = widget.MaxWindowSize;
                 var host = widget.WindowBounds;
@@ -219,9 +216,18 @@ namespace YummiGameBarWidget
             return accepted;
         }
 
+        private void UpdateDisplayMetrics()
+        {
+            var display = DisplayInformation.GetForCurrentView();
+            displayScale = Math.Max(1.0, display.RawPixelsPerViewPixel);
+            displayWidth = display.ScreenWidthInRawPixels / displayScale;
+            displayHeight = display.ScreenHeightInRawPixels / displayScale;
+        }
+
         private void UpdateDisplayState()
         {
             if (widget == null) return;
+            UpdateDisplayMetrics();
             var bounds = widget.WindowBounds;
             if (bounds.Width <= 0 || bounds.Height <= 0) return;
             // Dimensions alone do not establish screen coverage or position.
