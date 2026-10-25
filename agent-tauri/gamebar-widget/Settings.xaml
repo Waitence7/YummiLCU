@@ -18,6 +18,14 @@
           <TextBlock Text="click-through는 핀 고정 위젯에 전역 적용됩니다. 켜져 있으면 작은 컨트롤러도 클릭되지 않습니다. 이 빌드는 전체 화면 크기/투명도/독점 전체화면 표시를 우선 검증하는 실험용입니다." Foreground="#D8CCE9" TextWrapping="Wrap"/>
         </StackPanel>
       </Border>
+      <Border Background="#342A203A" CornerRadius="10" Padding="12">
+        <StackPanel Spacing="8">
+          <TextBlock Text="오버레이 업데이트" Foreground="White" FontWeight="SemiBold"/>
+          <TextBlock Text="자동으로 5분마다 확인합니다. 필요하면 지금 즉시 확인할 수 있습니다." Foreground="#D8CCE9" TextWrapping="Wrap"/>
+          <Button x:Name="CheckUpdateButton" Content="업데이트 확인" Click="CheckUpdateButton_Click" HorizontalAlignment="Left" Padding="16,7"/>
+          <TextBlock x:Name="UpdateStatusText" Text="" Foreground="#B9AAD2" TextWrapping="Wrap"/>
+        </StackPanel>
+      </Border>
       <TextBlock Text="HUD가 화면 전체를 덮는지, LoL 전체화면에서 표시되는지, 작은 컨트롤러가 정상적으로 설정을 여는지 확인해 주세요." Foreground="#AFA3C8" TextWrapping="Wrap"/>
     </StackPanel>
   </Grid>

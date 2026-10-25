@@ -436,6 +436,13 @@ fn handle_command(_app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
         .get("command")
         .and_then(Value::as_str)
         .unwrap_or_default();
+
+    if command == "check_overlay_update" {
+        return match start_overlay_update_check() {
+            Ok(()) => json_response(true, "오버레이 업데이트 확인을 시작했습니다."),
+            Err(error) => json_response(false, &error),
+        };
+    }
     if command != "set_status_message" {
         return json_response(false, "허용되지 않은 명령입니다.");
     }
@@ -452,6 +459,32 @@ fn handle_command(_app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
         Ok(()) => json_response(true, "상태 메시지를 변경했습니다."),
         Err(error) => json_response(false, &error),
     }
+}
+
+#[cfg(windows)]
+fn start_overlay_update_check() -> Result<(), String> {
+    use std::{env, path::PathBuf, process::Command};
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let local_app_data = env::var_os("LOCALAPPDATA")
+        .ok_or_else(|| "LOCALAPPDATA를 찾지 못했습니다.".to_owned())?;
+    let updater = PathBuf::from(local_app_data)
+        .join("Yummi")
+        .join("GameBarUpdater")
+        .join("Update-YummiGameBar.ps1");
+    if !updater.is_file() {
+        return Err("오버레이 updater가 설치되어 있지 않습니다. 최신 오버레이를 한 번 다시 설치해 주세요.".to_owned());
+    }
+
+    Command::new("powershell.exe")
+        .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&updater)
+        .arg("-Quiet")
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|error| format!("업데이트 확인 실행 실패: {error}"))?;
+    Ok(())
 }
 
 async fn set_status_message(state: Arc<AppState>, value: String) -> Result<(), String> {

@@ -38,7 +38,7 @@ try {
     try { $state = Get-Content $statePath -Raw | ConvertFrom-Json } catch { $state = $null }
   }
 
-  if (-not $ForceCheck -and $state -and $state.fingerprint -eq $fingerprint) {
+  if ($state -and $state.fingerprint -eq $fingerprint) {
     Write-UpdateLog "최신 오버레이 사용 중: $($candidate.release.tag_name)"
     exit 0
   }
