@@ -100,6 +100,8 @@ foreach ($dep in $deps) {
   $name = $null
   if ($dep.Name -match '^Microsoft\.NET\.Native\.Framework\.2\.2') { $name = 'Microsoft.NET.Native.Framework.2.2' }
   elseif ($dep.Name -match '^Microsoft\.NET\.Native\.Runtime\.2\.2') { $name = 'Microsoft.NET.Native.Runtime.2.2' }
+  elseif ($dep.Name -match '^Microsoft\.UI\.Xaml\.2\.8') { $name = 'Microsoft.UI.Xaml.2.8' }
+  elseif ($dep.Name -match '^Microsoft\.VCLibs\.x64\.14\.00\.Desktop') { $name = 'Microsoft.VCLibs.140.00.UWPDesktop' }
   elseif ($dep.Name -match '^Microsoft\.VCLibs\.x64\.14\.00') { $name = 'Microsoft.VCLibs.140.00' }
 
   $installed = if ($name) { Get-AppxPackage -Name $name -ErrorAction SilentlyContinue } else { $null }
