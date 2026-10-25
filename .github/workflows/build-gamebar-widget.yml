@@ -63,7 +63,9 @@ jobs:
             $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
             $cert = Import-PfxCertificate -FilePath $certPath -CertStoreLocation Cert:\CurrentUser\My -Password $password
             if (-not $cert) { throw "failed to import signing certificate" }
-            "self_signed=false" >> $env:GITHUB_OUTPUT
+            Export-Certificate -Cert $cert -FilePath $publicCertPath -Type CERT | Out-Null
+            $isSelfSigned = $cert.Subject -eq $cert.Issuer
+            "self_signed=$($isSelfSigned.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
           } else {
             Write-Warning "WINDOWS_CERTIFICATE is not configured; creating a self-signed sideload certificate for this overlay build."
             $cert = New-SelfSignedCertificate `
