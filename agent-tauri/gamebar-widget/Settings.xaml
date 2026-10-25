@@ -1,0 +1,24 @@
+<Page
+    x:Class="YummiGameBarWidget.Settings"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Grid Background="#F0141020" Padding="20">
+    <StackPanel Spacing="12">
+      <TextBlock Text="유미 LCU 설정" FontSize="20" FontWeight="SemiBold" Foreground="White"/>
+      <TextBlock Text="전체 화면 HUD 실험" FontSize="13" Foreground="#CDBDE8"/>
+      <Border Background="#342A203A" CornerRadius="10" Padding="12">
+        <StackPanel Spacing="6">
+          <TextBlock Text="현재 구조" Foreground="White" FontWeight="SemiBold"/>
+          <TextBlock Text="• 전체 화면 투명 HUD\n• 별도 작은 설정 컨트롤러\n• 컨트롤러 클릭 → 이 설정창" Foreground="#D8CCE9" TextWrapping="Wrap"/>
+        </StackPanel>
+      </Border>
+      <Border Background="#342A203A" CornerRadius="10" Padding="12">
+        <StackPanel Spacing="6">
+          <TextBlock Text="Game Bar click-through 제한" Foreground="White" FontWeight="SemiBold"/>
+          <TextBlock Text="click-through는 핀 고정 위젯에 전역 적용됩니다. 켜져 있으면 작은 컨트롤러도 클릭되지 않습니다. 이 빌드는 전체 화면 크기/투명도/독점 전체화면 표시를 우선 검증하는 실험용입니다." Foreground="#D8CCE9" TextWrapping="Wrap"/>
+        </StackPanel>
+      </Border>
+      <TextBlock Text="HUD가 화면 전체를 덮는지, LoL 전체화면에서 표시되는지, 작은 컨트롤러가 정상적으로 설정을 여는지 확인해 주세요." Foreground="#AFA3C8" TextWrapping="Wrap"/>
+    </StackPanel>
+  </Grid>
+</Page>

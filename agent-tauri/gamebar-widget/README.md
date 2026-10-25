@@ -31,3 +31,7 @@ Game Bar 오버레이는 Yummi LCU Agent 설치파일에 포함하지 않습니�
 
 Xbox Game Bar SDK는 위젯 콘텐츠에서 호스트 창 좌표를 직접 변경하는 API를 제공하지 않습니다. `Win+G`로 Game Bar를 연 뒤 위젯의 Game Bar 제목 표시줄을 드래그해 위치를 옮기고, 원하는 위치에서 핀 고정하세요. 위치는 Game Bar가 관리합니다.
 
+
+## 전체 화면 HUD 실험
+
+`YummiLCU`는 현재 디스플레이의 논리 크기로 리사이즈를 시도하는 투명 HUD입니다. `YummiLCUController`는 작은 설정 런처이며, 클릭 시 `YummiLCUSettings`를 엽니다. Game Bar click-through는 핀 고정 위젯 전체에 전역 적용되므로 HUD만 click-through, Controller만 interactive 상태로 동시에 둘 수는 없습니다.

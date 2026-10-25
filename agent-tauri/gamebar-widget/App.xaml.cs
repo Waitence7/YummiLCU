@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Microsoft.Gaming.XboxGameBar;
 using Windows.ApplicationModel.Activation;
 using Windows.UI.Xaml;
@@ -8,12 +9,12 @@ namespace YummiGameBarWidget
 {
     sealed partial class App : Application
     {
-        private XboxGameBarWidget gameBarWidget;
+        private readonly Dictionary<string, XboxGameBarWidget> widgets = new Dictionary<string, XboxGameBarWidget>();
 
         public App()
         {
             InitializeComponent();
-            Suspending += (_, __) => gameBarWidget = null;
+            Suspending += (_, __) => widgets.Clear();
         }
 
         protected override void OnActivated(IActivatedEventArgs args)
@@ -27,9 +28,27 @@ namespace YummiGameBarWidget
 
             var frame = new Frame();
             Window.Current.Content = frame;
-            gameBarWidget = new XboxGameBarWidget(widgetArgs, Window.Current.CoreWindow, frame);
-            frame.Navigate(typeof(Widget));
-            Window.Current.Closed += (_, __) => gameBarWidget = null;
+            var widget = new XboxGameBarWidget(widgetArgs, Window.Current.CoreWindow, frame);
+            widgets[widgetArgs.AppExtensionId] = widget;
+
+            switch (widgetArgs.AppExtensionId)
+            {
+                case "YummiLCU":
+                    frame.Navigate(typeof(Widget), widget);
+                    break;
+                case "YummiLCUController":
+                    frame.Navigate(typeof(Controller), widget);
+                    break;
+                case "YummiLCUSettings":
+                    frame.Navigate(typeof(Settings), widget);
+                    break;
+                default:
+                    widget.Close();
+                    return;
+            }
+
+            var extensionId = widgetArgs.AppExtensionId;
+            Window.Current.Closed += (_, __) => widgets.Remove(extensionId);
             Window.Current.Activate();
         }
     }
