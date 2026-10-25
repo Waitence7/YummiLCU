@@ -18,6 +18,12 @@ function Write-UpdateLog([string]$message) {
   if (-not $Quiet) { Write-Host $message }
 }
 
+function Write-UpdateState([string]$Path, $State) {
+  # PowerShell 5.1 -Encoding UTF8 adds a BOM that serde_json rejects.
+  # The Agent must read this marker to avoid reinstalling an unchanged build.
+  [IO.File]::WriteAllText($Path, ($State | ConvertTo-Json), [Text.UTF8Encoding]::new($false))
+}
+
 try {
   if (-not $PackagePath -or -not (Test-Path $PackagePath)) { throw 'Agent가 검증한 Game Bar ZIP 경로가 없습니다.' }
   if ($ExpectedSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw '검증 SHA256 형식이 올바르지 않습니다.' }
@@ -44,12 +50,13 @@ try {
     $currentUpdater = Join-Path $stateDir 'Update-YummiGameBar.ps1'
     if (Test-Path $newUpdaterStaged) { Move-Item $newUpdaterStaged $currentUpdater -Force }
 
-    [pscustomobject]@{
+    $installedState = [pscustomobject]@{
       build_id = $BuildId
       sha256 = $ExpectedSha256.ToLowerInvariant()
       release_tag = $ReleaseTag
       installed_at = (Get-Date).ToString('o')
-    } | ConvertTo-Json | Set-Content -Path $statePath -Encoding UTF8
+    }
+    Write-UpdateState -Path $statePath -State $installedState
     Write-UpdateLog "오버레이 업데이트 완료: $ReleaseTag / build $BuildId"
   }
   finally {

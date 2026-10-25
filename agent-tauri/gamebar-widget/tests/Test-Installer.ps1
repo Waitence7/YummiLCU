@@ -90,6 +90,23 @@ try {
   & ([scriptblock]::Create($body))
   if ($script:ElevationRequested -or ($script:LoopbackCalls -join ',') -ne 'LoopbackExempt|-s,LoopbackExempt|-a|-n=YummiGameBarWidget_test') { throw 'Administrator must register the missing exemption' }
   Write-Host 'PASS: administrator registers only a missing exemption'
+
+  # Run the production state writer, without invoking an installer or updater.
+  $updaterSource = Get-Content (Join-Path $InstallerRoot 'Update-YummiGameBar.ps1') -Raw
+  $updaterAst = [Management.Automation.Language.Parser]::ParseInput($updaterSource, [ref]$tokens, [ref]$errors)
+  if ($errors.Count) { throw 'Updater syntax errors' }
+  $stateWriter = $updaterAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-UpdateState' }, $true)
+  if (-not $stateWriter) { throw 'Production state writer not found' }
+  . ([scriptblock]::Create($stateWriter.Extent.Text))
+  $stateFile = Join-Path $root 'update-state.json'
+  $expectedHash = 'a' * 64
+  Write-UpdateState -Path $stateFile -State ([pscustomobject]@{build_id='69';sha256=$expectedHash;release_tag='gamebar-v0.1.14'})
+  $bytes = [IO.File]::ReadAllBytes($stateFile)
+  if ($bytes[0] -ne 0x7B) { throw 'Agent update state must start with JSON, without UTF8 BOM' }
+  $state = [Text.Encoding]::UTF8.GetString($bytes) | ConvertFrom-Json
+  if ($state.build_id -cne '69' -or $state.sha256 -cne $expectedHash) { throw 'Update identity changed during state serialization' }
+  Write-Host 'PASS: PowerShell 5.1 updater state is BOM-free and preserves build/hash identity'
+
 } finally {
   # Only remove this test's newly created GUID directory.
   if ((Split-Path -Parent $root) -eq [IO.Path]::GetTempPath().TrimEnd('\')) {
