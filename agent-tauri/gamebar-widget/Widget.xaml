@@ -2,6 +2,7 @@
     x:Class="YummiGameBarWidget.Widget"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:canvas="using:Microsoft.Graphics.Canvas.UI.Xaml"
     Background="Transparent">
   <Grid x:Name="RootGrid" Background="Transparent">
     <Border
@@ -65,8 +66,14 @@
               </Grid>
 
               <Border Height="200" Background="#FF000000" CornerRadius="6">
-                <Grid x:Name="YoutubeWebHost">
-                  <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
+                <Grid x:Name="YoutubeVideoHost">
+                  <canvas:CanvasControl x:Name="BrowserCaptureCanvas" Visibility="Collapsed" Draw="BrowserCaptureCanvas_Draw"/>
+                  <Grid x:Name="YoutubeWebHost">
+                    <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
+                  </Grid>
+                  <Border x:Name="BrowserCaptureHint" Background="#B0000000" Visibility="Collapsed">
+                    <TextBlock Text="브라우저 창을 선택해 주세요" Foreground="White" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="11"/>
+                  </Border>
                 </Grid>
               </Border>
 
@@ -76,13 +83,19 @@
                   <ColumnDefinition Width="Auto"/>
                   <ColumnDefinition Width="Auto"/>
                   <ColumnDefinition Width="*"/>
-                  <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 <Button Content="▶" Width="36" Padding="4" Click="YoutubePlayButton_Click" ToolTipService.ToolTip="재생"/>
                 <Button Grid.Column="1" Content="Ⅱ" Width="36" Padding="4" Click="YoutubePauseButton_Click" ToolTipService.ToolTip="일시정지"/>
                 <TextBlock Grid.Column="2" Text="볼륨" FontSize="10" Foreground="#BDB1D0" VerticalAlignment="Center" Margin="4,0"/>
                 <Slider x:Name="YoutubeVolumeSlider" Grid.Column="3" Minimum="0" Maximum="100" Value="60" ValueChanged="YoutubeVolumeSlider_ValueChanged"/>
-                <Button Grid.Column="4" Content="로그인" Padding="8,4" FontSize="10" Click="YoutubeLoginButton_Click" ToolTipService.ToolTip="YouTube 로그인 / 봇 확인"/>
+              </Grid>
+              <Grid ColumnSpacing="6">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Button Content="브라우저에서 열기" HorizontalAlignment="Stretch" Padding="8,4" FontSize="10" Click="YoutubeOpenBrowserButton_Click" ToolTipService.ToolTip="기본 브라우저에서 YouTube 열기"/>
+                <Button Grid.Column="1" Content="브라우저 창 캡처" HorizontalAlignment="Stretch" Padding="8,4" FontSize="10" Click="YoutubeCaptureBrowserButton_Click" ToolTipService.ToolTip="브라우저 창을 Game Bar에 표시"/>
               </Grid>
               <TextBlock x:Name="YoutubeStatusText" Text="링크를 입력하면 영상이 표시됩니다" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
             </StackPanel>

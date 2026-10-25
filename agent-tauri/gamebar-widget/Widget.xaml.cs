@@ -6,6 +6,11 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Graphics.Canvas;
+using Microsoft.Graphics.Canvas.UI.Xaml;
+using Windows.Graphics;
+using Windows.Graphics.Capture;
+using Windows.Graphics.DirectX;
 using Microsoft.Gaming.XboxGameBar;
 using Windows.Data.Json;
 using Windows.ApplicationModel;
@@ -52,6 +57,12 @@ namespace YummiGameBarWidget
         private bool youtubeWebView2Unavailable;
         private bool youtubeUsingFallback;
         private string youtubePendingPlayerUrl;
+        private CanvasDevice browserCaptureDevice;
+        private Direct3D11CaptureFramePool browserCaptureFramePool;
+        private GraphicsCaptureSession browserCaptureSession;
+        private GraphicsCaptureItem browserCaptureItem;
+        private CanvasRenderTarget browserCaptureTarget;
+        private SizeInt32 browserCaptureSize;
         private readonly TranslateTransform hudPanelTransform = new TranslateTransform();
         private uint? hudDragPointerId;
         private Windows.Foundation.Point hudDragStartPoint;
@@ -93,6 +104,8 @@ namespace YummiGameBarWidget
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
                 timer.Stop();
+                StopBrowserCapture();
+                try { BrowserCaptureCanvas.RemoveFromVisualTree(); } catch { }
             };
         }
 
@@ -683,21 +696,184 @@ namespace YummiGameBarWidget
             YoutubeStatusText.Text = "영상 준비됨 · 기본 WebView fallback";
         }
 
-        private async void YoutubeLoginButton_Click(object sender, RoutedEventArgs e)
+        private async void YoutubeOpenBrowserButton_Click(object sender, RoutedEventArgs e)
         {
-            youtubeReady = false;
-            youtubePlaying = false;
-            YoutubeStatusText.Text = "YouTube 로그인/봇 확인 페이지 여는 중…";
-            if (await EnsureYoutubeWebView2Async())
+            var videoId = ExtractYoutubeVideoId(YoutubeUrlBox.Text);
+            var target = string.IsNullOrWhiteSpace(videoId)
+                ? new Uri("https://www.youtube.com/")
+                : new Uri("https://www.youtube.com/watch?v=" + Uri.EscapeDataString(videoId));
+            try
             {
-                youtubeUsingFallback = false;
-                YoutubeFallbackWebView.Visibility = Visibility.Collapsed;
-                youtubeWebView2.Visibility = Visibility.Visible;
-                youtubeWebView2.Source = new Uri("https://www.youtube.com/");
+                YoutubeStatusText.Text = "기본 브라우저에서 YouTube 여는 중…";
+                var opened = await Launcher.LaunchUriAsync(target);
+                YoutubeStatusText.Text = opened
+                    ? "브라우저에서 재생한 뒤 ‘창 캡처’를 눌러 주세요"
+                    : "기본 브라우저를 열지 못했습니다";
+            }
+            catch (Exception ex)
+            {
+                YoutubeStatusText.Text = "브라우저 열기 실패 · " + ErrorCode(ex);
+            }
+        }
+
+        private async void YoutubeCaptureBrowserButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (!GraphicsCaptureSession.IsSupported())
+            {
+                YoutubeStatusText.Text = "이 Windows에서는 창 캡처를 지원하지 않습니다";
                 return;
             }
 
-            YoutubeStatusText.Text = "WebView2가 없어 로그인 세션을 열 수 없습니다 · 기본 플레이어만 사용 가능";
+            try
+            {
+                YoutubeStatusText.Text = "캡처할 Edge/Chrome 창을 선택해 주세요";
+                BrowserCaptureHint.Visibility = Visibility.Visible;
+                var picker = new GraphicsCapturePicker();
+                var item = await picker.PickSingleItemAsync();
+                BrowserCaptureHint.Visibility = Visibility.Collapsed;
+                if (item == null)
+                {
+                    YoutubeStatusText.Text = "창 캡처 선택이 취소되었습니다";
+                    return;
+                }
+
+                StartBrowserCapture(item);
+            }
+            catch (Exception ex)
+            {
+                BrowserCaptureHint.Visibility = Visibility.Collapsed;
+                YoutubeStatusText.Text = "브라우저 창 캡처 실패 · " + ErrorCode(ex);
+                App.LogStage("browser-capture-picker-error-" + ErrorCode(ex));
+            }
+        }
+
+        private void StartBrowserCapture(GraphicsCaptureItem item)
+        {
+            StopBrowserCapture();
+            browserCaptureItem = item;
+            browserCaptureSize = item.Size;
+            browserCaptureDevice = CanvasDevice.GetSharedDevice();
+            browserCaptureFramePool = Direct3D11CaptureFramePool.Create(
+                browserCaptureDevice,
+                DirectXPixelFormat.B8G8R8A8UIntNormalized,
+                2,
+                browserCaptureSize);
+            browserCaptureFramePool.FrameArrived += BrowserCaptureFramePool_FrameArrived;
+            browserCaptureSession = browserCaptureFramePool.CreateCaptureSession(item);
+            browserCaptureItem.Closed += BrowserCaptureItem_Closed;
+
+            BrowserCaptureCanvas.Visibility = Visibility.Visible;
+            YoutubeWebHost.Visibility = Visibility.Collapsed;
+            BrowserCaptureHint.Visibility = Visibility.Collapsed;
+            browserCaptureSession.StartCapture();
+            YoutubeStatusText.Text = "브라우저 캡처 중 · " + item.DisplayName;
+            App.LogStage("browser-capture-started");
+        }
+
+        private void BrowserCaptureFramePool_FrameArrived(Direct3D11CaptureFramePool sender, object args)
+        {
+            try
+            {
+                var resize = false;
+                var nextSize = browserCaptureSize;
+                using (var frame = sender.TryGetNextFrame())
+                {
+                    if (frame == null) return;
+                    var contentSize = frame.ContentSize;
+                    if (contentSize.Width <= 0 || contentSize.Height <= 0) return;
+
+                    using (var source = CanvasBitmap.CreateFromDirect3D11Surface(browserCaptureDevice, frame.Surface))
+                    {
+                        if (browserCaptureTarget == null ||
+                            (int)browserCaptureTarget.SizeInPixels.Width != contentSize.Width ||
+                            (int)browserCaptureTarget.SizeInPixels.Height != contentSize.Height)
+                        {
+                            browserCaptureTarget?.Dispose();
+                            browserCaptureTarget = new CanvasRenderTarget(
+                                browserCaptureDevice,
+                                contentSize.Width,
+                                contentSize.Height,
+                                96);
+                        }
+
+                        using (var drawing = browserCaptureTarget.CreateDrawingSession())
+                        {
+                            drawing.Clear(Windows.UI.Colors.Black);
+                            drawing.DrawImage(source);
+                        }
+                    }
+
+                    BrowserCaptureCanvas.Invalidate();
+                    if (contentSize.Width != browserCaptureSize.Width || contentSize.Height != browserCaptureSize.Height)
+                    {
+                        resize = true;
+                        nextSize = contentSize;
+                    }
+                }
+
+                if (resize && browserCaptureFramePool != null)
+                {
+                    browserCaptureSize = nextSize;
+                    browserCaptureFramePool.Recreate(
+                        browserCaptureDevice,
+                        DirectXPixelFormat.B8G8R8A8UIntNormalized,
+                        2,
+                        browserCaptureSize);
+                }
+            }
+            catch (Exception ex)
+            {
+                App.LogStage("browser-capture-frame-error-" + ErrorCode(ex));
+            }
+        }
+
+        private void BrowserCaptureCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
+        {
+            var bitmap = browserCaptureTarget;
+            if (bitmap == null) return;
+
+            var sourceWidth = bitmap.Size.Width;
+            var sourceHeight = bitmap.Size.Height;
+            if (sourceWidth <= 0 || sourceHeight <= 0 || sender.ActualWidth <= 0 || sender.ActualHeight <= 0) return;
+
+            var scale = Math.Min(sender.ActualWidth / sourceWidth, sender.ActualHeight / sourceHeight);
+            var width = sourceWidth * scale;
+            var height = sourceHeight * scale;
+            var x = (sender.ActualWidth - width) / 2.0;
+            var y = (sender.ActualHeight - height) / 2.0;
+            args.DrawingSession.DrawImage(bitmap, new Windows.Foundation.Rect(x, y, width, height));
+        }
+
+        private async void BrowserCaptureItem_Closed(GraphicsCaptureItem sender, object args)
+        {
+            try
+            {
+                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+                {
+                    StopBrowserCapture();
+                    YoutubeStatusText.Text = "캡처하던 브라우저 창이 닫혔습니다";
+                });
+            }
+            catch { }
+        }
+
+        private void StopBrowserCapture()
+        {
+            try
+            {
+                if (browserCaptureItem != null) browserCaptureItem.Closed -= BrowserCaptureItem_Closed;
+                if (browserCaptureFramePool != null) browserCaptureFramePool.FrameArrived -= BrowserCaptureFramePool_FrameArrived;
+            }
+            catch { }
+            try { browserCaptureSession?.Dispose(); } catch { }
+            try { browserCaptureFramePool?.Dispose(); } catch { }
+            try { browserCaptureTarget?.Dispose(); } catch { }
+            browserCaptureSession = null;
+            browserCaptureFramePool = null;
+            browserCaptureTarget = null;
+            browserCaptureItem = null;
+            if (BrowserCaptureCanvas != null) BrowserCaptureCanvas.Visibility = Visibility.Collapsed;
+            if (YoutubeWebHost != null) YoutubeWebHost.Visibility = Visibility.Visible;
         }
 
         private async void YoutubePlayButton_Click(object sender, RoutedEventArgs e)
