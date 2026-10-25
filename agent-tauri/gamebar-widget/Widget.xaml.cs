@@ -34,6 +34,8 @@ namespace YummiGameBarWidget
         private bool resizeAccepted;
         private double fittedWidth;
         private double fittedHeight;
+        private double fitTargetWidth;
+        private double fitTargetHeight;
         private readonly SemaphoreSlim statusWrite = new SemaphoreSlim(1, 1);
         private string lastSavedStatus;
         private string bridgeStatus = "checking";
@@ -187,8 +189,10 @@ namespace YummiGameBarWidget
                 var height = Math.Max(minimum.Height, Math.Min(maximum.Height, displayHeight));
                 // Keep the manifest's minimum size: Game Bar must be able to fit
                 // the content around its chrome and home bar.
+                fitTargetWidth = width;
+                fitTargetHeight = height;
                 var result = await HudGeometry.FitLargestAsync(width, height, minimum.Width, minimum.Height,
-                    (w, h) => widget.TryResizeWindowAsync(new Windows.Foundation.Size(w, h)).AsTask());
+                    ResizeHudAsync);
                 resizeAccepted = result.Accepted;
                 fittedWidth = result.Width;
                 fittedHeight = result.Height;
@@ -200,6 +204,13 @@ namespace YummiGameBarWidget
                 DisplayText.Text = "화면 맞춤 실패 · " + ErrorCode(ex);
             }
             finally { fittingDisplay = false; }
+        }
+
+        private async Task<bool> ResizeHudAsync(double width, double height)
+        {
+            var accepted = await widget.TryResizeWindowAsync(new Windows.Foundation.Size(width, height));
+            App.LogStage($"fit {widget.GameBarDisplayMode} {width}x{height} accepted={accepted}");
+            return accepted;
         }
 
         private void UpdateDisplayState()
@@ -251,6 +262,14 @@ namespace YummiGameBarWidget
                     ["contentHeight"] = JsonValue.CreateNumberValue(ActualHeight),
                     ["displayScale"] = JsonValue.CreateNumberValue(displayScale),
                     ["resizeAccepted"] = JsonValue.CreateBooleanValue(resizeAccepted),
+                    ["fitTargetWidth"] = JsonValue.CreateNumberValue(fitTargetWidth),
+                    ["fitTargetHeight"] = JsonValue.CreateNumberValue(fitTargetHeight),
+                    ["horizontalResizeSupported"] = JsonValue.CreateBooleanValue(widget.HorizontalResizeSupported),
+                    ["verticalResizeSupported"] = JsonValue.CreateBooleanValue(widget.VerticalResizeSupported),
+                    ["minWidth"] = JsonValue.CreateNumberValue(widget.MinWindowSize.Width),
+                    ["minHeight"] = JsonValue.CreateNumberValue(widget.MinWindowSize.Height),
+                    ["maxWidth"] = JsonValue.CreateNumberValue(widget.MaxWindowSize.Width),
+                    ["maxHeight"] = JsonValue.CreateNumberValue(widget.MaxWindowSize.Height),
                     ["fittedWidth"] = JsonValue.CreateNumberValue(fittedWidth),
                     ["fittedHeight"] = JsonValue.CreateNumberValue(fittedHeight),
                     ["width"] = JsonValue.CreateNumberValue(bounds.Width),
