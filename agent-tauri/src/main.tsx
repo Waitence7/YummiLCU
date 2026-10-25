@@ -5,7 +5,6 @@ import { getCurrentWindow } from '@tauri-apps/api/window';
 import { reportUnexpectedError, useMockBridge } from './api/commands';
 import { App } from './App';
 import { WindowGlideHint } from './components/WindowGlideHint';
-import { FullscreenHud } from './components/FullscreenHud';
 import './styles.css';
 
 const root = document.getElementById('root');
@@ -25,10 +24,7 @@ if (!useMockBridge) {
 const isMotionHint = !useMockBridge && getCurrentWindow().label === 'motion-hint';
 
 // 목 모드(브라우저 프리뷰)에서는 실제 앱 창 크기(640×620) 프레임 안에 렌더링한다.
-const isFullscreenHud = !useMockBridge && getCurrentWindow().label === 'fullscreen-hud';
-const app = isFullscreenHud ? (
-  <FullscreenHud />
-) : isMotionHint ? (
+const app = isMotionHint ? (
   <WindowGlideHint />
 ) : useMockBridge ? (
   <div className="flex min-h-full flex-col items-center justify-center gap-3 bg-slate-100 p-6">

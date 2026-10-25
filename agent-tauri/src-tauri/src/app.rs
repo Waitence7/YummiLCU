@@ -62,10 +62,6 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                     return;
                 }
             }
-            if args.iter().any(|arg| arg == "--fullscreen-hud") {
-                crate::fullscreen_hud::request(app, true);
-                return;
-            }
             tray::request_main_window(app);
         }));
     }
@@ -74,8 +70,6 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
         .plugin(tauri_plugin_opener::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
-            crate::fullscreen_hud::fullscreen_hud_snapshot,
-            crate::fullscreen_hud::fullscreen_hud_ready,
             crate::commands::config::load_config,
             crate::commands::config::save_config,
             crate::commands::config::set_window_glide_strength,
@@ -183,11 +177,6 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             // our builder so beta/dev builds can opt into HTML-in-Canvas WebView2 flags,
             // and background startup does not keep an unused WebView alive.
             tray::destroy_main_window(app.handle());
-            if args.iter().any(|arg| arg == "--fullscreen-hud") {
-                crate::fullscreen_hud::request(app.handle(), true);
-            } else {
-                crate::fullscreen_hud::restore(app.handle());
-            }
             if let Some(parent_pid) = startup_post_install_parent_pid {
                 schedule_post_install_window(
                     app.handle().clone(),
@@ -246,14 +235,6 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             // always starts from a clean WebView state. Background workers stay alive.
             api.prevent_close();
             tray::request_animated_hide(app);
-        }
-        #[cfg(windows)]
-        RunEvent::WindowEvent {
-            label,
-            event: WindowEvent::ScaleFactorChanged { .. },
-            ..
-        } if label == crate::fullscreen_hud::LABEL => {
-            let _ = crate::fullscreen_hud::fullscreen_hud_ready(app.clone());
         }
         RunEvent::ExitRequested { code, api, .. } => {
             if should_keep_running(code) {
