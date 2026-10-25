@@ -1,4 +1,4 @@
-param(
+﻿param(
   [string]$PackagePath,
   [string]$ExpectedSha256,
   [string]$BuildId,

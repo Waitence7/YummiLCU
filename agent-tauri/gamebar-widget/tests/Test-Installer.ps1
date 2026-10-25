@@ -92,7 +92,7 @@ try {
   Write-Host 'PASS: administrator registers only a missing exemption'
 
   # Run the production state writer, without invoking an installer or updater.
-  $updaterSource = Get-Content (Join-Path $InstallerRoot 'Update-YummiGameBar.ps1') -Raw
+  $updaterSource = Get-Content (Join-Path $InstallerRoot 'Update-YummiGameBar.ps1') -Raw -Encoding UTF8
   $updaterAst = [Management.Automation.Language.Parser]::ParseInput($updaterSource, [ref]$tokens, [ref]$errors)
   if ($errors.Count) { throw 'Updater syntax errors' }
   $stateWriter = $updaterAst.Find({ param($node) $node -is [Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Write-UpdateState' }, $true)
