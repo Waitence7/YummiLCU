@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Gaming.XboxGameBar;
@@ -17,7 +18,9 @@ using Windows.UI.Core;
 using Windows.System;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
+using Windows.UI.Xaml.Controls.Primitives;
 using Windows.UI.Xaml.Media;
+using Windows.UI.Xaml.Input;
 using Windows.UI.Xaml.Navigation;
 
 namespace YummiGameBarWidget
@@ -41,6 +44,9 @@ namespace YummiGameBarWidget
         private string bridgeStatus = "checking";
         private string bridgeError = "";
         private long lastFitRequest;
+        private bool youtubeReady;
+        private bool youtubeCollapsed;
+        private double youtubeVolume = 60;
 
         public Widget()
         {
@@ -359,6 +365,150 @@ namespace YummiGameBarWidget
             BridgeText.Text = connected ? "LCU 연결됨" : "유미 에이전트 연결됨 · League 대기 중";
             StatusDot.Fill = new SolidColorBrush(connected ? Color.FromArgb(255, 86, 221, 139) : Color.FromArgb(255, 122, 106, 134));
             SaveStatus();
+        }
+
+        private async void YoutubeLoadButton_Click(object sender, RoutedEventArgs e)
+        {
+            await LoadYoutubeAsync();
+        }
+
+        private async void YoutubeUrlBox_KeyDown(object sender, KeyRoutedEventArgs e)
+        {
+            if (e.Key != VirtualKey.Enter) return;
+            e.Handled = true;
+            await LoadYoutubeAsync();
+        }
+
+        private async Task LoadYoutubeAsync()
+        {
+            var videoId = ExtractYoutubeVideoId(YoutubeUrlBox.Text);
+            if (string.IsNullOrWhiteSpace(videoId))
+            {
+                YoutubeStatusText.Text = "올바른 YouTube 링크 또는 영상 ID를 입력해 주세요";
+                return;
+            }
+
+            youtubeReady = false;
+            YoutubeStatusText.Text = "YouTube 플레이어 불러오는 중…";
+            var html = BuildYoutubePlayerHtml(videoId, (int)Math.Round(youtubeVolume));
+            YoutubeWebView.NavigateToString(html);
+            await Task.CompletedTask;
+        }
+
+        private void YoutubeWebView_NavigationCompleted(WebView sender, WebViewNavigationCompletedEventArgs args)
+        {
+            if (!args.IsSuccess)
+            {
+                youtubeReady = false;
+                YoutubeStatusText.Text = "YouTube 플레이어를 불러오지 못했습니다";
+                return;
+            }
+            youtubeReady = true;
+            YoutubeStatusText.Text = "영상 준비됨 · Game Bar가 열려 있을 때 조작할 수 있습니다";
+        }
+
+        private async void YoutubePlayButton_Click(object sender, RoutedEventArgs e)
+        {
+            await InvokeYoutubeAsync("yummiPlay", "재생");
+        }
+
+        private async void YoutubePauseButton_Click(object sender, RoutedEventArgs e)
+        {
+            await InvokeYoutubeAsync("yummiPause", "일시정지");
+        }
+
+        private async void YoutubeVolumeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
+        {
+            youtubeVolume = e.NewValue;
+            if (!youtubeReady || YoutubeWebView == null) return;
+            try
+            {
+                await YoutubeWebView.InvokeScriptAsync("yummiSetVolume", new[] { ((int)Math.Round(youtubeVolume)).ToString() });
+            }
+            catch { }
+        }
+
+        private void YoutubeCollapseButton_Click(object sender, RoutedEventArgs e)
+        {
+            youtubeCollapsed = !youtubeCollapsed;
+            YoutubeBody.Visibility = youtubeCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            YoutubeCollapseButton.Content = youtubeCollapsed ? "펼치기" : "접기";
+        }
+
+        private async Task InvokeYoutubeAsync(string functionName, string actionLabel)
+        {
+            if (!youtubeReady)
+            {
+                YoutubeStatusText.Text = "먼저 영상을 불러와 주세요";
+                return;
+            }
+            try
+            {
+                await YoutubeWebView.InvokeScriptAsync(functionName, new string[0]);
+                YoutubeStatusText.Text = actionLabel;
+            }
+            catch (Exception ex)
+            {
+                YoutubeStatusText.Text = actionLabel + " 실패 · " + ErrorCode(ex);
+            }
+        }
+
+        private static string ExtractYoutubeVideoId(string input)
+        {
+            var raw = (input ?? "").Trim();
+            if (Regex.IsMatch(raw, "^[A-Za-z0-9_-]{11}$")) return raw;
+
+            Uri uri;
+            if (!Uri.TryCreate(raw, UriKind.Absolute, out uri))
+            {
+                if (!Uri.TryCreate("https://" + raw, UriKind.Absolute, out uri)) return null;
+            }
+
+            var host = uri.Host.ToLowerInvariant();
+            string candidate = null;
+            if (host == "youtu.be" || host.EndsWith(".youtu.be"))
+            {
+                candidate = uri.AbsolutePath.Trim('/').Split('/').FirstOrDefault();
+            }
+            else if (host == "youtube.com" || host.EndsWith(".youtube.com") || host == "youtube-nocookie.com" || host.EndsWith(".youtube-nocookie.com"))
+            {
+                var path = uri.AbsolutePath.Trim('/').Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries);
+                if (path.Length >= 2 && (path[0] == "embed" || path[0] == "shorts" || path[0] == "live")) candidate = path[1];
+                if (candidate == null)
+                {
+                    var match = Regex.Match(uri.Query ?? "", "(?:^|[?&])v=([A-Za-z0-9_-]{11})(?:&|$)");
+                    if (match.Success) candidate = match.Groups[1].Value;
+                }
+            }
+            return candidate != null && Regex.IsMatch(candidate, "^[A-Za-z0-9_-]{11}$") ? candidate : null;
+        }
+
+        private static string BuildYoutubePlayerHtml(string videoId, int volume)
+        {
+            return @"<!doctype html>
+<html>
+<head>
+<meta name='viewport' content='width=device-width,height=device-height,initial-scale=1,maximum-scale=1'>
+<style>html,body,#player{margin:0;width:100%;height:100%;overflow:hidden;background:#000}iframe{display:block}</style>
+</head>
+<body>
+<div id='player'></div>
+<script>
+var player;
+function onYouTubeIframeAPIReady(){
+  player=new YT.Player('player',{
+    width:'100%',height:'100%',videoId:'" + videoId + @"',
+    playerVars:{playsinline:1,rel:0,modestbranding:1},
+    events:{onReady:function(e){e.target.setVolume(" + Math.Max(0, Math.Min(100, volume)) + @");}}
+  });
+}
+function yummiPlay(){if(player&&player.playVideo)player.playVideo();}
+function yummiPause(){if(player&&player.pauseVideo)player.pauseVideo();}
+function yummiSetVolume(v){if(player&&player.setVolume)player.setVolume(parseInt(v)||0);}
+var tag=document.createElement('script');tag.src='https://www.youtube.com/iframe_api';document.head.appendChild(tag);
+</script>
+</body>
+</html>";
         }
 
         private static string ErrorCode(Exception error)

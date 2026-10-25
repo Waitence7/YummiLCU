@@ -26,6 +26,48 @@
         <TextBlock x:Name="DisplayText" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
         <TextBlock x:Name="InputText" FontSize="10" Foreground="#BDB1D0" TextWrapping="Wrap"/>
         <TextBlock x:Name="BridgeText" Text="유미 에이전트 연결 확인 중…" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
+
+        <Border Margin="0,6,0,0" BorderBrush="#3DFFFFFF" BorderThickness="1" CornerRadius="8" Padding="8" Background="#B30E0B17">
+          <StackPanel Spacing="7">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBlock Text="YouTube" FontSize="12" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
+              <Button x:Name="YoutubeCollapseButton" Grid.Column="1" Content="접기" Padding="8,2" FontSize="10" Click="YoutubeCollapseButton_Click"/>
+            </Grid>
+
+            <StackPanel x:Name="YoutubeBody" Spacing="7">
+              <Grid ColumnSpacing="6">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <TextBox x:Name="YoutubeUrlBox" PlaceholderText="YouTube 링크 또는 영상 ID" FontSize="11" KeyDown="YoutubeUrlBox_KeyDown"/>
+                <Button Grid.Column="1" Content="열기" Padding="12,4" FontSize="11" Click="YoutubeLoadButton_Click"/>
+              </Grid>
+
+              <Border Height="168" Background="#FF000000" CornerRadius="6">
+                <WebView x:Name="YoutubeWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" NavigationCompleted="YoutubeWebView_NavigationCompleted"/>
+              </Border>
+
+              <Grid ColumnSpacing="6">
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <Button Content="▶" Width="36" Padding="4" Click="YoutubePlayButton_Click" ToolTipService.ToolTip="재생"/>
+                <Button Grid.Column="1" Content="Ⅱ" Width="36" Padding="4" Click="YoutubePauseButton_Click" ToolTipService.ToolTip="일시정지"/>
+                <TextBlock Grid.Column="2" Text="볼륨" FontSize="10" Foreground="#BDB1D0" VerticalAlignment="Center" Margin="4,0"/>
+                <Slider x:Name="YoutubeVolumeSlider" Grid.Column="3" Minimum="0" Maximum="100" Value="60" ValueChanged="YoutubeVolumeSlider_ValueChanged"/>
+              </Grid>
+              <TextBlock x:Name="YoutubeStatusText" Text="링크를 입력하면 영상이 표시됩니다" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
+            </StackPanel>
+          </StackPanel>
+        </Border>
       </StackPanel>
     </Border>
   </Grid>
