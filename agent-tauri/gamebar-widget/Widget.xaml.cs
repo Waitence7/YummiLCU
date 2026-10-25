@@ -564,42 +564,12 @@ namespace YummiGameBarWidget
             youtubeReady = false;
             youtubePlaying = false;
             YoutubeStatusText.Text = "YouTube 플레이어 불러오는 중…";
-            var playerUrl = "https://yummi.duckdns.org/gamebar/youtube-player.html?v=" +
-                Uri.EscapeDataString(videoId) + "&volume=" + ((int)Math.Round(youtubeVolume)).ToString();
-            try
-            {
-                await YoutubeWebView.EnsureCoreWebView2Async();
-                YoutubeWebView.Source = new Uri(playerUrl);
-            }
-            catch (Exception ex)
-            {
-                youtubeReady = false;
-                YoutubeStatusText.Text = "WebView2 초기화 실패 · " + ErrorCode(ex);
-            }
+            var html = BuildYoutubePlayerHtml(videoId, (int)Math.Round(youtubeVolume));
+            YoutubeWebView.NavigateToString(html);
+            await Task.CompletedTask;
         }
 
-        private void YoutubeWebView_CoreWebView2Initialized(
-            Microsoft.UI.Xaml.Controls.WebView2 sender,
-            Microsoft.UI.Xaml.Controls.CoreWebView2InitializedEventArgs args)
-        {
-            if (args.Exception != null)
-            {
-                youtubeReady = false;
-                YoutubeStatusText.Text = "WebView2 초기화 실패 · " + ErrorCode(args.Exception);
-                return;
-            }
-
-            if (sender.CoreWebView2 != null)
-            {
-                sender.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
-                sender.CoreWebView2.Settings.AreDevToolsEnabled = false;
-                sender.CoreWebView2.Settings.IsStatusBarEnabled = false;
-            }
-        }
-
-        private void YoutubeWebView_NavigationCompleted(
-            Microsoft.UI.Xaml.Controls.WebView2 sender,
-            Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs args)
+        private void YoutubeWebView_NavigationCompleted(WebView sender, WebViewNavigationCompletedEventArgs args)
         {
             if (!args.IsSuccess)
             {
@@ -607,70 +577,8 @@ namespace YummiGameBarWidget
                 YoutubeStatusText.Text = "YouTube 플레이어를 불러오지 못했습니다";
                 return;
             }
-            YoutubeStatusText.Text = "YouTube 플레이어 초기화 중…";
-        }
-
-        private void YoutubeWebView_WebMessageReceived(
-            Microsoft.UI.Xaml.Controls.WebView2 sender,
-            Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
-        {
-            var source = e.Source ?? "";
-            if (!source.StartsWith("https://yummi.duckdns.org/gamebar/", StringComparison.OrdinalIgnoreCase)) return;
-
-            string message;
-            try
-            {
-                message = e.TryGetWebMessageAsString() ?? "";
-            }
-            catch
-            {
-                return;
-            }
-
-            var separator = message.IndexOf(':');
-            var kind = separator >= 0 ? message.Substring(0, separator) : message;
-            var value = separator >= 0 ? message.Substring(separator + 1) : "";
-
-            if (kind == "ready")
-            {
-                youtubeReady = true;
-                YoutubeStatusText.Text = "영상 준비됨 · Game Bar가 열려 있을 때 조작할 수 있습니다";
-                return;
-            }
-
-            if (kind == "state")
-            {
-                if (value == "1") youtubePlaying = true;
-                else if (value == "0" || value == "2") youtubePlaying = false;
-                return;
-            }
-
-            if (kind == "error")
-            {
-                youtubeReady = false;
-                youtubePlaying = false;
-                YoutubeStatusText.Text = YoutubePlayerErrorText(value);
-            }
-        }
-
-        private static string YoutubePlayerErrorText(string code)
-        {
-            switch (code)
-            {
-                case "101":
-                case "150":
-                    return "이 영상은 외부 플레이어 재생이 제한되어 있습니다";
-                case "153":
-                    return "YouTube 플레이어 인증 정보를 확인하지 못했습니다";
-                case "2":
-                    return "YouTube 영상 ID가 올바르지 않습니다";
-                case "5":
-                    return "YouTube HTML5 플레이어 오류가 발생했습니다";
-                case "100":
-                    return "삭제되었거나 비공개인 영상입니다";
-                default:
-                    return "YouTube 플레이어 오류 · " + code;
-            }
+            youtubeReady = true;
+            YoutubeStatusText.Text = "영상 준비됨 · Game Bar가 열려 있을 때 조작할 수 있습니다";
         }
 
         private async void YoutubePlayButton_Click(object sender, RoutedEventArgs e)
@@ -701,7 +609,7 @@ namespace YummiGameBarWidget
             if (!youtubeReady || YoutubeWebView == null) return;
             try
             {
-                await YoutubeWebView.ExecuteScriptAsync("yummiSetVolume(" + ((int)Math.Round(youtubeVolume)).ToString() + ");");
+                await YoutubeWebView.InvokeScriptAsync("yummiSetVolume", new[] { ((int)Math.Round(youtubeVolume)).ToString() });
             }
             catch { }
         }
@@ -722,7 +630,7 @@ namespace YummiGameBarWidget
             }
             try
             {
-                await YoutubeWebView.ExecuteScriptAsync(functionName + "();");
+                await YoutubeWebView.InvokeScriptAsync(functionName, new string[0]);
                 YoutubeStatusText.Text = actionLabel;
                 return true;
             }
@@ -763,7 +671,33 @@ namespace YummiGameBarWidget
             return candidate != null && Regex.IsMatch(candidate, "^[A-Za-z0-9_-]{11}$") ? candidate : null;
         }
 
-
+        private static string BuildYoutubePlayerHtml(string videoId, int volume)
+        {
+            return @"<!doctype html>
+<html>
+<head>
+<meta name='viewport' content='width=device-width,height=device-height,initial-scale=1,maximum-scale=1'>
+<style>html,body,#player{margin:0;width:100%;height:100%;overflow:hidden;background:#000}iframe{display:block}</style>
+</head>
+<body>
+<div id='player'></div>
+<script>
+var player;
+function onYouTubeIframeAPIReady(){
+  player=new YT.Player('player',{
+    width:'100%',height:'100%',videoId:'" + videoId + @"',
+    playerVars:{playsinline:1,rel:0,modestbranding:1},
+    events:{onReady:function(e){e.target.setVolume(" + Math.Max(0, Math.Min(100, volume)) + @");}}
+  });
+}
+function yummiPlay(){if(player&&player.playVideo)player.playVideo();}
+function yummiPause(){if(player&&player.pauseVideo)player.pauseVideo();}
+function yummiSetVolume(v){if(player&&player.setVolume)player.setVolume(parseInt(v)||0);}
+var tag=document.createElement('script');tag.src='https://www.youtube.com/iframe_api';document.head.appendChild(tag);
+</script>
+</body>
+</html>";
+        }
 
         private static string ErrorCode(Exception error)
         {
