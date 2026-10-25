@@ -198,3 +198,33 @@ body {
     display: none;
   }
 }
+
+
+.yummi-fullscreen-hud {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background: transparent;
+  color: white;
+  font-family: var(--font-sans);
+}
+.yummi-fullscreen-hud-panel {
+  position: absolute;
+  left: 36px;
+  top: 36px;
+  width: 330px;
+  box-sizing: border-box;
+  display: grid;
+  gap: 7px;
+  padding: 14px;
+  border-radius: 12px;
+  background: #141020d9;
+  border: 1px solid #7b5aa650;
+  font-size: 13px;
+}
+.yummi-fullscreen-hud-title { display: flex; align-items: center; gap: 8px; }
+.yummi-fullscreen-hud-title strong { font-size: 17px; }
+.yummi-fullscreen-hud-title > span:last-child { color: #cdbde8; font-size: 11px; }
+.yummi-hud-dot { width: 10px; height: 10px; border-radius: 50%; background: #7a6a86; }
+.yummi-hud-dot.connected { background: #56dd8b; }
+.yummi-hud-muted { color: #bdb1d0; font-size: 11px; }

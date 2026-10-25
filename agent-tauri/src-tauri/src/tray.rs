@@ -41,7 +41,14 @@ fn report_ui_error(app: &AppHandle, code: &'static str, error: impl ToString) {
 pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, OPEN_MENU_ID, "열기", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, QUIT_MENU_ID, "종료", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &quit])?;
+    let hud = MenuItem::with_id(
+        app,
+        "fullscreen-hud",
+        "전체화면 HUD 켜기/끄기",
+        true,
+        None::<&str>,
+    )?;
+    let menu = Menu::with_items(app, &[&open, &hud, &quit])?;
     let icon = tauri::include_image!("icons/yummibot-tray.png");
     TrayIconBuilder::with_id(TRAY_ID)
         .icon(icon)
@@ -50,6 +57,7 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
         .tooltip("Yummi LCU Agent")
         .on_menu_event(move |app, event| match event.id.as_ref() {
             OPEN_MENU_ID => request_main_window(app),
+            "fullscreen-hud" => crate::fullscreen_hud::toggle(app),
             QUIT_MENU_ID => request_exit(app),
             _ => {}
         })

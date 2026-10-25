@@ -1,0 +1,1 @@
+{"$schema":"../gen/schemas/desktop-schema.json","identifier":"fullscreen-hud","description":"Read-only fullscreen HUD event updates","windows":["fullscreen-hud"],"permissions":["core:event:allow-listen","core:event:allow-unlisten"]}

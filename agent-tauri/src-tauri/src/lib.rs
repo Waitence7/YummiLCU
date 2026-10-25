@@ -6,6 +6,7 @@ mod diagnostics;
 mod discord_presence;
 mod error;
 mod gamebar_bridge;
+mod fullscreen_hud;
 mod http_diagnostics;
 mod lcu;
 mod platform;

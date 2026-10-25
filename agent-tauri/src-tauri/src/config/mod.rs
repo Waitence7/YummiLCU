@@ -75,6 +75,7 @@ pub struct Config {
     pub window_glide_strength: Option<f64>,
     pub window_free_rotation: bool,
     pub ui_test_mode: bool,
+    pub fullscreen_hud_enabled: bool,
 }
 
 impl Default for Config {
@@ -102,6 +103,7 @@ impl Default for Config {
             window_glide_strength: Some(1.0),
             window_free_rotation: false,
             ui_test_mode: false,
+            fullscreen_hud_enabled: false,
         }
     }
 }

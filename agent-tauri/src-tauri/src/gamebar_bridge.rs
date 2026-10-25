@@ -33,8 +33,9 @@ const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:47658";
 
 pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     let watcher_state = state.clone();
+    let watcher_app = app.clone();
     tauri::async_runtime::spawn(async move {
-        watch_snapshot(watcher_state).await;
+        watch_snapshot(watcher_app, watcher_state).await;
     });
 
     #[cfg(windows)]
@@ -95,7 +96,7 @@ async fn watch_overlay_updates(state: Arc<AppState>) {
     }
 }
 
-async fn watch_snapshot(state: Arc<AppState>) {
+async fn watch_snapshot(_app: AppHandle, state: Arc<AppState>) {
     let mut shutdown = state.shutdown_receiver();
     let mut friend_tick = 0u8;
     let mut cached_online_friends = Vec::new();
@@ -110,7 +111,14 @@ async fn watch_snapshot(state: Arc<AppState>) {
             cached_online_friends = snapshot.online_friends.clone();
         }
         friend_tick = (friend_tick + 1) % FRIEND_REFRESH_EVERY_TICKS;
-        state.set_gamebar_snapshot(snapshot);
+        state.set_gamebar_snapshot(snapshot.clone());
+        #[cfg(windows)]
+        {
+            use tauri::{Emitter, Manager};
+            if let Some(window) = _app.get_webview_window(crate::fullscreen_hud::LABEL) {
+                let _ = window.emit("yummi://hud-snapshot", &snapshot);
+            }
+        }
 
         tokio::select! {
             _ = sleep(SNAPSHOT_INTERVAL) => {},

@@ -42,6 +42,7 @@ export type Config = {
   WindowGlideStrength: number | null;
   WindowFreeRotation: boolean;
   UiTestMode: boolean;
+  FullscreenHudEnabled?: boolean;
 };
 
 export type AgentState = {
