@@ -99,7 +99,7 @@ export async function mockInvoke<T>(
         emit();
         later(900, () => {
           state.oauth_pending = false;
-          state.discord_id = 123456789012345678;
+          state.discord_id = "123456789012345678";
           state.discord_name = "Waitence";
           state.status = "Discord 연결 완료 — LCU 확인 중…";
           log("Discord OAuth 자동 연결 완료");

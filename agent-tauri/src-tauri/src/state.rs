@@ -4,7 +4,7 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
@@ -36,6 +36,7 @@ pub(crate) struct UiState {
     status: String,
     relay: bool,
     lcu: bool,
+    #[serde(serialize_with = "serialize_optional_u64_as_string")]
     discord_id: Option<u64>,
     discord_name: Option<String>,
     discord_avatar: Option<String>,
@@ -50,6 +51,19 @@ pub(crate) struct UiState {
     git_commit: String,
     downloaded_at: Option<u64>,
     config: Config,
+}
+
+fn serialize_optional_u64_as_string<S>(
+    value: &Option<u64>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serializer.serialize_some(&value.to_string()),
+        None => serializer.serialize_none(),
+    }
 }
 
 impl UiState {
@@ -850,6 +864,17 @@ mod tests {
         assert_eq!(
             state.logs.back().map(String::as_str),
             Some(format!("log-{}", MAX_UI_LOGS + 4).as_str())
+        );
+    }
+
+    #[test]
+    fn ui_state_serializes_discord_snowflake_as_string() {
+        let mut state = UiState::new(Config::default());
+        state.discord_id = Some(823814708330627073);
+        let value = serde_json::to_value(&state).expect("serialize ui state");
+        assert_eq!(
+            value.get("discord_id").and_then(serde_json::Value::as_str),
+            Some("823814708330627073")
         );
     }
 

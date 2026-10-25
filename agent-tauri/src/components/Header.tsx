@@ -94,7 +94,7 @@ function DiscordAccount({ state }: { state: AgentState }) {
   const avatar =
     safeDiscordAvatar(state.discord_avatar) ||
     (connected
-      ? `https://cdn.discordapp.com/embed/avatars/${Number(state.discord_id) % 6}.png`
+      ? `https://cdn.discordapp.com/embed/avatars/${Number(BigInt(state.discord_id!) % 6n)}.png`
       : null);
   return (
     <div

@@ -48,7 +48,7 @@ export type AgentState = {
   status: string;
   relay: boolean;
   lcu: boolean;
-  discord_id?: number | null;
+  discord_id?: string | null;
   discord_name?: string | null;
   discord_avatar?: string | null;
   trust_level?: 'unauthenticated' | 'new_device' | 'trusted' | string;
