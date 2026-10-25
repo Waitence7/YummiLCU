@@ -20,6 +20,23 @@ public static class BridgeTests {
       throw new Exception("Matching coordinate spaces must keep the display size");
     if (HudGeometry.TargetInHostUnits(1440, 1440, 720, 640, 2000) != 2000)
       throw new Exception("Host size constraint was ignored");
+    int probes = 0;
+    var fitted = await HudGeometry.FitLargestAsync(1440, 900, 640, 360, (w, h) => {
+      probes++;
+      return Task.FromResult(w <= 1435 && h <= 806);
+    });
+    if (!fitted.Accepted || fitted.Width != 1435 || fitted.Height != 806 || probes > 30)
+      throw new Exception("Rejected fullscreen request must converge to the largest allowed bounds");
+    probes = 0;
+    var exact = await HudGeometry.FitLargestAsync(1440, 900, 640, 360, (w, h) => { probes++; return Task.FromResult(true); });
+    if (!exact.Accepted || exact.Width != 1440 || exact.Height != 900 || probes != 1)
+      throw new Exception("An accepted display size must not be probed again");
+    var heightOnly = await HudGeometry.FitLargestAsync(1440, 900, 640, 360, (w, h) => Task.FromResult(h <= 806));
+    if (!heightOnly.Accepted || heightOnly.Width != 1440 || heightOnly.Height != 806)
+      throw new Exception("A height limit must not unnecessarily reduce width");
+    var rejected = await HudGeometry.FitLargestAsync(1440, 900, 640, 360, (w, h) => Task.FromResult(false));
+    if (rejected.Accepted) throw new Exception("Rejected minimum must not report fitting success");
+    Console.WriteLine("PASS: bounded maximum fit, exact-size fast path, and rejected minimum");
     string name = @"LOCAL\YummiBridgeTest-" + Guid.NewGuid().ToString("N");
     using (var server = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous)) {
       var connected = server.WaitForConnectionAsync();

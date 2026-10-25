@@ -44,7 +44,7 @@ namespace YummiGameBarWidget
         private void FitHudButton_Click(object sender, RoutedEventArgs args)
         {
             HudPreferences.RequestFit();
-            PreferenceStatusText.Text = "화면 맞춤을 요청했습니다.";
+            PreferenceStatusText.Text = "Game Bar가 허용하는 최대 크기로 맞춥니다.";
         }
 
 

@@ -32,6 +32,8 @@ namespace YummiGameBarWidget
         private double displayScale = 1;
         private bool fittingDisplay;
         private bool resizeAccepted;
+        private double fittedWidth;
+        private double fittedHeight;
         private readonly SemaphoreSlim statusWrite = new SemaphoreSlim(1, 1);
         private string lastSavedStatus;
         private string bridgeStatus = "checking";
@@ -179,14 +181,19 @@ namespace YummiGameBarWidget
                 var minimum = widget.MinWindowSize;
                 var maximum = widget.MaxWindowSize;
                 var host = widget.WindowBounds;
-                var content = Window.Current.Bounds;
-                var contentWidth = ActualWidth > 0 ? ActualWidth : content.Width;
-                var contentHeight = ActualHeight > 0 ? ActualHeight : content.Height;
+                // Before first layout, Window.Current.Bounds may describe the
+                // activation window rather than the hosted XAML content.
+                var contentWidth = ActualWidth > 0 ? ActualWidth : host.Width;
+                var contentHeight = ActualHeight > 0 ? ActualHeight : host.Height;
                 var width = HudGeometry.TargetInHostUnits(displayWidth, host.Width, contentWidth, minimum.Width, maximum.Width);
                 var height = HudGeometry.TargetInHostUnits(displayHeight, host.Height, contentHeight, minimum.Height, maximum.Height);
                 // Keep the manifest's minimum size: Game Bar must be able to fit
                 // the content around its chrome and home bar.
-                resizeAccepted = await widget.TryResizeWindowAsync(new Windows.Foundation.Size(width, height));
+                var result = await HudGeometry.FitLargestAsync(width, height, minimum.Width, minimum.Height,
+                    (w, h) => widget.TryResizeWindowAsync(new Windows.Foundation.Size(w, h)).AsTask());
+                resizeAccepted = result.Accepted;
+                fittedWidth = result.Width;
+                fittedHeight = result.Height;
                 await widget.CenterWindowAsync();
                 UpdateDisplayState();
             }
@@ -246,6 +253,8 @@ namespace YummiGameBarWidget
                     ["contentHeight"] = JsonValue.CreateNumberValue(ActualHeight),
                     ["displayScale"] = JsonValue.CreateNumberValue(displayScale),
                     ["resizeAccepted"] = JsonValue.CreateBooleanValue(resizeAccepted),
+                    ["fittedWidth"] = JsonValue.CreateNumberValue(fittedWidth),
+                    ["fittedHeight"] = JsonValue.CreateNumberValue(fittedHeight),
                     ["width"] = JsonValue.CreateNumberValue(bounds.Width),
                     ["height"] = JsonValue.CreateNumberValue(bounds.Height),
                     ["displayWidth"] = JsonValue.CreateNumberValue(displayWidth),
