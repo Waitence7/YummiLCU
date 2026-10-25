@@ -16,11 +16,24 @@
         BorderBrush="#507B5AA6"
         BorderThickness="1">
       <StackPanel Spacing="7">
-        <StackPanel Orientation="Horizontal">
-          <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#7A6A86" Margin="0,0,8,0" VerticalAlignment="Center"/>
-          <TextBlock Text="유미 LCU" FontSize="17" FontWeight="SemiBold" Foreground="White"/>
-          <TextBlock x:Name="PhaseText" Text="Offline" FontSize="11" Foreground="#CDBDE8" Margin="10,4,0,0"/>
-        </StackPanel>
+        <Grid x:Name="HudDragHandle"
+              Background="#01000000"
+              PointerPressed="HudDragHandle_PointerPressed"
+              PointerMoved="HudDragHandle_PointerMoved"
+              PointerReleased="HudDragHandle_PointerReleased"
+              PointerCanceled="HudDragHandle_PointerCanceled"
+              PointerCaptureLost="HudDragHandle_PointerCaptureLost">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="Auto"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+          </Grid.ColumnDefinitions>
+          <Ellipse x:Name="StatusDot" Grid.Column="0" Width="10" Height="10" Fill="#7A6A86" Margin="0,0,8,0" VerticalAlignment="Center"/>
+          <TextBlock Grid.Column="1" Text="유미 LCU" FontSize="17" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
+          <TextBlock x:Name="PhaseText" Grid.Column="2" Text="Offline" FontSize="11" Foreground="#CDBDE8" Margin="10,4,0,0" VerticalAlignment="Center"/>
+          <Button x:Name="HudResetPositionButton" Grid.Column="3" Content="↺" Width="28" Height="26" Padding="0" FontSize="13" Click="HudResetPositionButton_Click" ToolTipService.ToolTip="HUD 위치 초기화"/>
+        </Grid>
         <TextBlock x:Name="RiotIdText" Text="League 클라이언트를 기다리는 중" FontSize="13" Foreground="White" TextTrimming="CharacterEllipsis"/>
         <TextBlock x:Name="PartyText" Text="파티 정보 없음" FontSize="11" Foreground="#BDB1D0" TextWrapping="Wrap"/>
         <TextBlock x:Name="DisplayText" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>

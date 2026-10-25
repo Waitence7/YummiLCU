@@ -46,11 +46,22 @@ namespace YummiGameBarWidget
         private long lastFitRequest;
         private bool youtubeReady;
         private bool youtubeCollapsed;
+        private bool youtubePlaying;
         private double youtubeVolume = 60;
+        private readonly TranslateTransform hudPanelTransform = new TranslateTransform();
+        private uint? hudDragPointerId;
+        private Windows.Foundation.Point hudDragStartPoint;
+        private double hudDragStartX;
+        private double hudDragStartY;
+        private const string HudPanelXSetting = "hud-panel-x";
+        private const string HudPanelYSetting = "hud-panel-y";
 
         public Widget()
         {
             InitializeComponent();
+            HudPanel.RenderTransform = hudPanelTransform;
+            RestoreHudPanelPosition();
+            SizeChanged += (_, __) => ClampHudPanelPosition();
             timer.Tick += async (_, __) => await RefreshAsync();
             Loaded += async (_, __) =>
             {
@@ -82,12 +93,25 @@ namespace YummiGameBarWidget
 
         private void CoreWindowKeyDown(CoreWindow sender, KeyEventArgs args)
         {
-            if (args.VirtualKey != VirtualKey.F8 || args.KeyStatus.WasKeyDown) return;
-            // CoreWindow raises this on the view dispatcher. Handle the event
-            // before returning; its WinRT args must not be used after an await.
-            args.Handled = true;
-            HudPreferences.CoverageTint = !HudPreferences.CoverageTint;
-            ApplyPreferences();
+            if (args.KeyStatus.WasKeyDown) return;
+
+            if (args.VirtualKey == VirtualKey.F8)
+            {
+                // CoreWindow raises this on the view dispatcher. Handle the event
+                // before returning; its WinRT args must not be used after an await.
+                args.Handled = true;
+                HudPreferences.CoverageTint = !HudPreferences.CoverageTint;
+                ApplyPreferences();
+                return;
+            }
+
+            if (args.VirtualKey == VirtualKey.Space && youtubeReady && YoutubeBody.Visibility == Visibility.Visible)
+            {
+                var focused = FocusManager.GetFocusedElement() as DependencyObject;
+                if (focused is TextBox || focused is WebView) return;
+                args.Handled = true;
+                _ = ToggleYoutubePlaybackAsync();
+            }
         }
 
         private void ApplyPreferences()
@@ -367,6 +391,155 @@ namespace YummiGameBarWidget
             SaveStatus();
         }
 
+        private void HudDragHandle_PointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            if (e.OriginalSource is Button || IsInteractiveHudElement(e.OriginalSource as DependencyObject)) return;
+            var point = e.GetCurrentPoint(RootGrid);
+            if (!point.Properties.IsLeftButtonPressed) return;
+
+            hudDragPointerId = e.Pointer.PointerId;
+            hudDragStartPoint = point.Position;
+            hudDragStartX = hudPanelTransform.X;
+            hudDragStartY = hudPanelTransform.Y;
+            HudDragHandle.CapturePointer(e.Pointer);
+            e.Handled = true;
+        }
+
+        private void HudDragHandle_PointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            if (hudDragPointerId != e.Pointer.PointerId) return;
+            var point = e.GetCurrentPoint(RootGrid);
+            if (!point.Properties.IsLeftButtonPressed)
+            {
+                EndHudPanelDrag(e.Pointer);
+                return;
+            }
+
+            var nextX = hudDragStartX + point.Position.X - hudDragStartPoint.X;
+            var nextY = hudDragStartY + point.Position.Y - hudDragStartPoint.Y;
+            SetHudPanelPosition(nextX, nextY, false);
+            e.Handled = true;
+        }
+
+        private void HudDragHandle_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            if (hudDragPointerId != e.Pointer.PointerId) return;
+            EndHudPanelDrag(e.Pointer);
+            SnapHudPanelToNearestCorner();
+            SaveHudPanelPosition();
+            e.Handled = true;
+        }
+
+        private void HudDragHandle_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        {
+            if (hudDragPointerId != e.Pointer.PointerId) return;
+            EndHudPanelDrag(e.Pointer);
+        }
+
+        private void HudDragHandle_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        {
+            if (hudDragPointerId == e.Pointer.PointerId) hudDragPointerId = null;
+        }
+
+        private void EndHudPanelDrag(Windows.UI.Input.Pointer pointer)
+        {
+            HudDragHandle.ReleasePointerCapture(pointer);
+            hudDragPointerId = null;
+        }
+
+        private static bool IsInteractiveHudElement(DependencyObject source)
+        {
+            for (var current = source; current != null; current = VisualTreeHelper.GetParent(current))
+            {
+                if (current is TextBox || current is Button || current is Slider || current is WebView)
+                    return true;
+                if (current is Border border && border.Name == "HudPanel") break;
+            }
+            return false;
+        }
+
+
+        private void HudResetPositionButton_Click(object sender, RoutedEventArgs e)
+        {
+            SetHudPanelPosition(0, 0, true);
+        }
+
+        private void SnapHudPanelToNearestCorner()
+        {
+            if (RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0) return;
+
+            var baseLeft = HudPanel.Margin.Left;
+            var baseTop = HudPanel.Margin.Top;
+            var panelWidth = HudPanel.ActualWidth > 0 ? HudPanel.ActualWidth : HudPanel.Width;
+            var panelHeight = HudPanel.ActualHeight > 0 ? HudPanel.ActualHeight : 80;
+            var rightX = RootGrid.ActualWidth - baseLeft - HudPanel.Margin.Right - panelWidth;
+            var bottomY = RootGrid.ActualHeight - baseTop - HudPanel.Margin.Bottom - panelHeight;
+            const double snapDistance = 56;
+
+            var x = hudPanelTransform.X;
+            var y = hudPanelTransform.Y;
+            var snapLeft = Math.Abs(x) <= snapDistance;
+            var snapRight = Math.Abs(x - rightX) <= snapDistance;
+            var snapTop = Math.Abs(y) <= snapDistance;
+            var snapBottom = Math.Abs(y - bottomY) <= snapDistance;
+
+            if (snapLeft || snapRight) x = snapRight && !snapLeft ? rightX : 0;
+            if (snapTop || snapBottom) y = snapBottom && !snapTop ? bottomY : 0;
+            SetHudPanelPosition(x, y, false);
+        }
+
+        private void RestoreHudPanelPosition()
+        {
+            var values = ApplicationData.Current.LocalSettings.Values;
+            var x = ReadLocalDouble(values, HudPanelXSetting);
+            var y = ReadLocalDouble(values, HudPanelYSetting);
+            SetHudPanelPosition(x, y, false);
+        }
+
+        private static double ReadLocalDouble(IDictionary<string, object> values, string key)
+        {
+            if (!values.TryGetValue(key, out var value) || value == null) return 0;
+            if (value is double number) return number;
+            return double.TryParse(value.ToString(), out number) ? number : 0;
+        }
+
+        private void SaveHudPanelPosition()
+        {
+            var values = ApplicationData.Current.LocalSettings.Values;
+            values[HudPanelXSetting] = hudPanelTransform.X;
+            values[HudPanelYSetting] = hudPanelTransform.Y;
+        }
+
+        private void ClampHudPanelPosition()
+        {
+            SetHudPanelPosition(hudPanelTransform.X, hudPanelTransform.Y, false);
+        }
+
+        private void SetHudPanelPosition(double x, double y, bool save)
+        {
+            // HudPanel starts at Margin=36. Keep at least 24 DIPs of the panel
+            // visible even when the host is temporarily smaller than the HUD.
+            var baseLeft = HudPanel.Margin.Left;
+            var baseTop = HudPanel.Margin.Top;
+            if (RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0)
+            {
+                hudPanelTransform.X = x;
+                hudPanelTransform.Y = y;
+                if (save) SaveHudPanelPosition();
+                return;
+            }
+            var panelWidth = HudPanel.ActualWidth > 0 ? HudPanel.ActualWidth : HudPanel.Width;
+            var panelHeight = HudPanel.ActualHeight > 0 ? HudPanel.ActualHeight : 80;
+            const double visibleEdge = 24;
+            var minX = -baseLeft - panelWidth + visibleEdge;
+            var minY = -baseTop - panelHeight + visibleEdge;
+            var maxX = Math.Max(minX, RootGrid.ActualWidth - baseLeft - visibleEdge);
+            var maxY = Math.Max(minY, RootGrid.ActualHeight - baseTop - visibleEdge);
+            hudPanelTransform.X = Math.Max(minX, Math.Min(maxX, x));
+            hudPanelTransform.Y = Math.Max(minY, Math.Min(maxY, y));
+            if (save) SaveHudPanelPosition();
+        }
+
         private async void YoutubeLoadButton_Click(object sender, RoutedEventArgs e)
         {
             await LoadYoutubeAsync();
@@ -389,6 +562,7 @@ namespace YummiGameBarWidget
             }
 
             youtubeReady = false;
+            youtubePlaying = false;
             YoutubeStatusText.Text = "YouTube 플레이어 불러오는 중…";
             var html = BuildYoutubePlayerHtml(videoId, (int)Math.Round(youtubeVolume));
             YoutubeWebView.NavigateToString(html);
@@ -409,12 +583,24 @@ namespace YummiGameBarWidget
 
         private async void YoutubePlayButton_Click(object sender, RoutedEventArgs e)
         {
-            await InvokeYoutubeAsync("yummiPlay", "재생");
+            if (await InvokeYoutubeAsync("yummiPlay", "재생")) youtubePlaying = true;
         }
 
         private async void YoutubePauseButton_Click(object sender, RoutedEventArgs e)
         {
-            await InvokeYoutubeAsync("yummiPause", "일시정지");
+            if (await InvokeYoutubeAsync("yummiPause", "일시정지")) youtubePlaying = false;
+        }
+
+        private async Task ToggleYoutubePlaybackAsync()
+        {
+            if (youtubePlaying)
+            {
+                if (await InvokeYoutubeAsync("yummiPause", "일시정지 · Space")) youtubePlaying = false;
+            }
+            else
+            {
+                if (await InvokeYoutubeAsync("yummiPlay", "재생 · Space")) youtubePlaying = true;
+            }
         }
 
         private async void YoutubeVolumeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
@@ -435,21 +621,23 @@ namespace YummiGameBarWidget
             YoutubeCollapseButton.Content = youtubeCollapsed ? "펼치기" : "접기";
         }
 
-        private async Task InvokeYoutubeAsync(string functionName, string actionLabel)
+        private async Task<bool> InvokeYoutubeAsync(string functionName, string actionLabel)
         {
             if (!youtubeReady)
             {
                 YoutubeStatusText.Text = "먼저 영상을 불러와 주세요";
-                return;
+                return false;
             }
             try
             {
                 await YoutubeWebView.InvokeScriptAsync(functionName, new string[0]);
                 YoutubeStatusText.Text = actionLabel;
+                return true;
             }
             catch (Exception ex)
             {
                 YoutubeStatusText.Text = actionLabel + " 실패 · " + ErrorCode(ex);
+                return false;
             }
         }
 
