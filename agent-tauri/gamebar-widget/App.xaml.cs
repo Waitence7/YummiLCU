@@ -6,7 +6,6 @@ using Windows.ApplicationModel.Activation;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.Storage;
-using Windows.UI.ViewManagement;
 
 namespace YummiGameBarWidget
 {
@@ -19,8 +18,6 @@ namespace YummiGameBarWidget
             LogStage("constructor");
             InitializeComponent();
             LogStage("xaml-initialized");
-            ApplicationViewSwitcher.DisableShowingMainViewOnActivation();
-            LogStage("main-view-suppressed");
             UnhandledException += (_, e) => LogFailure("unhandled", e.Exception);
             Suspending += (_, __) => widgets.Clear();
         }
