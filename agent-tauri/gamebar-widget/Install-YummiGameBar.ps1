@@ -1,5 +1,29 @@
-param([switch]$Force, [switch]$SkipAutoUpdateSetup)
+param(
+  [switch]$Force,
+  [switch]$SkipAutoUpdateSetup,
+  [string]$LogPath = (Join-Path $env:TEMP 'Yummi-GameBar-install.log')
+)
 $ErrorActionPreference = 'Stop'
+
+$script:TranscriptStarted = $false
+try {
+  $logDir = Split-Path -Parent $LogPath
+  if ($logDir) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+  Start-Transcript -Path $LogPath -Force | Out-Null
+  $script:TranscriptStarted = $true
+}
+catch {
+  # Installation must still run even if transcript initialization itself fails.
+}
+
+trap {
+  try {
+    $detail = ($_ | Out-String).TrimEnd()
+    if ($detail) { Add-Content -Path $LogPath -Value $detail -Encoding UTF8 }
+  } catch {}
+  if ($script:TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
+  exit 1
+}
 
 $package = Get-ChildItem $PSScriptRoot -File |
   Where-Object { $_.Extension -in '.appx', '.msix' } |
@@ -30,7 +54,7 @@ if (Test-Path $certificate) {
       $escapedLog = $logPath.Replace("'", "''")
       $forceArg = if ($Force) { ' -Force' } else { '' }
       $skipArg = if ($SkipAutoUpdateSetup) { ' -SkipAutoUpdateSetup' } else { '' }
-      $command = "& '$escapedScript'$forceArg$skipArg *>&1 | Tee-Object -FilePath '$escapedLog'; exit `$LASTEXITCODE"
+      $command = "& '$escapedScript'$forceArg$skipArg -LogPath '$escapedLog'; exit `$LASTEXITCODE"
       $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
       $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
       if ($process.ExitCode -ne 0) {
@@ -122,3 +146,5 @@ if (-not $SkipAutoUpdateSetup) {
     Write-Warning "자동 업데이트 준비 실패: $($_.Exception.Message)"
   }
 }
+
+if ($script:TranscriptStarted) { Stop-Transcript | Out-Null }
