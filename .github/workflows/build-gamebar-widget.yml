@@ -14,6 +14,8 @@ on:
         default: false
   push:
     branches: [main]
+    tags:
+      - "gamebar-v*"
     paths:
       - "agent-tauri/gamebar-widget/**"
       - "scripts/sync-gamebar-version.mjs"
@@ -45,7 +47,8 @@ jobs:
         run: |
           $sourceVersion = (Get-Content agent-tauri/gamebar-widget/version.json -Raw | ConvertFrom-Json).version
           $requested = "${{ github.event.inputs.version }}".Trim()
-          $version = if ($requested) { $requested } else { $sourceVersion }
+          $tagVersion = if ($env:GITHUB_REF -match '^refs/tags/gamebar-v(.+)$') { $Matches[1] } else { "" }
+          $version = if ($requested) { $requested } elseif ($tagVersion) { $tagVersion } else { $sourceVersion }
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "version must be x.y.z" }
           "version=$version" >> $env:GITHUB_OUTPUT
           $build = [int]$env:GITHUB_RUN_NUMBER
@@ -236,7 +239,7 @@ jobs:
           retention-days: 14
 
       - name: Deploy Game Bar release
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true'
+        if: (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true') || startsWith(github.ref, 'refs/tags/gamebar-v')
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.meta.outputs.version }}
