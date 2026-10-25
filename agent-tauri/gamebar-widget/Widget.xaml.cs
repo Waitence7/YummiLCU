@@ -14,6 +14,7 @@ using Windows.Networking;
 using Windows.Networking.Sockets;
 using Windows.UI;
 using Windows.UI.Core;
+using Windows.System;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Media;
@@ -35,6 +36,7 @@ namespace YummiGameBarWidget
         private string lastSavedStatus;
         private string bridgeStatus = "checking";
         private string bridgeError = "";
+        private bool coverageTintEnabled;
 
         public Widget()
         {
@@ -42,12 +44,30 @@ namespace YummiGameBarWidget
             timer.Tick += async (_, __) => await RefreshAsync();
             Loaded += async (_, __) =>
             {
+                Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
                 await FitToDisplayAsync();
                 UpdateInputState();
                 timer.Start();
                 await RefreshAsync();
             };
-            Unloaded += (_, __) => timer.Stop();
+            Unloaded += (_, __) =>
+            {
+                Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
+                timer.Stop();
+            };
+        }
+
+        private async void CoreWindowKeyDown(CoreWindow sender, KeyEventArgs args)
+        {
+            if (args.VirtualKey != VirtualKey.F8 || args.KeyStatus.WasKeyDown) return;
+            coverageTintEnabled = !coverageTintEnabled;
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            {
+                RootGrid.Background = coverageTintEnabled
+                    ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
+                    : new SolidColorBrush(Colors.Transparent);
+            });
+            args.Handled = true;
         }
 
         protected override void OnNavigatedTo(NavigationEventArgs e)
