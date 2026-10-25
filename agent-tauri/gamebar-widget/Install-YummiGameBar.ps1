@@ -1,4 +1,4 @@
-param(
+﻿param(
   [switch]$Force,
   [switch]$SkipAutoUpdateSetup,
   [string]$LogPath = (Join-Path $env:TEMP 'Yummi-GameBar-install.log')
@@ -17,11 +17,11 @@ catch {
 }
 
 trap {
+  $detail = ($_ | Out-String).TrimEnd()
+  if ($script:TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
   try {
-    $detail = ($_ | Out-String).TrimEnd()
     if ($detail) { Add-Content -Path $LogPath -Value $detail -Encoding UTF8 }
   } catch {}
-  if ($script:TranscriptStarted) { try { Stop-Transcript | Out-Null } catch {} }
   exit 1
 }
 
@@ -48,14 +48,15 @@ if (Test-Path $certificate) {
     if (-not $isAdmin) {
       Write-Host '오버레이 인증서는 최초 1회만 관리자 권한으로 등록합니다.' -ForegroundColor Yellow
       $scriptPath = $MyInvocation.MyCommand.Path
-      $logPath = Join-Path $env:TEMP 'Yummi-GameBar-install.log'
-      Remove-Item $logPath -Force -ErrorAction SilentlyContinue
-      $escapedScript = $scriptPath.Replace("'", "''")
-      $escapedLog = $logPath.Replace("'", "''")
+      # Release the transcript before the elevated process opens the same log.
+      if ($script:TranscriptStarted) {
+        Stop-Transcript | Out-Null
+        $script:TranscriptStarted = $false
+      }
+      $quote = [char]34
       $forceArg = if ($Force) { ' -Force' } else { '' }
       $skipArg = if ($SkipAutoUpdateSetup) { ' -SkipAutoUpdateSetup' } else { '' }
-      $command = "& '$escapedScript'$forceArg$skipArg -LogPath '$escapedLog'; exit `$LASTEXITCODE"
-      $arguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', $command)
+      $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + $quote + $scriptPath + $quote + $forceArg + $skipArg + ' -LogPath ' + $quote + $LogPath + $quote
       $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
       if ($process.ExitCode -ne 0) {
         if (Test-Path $logPath) {
@@ -118,7 +119,7 @@ Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceU
 # bridge when cross-package named pipes are unavailable on a Windows build.
 $installedOverlay = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
 if ($installedOverlay -and $installedOverlay.PackageFamilyName) {
-  & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -a -n=$installedOverlay.PackageFamilyName | Out-Null
+  & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -a ('-n=' + $installedOverlay.PackageFamilyName) | Out-Null
   if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption registration failed: $LASTEXITCODE" }
 }
 

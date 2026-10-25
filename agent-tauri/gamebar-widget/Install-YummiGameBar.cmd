@@ -15,6 +15,6 @@ for %%F in ("%INSTALL_DIR%*.msix" "%INSTALL_DIR%*.appx") do (
 if not defined PACKAGE_FOUND exit /b 2
 
 powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command ^
-  "$script='%INSTALL_PS1%'; $log='%LOG_FILE%'; Remove-Item $log -Force -ErrorAction SilentlyContinue; $argLine='-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""' + $script + '"" -Force -LogPath ""' + $log + '""'; $p=Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList $argLine -Wait -PassThru; exit $p.ExitCode"
+  "$script=$env:INSTALL_PS1; $log=$env:LOG_FILE; $q=[char]34; $argLine='-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ' + $q + $script + $q + ' -Force -LogPath ' + $q + $log + $q; try { $p=Start-Process powershell.exe -Verb RunAs -WindowStyle Hidden -ArgumentList $argLine -Wait -PassThru; exit $p.ExitCode } catch { $_ | Out-String | Out-File -FilePath $log -Append -Encoding UTF8; exit 1 }"
 
 exit /b %ERRORLEVEL%

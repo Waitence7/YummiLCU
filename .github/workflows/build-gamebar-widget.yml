@@ -55,6 +55,11 @@ jobs:
           if ($build -lt 0 -or $build -gt 65535) { throw "GitHub run number $build cannot be used as AppX build version" }
           "appx_version=$version.$build" >> $env:GITHUB_OUTPUT
 
+      - name: Verify installer on Windows PowerShell 5.1
+        run: |
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File agent-tauri/gamebar-widget/tests/Test-Installer.ps1
+          if ($LASTEXITCODE -ne 0) { throw "Game Bar installer regression checks failed" }
+
       - name: Restore UWP packages
         run: |
           dotnet restore agent-tauri/gamebar-widget/YummiGameBarWidget.csproj
