@@ -59,7 +59,6 @@ namespace YummiGameBarWidget
         public Widget()
         {
             InitializeComponent();
-            YoutubeWebView.AllowedScriptNotifyUris = new[] { new Uri("https://yummi.duckdns.org") };
             HudPanel.RenderTransform = hudPanelTransform;
             RestoreHudPanelPosition();
             SizeChanged += (_, __) => ClampHudPanelPosition();
@@ -567,11 +566,40 @@ namespace YummiGameBarWidget
             YoutubeStatusText.Text = "YouTube 플레이어 불러오는 중…";
             var playerUrl = "https://yummi.duckdns.org/gamebar/youtube-player.html?v=" +
                 Uri.EscapeDataString(videoId) + "&volume=" + ((int)Math.Round(youtubeVolume)).ToString();
-            YoutubeWebView.Navigate(new Uri(playerUrl));
-            await Task.CompletedTask;
+            try
+            {
+                await YoutubeWebView.EnsureCoreWebView2Async();
+                YoutubeWebView.Source = new Uri(playerUrl);
+            }
+            catch (Exception ex)
+            {
+                youtubeReady = false;
+                YoutubeStatusText.Text = "WebView2 초기화 실패 · " + ErrorCode(ex);
+            }
         }
 
-        private void YoutubeWebView_NavigationCompleted(WebView sender, WebViewNavigationCompletedEventArgs args)
+        private void YoutubeWebView_CoreWebView2Initialized(
+            Microsoft.UI.Xaml.Controls.WebView2 sender,
+            Microsoft.UI.Xaml.Controls.CoreWebView2InitializedEventArgs args)
+        {
+            if (args.Exception != null)
+            {
+                youtubeReady = false;
+                YoutubeStatusText.Text = "WebView2 초기화 실패 · " + ErrorCode(args.Exception);
+                return;
+            }
+
+            if (sender.CoreWebView2 != null)
+            {
+                sender.CoreWebView2.Settings.AreDefaultContextMenusEnabled = false;
+                sender.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                sender.CoreWebView2.Settings.IsStatusBarEnabled = false;
+            }
+        }
+
+        private void YoutubeWebView_NavigationCompleted(
+            Microsoft.UI.Xaml.Controls.WebView2 sender,
+            Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs args)
         {
             if (!args.IsSuccess)
             {
@@ -582,9 +610,23 @@ namespace YummiGameBarWidget
             YoutubeStatusText.Text = "YouTube 플레이어 초기화 중…";
         }
 
-        private void YoutubeWebView_ScriptNotify(object sender, NotifyEventArgs e)
+        private void YoutubeWebView_WebMessageReceived(
+            Microsoft.UI.Xaml.Controls.WebView2 sender,
+            Microsoft.Web.WebView2.Core.CoreWebView2WebMessageReceivedEventArgs e)
         {
-            var message = e.Value ?? "";
+            var source = e.Source ?? "";
+            if (!source.StartsWith("https://yummi.duckdns.org/gamebar/", StringComparison.OrdinalIgnoreCase)) return;
+
+            string message;
+            try
+            {
+                message = e.TryGetWebMessageAsString() ?? "";
+            }
+            catch
+            {
+                return;
+            }
+
             var separator = message.IndexOf(':');
             var kind = separator >= 0 ? message.Substring(0, separator) : message;
             var value = separator >= 0 ? message.Substring(separator + 1) : "";
@@ -659,7 +701,7 @@ namespace YummiGameBarWidget
             if (!youtubeReady || YoutubeWebView == null) return;
             try
             {
-                await YoutubeWebView.InvokeScriptAsync("yummiSetVolume", new[] { ((int)Math.Round(youtubeVolume)).ToString() });
+                await YoutubeWebView.ExecuteScriptAsync("yummiSetVolume(" + ((int)Math.Round(youtubeVolume)).ToString() + ");");
             }
             catch { }
         }
@@ -680,7 +722,7 @@ namespace YummiGameBarWidget
             }
             try
             {
-                await YoutubeWebView.InvokeScriptAsync(functionName, new string[0]);
+                await YoutubeWebView.ExecuteScriptAsync(functionName + "();");
                 YoutubeStatusText.Text = actionLabel;
                 return true;
             }

@@ -2,6 +2,7 @@
     x:Class="YummiGameBarWidget.Widget"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:muxc="using:Microsoft.UI.Xaml.Controls"
     Background="Transparent">
   <Grid x:Name="RootGrid" Background="Transparent">
     <Border
@@ -62,7 +63,7 @@
               </Grid>
 
               <Border Height="168" Background="#FF000000" CornerRadius="6">
-                <WebView x:Name="YoutubeWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" NavigationCompleted="YoutubeWebView_NavigationCompleted" ScriptNotify="YoutubeWebView_ScriptNotify"/>
+                <muxc:WebView2 x:Name="YoutubeWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" NavigationCompleted="YoutubeWebView_NavigationCompleted" WebMessageReceived="YoutubeWebView_WebMessageReceived" CoreWebView2Initialized="YoutubeWebView_CoreWebView2Initialized"/>
               </Border>
 
               <Grid ColumnSpacing="6">

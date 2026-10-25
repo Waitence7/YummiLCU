@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3" IgnorableNamespaces="uap uap3 mp">
-  <Identity Name="YummiGameBarWidget" Publisher="CN=Yummi" Version="0.1.22.0" />
+  <Identity Name="YummiGameBarWidget" Publisher="CN=Yummi" Version="0.1.23.0" />
   <mp:PhoneIdentity PhoneProductId="ca6c501b-e740-4ac7-8ef8-6f34cbcbbd3d" PhonePublisherId="00000000-0000-0000-0000-000000000000" />
   <Properties><DisplayName>유미 LCU</DisplayName><PublisherDisplayName>Yummi</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
   <Dependencies><TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.18362.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
@@ -14,9 +14,6 @@
       <uap:VisualElements AppListEntry="none" DisplayName="유미 Game Bar 오버레이" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" Description="유미 LCU Xbox Game Bar 오버레이" BackgroundColor="transparent">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
       </uap:VisualElements>
-      <uap:ApplicationContentUriRules>
-        <uap:Rule Match="https://yummi.duckdns.org/gamebar/*" WindowsRuntimeAccess="all" Type="include" />
-      </uap:ApplicationContentUriRules>
       <Extensions>
         <uap3:Extension Category="windows.appExtension">
           <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiLCU" DisplayName="유미 LCU HUD" Description="League LCU 상태를 전체 화면 HUD로 표시합니다" PublicFolder="GameBar">
