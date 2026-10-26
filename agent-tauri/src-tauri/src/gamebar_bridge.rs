@@ -87,8 +87,8 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
         });
 
         std::thread::Builder::new()
-            .name("yummi-gamebar-mouse-hook".into())
-            .spawn(external_mouse_hook_thread)
+            .name("yummi-gamebar-mouse-input".into())
+            .spawn(external_mouse_input_thread)
             .ok();
 
         std::thread::Builder::new()
@@ -495,52 +495,51 @@ fn pipe_server(state: Arc<AppState>) {
 }
 
 #[cfg(windows)]
-fn external_mouse_hook_thread() {
+fn external_mouse_input_thread() {
     use windows::Win32::{
-        Foundation::{LPARAM, LRESULT, WPARAM},
-        UI::WindowsAndMessaging::{
-            CallNextHookEx, GetMessageW, SetWindowsHookExW, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL,
-            WM_LBUTTONDOWN, WM_LBUTTONUP,
+        Foundation::POINT,
+        UI::{
+            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
+            WindowsAndMessaging::GetCursorPos,
         },
     };
 
-    unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 && (wparam.0 as u32 == WM_LBUTTONDOWN || wparam.0 as u32 == WM_LBUTTONUP) {
-            let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
-            let now = now_ms();
-            if let Ok(mut state) = external_click_test_state().lock() {
-                // Expire stale geometry so a crashed/closed widget can never leave a ghost hitbox.
-                let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
-                let inside = fresh
-                    && state.active
-                    && (info.pt.x as f64) >= state.x
-                    && (info.pt.x as f64) < state.x + state.width
-                    && (info.pt.y as f64) >= state.y
-                    && (info.pt.y as f64) < state.y + state.height;
-                if inside {
-                    state.sequence = state.sequence.wrapping_add(1);
-                    if wparam.0 as u32 == WM_LBUTTONUP {
-                        state.click_count = state.click_count.wrapping_add(1);
+    // Poll the native mouse state instead of depending on WH_MOUSE_LL. Some
+    // Game Bar / elevation combinations allow the Agent to query global mouse
+    // state but do not deliver low-level hook callbacks reliably.
+    let mut was_down = false;
+    loop {
+        let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+        if down != was_down {
+            let mut point = POINT::default();
+            if unsafe { GetCursorPos(&mut point) }.is_ok() {
+                let now = now_ms();
+                if let Ok(mut state) = external_click_test_state().lock() {
+                    // Expire stale geometry so a crashed/closed widget can never
+                    // leave a ghost hitbox active in the Agent.
+                    let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
+                    let inside = fresh
+                        && state.active
+                        && (point.x as f64) >= state.x
+                        && (point.x as f64) < state.x + state.width
+                        && (point.y as f64) >= state.y
+                        && (point.y as f64) < state.y + state.height;
+                    if inside {
+                        state.sequence = state.sequence.wrapping_add(1);
+                        if !down {
+                            state.click_count = state.click_count.wrapping_add(1);
+                        }
+                        state.event = if down { "down" } else { "up" }.into();
+                        state.event_x = point.x;
+                        state.event_y = point.y;
+                        state.event_at_ms = now;
                     }
-                    state.event = if wparam.0 as u32 == WM_LBUTTONDOWN {
-                        "down"
-                    } else {
-                        "up"
-                    }
-                    .into();
-                    state.event_x = info.pt.x;
-                    state.event_y = info.pt.y;
-                    state.event_at_ms = now;
                 }
             }
+            was_down = down;
         }
-        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+        std::thread::sleep(Duration::from_millis(8));
     }
-
-    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) };
-    let Ok(_hook) = hook else { return };
-    let mut message = MSG::default();
-    while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {}
 }
 
 #[cfg(windows)]
