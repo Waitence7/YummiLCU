@@ -2,7 +2,7 @@ name: Build Tauri Agent (Windows)
 
 on:
   push:
-    branches: [main]
+    branches: [main, gamebar-lcu-bridge-test]
     paths:
       - "agent-tauri/**"
       - "!agent-tauri/gamebar-widget/**"

@@ -129,12 +129,35 @@ async fn collect_snapshot(
     cached_online_friends: &[String],
 ) -> GameBarSnapshot {
     let config = state.config.read().await.clone();
-    let path = match discover_lockfile_nonblocking(&config).await {
-        Ok(discovery) => discovery.path,
-        Err(_) => None,
+    let path = if let Some(path) = state.lcu_lockfile_path() {
+        Some(path)
+    } else {
+        match discover_lockfile_nonblocking(&config).await {
+            Ok(discovery) => {
+                if let Some(path) = discovery.path.clone() {
+                    state.set_lcu_lockfile_path(Some(path));
+                }
+                discovery.path
+            }
+            Err(_) => None,
+        }
     };
     let Some(path) = path else {
+        let previous = state.gamebar_snapshot();
+        let agent_lcu = state.lcu_state().await;
+        if agent_lcu.is_ready() && previous.connected {
+            return GameBarSnapshot {
+                updated_at_ms: now_ms(),
+                ..previous
+            };
+        }
         return GameBarSnapshot {
+            connected: agent_lcu.is_ready(),
+            phase: if agent_lcu.is_ready() {
+                "Connected".into()
+            } else {
+                "Offline".into()
+            },
             updated_at_ms: now_ms(),
             ..GameBarSnapshot::default()
         };
