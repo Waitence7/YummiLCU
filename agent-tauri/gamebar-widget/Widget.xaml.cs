@@ -95,6 +95,7 @@ namespace YummiGameBarWidget
             {
                 App.LogStage("hud-loaded");
                 Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
+                Window.Current.CoreWindow.KeyUp += CoreWindowKeyUp;
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
@@ -114,6 +115,7 @@ namespace YummiGameBarWidget
             Unloaded += (_, __) =>
             {
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
+                Window.Current.CoreWindow.KeyUp -= CoreWindowKeyUp;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
                 timer.Stop();
             };
@@ -135,6 +137,11 @@ namespace YummiGameBarWidget
 
         private void CoreWindowKeyDown(CoreWindow sender, KeyEventArgs args)
         {
+            if (args.VirtualKey == VirtualKey.Shift)
+            {
+                YoutubeDragSurface.IsHitTestVisible = true;
+                return;
+            }
             if (args.KeyStatus.WasKeyDown) return;
 
             if (args.VirtualKey == VirtualKey.F8)
@@ -155,6 +162,14 @@ namespace YummiGameBarWidget
                 args.Handled = true;
                 _ = ToggleYoutubePlaybackAsync();
             }
+        }
+
+
+        private void CoreWindowKeyUp(CoreWindow sender, KeyEventArgs args)
+        {
+            if (args.VirtualKey != VirtualKey.Shift) return;
+            if (!youtubeSurfacePointerId.HasValue)
+                YoutubeDragSurface.IsHitTestVisible = false;
         }
 
         private void ApplyPreferences()
@@ -561,13 +576,12 @@ namespace YummiGameBarWidget
             youtubeSurfaceDragging = false;
 
             if (commit && wasDragging)
-            {
                 SavePanelPosition(YoutubePanel, YoutubePanelTransform);
-            }
-            else if (commit && !wasDragging && youtubeReady)
-            {
-                _ = ToggleYoutubePlaybackAsync();
-            }
+
+            // Shift+drag is only for moving the panel. Normal YouTube clicks go
+            // directly to the player because this surface is disabled otherwise.
+            var shiftDown = (Window.Current.CoreWindow.GetKeyState(VirtualKey.Shift) & CoreVirtualKeyStates.Down) != 0;
+            if (!shiftDown) YoutubeDragSurface.IsHitTestVisible = false;
             e.Handled = true;
         }
 

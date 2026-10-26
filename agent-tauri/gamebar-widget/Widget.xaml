@@ -100,8 +100,9 @@
                        VerticalAlignment="Center"
                        Margin="16"/>
           </Border>
-          <!-- 메인 오버레이에서는 영상 전체가 이동 핸들이다. 영상 조작은 설정 화면에서 한다. -->
+          <!-- 평소에는 YouTube 입력을 그대로 통과시키고, Shift를 누른 동안만 전체 영상이 이동 핸들이 된다. -->
           <Border x:Name="YoutubeDragSurface"
+                  IsHitTestVisible="False"
                   Background="#01000000"
                   PointerPressed="YoutubeDragSurface_PointerPressed"
                   PointerMoved="YoutubeDragSurface_PointerMoved"
