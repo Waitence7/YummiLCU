@@ -53,21 +53,25 @@ namespace YummiGameBarWidget
         private string youtubePendingPlayerUrl;
         private string youtubeLoadedVideoId;
         private long youtubeLastActionRequest;
-        private readonly TranslateTransform hudPanelTransform = new TranslateTransform();
-        private uint? hudDragPointerId;
-        private Windows.Foundation.Point hudDragStartPoint;
-        private double hudDragStartX;
-        private double hudDragStartY;
-        private const string HudPanelXSetting = "hud-panel-x";
-        private const string HudPanelYSetting = "hud-panel-y";
+        private FrameworkElement draggedPanel;
+        private TranslateTransform draggedPanelTransform;
+        private uint? panelDragPointerId;
+        private Windows.Foundation.Point panelDragStartPoint;
+        private double panelDragStartX;
+        private double panelDragStartY;
+        private const string LcuPanelXSetting = "lcu-panel-x";
+        private const string LcuPanelYSetting = "lcu-panel-y";
+        private const string PartyPanelXSetting = "party-panel-x";
+        private const string PartyPanelYSetting = "party-panel-y";
+        private const string YoutubePanelXSetting = "youtube-panel-x";
+        private const string YoutubePanelYSetting = "youtube-panel-y";
 
         public Widget()
         {
             InitializeComponent();
             SetVersionText();
-            HudPanel.RenderTransform = hudPanelTransform;
-            RestoreHudPanelPosition();
-            SizeChanged += (_, __) => ClampHudPanelPosition();
+            RestorePanelPositions();
+            SizeChanged += (_, __) => ClampAllPanelPositions();
             timer.Tick += async (_, __) => await RefreshAsync();
             Loaded += async (_, __) =>
             {
@@ -442,110 +446,120 @@ namespace YummiGameBarWidget
             SaveStatus();
         }
 
-        private void HudDragHandle_PointerPressed(object sender, PointerRoutedEventArgs e)
+        private void Panel_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            if (e.OriginalSource is Button || IsInteractiveHudElement(e.OriginalSource as DependencyObject)) return;
+            BeginPanelDrag(sender as FrameworkElement, e, sender as UIElement);
+        }
+
+        private void Panel_PointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            ContinuePanelDrag(e, sender as UIElement);
+        }
+
+        private void Panel_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            EndPanelDrag(e, sender as UIElement, true);
+        }
+
+        private void Panel_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        {
+            EndPanelDrag(e, sender as UIElement, false);
+        }
+
+        private void Panel_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        {
+            if (panelDragPointerId == e.Pointer.PointerId) ClearPanelDrag();
+        }
+
+        private void YoutubeDragHandle_PointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            BeginPanelDrag(YoutubePanel, e, sender as UIElement);
+        }
+
+        private void YoutubeDragHandle_PointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            ContinuePanelDrag(e, sender as UIElement);
+        }
+
+        private void YoutubeDragHandle_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            EndPanelDrag(e, sender as UIElement, true);
+        }
+
+        private void YoutubeDragHandle_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        {
+            EndPanelDrag(e, sender as UIElement, false);
+        }
+
+        private void YoutubeDragHandle_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        {
+            if (panelDragPointerId == e.Pointer.PointerId) ClearPanelDrag();
+        }
+
+        private void BeginPanelDrag(FrameworkElement panel, PointerRoutedEventArgs e, UIElement captureTarget)
+        {
+            if (panel == null || captureTarget == null) return;
             var point = e.GetCurrentPoint(RootGrid);
             if (!point.Properties.IsLeftButtonPressed) return;
+            var transform = panel.RenderTransform as TranslateTransform;
+            if (transform == null) return;
 
-            hudDragPointerId = e.Pointer.PointerId;
-            hudDragStartPoint = point.Position;
-            hudDragStartX = hudPanelTransform.X;
-            hudDragStartY = hudPanelTransform.Y;
-            HudDragHandle.CapturePointer(e.Pointer);
+            draggedPanel = panel;
+            draggedPanelTransform = transform;
+            panelDragPointerId = e.Pointer.PointerId;
+            panelDragStartPoint = point.Position;
+            panelDragStartX = transform.X;
+            panelDragStartY = transform.Y;
+            captureTarget.CapturePointer(e.Pointer);
             e.Handled = true;
         }
 
-        private void HudDragHandle_PointerMoved(object sender, PointerRoutedEventArgs e)
+        private void ContinuePanelDrag(PointerRoutedEventArgs e, UIElement captureTarget)
         {
-            if (hudDragPointerId != e.Pointer.PointerId) return;
+            if (panelDragPointerId != e.Pointer.PointerId || draggedPanel == null || draggedPanelTransform == null) return;
             var point = e.GetCurrentPoint(RootGrid);
             if (!point.Properties.IsLeftButtonPressed)
             {
-                EndHudPanelDrag(e);
+                EndPanelDrag(e, captureTarget, true);
                 return;
             }
-
-            var nextX = hudDragStartX + point.Position.X - hudDragStartPoint.X;
-            var nextY = hudDragStartY + point.Position.Y - hudDragStartPoint.Y;
-            SetHudPanelPosition(nextX, nextY, false);
+            SetPanelPosition(
+                draggedPanel,
+                draggedPanelTransform,
+                panelDragStartX + point.Position.X - panelDragStartPoint.X,
+                panelDragStartY + point.Position.Y - panelDragStartPoint.Y,
+                false);
             e.Handled = true;
         }
 
-        private void HudDragHandle_PointerReleased(object sender, PointerRoutedEventArgs e)
+        private void EndPanelDrag(PointerRoutedEventArgs e, UIElement captureTarget, bool save)
         {
-            if (hudDragPointerId != e.Pointer.PointerId) return;
-            EndHudPanelDrag(e);
-            SnapHudPanelToNearestCorner();
-            SaveHudPanelPosition();
+            if (panelDragPointerId != e.Pointer.PointerId) return;
+            try { captureTarget?.ReleasePointerCapture(e.Pointer); } catch { }
+            if (save && draggedPanel != null && draggedPanelTransform != null)
+                SavePanelPosition(draggedPanel, draggedPanelTransform);
+            ClearPanelDrag();
             e.Handled = true;
         }
 
-        private void HudDragHandle_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        private void ClearPanelDrag()
         {
-            if (hudDragPointerId != e.Pointer.PointerId) return;
-            EndHudPanelDrag(e);
+            draggedPanel = null;
+            draggedPanelTransform = null;
+            panelDragPointerId = null;
         }
 
-        private void HudDragHandle_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        private void RestorePanelPositions()
         {
-            if (hudDragPointerId == e.Pointer.PointerId) hudDragPointerId = null;
+            RestorePanelPosition(LcuPanel, LcuPanelTransform, LcuPanelXSetting, LcuPanelYSetting);
+            RestorePanelPosition(PartyPanel, PartyPanelTransform, PartyPanelXSetting, PartyPanelYSetting);
+            RestorePanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelXSetting, YoutubePanelYSetting);
         }
 
-        private void EndHudPanelDrag(PointerRoutedEventArgs e)
-        {
-            HudDragHandle.ReleasePointerCapture(e.Pointer);
-            hudDragPointerId = null;
-        }
-
-        private bool IsInteractiveHudElement(DependencyObject source)
-        {
-            for (var current = source; current != null; current = VisualTreeHelper.GetParent(current))
-            {
-                if (current is TextBox || current is Button || current is Slider || current is WebView ||
-                    (youtubeWebView2 != null && current == youtubeWebView2))
-                    return true;
-                if (current is Border border && border.Name == "HudPanel") break;
-            }
-            return false;
-        }
-
-
-        private void HudResetPositionButton_Click(object sender, RoutedEventArgs e)
-        {
-            SetHudPanelPosition(0, 0, true);
-        }
-
-        private void SnapHudPanelToNearestCorner()
-        {
-            if (RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0) return;
-
-            var baseLeft = HudPanel.Margin.Left;
-            var baseTop = HudPanel.Margin.Top;
-            var panelWidth = HudPanel.ActualWidth > 0 ? HudPanel.ActualWidth : HudPanel.Width;
-            var panelHeight = HudPanel.ActualHeight > 0 ? HudPanel.ActualHeight : 80;
-            var rightX = RootGrid.ActualWidth - baseLeft - HudPanel.Margin.Right - panelWidth;
-            var bottomY = RootGrid.ActualHeight - baseTop - HudPanel.Margin.Bottom - panelHeight;
-            const double snapDistance = 56;
-
-            var x = hudPanelTransform.X;
-            var y = hudPanelTransform.Y;
-            var snapLeft = Math.Abs(x) <= snapDistance;
-            var snapRight = Math.Abs(x - rightX) <= snapDistance;
-            var snapTop = Math.Abs(y) <= snapDistance;
-            var snapBottom = Math.Abs(y - bottomY) <= snapDistance;
-
-            if (snapLeft || snapRight) x = snapRight && !snapLeft ? rightX : 0;
-            if (snapTop || snapBottom) y = snapBottom && !snapTop ? bottomY : 0;
-            SetHudPanelPosition(x, y, false);
-        }
-
-        private void RestoreHudPanelPosition()
+        private void RestorePanelPosition(FrameworkElement panel, TranslateTransform transform, string xKey, string yKey)
         {
             var values = ApplicationData.Current.LocalSettings.Values;
-            var x = ReadLocalDouble(values, HudPanelXSetting);
-            var y = ReadLocalDouble(values, HudPanelYSetting);
-            SetHudPanelPosition(x, y, false);
+            SetPanelPosition(panel, transform, ReadLocalDouble(values, xKey), ReadLocalDouble(values, yKey), false);
         }
 
         private static double ReadLocalDouble(IDictionary<string, object> values, string key)
@@ -555,41 +569,53 @@ namespace YummiGameBarWidget
             return double.TryParse(value.ToString(), out number) ? number : 0;
         }
 
-        private void SaveHudPanelPosition()
+        private void SavePanelPosition(FrameworkElement panel, TranslateTransform transform)
         {
             var values = ApplicationData.Current.LocalSettings.Values;
-            values[HudPanelXSetting] = hudPanelTransform.X;
-            values[HudPanelYSetting] = hudPanelTransform.Y;
-        }
-
-        private void ClampHudPanelPosition()
-        {
-            SetHudPanelPosition(hudPanelTransform.X, hudPanelTransform.Y, false);
-        }
-
-        private void SetHudPanelPosition(double x, double y, bool save)
-        {
-            // HudPanel starts at Margin=36. Keep at least 24 DIPs of the panel
-            // visible even when the host is temporarily smaller than the HUD.
-            var baseLeft = HudPanel.Margin.Left;
-            var baseTop = HudPanel.Margin.Top;
-            if (RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0)
+            if (panel == LcuPanel)
             {
-                hudPanelTransform.X = x;
-                hudPanelTransform.Y = y;
-                if (save) SaveHudPanelPosition();
-                return;
+                values[LcuPanelXSetting] = transform.X;
+                values[LcuPanelYSetting] = transform.Y;
             }
-            var panelWidth = HudPanel.ActualWidth > 0 ? HudPanel.ActualWidth : HudPanel.Width;
-            var panelHeight = HudPanel.ActualHeight > 0 ? HudPanel.ActualHeight : 80;
-            const double visibleEdge = 24;
-            var minX = -baseLeft - panelWidth + visibleEdge;
-            var minY = -baseTop - panelHeight + visibleEdge;
-            var maxX = Math.Max(minX, RootGrid.ActualWidth - baseLeft - visibleEdge);
-            var maxY = Math.Max(minY, RootGrid.ActualHeight - baseTop - visibleEdge);
-            hudPanelTransform.X = Math.Max(minX, Math.Min(maxX, x));
-            hudPanelTransform.Y = Math.Max(minY, Math.Min(maxY, y));
-            if (save) SaveHudPanelPosition();
+            else if (panel == PartyPanel)
+            {
+                values[PartyPanelXSetting] = transform.X;
+                values[PartyPanelYSetting] = transform.Y;
+            }
+            else if (panel == YoutubePanel)
+            {
+                values[YoutubePanelXSetting] = transform.X;
+                values[YoutubePanelYSetting] = transform.Y;
+            }
+        }
+
+        private void ClampAllPanelPositions()
+        {
+            SetPanelPosition(LcuPanel, LcuPanelTransform, LcuPanelTransform.X, LcuPanelTransform.Y, false);
+            SetPanelPosition(PartyPanel, PartyPanelTransform, PartyPanelTransform.X, PartyPanelTransform.Y, false);
+            SetPanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelTransform.X, YoutubePanelTransform.Y, false);
+        }
+
+        private void SetPanelPosition(FrameworkElement panel, TranslateTransform transform, double x, double y, bool save)
+        {
+            if (panel == null || transform == null) return;
+            if (RootGrid.ActualWidth > 0 && RootGrid.ActualHeight > 0)
+            {
+                var width = panel.ActualWidth > 0 ? panel.ActualWidth : (double.IsNaN(panel.Width) ? 100 : panel.Width);
+                var height = panel.ActualHeight > 0 ? panel.ActualHeight : (double.IsNaN(panel.Height) ? 80 : panel.Height);
+                const double visibleEdge = 24;
+                var baseLeft = panel.Margin.Left;
+                var baseTop = panel.Margin.Top;
+                var minX = -baseLeft - width + visibleEdge;
+                var minY = -baseTop - height + visibleEdge;
+                var maxX = Math.Max(minX, RootGrid.ActualWidth - baseLeft - visibleEdge);
+                var maxY = Math.Max(minY, RootGrid.ActualHeight - baseTop - visibleEdge);
+                x = Math.Max(minX, Math.Min(maxX, x));
+                y = Math.Max(minY, Math.Min(maxY, y));
+            }
+            transform.X = x;
+            transform.Y = y;
+            if (save) SavePanelPosition(panel, transform);
         }
 
         private async Task LoadYoutubeVideoAsync(string videoId)
