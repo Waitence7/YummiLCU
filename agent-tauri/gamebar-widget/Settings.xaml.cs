@@ -123,7 +123,7 @@ namespace YummiGameBarWidget
             }
             catch
             {
-                UpdateStatusText.Text = "Yummi LCU Agent에 연결하지 못했습니다. Agent를 실행해 주세요.";
+                UpdateStatusText.Text = "유미지지 데스크톱에 연결하지 못했습니다. 유미지지 데스크톱을 실행해 주세요.";
             }
             finally
             {

@@ -158,7 +158,7 @@ export async function mockInvoke<T>(
     }
     case "get_diagnostic_bundle": {
       return [
-        "Yummi LCU Agent Diagnostics",
+        "유미지지 데스크톱 Diagnostics",
         `app_version=${state.app_version ?? "mock"}`,
         `relay_connected=${state.relay}`,
         `lcu_connected=${state.lcu}`,

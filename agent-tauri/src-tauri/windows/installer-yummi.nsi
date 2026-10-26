@@ -444,7 +444,7 @@ Function YummiInstallPageShow
   ; messages from replacing this single status line while sections run.
   SetDetailsView hide
   SetDetailsPrint none
-  SendMessage $1 0x000C 0 "STR:Yummi LCU Agent 설치 중..."
+  SendMessage $1 0x000C 0 "STR:유미지지 데스크톱 설치 중..."
   SetCtlColors $1 "" "F0F0F0"
 
   ; Keep generous vertical spacing so the status text and native progress bar

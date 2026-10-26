@@ -47,7 +47,7 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
         .icon(icon)
         .menu(&menu)
         .show_menu_on_left_click(false)
-        .tooltip("Yummi LCU Agent")
+        .tooltip("유미지지 데스크톱")
         .on_menu_event(move |app, event| match event.id.as_ref() {
             OPEN_MENU_ID => request_main_window(app),
             QUIT_MENU_ID => request_exit(app),
@@ -214,7 +214,7 @@ fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
     } else {
         let builder =
             WebviewWindowBuilder::new(app, MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
-                .title("Yummi LCU Agent")
+                .title("유미지지 데스크톱")
                 .inner_size(640.0, 620.0)
                 .min_inner_size(520.0, 500.0)
                 .max_inner_size(900.0, 860.0)

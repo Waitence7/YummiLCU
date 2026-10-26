@@ -1195,7 +1195,7 @@ async fn detect_presence(
 fn yummi_assets() -> PresenceAssets {
     PresenceAssets {
         large_image: YUMMI_ICON_URL.into(),
-        large_text: "Yummi LCU Agent".into(),
+        large_text: "유미지지 데스크톱".into(),
         small_image: None,
         small_text: None,
     }
@@ -1296,7 +1296,7 @@ fn in_progress_snapshot(
             large_image: champion_icon_url(champion_id),
             large_text: champion_name,
             small_image: Some(YUMMI_ICON_URL.into()),
-            small_text: Some("Yummi LCU Agent".into()),
+            small_text: Some("유미지지 데스크톱".into()),
         }),
         None => Some(yummi_assets()),
     };
@@ -1592,7 +1592,7 @@ mod tests {
         assert!(assets.large_image.ends_with("/103.png"));
         assert_eq!(assets.large_text, "아리");
         assert_eq!(assets.small_image.as_deref(), Some(YUMMI_ICON_URL));
-        assert_eq!(assets.small_text.as_deref(), Some("Yummi LCU Agent"));
+        assert_eq!(assets.small_text.as_deref(), Some("유미지지 데스크톱"));
     }
 
     #[test]

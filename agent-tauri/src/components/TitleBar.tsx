@@ -106,7 +106,7 @@ export function TitleBar() {
       <div className="flex min-w-0 flex-1 items-center gap-2.5 px-3">
         <img src={appIcon} alt="" className="size-5 shrink-0" draggable={false} />
         <span className="truncate text-[13px] font-medium tracking-[0.01em]">
-          Yummi LCU Agent
+          유미지지 데스크톱
         </span>
       </div>
       <div className="flex h-full shrink-0" aria-label="창 제어">

@@ -661,7 +661,7 @@ fn build_diagnostic_bundle(ui: &UiState, flight: &[crate::diagnostics::FlightRec
     use std::fmt::Write as _;
 
     let mut out = String::new();
-    let _ = writeln!(out, "Yummi LCU Agent Diagnostics");
+    let _ = writeln!(out, "유미지지 데스크톱 Diagnostics");
     let _ = writeln!(out, "generated_at_ms={}", diagnostic_now_ms());
     let _ = writeln!(out, "app_version={}", ui.app_version);
     let _ = writeln!(out, "release_label={}", ui.release_label);

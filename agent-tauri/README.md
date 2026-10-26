@@ -1,4 +1,4 @@
-# Yummi LCU Agent (Tauri + Rust)
+# 유미지지 데스크톱 (Tauri + Rust)
 
 Windows 에이전트의 Tauri/Rust 구현입니다. Yummi Relay의 `/ws/agent` WebSocket 연결과 `agent.json` 설정 형식을 기준으로 합니다.
 

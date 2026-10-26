@@ -35,7 +35,7 @@ export function Header({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h1 className="text-[15px] font-bold tracking-tight text-slate-900">
-            Yummi LCU Agent
+            유미지지 데스크톱
           </h1>
           <p className="mt-0.5 truncate text-[11px] text-slate-500" title={state.status}>
             {state.status}

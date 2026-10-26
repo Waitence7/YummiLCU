@@ -33,7 +33,7 @@ const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
 const MAX_GAMEBAR_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(windows)]
-const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:47658";
+const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:19514";
 
 #[cfg(windows)]
 #[derive(Clone, Debug, Default)]
@@ -74,10 +74,11 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
             .spawn(move || pipe_server(snapshot_state))
             .ok();
 
+        let tcp_app = app.clone();
         let tcp_state = state.clone();
         std::thread::Builder::new()
             .name("yummi-gamebar-loopback".into())
-            .spawn(move || loopback_snapshot_server(tcp_state))
+            .spawn(move || loopback_server(tcp_app, tcp_state))
             .ok();
 
         let update_state = state.clone();
@@ -348,7 +349,9 @@ fn now_ms() -> u64 {
 }
 
 #[cfg(windows)]
-fn loopback_snapshot_server(state: Arc<AppState>) {
+fn loopback_server(app: AppHandle, state: Arc<AppState>) {
+    use std::io::{BufRead, BufReader};
+
     let listener = match TcpListener::bind(GAMEBAR_LOOPBACK_ADDR) {
         Ok(listener) => listener,
         Err(_) => return,
@@ -356,11 +359,43 @@ fn loopback_snapshot_server(state: Arc<AppState>) {
 
     for incoming in listener.incoming() {
         let Ok(mut stream) = incoming else { continue };
-        let mut payload =
-            serde_json::to_vec(&state.gamebar_snapshot()).unwrap_or_else(|_| b"{}".to_vec());
-        payload.push(b'\n');
-        let _ = stream.write_all(&payload);
-        let _ = stream.flush();
+        let app = app.clone();
+        let state = state.clone();
+        std::thread::spawn(move || {
+            // Preserve the legacy snapshot protocol: every connection receives
+            // a snapshot immediately, without having to send a request first.
+            let mut snapshot =
+                serde_json::to_vec(&state.gamebar_snapshot()).unwrap_or_else(|_| b"{}".to_vec());
+            snapshot.push(b'\n');
+            if stream.write_all(&snapshot).is_err() || stream.flush().is_err() {
+                return;
+            }
+
+            // Command-capable clients consume the snapshot greeting, then send
+            // one newline-delimited command on the same localhost connection.
+            // Snapshot-only clients close after the first line, yielding EOF.
+            let Ok(reader_stream) = stream.try_clone() else {
+                return;
+            };
+            let _ = reader_stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut reader = BufReader::new(reader_stream);
+            let mut raw = String::new();
+            let Ok(read) = reader.read_line(&mut raw) else {
+                return;
+            };
+            if read == 0 {
+                return;
+            }
+            let response = if raw.len() > 1024 {
+                json_response(false, "명령을 읽지 못했습니다.")
+            } else {
+                handle_command(&app, state, raw.trim_end_matches(['\r', '\n']))
+            };
+            let mut payload = response.into_bytes();
+            payload.push(b'\n');
+            let _ = stream.write_all(&payload);
+            let _ = stream.flush();
+        });
     }
 }
 

@@ -88,7 +88,7 @@ export function PatchNotesTab() {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900">Yummi LCU Agent 0.7.3</h2>
+              <h2 className="text-[18px] font-semibold tracking-tight text-slate-900">유미지지 데스크톱 0.7.3</h2>
               <Badge tone="ok">정식 릴리스</Badge>
             </div>
             <p className="mt-1 text-[11px] leading-relaxed text-slate-500">

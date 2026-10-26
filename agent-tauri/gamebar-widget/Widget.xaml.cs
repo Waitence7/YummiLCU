@@ -487,7 +487,7 @@ namespace YummiGameBarWidget
             using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
             using (var socket = new StreamSocket())
             {
-                await socket.ConnectAsync(new HostName("127.0.0.1"), "47658").AsTask(timeout.Token);
+                await socket.ConnectAsync(new HostName("127.0.0.1"), "19514").AsTask(timeout.Token);
                 using (var stream = socket.InputStream.AsStreamForRead())
                     return await NativePipeClient.ReadLineAsync(stream, timeout.Token);
             }
@@ -1098,13 +1098,45 @@ namespace YummiGameBarWidget
 
         private static async Task<string> SendAgentCommandAsync(string payload)
         {
-            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
-            using (var pipe = NativePipeClient.Open(CommandPipeName, FileAccess.ReadWrite))
+            Exception pipeError = null;
+            try
             {
-                var data = Encoding.UTF8.GetBytes(payload + "\n");
-                await pipe.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
-                await pipe.FlushAsync(timeout.Token).ConfigureAwait(false);
-                return await NativePipeClient.ReadLineAsync(pipe, timeout.Token).ConfigureAwait(false);
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+                using (var pipe = NativePipeClient.Open(CommandPipeName, FileAccess.ReadWrite))
+                {
+                    var data = Encoding.UTF8.GetBytes(payload + "\n");
+                    await pipe.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
+                    await pipe.FlushAsync(timeout.Token).ConfigureAwait(false);
+                    return await NativePipeClient.ReadLineAsync(pipe, timeout.Token).ConfigureAwait(false);
+                }
+            }
+            catch (Exception ex)
+            {
+                pipeError = ex;
+            }
+
+            try
+            {
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+                using (var socket = new StreamSocket())
+                {
+                    await socket.ConnectAsync(new HostName("127.0.0.1"), "19514").AsTask(timeout.Token);
+                    using (var output = socket.OutputStream.AsStreamForWrite())
+                    using (var input = socket.InputStream.AsStreamForRead())
+                    {
+                        // The unified loopback endpoint keeps snapshot compatibility by
+                        // sending the current snapshot immediately after connect.
+                        await NativePipeClient.ReadLineAsync(input, timeout.Token).ConfigureAwait(false);
+                        var data = Encoding.UTF8.GetBytes(payload + "\n");
+                        await output.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
+                        await output.FlushAsync(timeout.Token).ConfigureAwait(false);
+                        return await NativePipeClient.ReadLineAsync(input, timeout.Token).ConfigureAwait(false);
+                    }
+                }
+            }
+            catch (Exception socketError)
+            {
+                throw new AggregateException(pipeError, socketError);
             }
         }
 
@@ -1409,7 +1441,7 @@ namespace YummiGameBarWidget
         private void SetOffline(Exception error)
         {
             PhaseText.Text = "Offline";
-            RiotIdText.Text = "유미 LCU Agent 연결을 확인해 주세요";
+            RiotIdText.Text = "유미지지 데스크톱 연결을 확인해 주세요";
             PartyText.Text = "파티 정보 없음";
             var failures = error as AggregateException;
             BridgeText.Text = failures == null ? "에이전트 연결 실패 · " + ErrorCode(error) :

@@ -117,7 +117,7 @@ foreach ($depPath in $missingDeps) {
   Add-AppxPackage -Path $depPath -ForceApplicationShutdown:$Force
 }
 
-Write-Host '유미 Game Bar 오버레이를 설치합니다.'
+Write-Host '유미지지 Xbox Game Bar 오버레이를 설치합니다.'
 Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceUpdateFromAnyVersion
 
 # UWP/Game Bar widgets are AppContainer processes. Enable the documented
@@ -143,7 +143,7 @@ if ($installedOverlay -and $installedOverlay.PackageFamilyName) {
 }
 
 Write-Host ''
-Write-Host '설치 완료. Win+G > 위젯 메뉴 > 유미 LCU 에서 실행하세요.' -ForegroundColor Green
+Write-Host '설치 완료. Win+G > 위젯 메뉴 > 유미지지 오버레이 에서 실행하세요.' -ForegroundColor Green
 
 
 if (-not $SkipAutoUpdateSetup) {
@@ -155,9 +155,9 @@ if (-not $SkipAutoUpdateSetup) {
       New-Item -ItemType Directory -Force -Path $updaterDir | Out-Null
       Copy-Item $updaterSource $updaterTarget -Force
 
-      # The Yummi LCU Agent owns periodic overlay update checks.
+      # The 유미지지 데스크톱 owns periodic overlay update checks.
       # Keep only the updater files here; no scheduled task is required.
-      Write-Host '오버레이 자동 업데이트 준비 완료 (Yummi LCU Agent가 5분마다 확인).' -ForegroundColor DarkGray
+      Write-Host '오버레이 자동 업데이트 준비 완료 (유미지지 데스크톱가 5분마다 확인).' -ForegroundColor DarkGray
     } else {
       Write-Warning '오버레이 updater 스크립트를 찾지 못했습니다.'
     }

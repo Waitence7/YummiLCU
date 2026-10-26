@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:uap3="http://schemas.microsoft.com/appx/manifest/uap/windows10/3" IgnorableNamespaces="uap uap3 mp">
-  <Identity Name="YummiGameBarWidget" Publisher="CN=Yummi" Version="0.1.40.0" />
+  <Identity Name="YummiGameBarWidget" Publisher="CN=Yummi" Version="0.1.41.0" />
   <mp:PhoneIdentity PhoneProductId="ca6c501b-e740-4ac7-8ef8-6f34cbcbbd3d" PhonePublisherId="00000000-0000-0000-0000-000000000000" />
-  <Properties><DisplayName>유미 LCU</DisplayName><PublisherDisplayName>Yummi</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
+  <Properties><DisplayName>유미지지 오버레이</DisplayName><PublisherDisplayName>YummiLabs</PublisherDisplayName><Logo>Assets\StoreLogo.png</Logo></Properties>
   <Dependencies><TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.18362.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
   <Resources><Resource Language="x-generate" /></Resources>
   <Capabilities>
@@ -11,50 +11,20 @@
   </Capabilities>
   <Applications>
     <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="YummiGameBarWidget.App">
-      <uap:VisualElements AppListEntry="none" DisplayName="유미 Game Bar 오버레이" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" Description="유미 LCU Xbox Game Bar 오버레이" BackgroundColor="transparent">
+      <uap:VisualElements AppListEntry="none" DisplayName="유미지지 오버레이" Square150x150Logo="Assets\Square150x150Logo.png" Square44x44Logo="Assets\Square44x44Logo.png" Description="유미지지 Xbox Game Bar 오버레이" BackgroundColor="transparent">
         <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
       </uap:VisualElements>
       <Extensions>
         <uap3:Extension Category="windows.appExtension">
-          <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiLCU" DisplayName="유미 LCU HUD" Description="League LCU 상태를 전체 화면 HUD로 표시합니다" PublicFolder="GameBar">
+          <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiLCU" DisplayName="유미지지 오버레이" Description="League LCU 상태를 전체 화면 HUD로 표시합니다" PublicFolder="GameBar">
             <uap3:Properties>
               <GameBarWidget Type="Standard">
                 <HomeMenuVisible>true</HomeMenuVisible>
                 <PinningSupported>true</PinningSupported>
                 <ActivateAfterInstall>true</ActivateAfterInstall>
-                <SettingsSupported AppExtensionId="YummiLCUSettings" />
                 <Window>
                   <AllowForegroundTransparency>true</AllowForegroundTransparency>
                   <Size><Height>900</Height><Width>1440</Width><MinHeight>360</MinHeight><MinWidth>640</MinWidth><MaxHeight>4320</MaxHeight><MaxWidth>7680</MaxWidth></Size>
-                  <ResizeSupported><Horizontal>true</Horizontal><Vertical>true</Vertical></ResizeSupported>
-                </Window>
-              </GameBarWidget>
-            </uap3:Properties>
-          </uap3:AppExtension>
-        </uap3:Extension>
-        <uap3:Extension Category="windows.appExtension">
-          <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiLCUController" DisplayName="유미 LCU 컨트롤" Description="유미 LCU 설정을 여는 작은 컨트롤러" PublicFolder="GameBar">
-            <uap3:Properties>
-              <GameBarWidget Type="Standard">
-                <HomeMenuVisible>true</HomeMenuVisible>
-                <PinningSupported>false</PinningSupported>
-                <SettingsSupported AppExtensionId="YummiLCUSettings" />
-                <Window>
-                  <AllowForegroundTransparency>true</AllowForegroundTransparency>
-                  <Size><Height>64</Height><Width>168</Width><MinHeight>56</MinHeight><MinWidth>140</MinWidth><MaxHeight>96</MaxHeight><MaxWidth>220</MaxWidth></Size>
-                  <ResizeSupported><Horizontal>false</Horizontal><Vertical>false</Vertical></ResizeSupported>
-                </Window>
-              </GameBarWidget>
-            </uap3:Properties>
-          </uap3:AppExtension>
-        </uap3:Extension>
-        <uap3:Extension Category="windows.appExtension">
-          <uap3:AppExtension Name="microsoft.gameBarUIExtension" Id="YummiLCUSettings" DisplayName="유미 LCU 설정" Description="유미 LCU HUD 설정" PublicFolder="GameBar">
-            <uap3:Properties>
-              <GameBarWidget Type="Settings">
-                <Window>
-                  <AllowForegroundTransparency>true</AllowForegroundTransparency>
-                  <Size><Height>520</Height><Width>420</Width><MinHeight>420</MinHeight><MinWidth>360</MinWidth><MaxHeight>720</MaxHeight><MaxWidth>560</MaxWidth></Size>
                   <ResizeSupported><Horizontal>true</Horizontal><Vertical>true</Vertical></ResizeSupported>
                 </Window>
               </GameBarWidget>
