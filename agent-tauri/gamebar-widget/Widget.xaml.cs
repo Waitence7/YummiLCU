@@ -149,6 +149,9 @@ namespace YummiGameBarWidget
                 YoutubeOnlyLayer.Visibility = Visibility.Visible;
                 HudPanel.Visibility = Visibility.Collapsed;
                 RootGrid.Background = new SolidColorBrush(Colors.Black);
+                var configuredId = ExtractYoutubeVideoId(YoutubePreferences.Video);
+                if (string.IsNullOrWhiteSpace(configuredId))
+                    SetYoutubeOnlyState(true, "YouTube 영상이 설정되지 않았습니다.\n설정에서 영상 링크 또는 ID를 입력해 주세요.");
             }
             else
             {
@@ -158,6 +161,7 @@ namespace YummiGameBarWidget
                     YoutubeEmbeddedSlot.Content = YoutubeVideoHost;
                 }
                 YoutubeOnlyLayer.Visibility = Visibility.Collapsed;
+                SetYoutubeOnlyState(false, null);
                 HudPanel.Visibility = HudPreferences.Visible ? Visibility.Visible : Visibility.Collapsed;
                 RootGrid.Background = HudPreferences.CoverageTint
                     ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
@@ -648,6 +652,7 @@ namespace YummiGameBarWidget
         {
             youtubeReady = false;
             youtubePlaying = false;
+            SetYoutubeOnlyState(true, "YouTube 영상을 불러오는 중…");
             YoutubeStatusText.Text = "YouTube 플레이어 불러오는 중…";
             youtubePendingPlayerUrl = "https://yummi.duckdns.org/gamebar/youtube-player.html?v=" +
                 Uri.EscapeDataString(videoId) + "&volume=" + ((int)Math.Round(youtubeVolume)).ToString();
@@ -725,10 +730,12 @@ namespace YummiGameBarWidget
             if (!args.IsSuccess)
             {
                 youtubeReady = false;
+                SetYoutubeOnlyState(true, "YouTube 영상을 불러오지 못했습니다.\n설정에서 링크를 확인해 주세요.");
                 YoutubeStatusText.Text = "YouTube 페이지를 불러오지 못했습니다 · WebView2 " + args.WebErrorStatus;
                 return;
             }
             youtubeReady = true;
+            SetYoutubeOnlyState(false, null);
             _ = SetYoutubeVolumeAsync(youtubeVolume);
             var host = sender.Source == null ? "" : sender.Source.Host;
             YoutubeStatusText.Text = host.EndsWith("youtube.com", StringComparison.OrdinalIgnoreCase)
@@ -741,12 +748,36 @@ namespace YummiGameBarWidget
             if (!args.IsSuccess)
             {
                 youtubeReady = false;
+                SetYoutubeOnlyState(true, "YouTube 영상을 불러오지 못했습니다.\n설정에서 링크를 확인해 주세요.");
                 YoutubeStatusText.Text = "기본 YouTube 플레이어를 불러오지 못했습니다";
                 return;
             }
             youtubeReady = true;
+            SetYoutubeOnlyState(false, null);
             _ = SetYoutubeVolumeAsync(youtubeVolume);
             YoutubeStatusText.Text = "영상 준비됨 · 기본 WebView fallback";
+        }
+
+        private void SetYoutubeOnlyState(bool visible, string message)
+        {
+            if (YoutubeOnlyState == null) return;
+            YoutubeOnlyState.Visibility = visible && YoutubePreferences.VideoOnlyMode
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            if (!string.IsNullOrWhiteSpace(message) && YoutubeOnlyStateText != null)
+                YoutubeOnlyStateText.Text = message;
+        }
+
+        private async void YoutubeOnlySettingsButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (widget != null) await widget.ActivateSettingsAsync();
+            }
+            catch
+            {
+                SetYoutubeOnlyState(true, "설정을 열지 못했습니다.\nWin+G의 유미 LCU 설정을 열어 주세요.");
+            }
         }
 
         private async void YoutubePlayButton_Click(object sender, RoutedEventArgs e)

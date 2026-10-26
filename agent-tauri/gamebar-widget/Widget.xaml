@@ -94,6 +94,13 @@
     </Border>
     <Grid x:Name="YoutubeOnlyLayer" Visibility="Collapsed" Background="Black">
       <ContentControl x:Name="YoutubeOnlySlot" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+      <Border x:Name="YoutubeOnlyState" Background="#E6120F1C" Visibility="Visible">
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" MaxWidth="420" Margin="24">
+          <TextBlock Text="유미 YouTube" Foreground="White" FontSize="22" FontWeight="SemiBold" HorizontalAlignment="Center"/>
+          <TextBlock x:Name="YoutubeOnlyStateText" Text="YouTube 영상이 설정되지 않았습니다." Foreground="#D9CFE8" FontSize="13" TextAlignment="Center" TextWrapping="Wrap"/>
+          <Button Content="설정 열기" HorizontalAlignment="Center" Padding="18,8" Click="YoutubeOnlySettingsButton_Click"/>
+        </StackPanel>
+      </Border>
     </Grid>
   </Grid>
 </Page>
