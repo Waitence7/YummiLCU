@@ -10,38 +10,80 @@
               HorizontalAlignment="Left"
               VerticalAlignment="Top"
               Margin="20,20,0,0"
-              Padding="12"
               CornerRadius="12"
               Background="#E6141020"
               BorderBrush="#507B5AA6"
-              BorderThickness="1"
-              PointerPressed="Panel_PointerPressed"
-              PointerMoved="Panel_PointerMoved"
-              PointerReleased="Panel_PointerReleased"
-              PointerCanceled="Panel_PointerCanceled"
-              PointerCaptureLost="Panel_PointerCaptureLost">
+              BorderThickness="1">
         <Border.RenderTransform>
           <TranslateTransform x:Name="LcuPanelTransform"/>
         </Border.RenderTransform>
-        <StackPanel Spacing="7">
-          <Grid>
-            <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="*"/>
-              <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-            <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#7A6A86" VerticalAlignment="Center" Margin="0,0,8,0"/>
-            <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
-              <TextBlock Text="LCU 상태" FontSize="13" FontWeight="SemiBold" Foreground="White"/>
-              <TextBlock x:Name="VersionText" Text="v-" FontSize="9" Foreground="#9687AA" VerticalAlignment="Center"/>
+        <Grid>
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+          <Border x:Name="LcuMoveBar"
+                  Grid.Row="0"
+                  Height="24"
+                  Visibility="Collapsed"
+                  Background="#E6141020"
+                  BorderBrush="#507B5AA6"
+                  BorderThickness="0,0,0,1"
+                  Tag="lcu"
+                  PointerPressed="PanelMoveBar_PointerPressed"
+                  PointerMoved="PanelMoveBar_PointerMoved"
+                  PointerReleased="PanelMoveBar_PointerReleased"
+                  PointerCanceled="PanelMoveBar_PointerCanceled"
+                  PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
+            <Grid Padding="8,0,3,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+              <TextBlock Text="Yummi LCU" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
+              <Button x:Name="LcuEyeButton" Grid.Column="1" Tag="lcu" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="PanelEyeButton_Click" ToolTipService.ToolTip="LCU 내용 가리기/표시">
+                <TextBlock x:Name="LcuEyeIcon" Text="&#xE890;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="White"/>
+              </Button>
+              <Button Grid.Column="2" Tag="lcu" Content="×" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="15" Click="PanelCloseButton_Click" ToolTipService.ToolTip="LCU 패널 닫기"/>
+            </Grid>
+          </Border>
+          <ScrollViewer x:Name="LcuBody"
+                        Grid.Row="1"
+                        Height="145"
+                        HorizontalScrollBarVisibility="Disabled"
+                        VerticalScrollBarVisibility="Disabled">
+            <StackPanel Padding="12" Spacing="7">
+              <Grid>
+                <Grid.ColumnDefinitions>
+                  <ColumnDefinition Width="Auto"/>
+                  <ColumnDefinition Width="*"/>
+                  <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#7A6A86" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center">
+                  <TextBlock Text="LCU 상태" FontSize="13" FontWeight="SemiBold" Foreground="White"/>
+                  <TextBlock x:Name="VersionText" Text="v-" FontSize="9" Foreground="#9687AA" VerticalAlignment="Center"/>
+                </StackPanel>
+                <TextBlock x:Name="PhaseText" Grid.Column="2" Text="Offline" FontSize="10" Foreground="#CDBDE8" VerticalAlignment="Center"/>
+              </Grid>
+              <TextBlock x:Name="RiotIdText" Text="League 클라이언트를 기다리는 중" FontSize="12" Foreground="White" TextTrimming="CharacterEllipsis"/>
+              <TextBlock x:Name="BridgeText" Text="유미 에이전트 연결 확인 중…" FontSize="9" Foreground="#A99DBB" TextWrapping="Wrap"/>
+              <TextBlock x:Name="DisplayText" FontSize="8" Foreground="#776E84" TextWrapping="Wrap"/>
+              <TextBlock x:Name="InputText" FontSize="8" Foreground="#9388A3" TextWrapping="Wrap"/>
             </StackPanel>
-            <TextBlock x:Name="PhaseText" Grid.Column="2" Text="Offline" FontSize="10" Foreground="#CDBDE8" VerticalAlignment="Center"/>
+          </ScrollViewer>
+          <Grid x:Name="LcuResizeHandles" Grid.RowSpan="2" Visibility="Collapsed">
+            <Border Tag="lcu:left" Width="7" HorizontalAlignment="Left" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Width="2" HorizontalAlignment="Left" Background="#70FFFFFF"/></Border>
+            <Border Tag="lcu:right" Width="7" HorizontalAlignment="Right" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Width="2" HorizontalAlignment="Right" Background="#70FFFFFF"/></Border>
+            <Border Tag="lcu:top" Height="7" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Height="2" VerticalAlignment="Top" Background="#70FFFFFF"/></Border>
+            <Border Tag="lcu:bottom" Height="7" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Height="2" VerticalAlignment="Bottom" Background="#70FFFFFF"/></Border>
+            <Border Tag="lcu:topleft" Width="12" Height="12" HorizontalAlignment="Left" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="lcu:topright" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="lcu:bottomleft" Width="12" Height="12" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="lcu:bottomright" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
           </Grid>
-          <TextBlock x:Name="RiotIdText" Text="League 클라이언트를 기다리는 중" FontSize="12" Foreground="White" TextTrimming="CharacterEllipsis"/>
-          <TextBlock x:Name="BridgeText" Text="유미 에이전트 연결 확인 중…" FontSize="9" Foreground="#A99DBB" TextWrapping="Wrap"/>
-          <TextBlock x:Name="DisplayText" FontSize="8" Foreground="#776E84" TextWrapping="Wrap"/>
-          <TextBlock x:Name="InputText" FontSize="8" Foreground="#9388A3" TextWrapping="Wrap"/>
-        </StackPanel>
+        </Grid>
       </Border>
 
       <Border x:Name="PartyPanel"
@@ -49,28 +91,46 @@
               HorizontalAlignment="Left"
               VerticalAlignment="Top"
               Margin="20,190,0,0"
-              Padding="12"
               CornerRadius="12"
               Background="#E6141020"
               BorderBrush="#507B5AA6"
-              BorderThickness="1"
-              PointerPressed="Panel_PointerPressed"
-              PointerMoved="Panel_PointerMoved"
-              PointerReleased="Panel_PointerReleased"
-              PointerCanceled="Panel_PointerCanceled"
-              PointerCaptureLost="Panel_PointerCaptureLost">
+              BorderThickness="1">
         <Border.RenderTransform>
           <TranslateTransform x:Name="PartyPanelTransform"/>
         </Border.RenderTransform>
-        <StackPanel Spacing="7">
-          <TextBlock Text="파티" FontSize="13" FontWeight="SemiBold" Foreground="White"/>
-          <TextBlock x:Name="PartyText" Text="파티 정보 없음" FontSize="11" Foreground="#BDB1D0" TextWrapping="Wrap"/>
-        </StackPanel>
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Border x:Name="PartyMoveBar" Grid.Row="0" Height="24" Visibility="Collapsed" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="party"
+                  PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
+            <Grid Padding="8,0,3,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBlock Text="Party" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
+              <Button x:Name="PartyEyeButton" Grid.Column="1" Tag="party" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="PanelEyeButton_Click" ToolTipService.ToolTip="파티 내용 가리기/표시">
+                <TextBlock x:Name="PartyEyeIcon" Text="&#xE890;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="White"/>
+              </Button>
+              <Button Grid.Column="2" Tag="party" Content="×" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="15" Click="PanelCloseButton_Click" ToolTipService.ToolTip="파티 패널 닫기"/>
+            </Grid>
+          </Border>
+          <ScrollViewer x:Name="PartyBody" Grid.Row="1" Height="70" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Disabled">
+            <StackPanel Padding="12" Spacing="7">
+              <TextBlock x:Name="PartyText" Text="파티 정보 없음" FontSize="11" Foreground="#BDB1D0" TextWrapping="Wrap"/>
+            </StackPanel>
+          </ScrollViewer>
+          <Grid x:Name="PartyResizeHandles" Grid.RowSpan="2" Visibility="Collapsed">
+            <Border Tag="party:left" Width="7" HorizontalAlignment="Left" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Width="2" HorizontalAlignment="Left" Background="#70FFFFFF"/></Border>
+            <Border Tag="party:right" Width="7" HorizontalAlignment="Right" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Width="2" HorizontalAlignment="Right" Background="#70FFFFFF"/></Border>
+            <Border Tag="party:top" Height="7" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Height="2" VerticalAlignment="Top" Background="#70FFFFFF"/></Border>
+            <Border Tag="party:bottom" Height="7" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Height="2" VerticalAlignment="Bottom" Background="#70FFFFFF"/></Border>
+            <Border Tag="party:topleft" Width="12" Height="12" HorizontalAlignment="Left" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="party:topright" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="party:bottomleft" Width="12" Height="12" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="party:bottomright" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+          </Grid>
+        </Grid>
       </Border>
 
       <Border x:Name="YoutubePanel"
               Width="340"
-              Height="191"
               HorizontalAlignment="Left"
               VerticalAlignment="Top"
               Margin="280,20,0,0"
@@ -82,88 +142,36 @@
           <TranslateTransform x:Name="YoutubePanelTransform"/>
         </Border.RenderTransform>
         <Grid Background="Black">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-          </Grid.RowDefinitions>
-
-          <!-- Game Bar가 열려 있을 때만 보이는 일반 창 형태의 빈 이동 바. -->
-          <Border x:Name="YoutubeMoveBar"
-                  Grid.Row="0"
-                  Height="24"
-                  Visibility="Collapsed"
-                  Background="#E6141020"
-                  BorderBrush="#507B5AA6"
-                  BorderThickness="0,0,0,1"
-                  PointerPressed="YoutubeMoveBar_PointerPressed"
-                  PointerMoved="YoutubeMoveBar_PointerMoved"
-                  PointerReleased="YoutubeMoveBar_PointerReleased"
-                  PointerCanceled="YoutubeMoveBar_PointerCanceled"
-                  PointerCaptureLost="YoutubeMoveBar_PointerCaptureLost"/>
-
-          <Grid x:Name="YoutubeVideoHost" Grid.Row="1" Background="Black">
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Border x:Name="YoutubeMoveBar" Grid.Row="0" Height="24" Visibility="Collapsed" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="youtube"
+                  PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
+            <Grid Padding="8,0,3,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBlock Text="YouTube Player" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
+              <Button x:Name="YoutubeEyeButton" Grid.Column="1" Tag="youtube" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="PanelEyeButton_Click" ToolTipService.ToolTip="YouTube 내용 가리기/표시">
+                <TextBlock x:Name="YoutubeEyeIcon" Text="&#xE890;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="White"/>
+              </Button>
+              <Button Grid.Column="2" Tag="youtube" Content="×" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="15" Click="PanelCloseButton_Click" ToolTipService.ToolTip="YouTube 패널 닫기"/>
+            </Grid>
+          </Border>
+          <Grid x:Name="YoutubeVideoHost" Grid.Row="1" Height="191" Background="Black">
             <Grid x:Name="YoutubeWebHost">
-              <WebView x:Name="YoutubeFallbackWebView"
-                       HorizontalAlignment="Stretch"
-                       VerticalAlignment="Stretch"
-                       Visibility="Collapsed"
-                       NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
+              <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
             </Grid>
             <Border x:Name="YoutubeInlineState" Background="#C8120F1C" Visibility="Visible">
-              <TextBlock x:Name="YoutubeInlineStateText"
-                         Text="설정에서 YouTube 영상을 선택해 주세요"
-                         Foreground="#D9CFE8"
-                         FontSize="11"
-                         TextAlignment="Center"
-                         TextWrapping="Wrap"
-                         HorizontalAlignment="Center"
-                         VerticalAlignment="Center"
-                         Margin="16"/>
+              <TextBlock x:Name="YoutubeInlineStateText" Text="설정에서 YouTube 영상을 선택해 주세요" Foreground="#D9CFE8" FontSize="11" TextAlignment="Center" TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16"/>
             </Border>
           </Grid>
-
-          <!-- 일반 창처럼 오른쪽/아래 테두리와 우하단 모서리를 잡아 크기를 조절한다. -->
-          <Border x:Name="YoutubeRightResizeBorder"
-                  Grid.RowSpan="2"
-                  Width="10"
-                  HorizontalAlignment="Right"
-                  Background="#01000000"
-                  PointerPressed="YoutubeRightResizeBorder_PointerPressed"
-                  PointerMoved="YoutubeResizeBorder_PointerMoved"
-                  PointerReleased="YoutubeResizeBorder_PointerReleased"
-                  PointerCanceled="YoutubeResizeBorder_PointerCanceled"
-                  PointerCaptureLost="YoutubeResizeBorder_PointerCaptureLost">
-            <Border Width="2" HorizontalAlignment="Right" Background="#70FFFFFF"/>
-          </Border>
-          <Border x:Name="YoutubeBottomResizeBorder"
-                  Grid.RowSpan="2"
-                  Height="10"
-                  VerticalAlignment="Bottom"
-                  Background="#01000000"
-                  PointerPressed="YoutubeBottomResizeBorder_PointerPressed"
-                  PointerMoved="YoutubeResizeBorder_PointerMoved"
-                  PointerReleased="YoutubeResizeBorder_PointerReleased"
-                  PointerCanceled="YoutubeResizeBorder_PointerCanceled"
-                  PointerCaptureLost="YoutubeResizeBorder_PointerCaptureLost">
-            <Border Height="2" VerticalAlignment="Bottom" Background="#70FFFFFF"/>
-          </Border>
-          <Border x:Name="YoutubeCornerResizeBorder"
-                  Grid.RowSpan="2"
-                  Width="16"
-                  Height="16"
-                  HorizontalAlignment="Right"
-                  VerticalAlignment="Bottom"
-                  Background="#01000000"
-                  PointerPressed="YoutubeCornerResizeBorder_PointerPressed"
-                  PointerMoved="YoutubeResizeBorder_PointerMoved"
-                  PointerReleased="YoutubeResizeBorder_PointerReleased"
-                  PointerCanceled="YoutubeResizeBorder_PointerCanceled"
-                  PointerCaptureLost="YoutubeResizeBorder_PointerCaptureLost">
-            <Grid>
-              <Border Width="2" HorizontalAlignment="Right" Background="#A0FFFFFF"/>
-              <Border Height="2" VerticalAlignment="Bottom" Background="#A0FFFFFF"/>
-            </Grid>
-          </Border>
+          <Grid x:Name="YoutubeResizeHandles" Grid.RowSpan="2" Visibility="Collapsed">
+            <Border Tag="youtube:left" Width="7" HorizontalAlignment="Left" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Width="2" HorizontalAlignment="Left" Background="#70FFFFFF"/></Border>
+            <Border Tag="youtube:right" Width="7" HorizontalAlignment="Right" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Width="2" HorizontalAlignment="Right" Background="#70FFFFFF"/></Border>
+            <Border Tag="youtube:top" Height="7" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Height="2" VerticalAlignment="Top" Background="#70FFFFFF"/></Border>
+            <Border Tag="youtube:bottom" Height="7" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Height="2" VerticalAlignment="Bottom" Background="#70FFFFFF"/></Border>
+            <Border Tag="youtube:topleft" Width="12" Height="12" HorizontalAlignment="Left" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="youtube:topright" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="youtube:bottomleft" Width="12" Height="12" HorizontalAlignment="Left" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="youtube:bottomright" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+          </Grid>
         </Grid>
       </Border>
     </Grid>

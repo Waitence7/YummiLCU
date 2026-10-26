@@ -5,6 +5,7 @@ namespace YummiGameBarWidget
     internal static class YoutubePreferences
     {
         internal static string Video { get { object v; return ApplicationData.Current.LocalSettings.Values.TryGetValue("YoutubeWidgetVideo", out v) && v is string ? (string)v : ""; } set { Set("YoutubeWidgetVideo", value ?? ""); } }
+        internal static bool Visible { get { object v; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("YoutubeWidgetVisible", out v) || !(v is bool) || (bool)v; } set { Set("YoutubeWidgetVisible", value); } }
         internal static double Volume { get { object v; return ApplicationData.Current.LocalSettings.Values.TryGetValue("YoutubeWidgetVolume", out v) && v is double ? Math.Max(0, Math.Min(100, (double)v)) : 60.0; } set { Set("YoutubeWidgetVolume", Math.Max(0, Math.Min(100, value))); } }
         internal static string Action { get { object v; return ApplicationData.Current.LocalSettings.Values.TryGetValue("YoutubeWidgetAction", out v) && v is string ? (string)v : ""; } }
         internal static long ActionRequest { get { object v; return ApplicationData.Current.LocalSettings.Values.TryGetValue("YoutubeWidgetActionRequest", out v) && v is long ? (long)v : 0; } }

@@ -59,30 +59,35 @@ namespace YummiGameBarWidget
         private Windows.Foundation.Point panelDragStartPoint;
         private double panelDragStartX;
         private double panelDragStartY;
-        private uint? youtubeResizePointerId;
-        private Windows.Foundation.Point youtubeResizeStartPoint;
-        private double youtubeResizeStartWidth;
-        private double youtubeResizeStartHeight;
-        private string youtubeResizeMode;
+        private FrameworkElement resizedPanel;
+        private FrameworkElement resizedBody;
+        private uint? panelResizePointerId;
+        private Windows.Foundation.Point panelResizeStartPoint;
+        private double panelResizeStartWidth;
+        private double panelResizeStartHeight;
+        private double panelResizeStartX;
+        private double panelResizeStartY;
+        private string panelResizeMode;
+        private string panelResizeKey;
         private const string LcuPanelXSetting = "lcu-panel-x";
         private const string LcuPanelYSetting = "lcu-panel-y";
+        private const string LcuPanelWidthSetting = "lcu-panel-width";
+        private const string LcuPanelHeightSetting = "lcu-panel-height";
         private const string PartyPanelXSetting = "party-panel-x";
         private const string PartyPanelYSetting = "party-panel-y";
+        private const string PartyPanelWidthSetting = "party-panel-width";
+        private const string PartyPanelHeightSetting = "party-panel-height";
         private const string YoutubePanelXSetting = "youtube-panel-x";
         private const string YoutubePanelYSetting = "youtube-panel-y";
         private const string YoutubePanelWidthSetting = "youtube-panel-width";
         private const string YoutubePanelHeightSetting = "youtube-panel-height";
-        private const double YoutubeMinWidth = 220;
-        private const double YoutubeMaxWidth = 1280;
-        private const double YoutubeMinHeight = 124;
-        private const double YoutubeMaxHeight = 720;
 
         public Widget()
         {
             InitializeComponent();
             SetVersionText();
             RestorePanelPositions();
-            RestoreYoutubePanelSize();
+            RestorePanelSizes();
             SizeChanged += (_, __) => ClampAllPanelPositions();
             timer.Tick += async (_, __) => await RefreshAsync();
             Loaded += async (_, __) =>
@@ -159,6 +164,7 @@ namespace YummiGameBarWidget
             RootGrid.Background = HudPreferences.CoverageTint
                 ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
                 : new SolidColorBrush(Colors.Transparent);
+            UpdatePanelChrome();
             ApplyYoutubePreferences();
             if (string.IsNullOrWhiteSpace(ExtractYoutubeVideoId(YoutubePreferences.Video)))
                 SetYoutubeInlineState(true, "영상 링크를 입력해 주세요");
@@ -340,7 +346,7 @@ namespace YummiGameBarWidget
         {
             if (widget == null) return;
             bool pinnedOnly = widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
-            YoutubeMoveBar.Visibility = pinnedOnly ? Visibility.Collapsed : Visibility.Visible;
+            UpdatePanelChrome();
             bool passesClicks = pinnedOnly && widget.Pinned && widget.ClickThroughEnabled;
             IsHitTestVisible = !passesClicks;
             if (passesClicks) InputText.Text = "게임으로 클릭 통과 중";
@@ -485,113 +491,184 @@ namespace YummiGameBarWidget
             if (panelDragPointerId == e.Pointer.PointerId) ClearPanelDrag();
         }
 
-        private void YoutubeMoveBar_PointerPressed(object sender, PointerRoutedEventArgs e)
+        private void PanelMoveBar_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            if (youtubeResizePointerId.HasValue) return;
-            BeginPanelDrag(YoutubePanel, e, sender as UIElement);
+            if (panelResizePointerId.HasValue || IsPointerFromButton(e.OriginalSource as DependencyObject)) return;
+            var key = (sender as FrameworkElement)?.Tag as string;
+            BeginPanelDrag(GetPanel(key), e, sender as UIElement);
         }
 
-        private void YoutubeMoveBar_PointerMoved(object sender, PointerRoutedEventArgs e)
+        private bool IsPointerFromButton(DependencyObject source)
+        {
+            for (var current = source; current != null; current = VisualTreeHelper.GetParent(current))
+            {
+                if (current is Button) return true;
+                if (current == RootGrid) break;
+            }
+            return false;
+        }
+
+        private void PanelEyeButton_Click(object sender, RoutedEventArgs e)
+        {
+            var key = (sender as FrameworkElement)?.Tag as string;
+            if (string.IsNullOrWhiteSpace(key)) return;
+            SetPanelExpanded(key, !GetPanelExpanded(key));
+            UpdatePanelChrome();
+            ClampAllPanelPositions();
+        }
+
+        private void PanelCloseButton_Click(object sender, RoutedEventArgs e)
+        {
+            var key = (sender as FrameworkElement)?.Tag as string;
+            if (string.IsNullOrWhiteSpace(key)) return;
+            SetPanelVisible(key, false);
+            UpdatePanelChrome();
+        }
+
+        private void PanelMoveBar_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
             ContinuePanelDrag(e, sender as UIElement);
         }
 
-        private void YoutubeMoveBar_PointerReleased(object sender, PointerRoutedEventArgs e)
+        private void PanelMoveBar_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
             EndPanelDrag(e, sender as UIElement, true);
         }
 
-        private void YoutubeMoveBar_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        private void PanelMoveBar_PointerCanceled(object sender, PointerRoutedEventArgs e)
         {
             EndPanelDrag(e, sender as UIElement, false);
         }
 
-        private void YoutubeMoveBar_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        private void PanelMoveBar_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
         {
             if (panelDragPointerId == e.Pointer.PointerId) ClearPanelDrag();
         }
 
-        private void YoutubeRightResizeBorder_PointerPressed(object sender, PointerRoutedEventArgs e)
+        private void PanelResizeBorder_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
-            BeginYoutubeResize("right", sender as UIElement, e);
+            var target = sender as FrameworkElement;
+            var tag = target?.Tag as string;
+            if (string.IsNullOrWhiteSpace(tag)) return;
+            var parts = tag.Split(':');
+            if (parts.Length != 2) return;
+            BeginPanelResize(parts[0], parts[1], target, e);
         }
 
-        private void YoutubeBottomResizeBorder_PointerPressed(object sender, PointerRoutedEventArgs e)
-        {
-            BeginYoutubeResize("bottom", sender as UIElement, e);
-        }
-
-        private void YoutubeCornerResizeBorder_PointerPressed(object sender, PointerRoutedEventArgs e)
-        {
-            BeginYoutubeResize("corner", sender as UIElement, e);
-        }
-
-        private void BeginYoutubeResize(string mode, UIElement target, PointerRoutedEventArgs e)
+        private void BeginPanelResize(string key, string mode, UIElement target, PointerRoutedEventArgs e)
         {
             if (target == null || panelDragPointerId.HasValue) return;
+            var panel = GetPanel(key);
+            var body = GetPanelBody(key);
+            if (panel == null || body == null || !GetPanelExpanded(key)) return;
             var point = e.GetCurrentPoint(RootGrid);
             if (!point.Properties.IsLeftButtonPressed) return;
 
-            youtubeResizeMode = mode;
-            youtubeResizePointerId = e.Pointer.PointerId;
-            youtubeResizeStartPoint = point.Position;
-            youtubeResizeStartWidth = YoutubePanel.ActualWidth > 0 ? YoutubePanel.ActualWidth : YoutubePanel.Width;
-            youtubeResizeStartHeight = YoutubePanel.ActualHeight > 0 ? YoutubePanel.ActualHeight : YoutubePanel.Height;
+            resizedPanel = panel;
+            resizedBody = body;
+            panelResizeKey = key;
+            panelResizeMode = mode;
+            panelResizePointerId = e.Pointer.PointerId;
+            panelResizeStartPoint = point.Position;
+            panelResizeStartWidth = panel.ActualWidth > 0 ? panel.ActualWidth : panel.Width;
+            panelResizeStartHeight = body.ActualHeight > 0 ? body.ActualHeight : body.Height;
+            var transform = panel.RenderTransform as TranslateTransform;
+            panelResizeStartX = transform?.X ?? 0;
+            panelResizeStartY = transform?.Y ?? 0;
             target.CapturePointer(e.Pointer);
+            SetResizeCursor(mode);
             e.Handled = true;
         }
 
-        private void YoutubeResizeBorder_PointerMoved(object sender, PointerRoutedEventArgs e)
+        private void PanelResizeBorder_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
-            if (youtubeResizePointerId != e.Pointer.PointerId) return;
+            if (panelResizePointerId != e.Pointer.PointerId || resizedPanel == null || resizedBody == null) return;
             var point = e.GetCurrentPoint(RootGrid);
             if (!point.Properties.IsLeftButtonPressed)
             {
-                EndYoutubeResize(e, sender as UIElement, true);
+                EndPanelResize(e, sender as UIElement, true);
                 return;
             }
 
-            var deltaX = point.Position.X - youtubeResizeStartPoint.X;
-            var deltaY = point.Position.Y - youtubeResizeStartPoint.Y;
-            var width = youtubeResizeStartWidth;
-            var height = youtubeResizeStartHeight;
-
-            if (youtubeResizeMode == "right" || youtubeResizeMode == "corner") width += deltaX;
-            if (youtubeResizeMode == "bottom" || youtubeResizeMode == "corner") height += deltaY;
-
-            SetYoutubePanelSize(width, height, false);
-            SetPanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelTransform.X, YoutubePanelTransform.Y, false);
+            var deltaX = point.Position.X - panelResizeStartPoint.X;
+            var deltaY = point.Position.Y - panelResizeStartPoint.Y;
+            var fromLeft = panelResizeMode == "left" || panelResizeMode == "topleft" || panelResizeMode == "bottomleft";
+            var fromRight = panelResizeMode == "right" || panelResizeMode == "topright" || panelResizeMode == "bottomright";
+            var fromTop = panelResizeMode == "top" || panelResizeMode == "topleft" || panelResizeMode == "topright";
+            var fromBottom = panelResizeMode == "bottom" || panelResizeMode == "bottomleft" || panelResizeMode == "bottomright";
+            var width = panelResizeStartWidth + (fromRight ? deltaX : fromLeft ? -deltaX : 0);
+            var height = panelResizeStartHeight + (fromBottom ? deltaY : fromTop ? -deltaY : 0);
+            SetPanelSize(panelResizeKey, width, height, false);
+            var appliedWidth = resizedPanel.Width;
+            var appliedHeight = resizedBody.Height;
+            var x = panelResizeStartX + (fromLeft ? panelResizeStartWidth - appliedWidth : 0);
+            var y = panelResizeStartY + (fromTop ? panelResizeStartHeight - appliedHeight : 0);
+            SetPanelPosition(resizedPanel, resizedPanel.RenderTransform as TranslateTransform, x, y, false);
             e.Handled = true;
         }
 
-        private void YoutubeResizeBorder_PointerReleased(object sender, PointerRoutedEventArgs e)
+        private void PanelResizeBorder_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
-            EndYoutubeResize(e, sender as UIElement, true);
+            EndPanelResize(e, sender as UIElement, true);
         }
 
-        private void YoutubeResizeBorder_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        private void PanelResizeBorder_PointerCanceled(object sender, PointerRoutedEventArgs e)
         {
-            EndYoutubeResize(e, sender as UIElement, false);
+            EndPanelResize(e, sender as UIElement, false);
         }
 
-        private void YoutubeResizeBorder_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        private void PanelResizeBorder_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
         {
-            if (youtubeResizePointerId == e.Pointer.PointerId)
-            {
-                youtubeResizePointerId = null;
-                youtubeResizeMode = null;
-            }
+            if (panelResizePointerId != e.Pointer.PointerId) return;
+            ClearPanelResize();
+            SetResizeCursor(null);
         }
 
-        private void EndYoutubeResize(PointerRoutedEventArgs e, UIElement captureTarget, bool save)
+        private void EndPanelResize(PointerRoutedEventArgs e, UIElement captureTarget, bool save)
         {
-            if (youtubeResizePointerId != e.Pointer.PointerId) return;
+            if (panelResizePointerId != e.Pointer.PointerId) return;
             try { captureTarget?.ReleasePointerCapture(e.Pointer); } catch { }
-            youtubeResizePointerId = null;
-            youtubeResizeMode = null;
-            if (save) SaveYoutubePanelSize();
+            if (save && !string.IsNullOrWhiteSpace(panelResizeKey)) SavePanelSize(panelResizeKey);
+            ClearPanelResize();
+            SetResizeCursor(null);
             ClampAllPanelPositions();
             e.Handled = true;
+        }
+
+        private void ClearPanelResize()
+        {
+            resizedPanel = null;
+            resizedBody = null;
+            panelResizePointerId = null;
+            panelResizeMode = null;
+            panelResizeKey = null;
+        }
+
+        private void ResizeBorder_PointerEntered(object sender, PointerRoutedEventArgs e)
+        {
+            if (panelResizePointerId.HasValue) return;
+            var tag = (sender as FrameworkElement)?.Tag as string;
+            var parts = tag?.Split(':');
+            if (parts != null && parts.Length == 2) SetResizeCursor(parts[1]);
+        }
+
+        private void ResizeBorder_PointerExited(object sender, PointerRoutedEventArgs e)
+        {
+            if (!panelResizePointerId.HasValue) SetResizeCursor(null);
+        }
+
+        private static void SetResizeCursor(string mode)
+        {
+            try
+            {
+                var type = CoreCursorType.Arrow;
+                if (mode == "left" || mode == "right") type = CoreCursorType.SizeWestEast;
+                else if (mode == "top" || mode == "bottom") type = CoreCursorType.SizeNorthSouth;
+                else if (mode == "topleft" || mode == "bottomright") type = CoreCursorType.SizeNorthwestSoutheast;
+                else if (mode == "topright" || mode == "bottomleft") type = CoreCursorType.SizeNortheastSouthwest;
+                Window.Current.CoreWindow.PointerCursor = new CoreCursor(type, 0);
+            }
+            catch { }
         }
 
         private void BeginPanelDrag(FrameworkElement panel, PointerRoutedEventArgs e, UIElement captureTarget)
@@ -654,30 +731,127 @@ namespace YummiGameBarWidget
             RestorePanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelXSetting, YoutubePanelYSetting);
         }
 
-        private void RestoreYoutubePanelSize()
+        private void RestorePanelSizes()
         {
             var values = ApplicationData.Current.LocalSettings.Values;
-            var width = ReadLocalDouble(values, YoutubePanelWidthSetting);
-            var height = ReadLocalDouble(values, YoutubePanelHeightSetting);
-            if (width <= 0) width = 340;
-            if (height <= 0) height = 191;
-            SetYoutubePanelSize(width, height, false);
+            RestorePanelSize("lcu", values, LcuPanelWidthSetting, LcuPanelHeightSetting, 240, 145);
+            RestorePanelSize("party", values, PartyPanelWidthSetting, PartyPanelHeightSetting, 240, 70);
+            RestorePanelSize("youtube", values, YoutubePanelWidthSetting, YoutubePanelHeightSetting, 340, 191);
         }
 
-        private void SetYoutubePanelSize(double requestedWidth, double requestedHeight, bool save)
+        private void RestorePanelSize(string key, IDictionary<string, object> values, string widthKey, string heightKey, double defaultWidth, double defaultHeight)
         {
-            var width = Math.Max(YoutubeMinWidth, Math.Min(YoutubeMaxWidth, requestedWidth));
-            var height = Math.Max(YoutubeMinHeight, Math.Min(YoutubeMaxHeight, requestedHeight));
-            YoutubePanel.Width = width;
-            YoutubePanel.Height = height;
-            if (save) SaveYoutubePanelSize();
+            var width = ReadLocalDouble(values, widthKey);
+            var height = ReadLocalDouble(values, heightKey);
+            if (width <= 0) width = defaultWidth;
+            if (height <= 0) height = defaultHeight;
+            SetPanelSize(key, width, height, false);
         }
 
-        private void SaveYoutubePanelSize()
+        private void SetPanelSize(string key, double requestedWidth, double requestedHeight, bool save)
+        {
+            var panel = GetPanel(key);
+            var body = GetPanelBody(key);
+            if (panel == null || body == null) return;
+
+            double minWidth = 160, maxWidth = 1280, minHeight = 48, maxHeight = 720;
+            if (key == "lcu") { minWidth = 190; maxWidth = 900; minHeight = 100; maxHeight = 600; }
+            else if (key == "party") { minWidth = 160; maxWidth = 800; minHeight = 48; maxHeight = 500; }
+            else if (key == "youtube") { minWidth = 220; maxWidth = 1280; minHeight = 124; maxHeight = 720; }
+
+            panel.Width = Math.Max(minWidth, Math.Min(maxWidth, requestedWidth));
+            body.Height = Math.Max(minHeight, Math.Min(maxHeight, requestedHeight));
+            if (save) SavePanelSize(key);
+        }
+
+        private void SavePanelSize(string key)
         {
             var values = ApplicationData.Current.LocalSettings.Values;
-            values[YoutubePanelWidthSetting] = YoutubePanel.Width;
-            values[YoutubePanelHeightSetting] = YoutubePanel.Height;
+            var panel = GetPanel(key);
+            var body = GetPanelBody(key);
+            if (panel == null || body == null) return;
+            if (key == "lcu")
+            {
+                values[LcuPanelWidthSetting] = panel.Width;
+                values[LcuPanelHeightSetting] = body.Height;
+            }
+            else if (key == "party")
+            {
+                values[PartyPanelWidthSetting] = panel.Width;
+                values[PartyPanelHeightSetting] = body.Height;
+            }
+            else if (key == "youtube")
+            {
+                values[YoutubePanelWidthSetting] = panel.Width;
+                values[YoutubePanelHeightSetting] = body.Height;
+            }
+        }
+
+        private FrameworkElement GetPanel(string key)
+        {
+            if (key == "lcu") return LcuPanel;
+            if (key == "party") return PartyPanel;
+            if (key == "youtube") return YoutubePanel;
+            return null;
+        }
+
+        private FrameworkElement GetPanelBody(string key)
+        {
+            if (key == "lcu") return LcuBody;
+            if (key == "party") return PartyBody;
+            if (key == "youtube") return YoutubeVideoHost;
+            return null;
+        }
+
+        private bool GetPanelVisible(string key)
+        {
+            if (key == "lcu") return HudPreferences.LcuPanelVisible;
+            if (key == "party") return HudPreferences.PartyPanelVisible;
+            if (key == "youtube") return YoutubePreferences.Visible;
+            return false;
+        }
+
+        private void SetPanelVisible(string key, bool visible)
+        {
+            if (key == "lcu") HudPreferences.LcuPanelVisible = visible;
+            else if (key == "party") HudPreferences.PartyPanelVisible = visible;
+            else if (key == "youtube") YoutubePreferences.Visible = visible;
+        }
+
+        private bool GetPanelExpanded(string key)
+        {
+            if (key == "lcu") return HudPreferences.LcuPanelExpanded;
+            if (key == "party") return HudPreferences.PartyPanelExpanded;
+            if (key == "youtube") return HudPreferences.YoutubePanelExpanded;
+            return true;
+        }
+
+        private void SetPanelExpanded(string key, bool expanded)
+        {
+            if (key == "lcu") HudPreferences.LcuPanelExpanded = expanded;
+            else if (key == "party") HudPreferences.PartyPanelExpanded = expanded;
+            else if (key == "youtube") HudPreferences.YoutubePanelExpanded = expanded;
+        }
+
+        private void UpdatePanelChrome()
+        {
+            bool pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+            ApplyPanelChrome("lcu", LcuPanel, LcuMoveBar, LcuBody, LcuEyeButton, LcuResizeHandles, pinnedOnly);
+            ApplyPanelChrome("party", PartyPanel, PartyMoveBar, PartyBody, PartyEyeButton, PartyResizeHandles, pinnedOnly);
+            ApplyPanelChrome("youtube", YoutubePanel, YoutubeMoveBar, YoutubeVideoHost, YoutubeEyeButton, YoutubeResizeHandles, pinnedOnly);
+        }
+
+        private void ApplyPanelChrome(string key, FrameworkElement panel, FrameworkElement moveBar, FrameworkElement body, Control eyeButton,
+            FrameworkElement resizeHandles, bool pinnedOnly)
+        {
+            bool visible = GetPanelVisible(key);
+            bool expanded = GetPanelExpanded(key);
+            panel.Visibility = visible && (!pinnedOnly || expanded) ? Visibility.Visible : Visibility.Collapsed;
+            moveBar.Visibility = visible && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
+            body.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
+            eyeButton.Opacity = expanded ? 1.0 : 0.5;
+            ToolTipService.SetToolTip(eyeButton, expanded ? "내용 가리기" : "내용 표시");
+            resizeHandles.Visibility = visible && expanded && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void RestorePanelPosition(FrameworkElement panel, TranslateTransform transform, string xKey, string yKey)

@@ -17,7 +17,16 @@
       <TextBlock x:Name="PreferenceStatusText" Foreground="#CDBDE8" TextWrapping="Wrap"/>
       <Border Background="#342A203A" CornerRadius="10" Padding="12">
         <StackPanel Spacing="9">
+          <TextBlock Text="패널 표시" Foreground="White" FontWeight="SemiBold"/>
+          <ToggleSwitch x:Name="LcuVisibleToggle" Header="LCU 패널" OnContent="표시" OffContent="숨김" Toggled="LcuVisibleToggle_Toggled" Foreground="White"/>
+          <ToggleSwitch x:Name="PartyVisibleToggle" Header="파티 패널" OnContent="표시" OffContent="숨김" Toggled="PartyVisibleToggle_Toggled" Foreground="White"/>
+          <TextBlock Text="제목줄의 눈 버튼은 내용만 접고, × 버튼은 패널을 완전히 숨깁니다. 여기서 다시 켤 수 있습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
+        </StackPanel>
+      </Border>
+      <Border Background="#342A203A" CornerRadius="10" Padding="12">
+        <StackPanel Spacing="9">
           <TextBlock Text="YouTube 화면" Foreground="White" FontWeight="SemiBold"/>
+          <ToggleSwitch x:Name="YoutubeVisibleToggle" Header="YouTube 패널 표시" OnContent="표시" OffContent="숨김" Toggled="YoutubeVisibleToggle_Toggled" Foreground="White"/>
           <TextBox x:Name="YoutubeUrlBox" Header="영상 링크 또는 ID" PlaceholderText="https://youtu.be/..." KeyDown="YoutubeUrlBox_KeyDown"/>
           <Button Content="영상 적용" Click="YoutubeApplyButton_Click" HorizontalAlignment="Left" Padding="16,7"/>
           <Grid ColumnSpacing="8">

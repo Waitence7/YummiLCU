@@ -28,6 +28,9 @@ namespace YummiGameBarWidget
                 HudVisibleToggle.IsOn = HudPreferences.Visible;
                 CoverageTintToggle.IsOn = HudPreferences.CoverageTint;
                 HudOpacitySlider.Value = HudPreferences.Opacity * 100;
+                LcuVisibleToggle.IsOn = HudPreferences.LcuPanelVisible;
+                PartyVisibleToggle.IsOn = HudPreferences.PartyPanelVisible;
+                YoutubeVisibleToggle.IsOn = YoutubePreferences.Visible;
                 YoutubeUrlBox.Text = YoutubePreferences.Video;
                 YoutubeVolumeSlider.Value = YoutubePreferences.Volume;
                 preferencesLoaded = true;
@@ -45,6 +48,14 @@ namespace YummiGameBarWidget
         {
             if (preferencesLoaded) HudPreferences.Opacity = args.NewValue / 100;
         }
+        private void LcuVisibleToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (preferencesLoaded) HudPreferences.LcuPanelVisible = LcuVisibleToggle.IsOn;
+        }
+        private void PartyVisibleToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (preferencesLoaded) HudPreferences.PartyPanelVisible = PartyVisibleToggle.IsOn;
+        }
         private void CompactHudButton_Click(object sender, RoutedEventArgs args)
         {
             HudPreferences.RequestCompact();
@@ -56,6 +67,10 @@ namespace YummiGameBarWidget
             PreferenceStatusText.Text = "Game Bar가 허용하는 최대 크기로 맞춥니다.";
         }
 
+        private void YoutubeVisibleToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (preferencesLoaded) YoutubePreferences.Visible = YoutubeVisibleToggle.IsOn;
+        }
         private void YoutubeApplyButton_Click(object sender, RoutedEventArgs args) { ApplyYoutubeVideo(); }
         private void YoutubeUrlBox_KeyDown(object sender, KeyRoutedEventArgs args)
         {
@@ -68,7 +83,10 @@ namespace YummiGameBarWidget
             var value = (YoutubeUrlBox.Text ?? "").Trim();
             if (value.Length == 0) { YoutubeSettingsStatusText.Text = "YouTube 링크 또는 영상 ID를 입력해 주세요."; return; }
             YoutubePreferences.Video = value;
-            YoutubeSettingsStatusText.Text = "영상을 적용했습니다.";
+            YoutubePreferences.Visible = true;
+            HudPreferences.YoutubePanelExpanded = true;
+            YoutubeVisibleToggle.IsOn = true;
+            YoutubeSettingsStatusText.Text = "영상을 적용하고 YouTube 패널을 표시했습니다.";
         }
         private void YoutubePlayButton_Click(object sender, RoutedEventArgs args)
         {

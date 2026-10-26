@@ -15,6 +15,31 @@ namespace YummiGameBarWidget
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("HudCoverageTint", out value) && value is bool && (bool)value; }
             set { Set("HudCoverageTint", value); }
         }
+        internal static bool LcuPanelVisible
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("LcuPanelVisible", out value) || !(value is bool) || (bool)value; }
+            set { Set("LcuPanelVisible", value); }
+        }
+        internal static bool PartyPanelVisible
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("PartyPanelVisible", out value) || !(value is bool) || (bool)value; }
+            set { Set("PartyPanelVisible", value); }
+        }
+        internal static bool LcuPanelExpanded
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("LcuPanelExpanded", out value) || !(value is bool) || (bool)value; }
+            set { Set("LcuPanelExpanded", value); }
+        }
+        internal static bool PartyPanelExpanded
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("PartyPanelExpanded", out value) || !(value is bool) || (bool)value; }
+            set { Set("PartyPanelExpanded", value); }
+        }
+        internal static bool YoutubePanelExpanded
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("YoutubePanelExpanded", out value) || !(value is bool) || (bool)value; }
+            set { Set("YoutubePanelExpanded", value); }
+        }
         internal static double Opacity
         {
             get
