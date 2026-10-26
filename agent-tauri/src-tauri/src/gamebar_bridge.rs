@@ -23,7 +23,7 @@ const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 #[cfg(windows)]
 const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 #[cfg(windows)]
-const GAMEBAR_RELEASES_API: &str = "https://api.github.com/repos/Waitence7/YummiLCU/releases?per_page=100";
+const GAMEBAR_VERSION_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/main/agent-tauri/gamebar-widget/version.json";
 #[cfg(windows)]
 const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
@@ -81,8 +81,10 @@ async fn watch_overlay_updates(state: Arc<AppState>) {
         }
 
         // Missing updater simply means the overlay has never been installed.
-        // Keep this silent so Agent users who do not use Game Bar are unaffected.
-        let _ = check_overlay_update().await;
+        // Persist all other failures so update problems are diagnosable.
+        if let Err(error) = check_overlay_update().await {
+            append_gamebar_update_log(&format!("오버레이 업데이트 확인 실패: {error}"));
+        }
 
         tokio::select! {
             _ = sleep(OVERLAY_UPDATE_INTERVAL) => {},
@@ -532,7 +534,9 @@ fn handle_command(_app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
 
     if command == "check_overlay_update" {
         tauri::async_runtime::spawn(async move {
-            let _ = check_overlay_update().await;
+            if let Err(error) = check_overlay_update().await {
+                append_gamebar_update_log(&format!("수동 오버레이 업데이트 확인 실패: {error}"));
+            }
         });
         return json_response(true, "오버레이 업데이트 확인을 시작했습니다.");
     }
@@ -605,6 +609,31 @@ fn select_gamebar_manifest(releases: &Value) -> Option<(String, String)> {
 }
 
 #[cfg(windows)]
+fn append_gamebar_update_log(message: &str) {
+    use std::{
+        env,
+        fs::{self, OpenOptions},
+        io::Write,
+        path::PathBuf,
+    };
+    let Some(local_app_data) = env::var_os("LOCALAPPDATA") else {
+        return;
+    };
+    let updater_dir = PathBuf::from(local_app_data).join("Yummi").join("GameBarUpdater");
+    if fs::create_dir_all(&updater_dir).is_err() {
+        return;
+    }
+    let path = updater_dir.join("update.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{now}] {message}");
+    }
+}
+
+#[cfg(windows)]
 async fn check_overlay_update() -> Result<(), String> {
     use std::{env, fs, path::PathBuf, process::Command};
     use std::os::windows::process::CommandExt;
@@ -623,12 +652,28 @@ async fn check_overlay_update() -> Result<(), String> {
         .user_agent("Yummi-LCU-Agent-GameBar-Updater")
         .build()
         .map_err(|e| format!("Game Bar 업데이트 클라이언트 생성 실패: {e}"))?;
-    let releases: Value = client.get(GAMEBAR_RELEASES_API).send().await
-        .map_err(|e| format!("Game Bar 릴리즈 조회 실패: {e}"))?
-        .error_for_status().map_err(|e| format!("Game Bar 릴리즈 응답 실패: {e}"))?
-        .json().await.map_err(|e| format!("Game Bar 릴리즈 JSON 실패: {e}"))?;
-    let (selected_release_tag, manifest_url) = select_gamebar_manifest(&releases)
-        .ok_or_else(|| "서명된 Game Bar manifest를 찾지 못했습니다.".to_owned())?;
+    append_gamebar_update_log("오버레이 업데이트 확인 시작");
+    let latest: Value = client
+        .get(GAMEBAR_VERSION_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Game Bar 최신 버전 조회 실패: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Game Bar 최신 버전 응답 실패: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Game Bar 최신 버전 JSON 실패: {e}"))?;
+    let selected_version = latest
+        .get("version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Game Bar 최신 버전 정보가 없습니다.".to_owned())?;
+    let selected_release_tag = format!("gamebar-v{selected_version}");
+    let selected_semver = parse_gamebar_release_version(&selected_release_tag)
+        .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
+    let manifest_url = format!(
+        "https://github.com/Waitence7/YummiLCU/releases/download/{selected_release_tag}/gamebar-version.json"
+    );
+    append_gamebar_update_log(&format!("최신 오버레이 릴리즈 감지: {selected_release_tag}"));
 
     let response = client.get(&manifest_url).send().await.map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?
         .error_for_status().map_err(|e| format!("Game Bar manifest 응답 실패: {e}"))?;
@@ -643,7 +688,6 @@ async fn check_overlay_update() -> Result<(), String> {
         .and_then(|v| v.as_str().map(str::to_owned)).ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
     verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
     let target: GameBarUpdateTarget = serde_json::from_value(payload).map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
-    let selected_version = selected_release_tag.strip_prefix("gamebar-v").unwrap_or_default();
     if target.release_tag != selected_release_tag || target.version != selected_version {
         return Err("Game Bar manifest 버전이 선택된 릴리즈와 일치하지 않습니다.".into());
     }
@@ -663,7 +707,22 @@ async fn check_overlay_update() -> Result<(), String> {
     let state_path = updater_dir.join("state.json");
     if let Ok(raw) = fs::read_to_string(&state_path) {
         if let Ok(state) = serde_json::from_str::<GameBarUpdateState>(&raw) {
-            if state.build_id == target.build_id && state.sha256.eq_ignore_ascii_case(&target.sha256) { return Ok(()); }
+            if let Some(installed_semver) = parse_gamebar_release_version(&state.release_tag) {
+                if installed_semver > selected_semver {
+                    append_gamebar_update_log(&format!(
+                        "설치된 오버레이가 최신 채널보다 높아 유지: {}",
+                        state.release_tag
+                    ));
+                    return Ok(());
+                }
+            }
+            if state.build_id == target.build_id && state.sha256.eq_ignore_ascii_case(&target.sha256) {
+                append_gamebar_update_log(&format!(
+                    "이미 최신 오버레이: {} / build {}",
+                    target.release_tag, target.build_id
+                ));
+                return Ok(());
+            }
         }
     }
 
@@ -679,6 +738,10 @@ async fn check_overlay_update() -> Result<(), String> {
     let zip_path = updater_dir.join("verified-update.zip");
     fs::write(&zip_path, &archive).map_err(|e| format!("검증된 Game Bar ZIP 저장 실패: {e}"))?;
 
+    append_gamebar_update_log(&format!(
+        "오버레이 업데이트 설치 시작: {} / build {}",
+        target.release_tag, target.build_id
+    ));
     Command::new("powershell.exe")
         .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&updater)
