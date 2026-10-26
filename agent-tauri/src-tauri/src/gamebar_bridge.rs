@@ -43,12 +43,19 @@ struct ExternalClickTestState {
     y: f64,
     width: f64,
     height: f64,
+    alt_x: f64,
+    alt_y: f64,
+    alt_width: f64,
+    alt_height: f64,
     geometry_updated_at_ms: u64,
     sequence: u64,
     click_count: u64,
     event: String,
     event_x: i32,
     event_y: i32,
+    cursor_x: i32,
+    cursor_y: i32,
+    matched_geometry: String,
     event_at_ms: u64,
 }
 
@@ -518,13 +525,21 @@ fn external_mouse_input_thread() {
                     // Expire stale geometry so a crashed/closed widget can never
                     // leave a ghost hitbox active in the Agent.
                     let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
-                    let inside = fresh
+                    state.cursor_x = point.x;
+                    state.cursor_y = point.y;
+                    let inside_primary = fresh
                         && state.active
                         && (point.x as f64) >= state.x
                         && (point.x as f64) < state.x + state.width
                         && (point.y as f64) >= state.y
                         && (point.y as f64) < state.y + state.height;
-                    if inside {
+                    let inside_alt = fresh
+                        && state.active
+                        && (point.x as f64) >= state.alt_x
+                        && (point.x as f64) < state.alt_x + state.alt_width
+                        && (point.y as f64) >= state.alt_y
+                        && (point.y as f64) < state.alt_y + state.alt_height;
+                    if inside_primary || inside_alt {
                         state.sequence = state.sequence.wrapping_add(1);
                         if !down {
                             state.click_count = state.click_count.wrapping_add(1);
@@ -532,6 +547,7 @@ fn external_mouse_input_thread() {
                         state.event = if down { "down" } else { "up" }.into();
                         state.event_x = point.x;
                         state.event_y = point.y;
+                        state.matched_geometry = if inside_primary { "scaled-bounds" } else { "raw-bounds" }.into();
                         state.event_at_ms = now;
                     }
                 }
@@ -553,14 +569,22 @@ fn sync_external_click_test(parsed: &Value) -> String {
     let y = number("y");
     let width = number("width");
     let height = number("height");
-    let valid_geometry = x.is_finite()
-        && y.is_finite()
-        && width.is_finite()
-        && height.is_finite()
-        && x.abs() <= 100_000.0
-        && y.abs() <= 100_000.0
-        && (1.0..=2_000.0).contains(&width)
-        && (1.0..=2_000.0).contains(&height);
+    let alt_x = number("altX");
+    let alt_y = number("altY");
+    let alt_width = number("altWidth");
+    let alt_height = number("altHeight");
+    let valid_rect = |rx: f64, ry: f64, rw: f64, rh: f64| {
+        rx.is_finite()
+            && ry.is_finite()
+            && rw.is_finite()
+            && rh.is_finite()
+            && rx.abs() <= 100_000.0
+            && ry.abs() <= 100_000.0
+            && (1.0..=2_000.0).contains(&rw)
+            && (1.0..=2_000.0).contains(&rh)
+    };
+    let valid_geometry = valid_rect(x, y, width, height)
+        && valid_rect(alt_x, alt_y, alt_width, alt_height);
     if active && !valid_geometry {
         return json_response(false, "외부 클릭 테스트 영역이 올바르지 않습니다.");
     }
@@ -576,6 +600,10 @@ fn sync_external_click_test(parsed: &Value) -> String {
         state.y = y;
         state.width = width;
         state.height = height;
+        state.alt_x = alt_x;
+        state.alt_y = alt_y;
+        state.alt_width = alt_width;
+        state.alt_height = alt_height;
     }
     state.geometry_updated_at_ms = now;
     serde_json::json!({
@@ -586,6 +614,17 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "event": state.event,
         "eventX": state.event_x,
         "eventY": state.event_y,
+        "cursorX": state.cursor_x,
+        "cursorY": state.cursor_y,
+        "matchedGeometry": state.matched_geometry,
+        "rectX": state.x,
+        "rectY": state.y,
+        "rectWidth": state.width,
+        "rectHeight": state.height,
+        "altRectX": state.alt_x,
+        "altRectY": state.alt_y,
+        "altRectWidth": state.alt_width,
+        "altRectHeight": state.alt_height,
         "eventAtMs": state.event_at_ms,
     })
     .to_string()

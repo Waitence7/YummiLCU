@@ -983,10 +983,16 @@ namespace YummiGameBarWidget
                         .TransformPoint(new Windows.Foundation.Point(0, 0));
                     var bounds = widget.WindowBounds;
                     var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
+                    // WindowBounds does not document whether X/Y are already raw screen pixels.
+                    // Send both plausible coordinate mappings; the Agent accepts either hitbox.
                     command["x"] = JsonValue.CreateNumberValue((bounds.X + local.X) * scale);
                     command["y"] = JsonValue.CreateNumberValue((bounds.Y + local.Y) * scale);
                     command["width"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualWidth * scale);
                     command["height"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
+                    command["altX"] = JsonValue.CreateNumberValue(bounds.X + (local.X * scale));
+                    command["altY"] = JsonValue.CreateNumberValue(bounds.Y + (local.Y * scale));
+                    command["altWidth"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualWidth * scale);
+                    command["altHeight"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
                 }
 
                 var response = JsonObject.Parse(await SendAgentCommandAsync(command.Stringify()));
@@ -998,16 +1004,24 @@ namespace YummiGameBarWidget
                 var sequence = (ulong)Math.Max(0, response.GetNamedNumber("sequence", 0));
                 var clickCount = (ulong)Math.Max(0, response.GetNamedNumber("clickCount", 0));
                 var eventName = response.GetNamedString("event", "");
+                var cursorX = (int)response.GetNamedNumber("cursorX", 0);
+                var cursorY = (int)response.GetNamedNumber("cursorY", 0);
+                var rectX = (int)Math.Round(response.GetNamedNumber("rectX", 0));
+                var rectY = (int)Math.Round(response.GetNamedNumber("rectY", 0));
+                var altRectX = (int)Math.Round(response.GetNamedNumber("altRectX", 0));
+                var altRectY = (int)Math.Round(response.GetNamedNumber("altRectY", 0));
                 if (sequence != lastNativeInputSequence)
                 {
                     lastNativeInputSequence = sequence;
                     var eventX = (int)response.GetNamedNumber("eventX", 0);
                     var eventY = (int)response.GetNamedNumber("eventY", 0);
-                    ClickNativeResult.Text = "count " + clickCount + " · native " + eventName + " · " + eventX + "," + eventY;
+                    var matched = response.GetNamedString("matchedGeometry", "?");
+                    ClickNativeResult.Text = "count " + clickCount + " · " + matched + " · " + eventName + " " + eventX + "," + eventY;
                 }
-                else if (sequence == 0)
+                else
                 {
-                    ClickNativeResult.Text = "count " + clickCount + " · Agent native input armed";
+                    ClickNativeResult.Text = "count " + clickCount + " · cursor " + cursorX + "," + cursorY +
+                        " · rect " + rectX + "," + rectY + " / " + altRectX + "," + altRectY;
                 }
             }
             catch (Exception ex)
