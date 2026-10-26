@@ -9,6 +9,8 @@ using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Controls.Primitives;
 using Windows.UI.Xaml.Navigation;
+using Windows.UI.Xaml.Input;
+using Windows.System;
 
 namespace YummiGameBarWidget
 {
@@ -26,6 +28,9 @@ namespace YummiGameBarWidget
                 HudVisibleToggle.IsOn = HudPreferences.Visible;
                 CoverageTintToggle.IsOn = HudPreferences.CoverageTint;
                 HudOpacitySlider.Value = HudPreferences.Opacity * 100;
+                YoutubeOnlyToggle.IsOn = YoutubePreferences.VideoOnlyMode;
+                YoutubeUrlBox.Text = YoutubePreferences.Video;
+                YoutubeVolumeSlider.Value = YoutubePreferences.Volume;
                 preferencesLoaded = true;
             };
         }
@@ -50,6 +55,41 @@ namespace YummiGameBarWidget
         {
             HudPreferences.RequestFit();
             PreferenceStatusText.Text = "Game Bar가 허용하는 최대 크기로 맞춥니다.";
+        }
+
+        private void YoutubeOnlyToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (!preferencesLoaded) return;
+            YoutubePreferences.VideoOnlyMode = YoutubeOnlyToggle.IsOn;
+            YoutubeSettingsStatusText.Text = YoutubeOnlyToggle.IsOn ? "영상 전용 화면으로 전환했습니다." : "LCU HUD 화면으로 전환했습니다.";
+        }
+        private void YoutubeApplyButton_Click(object sender, RoutedEventArgs args) { ApplyYoutubeVideo(); }
+        private void YoutubeUrlBox_KeyDown(object sender, KeyRoutedEventArgs args)
+        {
+            if (args.Key != VirtualKey.Enter) return;
+            args.Handled = true;
+            ApplyYoutubeVideo();
+        }
+        private void ApplyYoutubeVideo()
+        {
+            var value = (YoutubeUrlBox.Text ?? "").Trim();
+            if (value.Length == 0) { YoutubeSettingsStatusText.Text = "YouTube 링크 또는 영상 ID를 입력해 주세요."; return; }
+            YoutubePreferences.Video = value;
+            YoutubeSettingsStatusText.Text = "영상을 적용했습니다.";
+        }
+        private void YoutubePlayButton_Click(object sender, RoutedEventArgs args)
+        {
+            YoutubePreferences.RequestAction("play");
+            YoutubeSettingsStatusText.Text = "재생 명령을 보냈습니다.";
+        }
+        private void YoutubePauseButton_Click(object sender, RoutedEventArgs args)
+        {
+            YoutubePreferences.RequestAction("pause");
+            YoutubeSettingsStatusText.Text = "일시정지 명령을 보냈습니다.";
+        }
+        private void YoutubeVolumeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs args)
+        {
+            if (preferencesLoaded) YoutubePreferences.Volume = args.NewValue;
         }
 
 

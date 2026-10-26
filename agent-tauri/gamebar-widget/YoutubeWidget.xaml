@@ -1,7 +1,0 @@
-<Page x:Class="YummiGameBarWidget.YoutubeWidget" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" Background="Black">
-  <Grid Background="Black">
-    <Grid x:Name="YoutubeWebHost" Background="Black">
-      <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
-    </Grid>
-  </Grid>
-</Page>

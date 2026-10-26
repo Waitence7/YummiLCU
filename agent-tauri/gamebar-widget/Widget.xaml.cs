@@ -6,11 +6,6 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Graphics.Canvas;
-using Microsoft.Graphics.Canvas.UI.Xaml;
-using Windows.Graphics;
-using Windows.Graphics.Capture;
-using Windows.Graphics.DirectX;
 using Microsoft.Gaming.XboxGameBar;
 using Windows.Data.Json;
 using Windows.ApplicationModel;
@@ -57,12 +52,8 @@ namespace YummiGameBarWidget
         private bool youtubeWebView2Unavailable;
         private bool youtubeUsingFallback;
         private string youtubePendingPlayerUrl;
-        private CanvasDevice browserCaptureDevice;
-        private Direct3D11CaptureFramePool browserCaptureFramePool;
-        private GraphicsCaptureSession browserCaptureSession;
-        private GraphicsCaptureItem browserCaptureItem;
-        private CanvasRenderTarget browserCaptureTarget;
-        private SizeInt32 browserCaptureSize;
+        private string youtubeLoadedVideoId;
+        private long youtubeLastActionRequest;
         private readonly TranslateTransform hudPanelTransform = new TranslateTransform();
         private uint? hudDragPointerId;
         private Windows.Foundation.Point hudDragStartPoint;
@@ -104,8 +95,6 @@ namespace YummiGameBarWidget
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
                 timer.Stop();
-                StopBrowserCapture();
-                try { BrowserCaptureCanvas.RemoveFromVisualTree(); } catch { }
             };
         }
 
@@ -137,7 +126,7 @@ namespace YummiGameBarWidget
                 return;
             }
 
-            if (args.VirtualKey == VirtualKey.Space && youtubeReady && YoutubeBody.Visibility == Visibility.Visible)
+            if (args.VirtualKey == VirtualKey.Space && youtubeReady && (YoutubePreferences.VideoOnlyMode || YoutubeBody.Visibility == Visibility.Visible))
             {
                 var focused = FocusManager.GetFocusedElement() as DependencyObject;
                 if (focused is TextBox || focused is WebView ||
@@ -149,11 +138,65 @@ namespace YummiGameBarWidget
 
         private void ApplyPreferences()
         {
-            HudPanel.Visibility = HudPreferences.Visible ? Visibility.Visible : Visibility.Collapsed;
+            var videoOnly = YoutubePreferences.VideoOnlyMode;
+            if (videoOnly)
+            {
+                if (YoutubeOnlySlot.Content != YoutubeVideoHost)
+                {
+                    YoutubeEmbeddedSlot.Content = null;
+                    YoutubeOnlySlot.Content = YoutubeVideoHost;
+                }
+                YoutubeOnlyLayer.Visibility = Visibility.Visible;
+                HudPanel.Visibility = Visibility.Collapsed;
+                RootGrid.Background = new SolidColorBrush(Colors.Black);
+            }
+            else
+            {
+                if (YoutubeEmbeddedSlot.Content != YoutubeVideoHost)
+                {
+                    YoutubeOnlySlot.Content = null;
+                    YoutubeEmbeddedSlot.Content = YoutubeVideoHost;
+                }
+                YoutubeOnlyLayer.Visibility = Visibility.Collapsed;
+                HudPanel.Visibility = HudPreferences.Visible ? Visibility.Visible : Visibility.Collapsed;
+                RootGrid.Background = HudPreferences.CoverageTint
+                    ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
+                    : new SolidColorBrush(Colors.Transparent);
+            }
             HudPanel.Opacity = HudPreferences.Opacity;
-            RootGrid.Background = HudPreferences.CoverageTint
-                ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
-                : new SolidColorBrush(Colors.Transparent);
+            ApplyYoutubePreferences();
+        }
+
+        private void ApplyYoutubePreferences()
+        {
+            var configuredVideo = YoutubePreferences.Video;
+            var configuredId = ExtractYoutubeVideoId(configuredVideo);
+            if (!string.IsNullOrWhiteSpace(configuredVideo) && YoutubeUrlBox.Text != configuredVideo)
+                YoutubeUrlBox.Text = configuredVideo;
+
+            var configuredVolume = YoutubePreferences.Volume;
+            youtubeVolume = configuredVolume;
+            if (Math.Abs(YoutubeVolumeSlider.Value - configuredVolume) > 0.01)
+                YoutubeVolumeSlider.Value = configuredVolume;
+            if (youtubeReady) _ = SetYoutubeVolumeAsync(configuredVolume);
+
+            if (!string.IsNullOrWhiteSpace(configuredId) && !string.Equals(configuredId, youtubeLoadedVideoId, StringComparison.Ordinal))
+            {
+                youtubeLoadedVideoId = configuredId;
+                _ = LoadYoutubeVideoAsync(configuredId);
+            }
+
+            var actionRequest = YoutubePreferences.ActionRequest;
+            if (actionRequest != youtubeLastActionRequest)
+            {
+                youtubeLastActionRequest = actionRequest;
+                if (youtubeReady)
+                {
+                    var action = YoutubePreferences.Action;
+                    if (action == "play") { youtubePlaying = true; _ = InvokeYoutubeAsync("yummiPlay", "재생"); }
+                    else if (action == "pause") { youtubePlaying = false; _ = InvokeYoutubeAsync("yummiPause", "일시정지"); }
+                }
+            }
         }
 
         private async void PreferencesChanged(ApplicationData sender, object args)
@@ -588,13 +631,21 @@ namespace YummiGameBarWidget
 
         private async Task LoadYoutubeAsync()
         {
-            var videoId = ExtractYoutubeVideoId(YoutubeUrlBox.Text);
+            var raw = (YoutubeUrlBox.Text ?? "").Trim();
+            var videoId = ExtractYoutubeVideoId(raw);
             if (string.IsNullOrWhiteSpace(videoId))
             {
                 YoutubeStatusText.Text = "올바른 YouTube 링크 또는 영상 ID를 입력해 주세요";
                 return;
             }
+            youtubeLoadedVideoId = videoId;
+            if (!string.Equals(YoutubePreferences.Video, raw, StringComparison.Ordinal))
+                YoutubePreferences.Video = raw;
+            await LoadYoutubeVideoAsync(videoId);
+        }
 
+        private async Task LoadYoutubeVideoAsync(string videoId)
+        {
             youtubeReady = false;
             youtubePlaying = false;
             YoutubeStatusText.Text = "YouTube 플레이어 불러오는 중…";
@@ -678,6 +729,7 @@ namespace YummiGameBarWidget
                 return;
             }
             youtubeReady = true;
+            _ = SetYoutubeVolumeAsync(youtubeVolume);
             var host = sender.Source == null ? "" : sender.Source.Host;
             YoutubeStatusText.Text = host.EndsWith("youtube.com", StringComparison.OrdinalIgnoreCase)
                 ? "YouTube 로그인/확인 화면 · 완료 후 링크를 다시 열어 주세요"
@@ -693,187 +745,8 @@ namespace YummiGameBarWidget
                 return;
             }
             youtubeReady = true;
+            _ = SetYoutubeVolumeAsync(youtubeVolume);
             YoutubeStatusText.Text = "영상 준비됨 · 기본 WebView fallback";
-        }
-
-        private async void YoutubeOpenBrowserButton_Click(object sender, RoutedEventArgs e)
-        {
-            var videoId = ExtractYoutubeVideoId(YoutubeUrlBox.Text);
-            var target = string.IsNullOrWhiteSpace(videoId)
-                ? new Uri("https://www.youtube.com/")
-                : new Uri("https://www.youtube.com/watch?v=" + Uri.EscapeDataString(videoId));
-            try
-            {
-                YoutubeStatusText.Text = "기본 브라우저에서 YouTube 여는 중…";
-                var opened = await Launcher.LaunchUriAsync(target);
-                YoutubeStatusText.Text = opened
-                    ? "브라우저에서 재생한 뒤 ‘창 캡처’를 눌러 주세요"
-                    : "기본 브라우저를 열지 못했습니다";
-            }
-            catch (Exception ex)
-            {
-                YoutubeStatusText.Text = "브라우저 열기 실패 · " + ErrorCode(ex);
-            }
-        }
-
-        private async void YoutubeCaptureBrowserButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (!GraphicsCaptureSession.IsSupported())
-            {
-                YoutubeStatusText.Text = "이 Windows에서는 창 캡처를 지원하지 않습니다";
-                return;
-            }
-
-            try
-            {
-                YoutubeStatusText.Text = "캡처할 Edge/Chrome 창을 선택해 주세요";
-                BrowserCaptureHint.Visibility = Visibility.Visible;
-                var picker = new GraphicsCapturePicker();
-                var item = await picker.PickSingleItemAsync();
-                BrowserCaptureHint.Visibility = Visibility.Collapsed;
-                if (item == null)
-                {
-                    YoutubeStatusText.Text = "창 캡처 선택이 취소되었습니다";
-                    return;
-                }
-
-                StartBrowserCapture(item);
-            }
-            catch (Exception ex)
-            {
-                BrowserCaptureHint.Visibility = Visibility.Collapsed;
-                YoutubeStatusText.Text = "브라우저 창 캡처 실패 · " + ErrorCode(ex);
-                App.LogStage("browser-capture-picker-error-" + ErrorCode(ex));
-            }
-        }
-
-        private void StartBrowserCapture(GraphicsCaptureItem item)
-        {
-            StopBrowserCapture();
-            browserCaptureItem = item;
-            browserCaptureSize = item.Size;
-            browserCaptureDevice = CanvasDevice.GetSharedDevice();
-            browserCaptureFramePool = Direct3D11CaptureFramePool.Create(
-                browserCaptureDevice,
-                DirectXPixelFormat.B8G8R8A8UIntNormalized,
-                2,
-                browserCaptureSize);
-            browserCaptureFramePool.FrameArrived += BrowserCaptureFramePool_FrameArrived;
-            browserCaptureSession = browserCaptureFramePool.CreateCaptureSession(item);
-            browserCaptureItem.Closed += BrowserCaptureItem_Closed;
-
-            BrowserCaptureCanvas.Visibility = Visibility.Visible;
-            YoutubeWebHost.Visibility = Visibility.Collapsed;
-            BrowserCaptureHint.Visibility = Visibility.Collapsed;
-            browserCaptureSession.StartCapture();
-            YoutubeStatusText.Text = "브라우저 캡처 중 · " + item.DisplayName;
-            App.LogStage("browser-capture-started");
-        }
-
-        private void BrowserCaptureFramePool_FrameArrived(Direct3D11CaptureFramePool sender, object args)
-        {
-            try
-            {
-                var resize = false;
-                var nextSize = browserCaptureSize;
-                using (var frame = sender.TryGetNextFrame())
-                {
-                    if (frame == null) return;
-                    var contentSize = frame.ContentSize;
-                    if (contentSize.Width <= 0 || contentSize.Height <= 0) return;
-
-                    using (var source = CanvasBitmap.CreateFromDirect3D11Surface(browserCaptureDevice, frame.Surface))
-                    {
-                        if (browserCaptureTarget == null ||
-                            (int)browserCaptureTarget.SizeInPixels.Width != contentSize.Width ||
-                            (int)browserCaptureTarget.SizeInPixels.Height != contentSize.Height)
-                        {
-                            browserCaptureTarget?.Dispose();
-                            browserCaptureTarget = new CanvasRenderTarget(
-                                browserCaptureDevice,
-                                contentSize.Width,
-                                contentSize.Height,
-                                96);
-                        }
-
-                        using (var drawing = browserCaptureTarget.CreateDrawingSession())
-                        {
-                            drawing.Clear(Windows.UI.Colors.Black);
-                            drawing.DrawImage(source);
-                        }
-                    }
-
-                    BrowserCaptureCanvas.Invalidate();
-                    if (contentSize.Width != browserCaptureSize.Width || contentSize.Height != browserCaptureSize.Height)
-                    {
-                        resize = true;
-                        nextSize = contentSize;
-                    }
-                }
-
-                if (resize && browserCaptureFramePool != null)
-                {
-                    browserCaptureSize = nextSize;
-                    browserCaptureFramePool.Recreate(
-                        browserCaptureDevice,
-                        DirectXPixelFormat.B8G8R8A8UIntNormalized,
-                        2,
-                        browserCaptureSize);
-                }
-            }
-            catch (Exception ex)
-            {
-                App.LogStage("browser-capture-frame-error-" + ErrorCode(ex));
-            }
-        }
-
-        private void BrowserCaptureCanvas_Draw(CanvasControl sender, CanvasDrawEventArgs args)
-        {
-            var bitmap = browserCaptureTarget;
-            if (bitmap == null) return;
-
-            var sourceWidth = bitmap.Size.Width;
-            var sourceHeight = bitmap.Size.Height;
-            if (sourceWidth <= 0 || sourceHeight <= 0 || sender.ActualWidth <= 0 || sender.ActualHeight <= 0) return;
-
-            var scale = Math.Min(sender.ActualWidth / sourceWidth, sender.ActualHeight / sourceHeight);
-            var width = sourceWidth * scale;
-            var height = sourceHeight * scale;
-            var x = (sender.ActualWidth - width) / 2.0;
-            var y = (sender.ActualHeight - height) / 2.0;
-            args.DrawingSession.DrawImage(bitmap, new Windows.Foundation.Rect(x, y, width, height));
-        }
-
-        private async void BrowserCaptureItem_Closed(GraphicsCaptureItem sender, object args)
-        {
-            try
-            {
-                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
-                {
-                    StopBrowserCapture();
-                    YoutubeStatusText.Text = "캡처하던 브라우저 창이 닫혔습니다";
-                });
-            }
-            catch { }
-        }
-
-        private void StopBrowserCapture()
-        {
-            try
-            {
-                if (browserCaptureItem != null) browserCaptureItem.Closed -= BrowserCaptureItem_Closed;
-                if (browserCaptureFramePool != null) browserCaptureFramePool.FrameArrived -= BrowserCaptureFramePool_FrameArrived;
-            }
-            catch { }
-            try { browserCaptureSession?.Dispose(); } catch { }
-            try { browserCaptureFramePool?.Dispose(); } catch { }
-            try { browserCaptureTarget?.Dispose(); } catch { }
-            browserCaptureSession = null;
-            browserCaptureFramePool = null;
-            browserCaptureTarget = null;
-            browserCaptureItem = null;
-            if (BrowserCaptureCanvas != null) BrowserCaptureCanvas.Visibility = Visibility.Collapsed;
-            if (YoutubeWebHost != null) YoutubeWebHost.Visibility = Visibility.Visible;
         }
 
         private async void YoutubePlayButton_Click(object sender, RoutedEventArgs e)
@@ -901,18 +774,21 @@ namespace YummiGameBarWidget
         private async void YoutubeVolumeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs e)
         {
             youtubeVolume = e.NewValue;
+            if (Math.Abs(YoutubePreferences.Volume - e.NewValue) > 0.01)
+                YoutubePreferences.Volume = e.NewValue;
+            await SetYoutubeVolumeAsync(e.NewValue);
+        }
+
+        private async Task SetYoutubeVolumeAsync(double value)
+        {
             if (!youtubeReady) return;
             try
             {
-                var volume = ((int)Math.Round(youtubeVolume)).ToString();
+                var volume = ((int)Math.Round(Math.Max(0, Math.Min(100, value)))).ToString();
                 if (!youtubeUsingFallback && youtubeWebView2 != null && youtubeWebView2.CoreWebView2 != null)
-                {
                     await youtubeWebView2.ExecuteScriptAsync("window.yummiSetVolume && window.yummiSetVolume(" + volume + ");");
-                }
                 else if (youtubeUsingFallback)
-                {
                     await YoutubeFallbackWebView.InvokeScriptAsync("yummiSetVolume", new[] { volume });
-                }
             }
             catch { }
         }
