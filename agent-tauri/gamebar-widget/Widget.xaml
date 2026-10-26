@@ -81,35 +81,50 @@
         <Border.RenderTransform>
           <TranslateTransform x:Name="YoutubePanelTransform"/>
         </Border.RenderTransform>
-        <Grid x:Name="YoutubeVideoHost" Background="Black">
-          <Grid x:Name="YoutubeWebHost">
-            <WebView x:Name="YoutubeFallbackWebView"
-                     HorizontalAlignment="Stretch"
-                     VerticalAlignment="Stretch"
-                     Visibility="Collapsed"
-                     NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
+        <Grid Background="Black">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+          </Grid.RowDefinitions>
+
+          <!-- Game Bar가 열려 있을 때만 보이는 일반 창 형태의 빈 이동 바. -->
+          <Border x:Name="YoutubeMoveBar"
+                  Grid.Row="0"
+                  Height="24"
+                  Visibility="Collapsed"
+                  Background="#E6141020"
+                  BorderBrush="#507B5AA6"
+                  BorderThickness="0,0,0,1"
+                  PointerPressed="YoutubeMoveBar_PointerPressed"
+                  PointerMoved="YoutubeMoveBar_PointerMoved"
+                  PointerReleased="YoutubeMoveBar_PointerReleased"
+                  PointerCanceled="YoutubeMoveBar_PointerCanceled"
+                  PointerCaptureLost="YoutubeMoveBar_PointerCaptureLost"/>
+
+          <Grid x:Name="YoutubeVideoHost" Grid.Row="1" Background="Black">
+            <Grid x:Name="YoutubeWebHost">
+              <WebView x:Name="YoutubeFallbackWebView"
+                       HorizontalAlignment="Stretch"
+                       VerticalAlignment="Stretch"
+                       Visibility="Collapsed"
+                       NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
+            </Grid>
+            <Border x:Name="YoutubeInlineState" Background="#C8120F1C" Visibility="Visible">
+              <TextBlock x:Name="YoutubeInlineStateText"
+                         Text="설정에서 YouTube 영상을 선택해 주세요"
+                         Foreground="#D9CFE8"
+                         FontSize="11"
+                         TextAlignment="Center"
+                         TextWrapping="Wrap"
+                         HorizontalAlignment="Center"
+                         VerticalAlignment="Center"
+                         Margin="16"/>
+            </Border>
           </Grid>
-          <Border x:Name="YoutubeInlineState" Background="#C8120F1C" Visibility="Visible">
-            <TextBlock x:Name="YoutubeInlineStateText"
-                       Text="설정에서 YouTube 영상을 선택해 주세요"
-                       Foreground="#D9CFE8"
-                       FontSize="11"
-                       TextAlignment="Center"
-                       TextWrapping="Wrap"
-                       HorizontalAlignment="Center"
-                       VerticalAlignment="Center"
-                       Margin="16"/>
-          </Border>
-          <!-- 메인 오버레이에서는 영상 전체가 이동 핸들이다. 영상 조작은 설정 화면에서 한다. -->
-          <Border x:Name="YoutubeDragSurface"
-                  Background="#01000000"
-                  PointerPressed="YoutubeDragSurface_PointerPressed"
-                  PointerMoved="YoutubeDragSurface_PointerMoved"
-                  PointerReleased="YoutubeDragSurface_PointerReleased"
-                  PointerCanceled="YoutubeDragSurface_PointerCanceled"
-                  PointerCaptureLost="YoutubeDragSurface_PointerCaptureLost"/>
+
           <!-- 일반 창처럼 오른쪽/아래 테두리와 우하단 모서리를 잡아 크기를 조절한다. -->
           <Border x:Name="YoutubeRightResizeBorder"
+                  Grid.RowSpan="2"
                   Width="10"
                   HorizontalAlignment="Right"
                   Background="#01000000"
@@ -121,6 +136,7 @@
             <Border Width="2" HorizontalAlignment="Right" Background="#70FFFFFF"/>
           </Border>
           <Border x:Name="YoutubeBottomResizeBorder"
+                  Grid.RowSpan="2"
                   Height="10"
                   VerticalAlignment="Bottom"
                   Background="#01000000"
@@ -132,6 +148,7 @@
             <Border Height="2" VerticalAlignment="Bottom" Background="#70FFFFFF"/>
           </Border>
           <Border x:Name="YoutubeCornerResizeBorder"
+                  Grid.RowSpan="2"
                   Width="16"
                   Height="16"
                   HorizontalAlignment="Right"

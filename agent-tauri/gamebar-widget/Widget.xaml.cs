@@ -64,12 +64,6 @@ namespace YummiGameBarWidget
         private double youtubeResizeStartWidth;
         private double youtubeResizeStartHeight;
         private string youtubeResizeMode;
-        private uint? youtubeSurfacePointerId;
-        private Windows.Foundation.Point youtubeSurfaceStartPoint;
-        private double youtubeSurfaceStartX;
-        private double youtubeSurfaceStartY;
-        private bool youtubeSurfaceDragging;
-        private const double YoutubeDragThreshold = 7.0;
         private const string LcuPanelXSetting = "lcu-panel-x";
         private const string LcuPanelYSetting = "lcu-panel-y";
         private const string PartyPanelXSetting = "party-panel-x";
@@ -156,6 +150,7 @@ namespace YummiGameBarWidget
                 _ = ToggleYoutubePlaybackAsync();
             }
         }
+
 
         private void ApplyPreferences()
         {
@@ -345,6 +340,7 @@ namespace YummiGameBarWidget
         {
             if (widget == null) return;
             bool pinnedOnly = widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+            YoutubeMoveBar.Visibility = pinnedOnly ? Visibility.Collapsed : Visibility.Visible;
             bool passesClicks = pinnedOnly && widget.Pinned && widget.ClickThroughEnabled;
             IsHitTestVisible = !passesClicks;
             if (passesClicks) InputText.Text = "게임으로 클릭 통과 중";
@@ -489,86 +485,30 @@ namespace YummiGameBarWidget
             if (panelDragPointerId == e.Pointer.PointerId) ClearPanelDrag();
         }
 
-        private void YoutubeDragSurface_PointerPressed(object sender, PointerRoutedEventArgs e)
+        private void YoutubeMoveBar_PointerPressed(object sender, PointerRoutedEventArgs e)
         {
             if (youtubeResizePointerId.HasValue) return;
-            var surface = sender as UIElement;
-            if (surface == null) return;
-            var point = e.GetCurrentPoint(RootGrid);
-            if (!point.Properties.IsLeftButtonPressed) return;
-
-            youtubeSurfacePointerId = e.Pointer.PointerId;
-            youtubeSurfaceStartPoint = point.Position;
-            youtubeSurfaceStartX = YoutubePanelTransform.X;
-            youtubeSurfaceStartY = YoutubePanelTransform.Y;
-            youtubeSurfaceDragging = false;
-            surface.CapturePointer(e.Pointer);
-            e.Handled = true;
+            BeginPanelDrag(YoutubePanel, e, sender as UIElement);
         }
 
-        private void YoutubeDragSurface_PointerMoved(object sender, PointerRoutedEventArgs e)
+        private void YoutubeMoveBar_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
-            if (youtubeSurfacePointerId != e.Pointer.PointerId) return;
-            var point = e.GetCurrentPoint(RootGrid);
-            if (!point.Properties.IsLeftButtonPressed)
-            {
-                EndYoutubeSurfaceInteraction(e, sender as UIElement, true);
-                return;
-            }
-
-            var deltaX = point.Position.X - youtubeSurfaceStartPoint.X;
-            var deltaY = point.Position.Y - youtubeSurfaceStartPoint.Y;
-            if (!youtubeSurfaceDragging && Math.Sqrt(deltaX * deltaX + deltaY * deltaY) >= YoutubeDragThreshold)
-                youtubeSurfaceDragging = true;
-
-            if (youtubeSurfaceDragging)
-            {
-                SetPanelPosition(
-                    YoutubePanel,
-                    YoutubePanelTransform,
-                    youtubeSurfaceStartX + deltaX,
-                    youtubeSurfaceStartY + deltaY,
-                    false);
-            }
-            e.Handled = true;
+            ContinuePanelDrag(e, sender as UIElement);
         }
 
-        private void YoutubeDragSurface_PointerReleased(object sender, PointerRoutedEventArgs e)
+        private void YoutubeMoveBar_PointerReleased(object sender, PointerRoutedEventArgs e)
         {
-            EndYoutubeSurfaceInteraction(e, sender as UIElement, true);
+            EndPanelDrag(e, sender as UIElement, true);
         }
 
-        private void YoutubeDragSurface_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        private void YoutubeMoveBar_PointerCanceled(object sender, PointerRoutedEventArgs e)
         {
-            EndYoutubeSurfaceInteraction(e, sender as UIElement, false);
+            EndPanelDrag(e, sender as UIElement, false);
         }
 
-        private void YoutubeDragSurface_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        private void YoutubeMoveBar_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
         {
-            if (youtubeSurfacePointerId == e.Pointer.PointerId)
-            {
-                youtubeSurfacePointerId = null;
-                youtubeSurfaceDragging = false;
-            }
-        }
-
-        private void EndYoutubeSurfaceInteraction(PointerRoutedEventArgs e, UIElement captureTarget, bool commit)
-        {
-            if (youtubeSurfacePointerId != e.Pointer.PointerId) return;
-            var wasDragging = youtubeSurfaceDragging;
-            try { captureTarget?.ReleasePointerCapture(e.Pointer); } catch { }
-            youtubeSurfacePointerId = null;
-            youtubeSurfaceDragging = false;
-
-            if (commit && wasDragging)
-            {
-                SavePanelPosition(YoutubePanel, YoutubePanelTransform);
-            }
-            else if (commit && !wasDragging && youtubeReady)
-            {
-                _ = ToggleYoutubePlaybackAsync();
-            }
-            e.Handled = true;
+            if (panelDragPointerId == e.Pointer.PointerId) ClearPanelDrag();
         }
 
         private void YoutubeRightResizeBorder_PointerPressed(object sender, PointerRoutedEventArgs e)
@@ -588,7 +528,7 @@ namespace YummiGameBarWidget
 
         private void BeginYoutubeResize(string mode, UIElement target, PointerRoutedEventArgs e)
         {
-            if (target == null || youtubeSurfacePointerId.HasValue) return;
+            if (target == null || panelDragPointerId.HasValue) return;
             var point = e.GetCurrentPoint(RootGrid);
             if (!point.Properties.IsLeftButtonPressed) return;
 
