@@ -100,16 +100,31 @@
                        VerticalAlignment="Center"
                        Margin="16"/>
           </Border>
-          <!-- 영상 UI는 그대로 두고, 상단의 얇은 투명 영역만 패널 이동 핸들로 사용한다. -->
-          <Border x:Name="YoutubeDragHandle"
-                  Height="12"
-                  VerticalAlignment="Top"
+          <!-- 메인 오버레이에서는 영상 전체가 이동 핸들이다. 영상 조작은 설정 화면에서 한다. -->
+          <Border x:Name="YoutubeDragSurface"
                   Background="#01000000"
-                  PointerPressed="YoutubeDragHandle_PointerPressed"
-                  PointerMoved="YoutubeDragHandle_PointerMoved"
-                  PointerReleased="YoutubeDragHandle_PointerReleased"
-                  PointerCanceled="YoutubeDragHandle_PointerCanceled"
-                  PointerCaptureLost="YoutubeDragHandle_PointerCaptureLost"/>
+                  PointerPressed="YoutubeDragSurface_PointerPressed"
+                  PointerMoved="YoutubeDragSurface_PointerMoved"
+                  PointerReleased="YoutubeDragSurface_PointerReleased"
+                  PointerCanceled="YoutubeDragSurface_PointerCanceled"
+                  PointerCaptureLost="YoutubeDragSurface_PointerCaptureLost"/>
+          <!-- 우하단의 넓은 그립으로 YouTube 패널 자체를 16:9 비율로 확대/축소한다. -->
+          <Border x:Name="YoutubeResizeGrip"
+                  Width="34"
+                  Height="34"
+                  HorizontalAlignment="Right"
+                  VerticalAlignment="Bottom"
+                  Background="#990E0B17"
+                  BorderBrush="#80FFFFFF"
+                  BorderThickness="1,1,0,0"
+                  CornerRadius="8,0,10,0"
+                  PointerPressed="YoutubeResizeGrip_PointerPressed"
+                  PointerMoved="YoutubeResizeGrip_PointerMoved"
+                  PointerReleased="YoutubeResizeGrip_PointerReleased"
+                  PointerCanceled="YoutubeResizeGrip_PointerCanceled"
+                  PointerCaptureLost="YoutubeResizeGrip_PointerCaptureLost">
+            <TextBlock Text="↘" Foreground="White" FontSize="17" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
         </Grid>
       </Border>
     </Grid>
