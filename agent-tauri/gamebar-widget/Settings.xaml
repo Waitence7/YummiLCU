@@ -18,7 +18,6 @@
       <Border Background="#342A203A" CornerRadius="10" Padding="12">
         <StackPanel Spacing="9">
           <TextBlock Text="YouTube 화면" Foreground="White" FontWeight="SemiBold"/>
-          <ToggleSwitch x:Name="YoutubeOnlyToggle" Header="YouTube 영상만 표시" OnContent="영상 전용" OffContent="LCU HUD" IsOn="True" Toggled="YoutubeOnlyToggle_Toggled" Foreground="White"/>
           <TextBox x:Name="YoutubeUrlBox" Header="영상 링크 또는 ID" PlaceholderText="https://youtu.be/..." KeyDown="YoutubeUrlBox_KeyDown"/>
           <Button Content="영상 적용" Click="YoutubeApplyButton_Click" HorizontalAlignment="Left" Padding="16,7"/>
           <Grid ColumnSpacing="8">
@@ -30,7 +29,7 @@
             <TextBlock Text="볼륨" Foreground="White"/>
             <Slider x:Name="YoutubeVolumeSlider" Minimum="0" Maximum="100" StepFrequency="1" Value="60" ValueChanged="YoutubeVolumeSlider_ValueChanged"/>
           </StackPanel>
-          <TextBlock x:Name="YoutubeSettingsStatusText" Text="기본값은 영상 전용 화면입니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
+          <TextBlock x:Name="YoutubeSettingsStatusText" Text="YouTube는 유미 위젯 안의 작은 카드로 표시됩니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
         </StackPanel>
       </Border>
       <TextBlock Text="설정은 Game Bar를 연 상태에서 조작할 수 있습니다. 게임 클릭 통과는 Game Bar 상단의 클릭 통과 버튼에서 켜 주세요." Foreground="#BDB1D0" TextWrapping="Wrap"/>

@@ -6,16 +6,16 @@
   <Grid x:Name="RootGrid" Background="Transparent">
     <Border
         x:Name="HudPanel"
-        Width="330"
+        Width="600"
         HorizontalAlignment="Left"
         VerticalAlignment="Top"
-        Margin="36"
-        Padding="14"
-        CornerRadius="12"
+        Margin="20"
+        Padding="12"
+        CornerRadius="14"
         Background="#D9141020"
         BorderBrush="#507B5AA6"
         BorderThickness="1">
-      <StackPanel Spacing="7">
+      <StackPanel Spacing="10">
         <Grid x:Name="HudDragHandle"
               Background="#01000000"
               PointerPressed="HudDragHandle_PointerPressed"
@@ -25,82 +25,55 @@
               PointerCaptureLost="HudDragHandle_PointerCaptureLost">
           <Grid.ColumnDefinitions>
             <ColumnDefinition Width="Auto"/>
-            <ColumnDefinition Width="Auto"/>
             <ColumnDefinition Width="*"/>
             <ColumnDefinition Width="Auto"/>
           </Grid.ColumnDefinitions>
-          <Ellipse x:Name="StatusDot" Grid.Column="0" Width="10" Height="10" Fill="#7A6A86" Margin="0,0,8,0" VerticalAlignment="Center"/>
-          <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center" Spacing="6">
-            <TextBlock Text="유미 LCU" FontSize="17" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
+          <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Spacing="7">
+            <Ellipse x:Name="StatusDot" Width="10" Height="10" Fill="#7A6A86" VerticalAlignment="Center"/>
+            <TextBlock Text="유미" FontSize="17" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
             <TextBlock x:Name="VersionText" Text="v-" FontSize="10" Foreground="#9687AA" VerticalAlignment="Center" Margin="0,3,0,0"/>
           </StackPanel>
-          <TextBlock x:Name="PhaseText" Grid.Column="2" Text="Offline" FontSize="11" Foreground="#CDBDE8" Margin="10,4,0,0" VerticalAlignment="Center"/>
-          <Button x:Name="HudResetPositionButton" Grid.Column="3" Content="↺" Width="28" Height="26" Padding="0" FontSize="13" Click="HudResetPositionButton_Click" ToolTipService.ToolTip="HUD 위치 초기화"/>
+          <TextBlock x:Name="PhaseText" Grid.Column="1" Text="Offline" FontSize="11" Foreground="#CDBDE8" Margin="10,4,0,0" VerticalAlignment="Center"/>
+          <Button x:Name="HudResetPositionButton" Grid.Column="2" Content="↺" Width="28" Height="26" Padding="0" FontSize="13" Click="HudResetPositionButton_Click" ToolTipService.ToolTip="위젯 위치 초기화"/>
         </Grid>
-        <TextBlock x:Name="RiotIdText" Text="League 클라이언트를 기다리는 중" FontSize="13" Foreground="White" TextTrimming="CharacterEllipsis"/>
-        <TextBlock x:Name="PartyText" Text="파티 정보 없음" FontSize="11" Foreground="#BDB1D0" TextWrapping="Wrap"/>
-        <TextBlock x:Name="DisplayText" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
-        <TextBlock x:Name="InputText" FontSize="10" Foreground="#BDB1D0" TextWrapping="Wrap"/>
-        <TextBlock x:Name="BridgeText" Text="유미 에이전트 연결 확인 중…" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
 
-        <Border Margin="0,6,0,0" BorderBrush="#3DFFFFFF" BorderThickness="1" CornerRadius="8" Padding="8" Background="#B30E0B17">
-          <StackPanel Spacing="7">
-            <Grid>
-              <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-              </Grid.ColumnDefinitions>
-              <TextBlock Text="YouTube" FontSize="12" FontWeight="SemiBold" Foreground="White" VerticalAlignment="Center"/>
-              <Button x:Name="YoutubeCollapseButton" Grid.Column="1" Content="접기" Padding="8,2" FontSize="10" Click="YoutubeCollapseButton_Click"/>
-            </Grid>
+        <Grid ColumnSpacing="10">
+          <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="220"/>
+            <ColumnDefinition Width="*"/>
+          </Grid.ColumnDefinitions>
 
-            <StackPanel x:Name="YoutubeBody" Spacing="7">
-              <Grid ColumnSpacing="6">
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="*"/>
-                  <ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
-                <TextBox x:Name="YoutubeUrlBox" PlaceholderText="YouTube 링크 또는 영상 ID" FontSize="11" KeyDown="YoutubeUrlBox_KeyDown"/>
-                <Button Grid.Column="1" Content="열기" Padding="12,4" FontSize="11" Click="YoutubeLoadButton_Click"/>
-              </Grid>
+          <StackPanel Grid.Column="0" Spacing="10">
+            <Border CornerRadius="10" Padding="11" Background="#B30E0B17" BorderBrush="#2FFFFFFF" BorderThickness="1">
+              <StackPanel Spacing="6">
+                <TextBlock Text="LCU 상태" FontSize="12" FontWeight="SemiBold" Foreground="White"/>
+                <TextBlock x:Name="RiotIdText" Text="League 클라이언트를 기다리는 중" FontSize="13" Foreground="White" TextTrimming="CharacterEllipsis"/>
+                <TextBlock x:Name="BridgeText" Text="유미 에이전트 연결 확인 중…" FontSize="10" Foreground="#A99DBB" TextWrapping="Wrap"/>
+                <TextBlock x:Name="DisplayText" FontSize="9" Foreground="#776E84" TextWrapping="Wrap"/>
+                <TextBlock x:Name="InputText" FontSize="9" Foreground="#9388A3" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
 
-              <Border Height="200" Background="#FF000000" CornerRadius="6">
-                <ContentControl x:Name="YoutubeEmbeddedSlot" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
-                  <Grid x:Name="YoutubeVideoHost" Background="Black">
-                    <Grid x:Name="YoutubeWebHost">
-                      <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
-                    </Grid>
-                  </Grid>
-                </ContentControl>
-              </Border>
-
-              <Grid ColumnSpacing="6">
-                <Grid.ColumnDefinitions>
-                  <ColumnDefinition Width="Auto"/>
-                  <ColumnDefinition Width="Auto"/>
-                  <ColumnDefinition Width="Auto"/>
-                  <ColumnDefinition Width="*"/>
-                </Grid.ColumnDefinitions>
-                <Button Content="▶" Width="36" Padding="4" Click="YoutubePlayButton_Click" ToolTipService.ToolTip="재생"/>
-                <Button Grid.Column="1" Content="Ⅱ" Width="36" Padding="4" Click="YoutubePauseButton_Click" ToolTipService.ToolTip="일시정지"/>
-                <TextBlock Grid.Column="2" Text="볼륨" FontSize="10" Foreground="#BDB1D0" VerticalAlignment="Center" Margin="4,0"/>
-                <Slider x:Name="YoutubeVolumeSlider" Grid.Column="3" Minimum="0" Maximum="100" Value="60" ValueChanged="YoutubeVolumeSlider_ValueChanged"/>
-              </Grid>
-              <TextBlock x:Name="YoutubeStatusText" Text="링크를 입력하면 영상이 표시됩니다" FontSize="10" Foreground="#877C98" TextWrapping="Wrap"/>
-            </StackPanel>
+            <Border CornerRadius="10" Padding="11" Background="#B30E0B17" BorderBrush="#2FFFFFFF" BorderThickness="1">
+              <StackPanel Spacing="6">
+                <TextBlock Text="파티" FontSize="12" FontWeight="SemiBold" Foreground="White"/>
+                <TextBlock x:Name="PartyText" Text="파티 정보 없음" FontSize="11" Foreground="#BDB1D0" TextWrapping="Wrap"/>
+              </StackPanel>
+            </Border>
           </StackPanel>
-        </Border>
+
+          <Border Grid.Column="1" CornerRadius="10" Padding="0" Background="#FF000000" BorderBrush="#2FFFFFFF" BorderThickness="1">
+            <Grid x:Name="YoutubeVideoHost" Background="Black">
+              <Grid x:Name="YoutubeWebHost">
+                <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
+              </Grid>
+              <Border x:Name="YoutubeInlineState" Background="#C8120F1C" Visibility="Visible">
+                <TextBlock x:Name="YoutubeInlineStateText" Text="설정에서 YouTube 영상을 선택해 주세요" Foreground="#D9CFE8" FontSize="11" TextAlignment="Center" TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16"/>
+              </Border>
+            </Grid>
+          </Border>
+        </Grid>
       </StackPanel>
     </Border>
-    <Grid x:Name="YoutubeOnlyLayer" Visibility="Collapsed" Background="Black">
-      <ContentControl x:Name="YoutubeOnlySlot" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
-      <Border x:Name="YoutubeOnlyState" Background="#E6120F1C" Visibility="Visible">
-        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Spacing="12" MaxWidth="420" Margin="24">
-          <TextBlock Text="유미 YouTube" Foreground="White" FontSize="22" FontWeight="SemiBold" HorizontalAlignment="Center"/>
-          <TextBlock x:Name="YoutubeOnlyStateText" Text="YouTube 영상이 설정되지 않았습니다." Foreground="#D9CFE8" FontSize="13" TextAlignment="Center" TextWrapping="Wrap"/>
-          <Button Content="설정 열기" HorizontalAlignment="Center" Padding="18,8" Click="YoutubeOnlySettingsButton_Click"/>
-        </StackPanel>
-      </Border>
-    </Grid>
   </Grid>
 </Page>
