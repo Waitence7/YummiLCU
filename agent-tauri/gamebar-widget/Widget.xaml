@@ -108,22 +108,44 @@
                   PointerReleased="YoutubeDragSurface_PointerReleased"
                   PointerCanceled="YoutubeDragSurface_PointerCanceled"
                   PointerCaptureLost="YoutubeDragSurface_PointerCaptureLost"/>
-          <!-- 우하단의 넓은 그립으로 YouTube 패널 자체를 16:9 비율로 확대/축소한다. -->
-          <Border x:Name="YoutubeResizeGrip"
-                  Width="34"
-                  Height="34"
+          <!-- 일반 창처럼 오른쪽/아래 테두리와 우하단 모서리를 잡아 크기를 조절한다. -->
+          <Border x:Name="YoutubeRightResizeBorder"
+                  Width="10"
+                  HorizontalAlignment="Right"
+                  Background="#01000000"
+                  PointerPressed="YoutubeRightResizeBorder_PointerPressed"
+                  PointerMoved="YoutubeResizeBorder_PointerMoved"
+                  PointerReleased="YoutubeResizeBorder_PointerReleased"
+                  PointerCanceled="YoutubeResizeBorder_PointerCanceled"
+                  PointerCaptureLost="YoutubeResizeBorder_PointerCaptureLost">
+            <Border Width="2" HorizontalAlignment="Right" Background="#70FFFFFF"/>
+          </Border>
+          <Border x:Name="YoutubeBottomResizeBorder"
+                  Height="10"
+                  VerticalAlignment="Bottom"
+                  Background="#01000000"
+                  PointerPressed="YoutubeBottomResizeBorder_PointerPressed"
+                  PointerMoved="YoutubeResizeBorder_PointerMoved"
+                  PointerReleased="YoutubeResizeBorder_PointerReleased"
+                  PointerCanceled="YoutubeResizeBorder_PointerCanceled"
+                  PointerCaptureLost="YoutubeResizeBorder_PointerCaptureLost">
+            <Border Height="2" VerticalAlignment="Bottom" Background="#70FFFFFF"/>
+          </Border>
+          <Border x:Name="YoutubeCornerResizeBorder"
+                  Width="16"
+                  Height="16"
                   HorizontalAlignment="Right"
                   VerticalAlignment="Bottom"
-                  Background="#990E0B17"
-                  BorderBrush="#80FFFFFF"
-                  BorderThickness="1,1,0,0"
-                  CornerRadius="8,0,10,0"
-                  PointerPressed="YoutubeResizeGrip_PointerPressed"
-                  PointerMoved="YoutubeResizeGrip_PointerMoved"
-                  PointerReleased="YoutubeResizeGrip_PointerReleased"
-                  PointerCanceled="YoutubeResizeGrip_PointerCanceled"
-                  PointerCaptureLost="YoutubeResizeGrip_PointerCaptureLost">
-            <TextBlock Text="↘" Foreground="White" FontSize="17" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                  Background="#01000000"
+                  PointerPressed="YoutubeCornerResizeBorder_PointerPressed"
+                  PointerMoved="YoutubeResizeBorder_PointerMoved"
+                  PointerReleased="YoutubeResizeBorder_PointerReleased"
+                  PointerCanceled="YoutubeResizeBorder_PointerCanceled"
+                  PointerCaptureLost="YoutubeResizeBorder_PointerCaptureLost">
+            <Grid>
+              <Border Width="2" HorizontalAlignment="Right" Background="#A0FFFFFF"/>
+              <Border Height="2" VerticalAlignment="Bottom" Background="#A0FFFFFF"/>
+            </Grid>
           </Border>
         </Grid>
       </Border>
