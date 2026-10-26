@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -28,6 +29,7 @@ namespace YummiGameBarWidget
     public sealed partial class Widget : Page
     {
         private readonly DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
+        private readonly DispatcherTimer nativeInputTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
         private XboxGameBarWidget widget;
         private bool refreshing;
         private double displayWidth;
@@ -69,6 +71,8 @@ namespace YummiGameBarWidget
         private double panelResizeStartY;
         private string panelResizeMode;
         private string panelResizeKey;
+        private bool panelChromePinnedOffsetApplied;
+        private const double PanelTitleBarHeight = 24.0;
         private const string LcuPanelXSetting = "lcu-panel-x";
         private const string LcuPanelYSetting = "lcu-panel-y";
         private const string LcuPanelWidthSetting = "lcu-panel-width";
@@ -81,10 +85,49 @@ namespace YummiGameBarWidget
         private const string YoutubePanelYSetting = "youtube-panel-y";
         private const string YoutubePanelWidthSetting = "youtube-panel-width";
         private const string YoutubePanelHeightSetting = "youtube-panel-height";
+        private const string ClickButtonPanelXSetting = "click-button-panel-x";
+        private const string ClickButtonPanelYSetting = "click-button-panel-y";
+        private const string ClickPointerPanelXSetting = "click-pointer-panel-x";
+        private const string ClickPointerPanelYSetting = "click-pointer-panel-y";
+        private const string ClickHitboxPanelXSetting = "click-hitbox-panel-x";
+        private const string ClickHitboxPanelYSetting = "click-hitbox-panel-y";
+        private const string ClickThresholdPanelXSetting = "click-threshold-panel-x";
+        private const string ClickThresholdPanelYSetting = "click-threshold-panel-y";
+        private const string ClickRoutedPanelXSetting = "click-routed-panel-x";
+        private const string ClickRoutedPanelYSetting = "click-routed-panel-y";
+        private const string ClickButtonPanelWidthSetting = "click-button-panel-width";
+        private const string ClickButtonPanelHeightSetting = "click-button-panel-height";
+        private const string ClickPointerPanelWidthSetting = "click-pointer-panel-width";
+        private const string ClickPointerPanelHeightSetting = "click-pointer-panel-height";
+        private const string ClickHitboxPanelWidthSetting = "click-hitbox-panel-width";
+        private const string ClickHitboxPanelHeightSetting = "click-hitbox-panel-height";
+        private const string ClickThresholdPanelWidthSetting = "click-threshold-panel-width";
+        private const string ClickThresholdPanelHeightSetting = "click-threshold-panel-height";
+        private const string ClickRoutedPanelWidthSetting = "click-routed-panel-width";
+        private const string ClickRoutedPanelHeightSetting = "click-routed-panel-height";
+        private const string ClickNativePanelXSetting = "click-native-panel-x";
+        private const string ClickNativePanelYSetting = "click-native-panel-y";
+        private const string ClickNativePanelWidthSetting = "click-native-panel-width";
+        private const string ClickNativePanelHeightSetting = "click-native-panel-height";
+        private const string CommandPipeName = @"LOCAL\YummiLcuGameBarCommandV1";
+        private int clickButtonCount;
+        private int clickPointerCount;
+        private int clickHitboxCount;
+        private int clickThresholdCount;
+        private int clickRoutedCount;
+        private uint? directPointerId;
+        private uint? thresholdPointerId;
+        private Windows.Foundation.Point thresholdStart;
+        private bool thresholdMoved;
+        private bool syncingNativeInput;
+        private ulong lastNativeInputSequence;
 
         public Widget()
         {
             InitializeComponent();
+            ClickRoutedBody.AddHandler(UIElement.PointerPressedEvent, new PointerEventHandler(RoutedTest_PointerPressed), true);
+            ClickRoutedBody.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(RoutedTest_PointerReleased), true);
+            nativeInputTimer.Tick += async (_, __) => await SyncExternalClickTestAsync(true);
             SetVersionText();
             RestorePanelPositions();
             RestorePanelSizes();
@@ -106,6 +149,7 @@ namespace YummiGameBarWidget
                     if (adapt) await FitToDisplayAsync();
                 }
                 UpdateInputState();
+                nativeInputTimer.Start();
                 timer.Start();
                 await RefreshAsync();
                 App.LogStage("hud-ready");
@@ -114,6 +158,8 @@ namespace YummiGameBarWidget
             {
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
+                nativeInputTimer.Stop();
+                _ = SyncExternalClickTestAsync(false);
                 timer.Stop();
             };
         }
@@ -729,6 +775,12 @@ namespace YummiGameBarWidget
             RestorePanelPosition(LcuPanel, LcuPanelTransform, LcuPanelXSetting, LcuPanelYSetting);
             RestorePanelPosition(PartyPanel, PartyPanelTransform, PartyPanelXSetting, PartyPanelYSetting);
             RestorePanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelXSetting, YoutubePanelYSetting);
+            RestorePanelPosition(ClickButtonPanel, ClickButtonPanelTransform, ClickButtonPanelXSetting, ClickButtonPanelYSetting);
+            RestorePanelPosition(ClickPointerPanel, ClickPointerPanelTransform, ClickPointerPanelXSetting, ClickPointerPanelYSetting);
+            RestorePanelPosition(ClickHitboxPanel, ClickHitboxPanelTransform, ClickHitboxPanelXSetting, ClickHitboxPanelYSetting);
+            RestorePanelPosition(ClickThresholdPanel, ClickThresholdPanelTransform, ClickThresholdPanelXSetting, ClickThresholdPanelYSetting);
+            RestorePanelPosition(ClickRoutedPanel, ClickRoutedPanelTransform, ClickRoutedPanelXSetting, ClickRoutedPanelYSetting);
+            RestorePanelPosition(ClickNativePanel, ClickNativePanelTransform, ClickNativePanelXSetting, ClickNativePanelYSetting);
         }
 
         private void RestorePanelSizes()
@@ -737,6 +789,12 @@ namespace YummiGameBarWidget
             RestorePanelSize("lcu", values, LcuPanelWidthSetting, LcuPanelHeightSetting, 240, 145);
             RestorePanelSize("party", values, PartyPanelWidthSetting, PartyPanelHeightSetting, 240, 70);
             RestorePanelSize("youtube", values, YoutubePanelWidthSetting, YoutubePanelHeightSetting, 340, 191);
+            RestorePanelSize("click-button", values, ClickButtonPanelWidthSetting, ClickButtonPanelHeightSetting, 250, 92);
+            RestorePanelSize("click-pointer", values, ClickPointerPanelWidthSetting, ClickPointerPanelHeightSetting, 250, 92);
+            RestorePanelSize("click-hitbox", values, ClickHitboxPanelWidthSetting, ClickHitboxPanelHeightSetting, 250, 92);
+            RestorePanelSize("click-threshold", values, ClickThresholdPanelWidthSetting, ClickThresholdPanelHeightSetting, 250, 92);
+            RestorePanelSize("click-routed", values, ClickRoutedPanelWidthSetting, ClickRoutedPanelHeightSetting, 250, 92);
+            RestorePanelSize("click-native", values, ClickNativePanelWidthSetting, ClickNativePanelHeightSetting, 250, 92);
         }
 
         private void RestorePanelSize(string key, IDictionary<string, object> values, string widthKey, string heightKey, double defaultWidth, double defaultHeight)
@@ -758,6 +816,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") { minWidth = 190; maxWidth = 900; minHeight = 100; maxHeight = 600; }
             else if (key == "party") { minWidth = 160; maxWidth = 800; minHeight = 48; maxHeight = 500; }
             else if (key == "youtube") { minWidth = 220; maxWidth = 1280; minHeight = 124; maxHeight = 720; }
+            else if (key.StartsWith("click-")) { minWidth = 190; maxWidth = 700; minHeight = 70; maxHeight = 300; }
 
             panel.Width = Math.Max(minWidth, Math.Min(maxWidth, requestedWidth));
             body.Height = Math.Max(minHeight, Math.Min(maxHeight, requestedHeight));
@@ -785,6 +844,12 @@ namespace YummiGameBarWidget
                 values[YoutubePanelWidthSetting] = panel.Width;
                 values[YoutubePanelHeightSetting] = body.Height;
             }
+            else if (key == "click-button") { values[ClickButtonPanelWidthSetting] = panel.Width; values[ClickButtonPanelHeightSetting] = body.Height; }
+            else if (key == "click-pointer") { values[ClickPointerPanelWidthSetting] = panel.Width; values[ClickPointerPanelHeightSetting] = body.Height; }
+            else if (key == "click-hitbox") { values[ClickHitboxPanelWidthSetting] = panel.Width; values[ClickHitboxPanelHeightSetting] = body.Height; }
+            else if (key == "click-threshold") { values[ClickThresholdPanelWidthSetting] = panel.Width; values[ClickThresholdPanelHeightSetting] = body.Height; }
+            else if (key == "click-routed") { values[ClickRoutedPanelWidthSetting] = panel.Width; values[ClickRoutedPanelHeightSetting] = body.Height; }
+            else if (key == "click-native") { values[ClickNativePanelWidthSetting] = panel.Width; values[ClickNativePanelHeightSetting] = body.Height; }
         }
 
         private FrameworkElement GetPanel(string key)
@@ -792,6 +857,12 @@ namespace YummiGameBarWidget
             if (key == "lcu") return LcuPanel;
             if (key == "party") return PartyPanel;
             if (key == "youtube") return YoutubePanel;
+            if (key == "click-button") return ClickButtonPanel;
+            if (key == "click-pointer") return ClickPointerPanel;
+            if (key == "click-hitbox") return ClickHitboxPanel;
+            if (key == "click-threshold") return ClickThresholdPanel;
+            if (key == "click-routed") return ClickRoutedPanel;
+            if (key == "click-native") return ClickNativePanel;
             return null;
         }
 
@@ -800,6 +871,12 @@ namespace YummiGameBarWidget
             if (key == "lcu") return LcuBody;
             if (key == "party") return PartyBody;
             if (key == "youtube") return YoutubeVideoHost;
+            if (key == "click-button") return ClickButtonBody;
+            if (key == "click-pointer") return ClickPointerBody;
+            if (key == "click-hitbox") return ClickHitboxBody;
+            if (key == "click-threshold") return ClickThresholdBody;
+            if (key == "click-routed") return ClickRoutedBody;
+            if (key == "click-native") return ClickNativeBody;
             return null;
         }
 
@@ -836,9 +913,43 @@ namespace YummiGameBarWidget
         private void UpdatePanelChrome()
         {
             bool pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+            ApplyPinnedBodyPositionOffset(pinnedOnly);
             ApplyPanelChrome("lcu", LcuPanel, LcuMoveBar, LcuBody, LcuEyeButton, LcuResizeHandles, pinnedOnly);
             ApplyPanelChrome("party", PartyPanel, PartyMoveBar, PartyBody, PartyEyeButton, PartyResizeHandles, pinnedOnly);
             ApplyPanelChrome("youtube", YoutubePanel, YoutubeMoveBar, YoutubeVideoHost, YoutubeEyeButton, YoutubeResizeHandles, pinnedOnly);
+            ApplyClickTestPanelChrome(ClickButtonMoveBar, ClickButtonResizeHandles, pinnedOnly);
+            ApplyClickTestPanelChrome(ClickPointerMoveBar, ClickPointerResizeHandles, pinnedOnly);
+            ApplyClickTestPanelChrome(ClickHitboxMoveBar, ClickHitboxResizeHandles, pinnedOnly);
+            ApplyClickTestPanelChrome(ClickThresholdMoveBar, ClickThresholdResizeHandles, pinnedOnly);
+            ApplyClickTestPanelChrome(ClickRoutedMoveBar, ClickRoutedResizeHandles, pinnedOnly);
+            ApplyClickTestPanelChrome(ClickNativeMoveBar, ClickNativeResizeHandles, pinnedOnly);
+        }
+
+        private static void ApplyClickTestPanelChrome(FrameworkElement moveBar, FrameworkElement resizeHandles, bool pinnedOnly)
+        {
+            moveBar.Visibility = pinnedOnly ? Visibility.Collapsed : Visibility.Visible;
+            resizeHandles.Visibility = pinnedOnly ? Visibility.Collapsed : Visibility.Visible;
+        }
+
+        private void ApplyPinnedBodyPositionOffset(bool pinnedOnly)
+        {
+            if (panelChromePinnedOffsetApplied == pinnedOnly) return;
+
+            // Stored Y is the edit-mode panel position, where the 24 DIP title
+            // bar sits above the body. When the title bar collapses in pinned
+            // mode, move the whole panel down by the same amount so the body
+            // remains at the exact same screen Y. Reverse it when Win+G opens.
+            var delta = pinnedOnly ? PanelTitleBarHeight : -PanelTitleBarHeight;
+            LcuPanelTransform.Y += delta;
+            PartyPanelTransform.Y += delta;
+            YoutubePanelTransform.Y += delta;
+            ClickButtonPanelTransform.Y += delta;
+            ClickPointerPanelTransform.Y += delta;
+            ClickHitboxPanelTransform.Y += delta;
+            ClickThresholdPanelTransform.Y += delta;
+            ClickRoutedPanelTransform.Y += delta;
+            ClickNativePanelTransform.Y += delta;
+            panelChromePinnedOffsetApplied = pinnedOnly;
         }
 
         private void ApplyPanelChrome(string key, FrameworkElement panel, FrameworkElement moveBar, FrameworkElement body, Control eyeButton,
@@ -885,6 +996,12 @@ namespace YummiGameBarWidget
                 values[YoutubePanelXSetting] = transform.X;
                 values[YoutubePanelYSetting] = transform.Y;
             }
+            else if (panel == ClickButtonPanel) { values[ClickButtonPanelXSetting] = transform.X; values[ClickButtonPanelYSetting] = transform.Y; }
+            else if (panel == ClickPointerPanel) { values[ClickPointerPanelXSetting] = transform.X; values[ClickPointerPanelYSetting] = transform.Y; }
+            else if (panel == ClickHitboxPanel) { values[ClickHitboxPanelXSetting] = transform.X; values[ClickHitboxPanelYSetting] = transform.Y; }
+            else if (panel == ClickThresholdPanel) { values[ClickThresholdPanelXSetting] = transform.X; values[ClickThresholdPanelYSetting] = transform.Y; }
+            else if (panel == ClickRoutedPanel) { values[ClickRoutedPanelXSetting] = transform.X; values[ClickRoutedPanelYSetting] = transform.Y; }
+            else if (panel == ClickNativePanel) { values[ClickNativePanelXSetting] = transform.X; values[ClickNativePanelYSetting] = transform.Y; }
         }
 
         private void ClampAllPanelPositions()
@@ -892,6 +1009,12 @@ namespace YummiGameBarWidget
             SetPanelPosition(LcuPanel, LcuPanelTransform, LcuPanelTransform.X, LcuPanelTransform.Y, false);
             SetPanelPosition(PartyPanel, PartyPanelTransform, PartyPanelTransform.X, PartyPanelTransform.Y, false);
             SetPanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelTransform.X, YoutubePanelTransform.Y, false);
+            SetPanelPosition(ClickButtonPanel, ClickButtonPanelTransform, ClickButtonPanelTransform.X, ClickButtonPanelTransform.Y, false);
+            SetPanelPosition(ClickPointerPanel, ClickPointerPanelTransform, ClickPointerPanelTransform.X, ClickPointerPanelTransform.Y, false);
+            SetPanelPosition(ClickHitboxPanel, ClickHitboxPanelTransform, ClickHitboxPanelTransform.X, ClickHitboxPanelTransform.Y, false);
+            SetPanelPosition(ClickThresholdPanel, ClickThresholdPanelTransform, ClickThresholdPanelTransform.X, ClickThresholdPanelTransform.Y, false);
+            SetPanelPosition(ClickRoutedPanel, ClickRoutedPanelTransform, ClickRoutedPanelTransform.X, ClickRoutedPanelTransform.Y, false);
+            SetPanelPosition(ClickNativePanel, ClickNativePanelTransform, ClickNativePanelTransform.X, ClickNativePanelTransform.Y, false);
         }
 
         private void SetPanelPosition(FrameworkElement panel, TranslateTransform transform, double x, double y, bool save)
@@ -914,6 +1037,175 @@ namespace YummiGameBarWidget
             transform.X = x;
             transform.Y = y;
             if (save) SavePanelPosition(panel, transform);
+        }
+
+        private async Task SyncExternalClickTestAsync(bool active)
+        {
+            if (syncingNativeInput || widget == null) return;
+            syncingNativeInput = true;
+            try
+            {
+                var effectiveActive = active && HudPreferences.Visible && HudPanel.Visibility == Visibility.Visible
+                    && ClickNativePanel.Visibility == Visibility.Visible;
+                var command = new JsonObject
+                {
+                    ["command"] = JsonValue.CreateStringValue("sync_external_click_test"),
+                    ["active"] = JsonValue.CreateBooleanValue(effectiveActive),
+                };
+                if (effectiveActive)
+                {
+                    if (NativeHookHitbox.ActualWidth <= 0 || NativeHookHitbox.ActualHeight <= 0) return;
+                    var local = NativeHookHitbox.TransformToVisual(RootGrid)
+                        .TransformPoint(new Windows.Foundation.Point(0, 0));
+                    var bounds = widget.WindowBounds;
+                    var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
+                    command["x"] = JsonValue.CreateNumberValue((bounds.X + local.X) * scale);
+                    command["y"] = JsonValue.CreateNumberValue((bounds.Y + local.Y) * scale);
+                    command["width"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualWidth * scale);
+                    command["height"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
+                }
+
+                var response = JsonObject.Parse(await SendAgentCommandAsync(command.Stringify()));
+                if (!response.GetNamedBoolean("ok", false))
+                {
+                    ClickNativeResult.Text = "Agent hook · " + response.GetNamedString("message", "sync failed");
+                    return;
+                }
+                var sequence = (ulong)Math.Max(0, response.GetNamedNumber("sequence", 0));
+                var clickCount = (ulong)Math.Max(0, response.GetNamedNumber("clickCount", 0));
+                var eventName = response.GetNamedString("event", "");
+                if (sequence != lastNativeInputSequence)
+                {
+                    lastNativeInputSequence = sequence;
+                    var eventX = (int)response.GetNamedNumber("eventX", 0);
+                    var eventY = (int)response.GetNamedNumber("eventY", 0);
+                    ClickNativeResult.Text = "count " + clickCount + " · native " + eventName + " · " + eventX + "," + eventY;
+                }
+                else if (sequence == 0)
+                {
+                    ClickNativeResult.Text = "count " + clickCount + " · Agent hook armed";
+                }
+            }
+            catch (Exception ex)
+            {
+                ClickNativeResult.Text = "Agent hook unavailable · " + ErrorCode(ex);
+            }
+            finally
+            {
+                syncingNativeInput = false;
+            }
+        }
+
+        private static async Task<string> SendAgentCommandAsync(string payload)
+        {
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+            using (var pipe = NativePipeClient.Open(CommandPipeName, FileAccess.ReadWrite))
+            {
+                var data = Encoding.UTF8.GetBytes(payload + "\n");
+                await pipe.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
+                await pipe.FlushAsync(timeout.Token).ConfigureAwait(false);
+                return await NativePipeClient.ReadLineAsync(pipe, timeout.Token).ConfigureAwait(false);
+            }
+        }
+
+        private static string PointerKind(PointerRoutedEventArgs e)
+        {
+            try { return e.Pointer.PointerDeviceType.ToString(); }
+            catch { return "pointer"; }
+        }
+
+        private void ClickTestButton_Click(object sender, RoutedEventArgs e)
+        {
+            clickButtonCount++;
+            ClickButtonResult.Text = "count " + clickButtonCount + " · Click · " + DateTime.Now.ToString("HH:mm:ss.fff");
+        }
+
+        private void DirectPointer_PointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            directPointerId = e.Pointer.PointerId;
+            ClickPointerResult.Text = "count " + clickPointerCount + " · pressed · " + PointerKind(e);
+            e.Handled = true;
+        }
+
+        private void DirectPointer_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            if (directPointerId != e.Pointer.PointerId) return;
+            directPointerId = null;
+            clickPointerCount++;
+            ClickPointerResult.Text = "count " + clickPointerCount + " · released · " + DateTime.Now.ToString("HH:mm:ss.fff");
+            e.Handled = true;
+        }
+
+        private void DirectPointer_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        {
+            if (directPointerId == e.Pointer.PointerId) directPointerId = null;
+            ClickPointerResult.Text = "count " + clickPointerCount + " · canceled";
+        }
+
+        private void TransparentHitbox_Tapped(object sender, TappedRoutedEventArgs e)
+        {
+            clickHitboxCount++;
+            ClickHitboxResult.Text = "count " + clickHitboxCount + " · Tapped · " + DateTime.Now.ToString("HH:mm:ss.fff");
+            e.Handled = true;
+        }
+
+        private void ThresholdPointer_PointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            var target = sender as UIElement;
+            thresholdPointerId = e.Pointer.PointerId;
+            thresholdStart = e.GetCurrentPoint(RootGrid).Position;
+            thresholdMoved = false;
+            target?.CapturePointer(e.Pointer);
+            ClickThresholdResult.Text = "count " + clickThresholdCount + " · captured";
+            e.Handled = true;
+        }
+
+        private void ThresholdPointer_PointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            if (thresholdPointerId != e.Pointer.PointerId) return;
+            var p = e.GetCurrentPoint(RootGrid).Position;
+            var dx = p.X - thresholdStart.X;
+            var dy = p.Y - thresholdStart.Y;
+            if ((dx * dx) + (dy * dy) > 36.0) thresholdMoved = true; // 6 DIP threshold.
+            if (thresholdMoved) ClickThresholdResult.Text = "count " + clickThresholdCount + " · moved > 6 DIP";
+            e.Handled = true;
+        }
+
+        private void ThresholdPointer_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            if (thresholdPointerId != e.Pointer.PointerId) return;
+            try { (sender as UIElement)?.ReleasePointerCapture(e.Pointer); } catch { }
+            if (!thresholdMoved)
+            {
+                clickThresholdCount++;
+                ClickThresholdResult.Text = "count " + clickThresholdCount + " · click (< 6 DIP) · " + DateTime.Now.ToString("HH:mm:ss.fff");
+            }
+            else ClickThresholdResult.Text = "count " + clickThresholdCount + " · release ignored (drag)";
+            thresholdPointerId = null;
+            thresholdMoved = false;
+            e.Handled = true;
+        }
+
+        private void ThresholdPointer_PointerCanceled(object sender, PointerRoutedEventArgs e) => ClearThresholdPointer(e, "canceled");
+        private void ThresholdPointer_PointerCaptureLost(object sender, PointerRoutedEventArgs e) => ClearThresholdPointer(e, "capture lost");
+
+        private void ClearThresholdPointer(PointerRoutedEventArgs e, string state)
+        {
+            if (thresholdPointerId != e.Pointer.PointerId) return;
+            thresholdPointerId = null;
+            thresholdMoved = false;
+            ClickThresholdResult.Text = "count " + clickThresholdCount + " · " + state;
+        }
+
+        private void RoutedTest_PointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            ClickRoutedResult.Text = "count " + clickRoutedCount + " · routed pressed · handled=" + e.Handled;
+        }
+
+        private void RoutedTest_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            clickRoutedCount++;
+            ClickRoutedResult.Text = "count " + clickRoutedCount + " · routed released · handled=" + e.Handled + " · " + DateTime.Now.ToString("HH:mm:ss.fff");
         }
 
         private async Task LoadYoutubeVideoAsync(string videoId)

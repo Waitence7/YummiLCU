@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, VecDeque},
+    path::PathBuf,
     sync::{Arc, RwLock as StdRwLock},
     time::{Duration, Instant, UNIX_EPOCH},
 };
@@ -175,6 +176,7 @@ pub(crate) struct AppState {
     recent_unexpected_errors: Mutex<HashMap<String, Instant>>,
     recent_diagnostics: Mutex<HashMap<String, Instant>>,
     gamebar_snapshot: StdRwLock<GameBarSnapshot>,
+    lcu_lockfile_path: StdRwLock<Option<PathBuf>>,
 }
 
 impl AppState {
@@ -205,6 +207,7 @@ impl AppState {
             recent_unexpected_errors: Mutex::new(HashMap::new()),
             recent_diagnostics: Mutex::new(HashMap::new()),
             gamebar_snapshot: StdRwLock::new(GameBarSnapshot::default()),
+            lcu_lockfile_path: StdRwLock::new(None),
         }
     }
 
@@ -467,6 +470,19 @@ impl AppState {
     pub(crate) fn set_gamebar_snapshot(&self, snapshot: GameBarSnapshot) {
         if let Ok(mut current) = self.gamebar_snapshot.write() {
             *current = snapshot;
+        }
+    }
+
+    pub(crate) fn lcu_lockfile_path(&self) -> Option<PathBuf> {
+        self.lcu_lockfile_path
+            .read()
+            .ok()
+            .and_then(|path| path.clone())
+    }
+
+    pub(crate) fn set_lcu_lockfile_path(&self, path: Option<PathBuf>) {
+        if let Ok(mut current) = self.lcu_lockfile_path.write() {
+            *current = path;
         }
     }
 

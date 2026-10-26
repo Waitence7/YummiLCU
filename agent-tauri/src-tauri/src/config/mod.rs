@@ -93,7 +93,7 @@ impl Default for Config {
             check_updates_on_startup: true,
             auto_update_enabled: true,
             update_channel: update_channel.into(),
-            saved_session_max_age_days: 14,
+            saved_session_max_age_days: 0,
             // The agent is a tray/background process. It must be running after
             // Windows login even when its main window is not visible.
             run_at_windows_startup: true,
@@ -334,6 +334,13 @@ impl Config {
         Ok(url.into())
     }
 
+    pub(crate) fn session_revoke_url(&self) -> AgentResult<String> {
+        let mut url = validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
+        url.set_path("/session/revoke");
+        url.set_query(None);
+        Ok(url.into())
+    }
+
     pub(crate) fn replay_upload_target_url(
         &self,
         session_id: &str,
@@ -525,7 +532,7 @@ mod tests {
         assert_eq!(config.auth_poll_interval_ms, 1500);
         assert!(config.follow_league_client);
         assert_eq!(config.update_channel, embedded_release_channel());
-        assert_eq!(config.saved_session_max_age_days, 14);
+        assert_eq!(config.saved_session_max_age_days, 0);
         assert_eq!(config.tray_hide_effect, "book-return-v2");
         assert_eq!(config.tray_effect_playback_rate, 1.0);
         assert_eq!(config.window_glide_strength, Some(1.0));

@@ -25,6 +25,8 @@ pub(crate) struct Session {
     pub(crate) session_id: String,
     pub(crate) ws_token: String,
     #[serde(default)]
+    pub(crate) refresh_token: Option<String>,
+    #[serde(default)]
     pub(crate) bound_discord_id: Option<u64>,
     saved_at_utc: u64,
     relay_base_url: String,
@@ -75,6 +77,9 @@ impl Drop for Session {
     fn drop(&mut self) {
         // The token is generated as ASCII; NUL replacement preserves String invariants.
         unsafe { self.ws_token.as_bytes_mut().fill(0) };
+        if let Some(refresh_token) = self.refresh_token.as_mut() {
+            unsafe { refresh_token.as_bytes_mut().fill(0) };
+        }
     }
 }
 
@@ -250,6 +255,7 @@ pub(crate) fn create(config: &Config) -> Session {
     Session {
         session_id: Uuid::new_v4().to_string(),
         ws_token: B64.encode(Uuid::new_v4().as_bytes()),
+        refresh_token: None,
         bound_discord_id: None,
         saved_at_utc: SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -328,7 +334,6 @@ pub(crate) fn load(config: &Config) -> Option<Session> {
             return None;
         }
     };
-    let max_age = config.saved_session_max_age_days.saturating_mul(86_400);
     if !session_shape_valid(&session) {
         write_bootstrap_error("session_shape_invalid");
         return None;
@@ -342,7 +347,6 @@ pub(crate) fn load(config: &Config) -> Option<Session> {
             .relay_public_base_url
             .trim_end_matches('/')
             .to_lowercase()
-        || now.saturating_sub(session.saved_at_utc) > max_age
     {
         return None;
     }
@@ -402,11 +406,31 @@ fn session_shape_valid(session: &Session) -> bool {
             .ws_token
             .chars()
             .all(|character| character.is_ascii_graphic())
+        && session.refresh_token.as_ref().is_none_or(|token| {
+            (32..=256).contains(&token.len())
+                && token.chars().all(|character| character.is_ascii_graphic())
+        })
         && session
             .bound_discord_id
             .is_none_or(|discord_id| discord_id > 0)
         && !session.relay_base_url.is_empty()
         && session.relay_base_url.len() <= 2_048
+}
+
+pub(crate) fn set_refresh_token(session: &mut Session, refresh_token: String) -> AgentResult<()> {
+    if !(32..=256).contains(&refresh_token.len())
+        || !refresh_token
+            .chars()
+            .all(|character| character.is_ascii_graphic())
+    {
+        return Err(AgentError::Session(
+            "Relay refresh token 형식이 올바르지 않습니다.".into(),
+        ));
+    }
+    if let Some(mut previous) = session.refresh_token.replace(refresh_token) {
+        unsafe { previous.as_bytes_mut().fill(0) };
+    }
+    save(session)
 }
 
 pub(crate) fn pin_discord_id(session: &mut Session, discord_id: u64) -> AgentResult<()> {
@@ -444,6 +468,7 @@ mod tests {
         let session = Session {
             session_id: Uuid::new_v4().to_string(),
             ws_token: "0123456789abcdef".into(),
+            refresh_token: Some("r".repeat(48)),
             bound_discord_id: Some(42),
             saved_at_utc: 1,
             relay_base_url: "https://relay.example".into(),
@@ -451,6 +476,7 @@ mod tests {
         let value = serde_json::to_value(session).unwrap();
         assert!(value.get("session_id").is_some());
         assert!(value.get("ws_token").is_some());
+        assert!(value.get("refresh_token").is_some());
         assert_eq!(
             value.get("bound_discord_id").and_then(Value::as_u64),
             Some(42)
@@ -473,6 +499,7 @@ mod tests {
         let session = Session {
             session_id: "not-a-uuid".into(),
             ws_token: "short".into(),
+            refresh_token: None,
             bound_discord_id: None,
             saved_at_utc: 1,
             relay_base_url: "https://relay.example".into(),

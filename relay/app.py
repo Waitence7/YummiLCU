@@ -59,6 +59,8 @@ logger = logging.getLogger("yummi_lcu.relay")
 SESSION_KEY = "relay:session:{session_id}"
 SESSION_STATUS_KEY = "relay:session_status:{session_id}"
 WS_TOKEN_KEY = "relay:ws_token:{session_id}"
+REFRESH_TOKEN_KEY = "relay:refresh_token:{token_hash}"
+SESSION_REFRESH_TOKEN_HASH_KEY = "relay:session_refresh_token_hash:{session_id}"
 OAUTH_LINK_PENDING_KEY = "relay:oauth_link_pending:{session_id}"
 DISCORD_PROFILE_KEY = "relay:discord_profile:{session_id}"
 DISCORD_USER_PROFILE_KEY = "relay:discord_user_profile:{discord_id}"
@@ -85,6 +87,11 @@ LIVE_DELTA_API_BLOCK_TTL_SEC = 30
 MAX_LIVE_DELTA_OPS = 4096
 MAX_LIVE_DELTA_PATH_DEPTH = 24
 _SERVER_PROTOCOL_VERSION = 1
+class RefreshSessionRevokeBody(BaseModel):
+    session_id: str = Field(min_length=36, max_length=36)
+    refresh_token: str = Field(min_length=32, max_length=256)
+
+
 _LCU_DATA_MESSAGE_TYPES = frozenset({
     "party_lobby_update",
     "ready_check_update",
@@ -285,6 +292,18 @@ def _ws_token_redis_key(session_id: str) -> str:
     return WS_TOKEN_KEY.format(session_id=session_id)
 
 
+def _refresh_token_redis_key(token_hash: str) -> str:
+    return REFRESH_TOKEN_KEY.format(token_hash=token_hash)
+
+
+def _session_refresh_token_hash_redis_key(session_id: str) -> str:
+    return SESSION_REFRESH_TOKEN_HASH_KEY.format(session_id=session_id)
+
+
+def _refresh_token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
 def _oauth_link_pending_redis_key(session_id: str) -> str:
     return OAUTH_LINK_PENDING_KEY.format(session_id=session_id)
 
@@ -476,6 +495,146 @@ async def _refresh_session_ttl(r: redis.Redis, session_id: str) -> None:
     await pipe.execute()
 
 
+async def _issue_refresh_token(
+    r: redis.Redis, session_id: str, discord_id: int, device_fingerprint: str
+) -> str:
+    """Issue a non-expiring Yummi refresh credential; Redis stores only its hash."""
+    token = secrets.token_urlsafe(48)
+    token_hash = _refresh_token_hash(token)
+    mapping_key = _session_refresh_token_hash_redis_key(session_id)
+    old_hash = await r.get(mapping_key)
+    if isinstance(old_hash, bytes):
+        old_hash = old_hash.decode("ascii", errors="ignore")
+    if isinstance(old_hash, str) and re.fullmatch(r"[0-9a-f]{64}", old_hash):
+        await r.delete(_refresh_token_redis_key(old_hash))
+    record = json.dumps(
+        {
+            "v": 1,
+            "session_id": session_id,
+            "discord_id": int(discord_id),
+            "device_fingerprint": device_fingerprint,
+            "created_at_ms": int(time.time() * 1000),
+        },
+        separators=(",", ":"),
+    )
+    # Intentionally no expiry: revocation/rotation removes these keys explicitly.
+    await r.set(_refresh_token_redis_key(token_hash), record)
+    await r.set(mapping_key, token_hash)
+    return token
+
+
+async def _ensure_refresh_token(
+    conn: ConnectionManager,
+    r: redis.Redis,
+    session_id: str,
+    discord_id: int,
+    trust_level: str,
+) -> str | None:
+    """Provision/migrate the long-lived refresh credential for a trusted device."""
+    if trust_level != "trusted":
+        return None
+    refresh_hash_getter = getattr(conn, "session_refresh_token_hash", None)
+    if not callable(refresh_hash_getter):
+        # Compatibility with pre-refresh connection managers/test doubles.
+        return None
+    fingerprint = await _session_device_key(r, session_id)
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        return None
+    presented_hash = refresh_hash_getter(session_id)
+    stored_hash = await r.get(_session_refresh_token_hash_redis_key(session_id))
+    if isinstance(stored_hash, bytes):
+        stored_hash = stored_hash.decode("ascii", errors="ignore")
+    if (
+        presented_hash
+        and isinstance(stored_hash, str)
+        and _safe_compare_digest(presented_hash, stored_hash)
+    ):
+        return None
+    # Missing/legacy/corrupt local refresh state while the short session is still
+    # authenticated: rotate to a fresh credential and deliver it in session_bound.
+    token = await _issue_refresh_token(r, session_id, discord_id, fingerprint)
+    setter = getattr(conn, "set_session_refresh_token_hash", None)
+    if callable(setter):
+        setter(session_id, _refresh_token_hash(token))
+    return token
+
+
+async def _restore_session_from_refresh(
+    conn: ConnectionManager,
+    r: redis.Redis,
+    session_id: str,
+    device_fingerprint: str,
+) -> int | None:
+    """Restore an expired short Relay session using refresh token + device proof."""
+    presented_hash = conn.session_refresh_token_hash(session_id)
+    if not presented_hash or not re.fullmatch(r"[0-9a-f]{64}", presented_hash):
+        return None
+    active_hash = await r.get(_session_refresh_token_hash_redis_key(session_id))
+    if isinstance(active_hash, bytes):
+        active_hash = active_hash.decode("ascii", errors="ignore")
+    if not isinstance(active_hash, str) or not _safe_compare_digest(active_hash, presented_hash):
+        return None
+    raw_record = await r.get(_refresh_token_redis_key(presented_hash))
+    if isinstance(raw_record, bytes):
+        raw_record = raw_record.decode("utf-8", errors="ignore")
+    try:
+        record = json.loads(raw_record) if isinstance(raw_record, str) else None
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict):
+        return None
+    if record.get("session_id") != session_id:
+        return None
+    if record.get("device_fingerprint") != device_fingerprint:
+        return None
+    try:
+        discord_id = int(record.get("discord_id"))
+    except (TypeError, ValueError):
+        return None
+    if discord_id <= 0:
+        return None
+
+    ttl = config.relay_session_ttl_sec()
+    await r.set(_session_redis_key(session_id), str(discord_id), ex=ttl)
+    await r.set(_session_auth_source_redis_key(session_id), "refresh", ex=ttl)
+    await r.set(_status_redis_key(session_id), "ok", ex=ttl)
+    raw_profile = await r.get(_discord_user_profile_redis_key(discord_id))
+    if raw_profile:
+        await r.set(_discord_profile_redis_key(session_id), raw_profile, ex=ttl)
+    await _mark_device_trusted(r, discord_id, session_id)
+    logger.info(
+        "장기 refresh 세션 복구 discord_id=%s session=%s fingerprint=%s",
+        discord_id,
+        session_id[:8],
+        device_fingerprint[:16],
+    )
+    return discord_id
+
+
+async def _revoke_refresh_token(
+    r: redis.Redis, session_id: str, refresh_token: str
+) -> bool:
+    """Revoke the persistent credential and its short-lived Relay session state."""
+    token_hash = _refresh_token_hash(refresh_token)
+    active_hash = await r.get(_session_refresh_token_hash_redis_key(session_id))
+    if isinstance(active_hash, bytes):
+        active_hash = active_hash.decode("ascii", errors="ignore")
+    if not isinstance(active_hash, str) or not _safe_compare_digest(active_hash, token_hash):
+        return False
+    await r.delete(
+        _refresh_token_redis_key(token_hash),
+        _session_refresh_token_hash_redis_key(session_id),
+        _session_redis_key(session_id),
+        _status_redis_key(session_id),
+        _ws_token_redis_key(session_id),
+        _session_auth_source_redis_key(session_id),
+        _session_device_fingerprint_redis_key(session_id),
+        _discord_profile_redis_key(session_id),
+        _oauth_link_pending_redis_key(session_id),
+    )
+    return True
+
+
 async def _complete_oauth_link(
     conn: ConnectionManager,
     r: redis.Redis,
@@ -573,12 +732,16 @@ async def _try_bind_discord(
         # Keep a Discord-id keyed copy so Relay restarts/new sessions can restore
         # display metadata without requiring another OAuth round-trip.
         await r.set(_discord_user_profile_redis_key(discord_id), json.dumps(profile))
+    refresh_token = await _ensure_refresh_token(
+        conn, r, session_id, discord_id, trust_level
+    )
     bound = await conn.bind_discord(
         session_id,
         discord_id,
         profile,
         allow_takeover=allow_takeover,
         trust_level=trust_level,
+        refresh_token=refresh_token,
     )
     if bound:
         await mark_lcu_linked(r, discord_id)
@@ -934,6 +1097,28 @@ async def _agent_proxy_response(request: Request, path: str) -> Response:
 @app.api_route("/agent/{asset_path:path}", methods=["GET", "HEAD"])
 async def agent_release_proxy(request: Request, asset_path: str) -> Response:
     return await _agent_proxy_response(request, f"/agent/{asset_path}")
+
+
+@app.post("/session/revoke")
+async def revoke_refresh_session(
+    request: Request, body: RefreshSessionRevokeBody
+) -> JSONResponse:
+    """Explicit Agent logout. The endpoint is idempotent and never exposes token validity."""
+    try:
+        uuid.UUID(body.session_id)
+    except ValueError as exc:
+        raise HTTPException(400, "invalid session_id") from exc
+    token = body.refresh_token
+    if not token.isascii() or not all(
+        character.isprintable() and not character.isspace() for character in token
+    ):
+        raise HTTPException(400, "invalid refresh token")
+    revoked = await _revoke_refresh_token(
+        request.app.state.redis, body.session_id, token
+    )
+    if revoked:
+        logger.info("장기 refresh 세션 폐기 session=%s", body.session_id[:8])
+    return JSONResponse({"ok": True})
 
 
 @app.get("/login")
@@ -2924,6 +3109,12 @@ async def _handle_agent_message(
             ex=config.relay_session_ttl_sec(),
         )
         raw_discord_id = await r.get(_session_redis_key(session_id))
+        if raw_discord_id is None:
+            restored_discord_id = await _restore_session_from_refresh(
+                conn, r, session_id, fingerprint
+            )
+            if restored_discord_id is not None:
+                raw_discord_id = str(restored_discord_id)
         if raw_discord_id is not None:
             try:
                 saved_discord_id = int(raw_discord_id)
@@ -3397,6 +3588,23 @@ async def _handle_agent_message(
                             session_id[:8],
                         )
                         return
+                    # Upgrade migration: a pre-device-key Agent may already have a
+                    # DPAPI-protected local session pinned to this exact Discord account.
+                    # If the current LCU identity resolves to the same account, enroll the
+                    # newly generated device fingerprint as trusted instead of showing it
+                    # as a brand-new environment. A copied session from another Windows
+                    # profile/machine cannot normally be decrypted by DPAPI.
+                    if (
+                        isinstance(pinned_discord_id, int)
+                        and pinned_discord_id > 0
+                        and pinned_discord_id == resolved_discord_id
+                    ):
+                        await _mark_device_trusted(r, resolved_discord_id, session_id)
+                        logger.info(
+                            "LCU 기존 세션 기기 신뢰 마이그레이션 discord_id=%s session=%s",
+                            resolved_discord_id,
+                            session_id[:8],
+                        )
                     ttl = config.relay_session_ttl_sec()
                     device_key = await _session_device_key(r, session_id)
                     pipe = r.pipeline()
@@ -3756,6 +3964,7 @@ async def ws_agent(
         await websocket.close(code=1008)
         return
     ws_token = auth_payload.get("ws_token")
+    refresh_token = auth_payload.get("refresh_token")
     raw_connection_id = auth_payload.get("connection_id")
     try:
         connection_id = str(uuid.UUID(str(raw_connection_id)))
@@ -3771,6 +3980,17 @@ async def ws_agent(
         await websocket.close(code=1008)
         return
 
+    if refresh_token is not None and (
+        not isinstance(refresh_token, str)
+        or len(refresh_token) < 32
+        or len(refresh_token) > 256
+        or not refresh_token.isascii()
+        or not all(character.isprintable() and not character.isspace() for character in refresh_token)
+    ):
+        await websocket.close(code=1008)
+        return
+    refresh_token_hash = _refresh_token_hash(refresh_token) if refresh_token else None
+
     r: redis.Redis = websocket.app.state.redis
     if not await _claim_or_verify_ws_token(r, session_id, ws_token):
         await websocket.close(code=1008)
@@ -3778,7 +3998,11 @@ async def ws_agent(
 
     conn: ConnectionManager = websocket.app.state.connections
     attached = await conn.attach_session(
-        session_id, websocket, ws_token, connection_id=connection_id
+        session_id,
+        websocket,
+        ws_token,
+        refresh_token_hash=refresh_token_hash,
+        connection_id=connection_id,
     )
 
     proof_version = auth_payload.get("device_proof_version")

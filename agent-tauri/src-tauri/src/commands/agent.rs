@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use tauri::{AppHandle, State};
 
 use crate::{
+    config::Config,
     relay::supervisor::RelaySupervisor,
     session,
     state::{AppState, UiState},
@@ -47,12 +48,58 @@ pub(crate) async fn stop_agent(
     Ok(())
 }
 
+async fn revoke_persisted_refresh(config: &Config) -> Result<(), String> {
+    let Some(saved) = session::load(config) else {
+        return Ok(());
+    };
+    let Some(credential) = saved.refresh_token.as_deref() else {
+        return Ok(());
+    };
+    let url = config
+        .session_revoke_url()
+        .map_err(|error| error.to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| format!("revoke client: {error}"))?;
+    let body = serde_json::json!({
+        "session_id": saved.session_id,
+        "refresh_token": credential,
+    });
+    let response = client
+        .post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("revoke request: {error}"))?;
+    if !response.status().is_success() {
+        return Err(format!("revoke HTTP {}", response.status()));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn logout(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     state.record_flight("command", "discord_logout").await;
     state
         .report_diagnostic("command", "discord_logout", "user requested Discord logout")
         .await;
+    let config = state.config.read().await.clone();
+    if let Err(error) = revoke_persisted_refresh(&config).await {
+        state
+            .record_flight("session_error", format!("refresh_revoke_failed: {error}"))
+            .await;
+        state
+            .log(
+                &app,
+                "서버 refresh 세션 폐기에 실패했지만 로컬 로그아웃은 계속합니다.",
+            )
+            .await;
+    } else {
+        state
+            .record_flight("session", "refresh_revoked_on_logout")
+            .await;
+    }
     RelaySupervisor::stop(&app, state.inner()).await;
     session::remove().map_err(|error| error.to_string())?;
     session::suppress_auto_login().map_err(|error| error.to_string())?;

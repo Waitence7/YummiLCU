@@ -560,6 +560,7 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
         }
     };
     let Some(path) = path else {
+        state.set_lcu_lockfile_path(None);
         return match LcuClient::probe_live_game().await {
             Ok(()) => LcuConnectionState::LoggedIn,
             Err(error) => {
@@ -575,6 +576,7 @@ async fn inspect_lcu(app: &AppHandle, state: &Arc<AppState>) -> LcuConnectionSta
         };
     };
 
+    state.set_lcu_lockfile_path(Some(path.clone()));
     let current = state.lcu_state().await;
     if matches!(
         current,

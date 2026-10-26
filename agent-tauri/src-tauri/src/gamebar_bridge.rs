@@ -1,9 +1,13 @@
+#[cfg(windows)]
+use std::{
+    io::Write,
+    net::TcpListener,
+    sync::{Mutex, OnceLock},
+};
 use std::{
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
-#[cfg(windows)]
-use std::{io::Write, net::TcpListener};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -23,13 +27,38 @@ const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 #[cfg(windows)]
 const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
 #[cfg(windows)]
-const GAMEBAR_RELEASES_API: &str = "https://api.github.com/repos/Waitence7/YummiLCU/releases?per_page=100";
+const GAMEBAR_VERSION_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/main/agent-tauri/gamebar-widget/version.json";
 #[cfg(windows)]
 const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
 const MAX_GAMEBAR_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(windows)]
 const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:47658";
+
+#[cfg(windows)]
+#[derive(Clone, Debug, Default)]
+struct ExternalClickTestState {
+    active: bool,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    geometry_updated_at_ms: u64,
+    sequence: u64,
+    click_count: u64,
+    event: String,
+    event_x: i32,
+    event_y: i32,
+    event_at_ms: u64,
+}
+
+#[cfg(windows)]
+static EXTERNAL_CLICK_TEST: OnceLock<Mutex<ExternalClickTestState>> = OnceLock::new();
+
+#[cfg(windows)]
+fn external_click_test_state() -> &'static Mutex<ExternalClickTestState> {
+    EXTERNAL_CLICK_TEST.get_or_init(|| Mutex::new(ExternalClickTestState::default()))
+}
 
 pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     let watcher_state = state.clone();
@@ -57,6 +86,11 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
         });
 
         std::thread::Builder::new()
+            .name("yummi-gamebar-mouse-hook".into())
+            .spawn(external_mouse_hook_thread)
+            .ok();
+
+        std::thread::Builder::new()
             .name("yummi-gamebar-command-pipe".into())
             .spawn(move || command_pipe_server(app, state))
             .ok();
@@ -69,7 +103,6 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     }
 }
 
-
 #[cfg(windows)]
 async fn watch_overlay_updates(state: Arc<AppState>) {
     let mut shutdown = state.shutdown_receiver();
@@ -81,8 +114,11 @@ async fn watch_overlay_updates(state: Arc<AppState>) {
         }
 
         // Missing updater simply means the overlay has never been installed.
-        // Keep this silent so Agent users who do not use Game Bar are unaffected.
-        let _ = check_overlay_update().await;
+        // Other failures are persisted by check_overlay_update() so update problems
+        // are diagnosable instead of silently disappearing.
+        if let Err(error) = check_overlay_update().await {
+            append_gamebar_update_log(&format!("오버레이 업데이트 확인 실패: {error}"));
+        }
 
         tokio::select! {
             _ = sleep(OVERLAY_UPDATE_INTERVAL) => {},
@@ -129,12 +165,35 @@ async fn collect_snapshot(
     cached_online_friends: &[String],
 ) -> GameBarSnapshot {
     let config = state.config.read().await.clone();
-    let path = match discover_lockfile_nonblocking(&config).await {
-        Ok(discovery) => discovery.path,
-        Err(_) => None,
+    let path = if let Some(path) = state.lcu_lockfile_path() {
+        Some(path)
+    } else {
+        match discover_lockfile_nonblocking(&config).await {
+            Ok(discovery) => {
+                if let Some(path) = discovery.path.clone() {
+                    state.set_lcu_lockfile_path(Some(path));
+                }
+                discovery.path
+            }
+            Err(_) => None,
+        }
     };
     let Some(path) = path else {
+        let previous = state.gamebar_snapshot();
+        let agent_lcu = state.lcu_state().await;
+        if agent_lcu.is_ready() && previous.connected {
+            return GameBarSnapshot {
+                updated_at_ms: now_ms(),
+                ..previous
+            };
+        }
         return GameBarSnapshot {
+            connected: agent_lcu.is_ready(),
+            phase: if agent_lcu.is_ready() {
+                "Connected".into()
+            } else {
+                "Offline".into()
+            },
             updated_at_ms: now_ms(),
             ..GameBarSnapshot::default()
         };
@@ -288,7 +347,6 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-
 #[cfg(windows)]
 fn loopback_snapshot_server(state: Arc<AppState>) {
     let listener = match TcpListener::bind(GAMEBAR_LOOPBACK_ADDR) {
@@ -298,7 +356,8 @@ fn loopback_snapshot_server(state: Arc<AppState>) {
 
     for incoming in listener.incoming() {
         let Ok(mut stream) = incoming else { continue };
-        let mut payload = serde_json::to_vec(&state.gamebar_snapshot()).unwrap_or_else(|_| b"{}".to_vec());
+        let mut payload =
+            serde_json::to_vec(&state.gamebar_snapshot()).unwrap_or_else(|_| b"{}".to_vec());
         payload.push(b'\n');
         let _ = stream.write_all(&payload);
         let _ = stream.flush();
@@ -325,11 +384,9 @@ fn pipe_server(state: Arc<AppState>) {
                 PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
             },
             Storage::FileSystem::{FlushFileBuffers, WriteFile, PIPE_ACCESS_OUTBOUND},
-            System::{
-                Pipes::{
-                    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-                    PIPE_TYPE_BYTE, PIPE_WAIT,
-                },
+            System::Pipes::{
+                ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+                PIPE_TYPE_BYTE, PIPE_WAIT,
             },
         },
     };
@@ -403,6 +460,104 @@ fn pipe_server(state: Arc<AppState>) {
 }
 
 #[cfg(windows)]
+fn external_mouse_hook_thread() {
+    use windows::Win32::{
+        Foundation::{LPARAM, LRESULT, WPARAM},
+        UI::WindowsAndMessaging::{
+            CallNextHookEx, GetMessageW, SetWindowsHookExW, MSG, MSLLHOOKSTRUCT, WH_MOUSE_LL,
+            WM_LBUTTONDOWN, WM_LBUTTONUP,
+        },
+    };
+
+    unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 && (wparam.0 as u32 == WM_LBUTTONDOWN || wparam.0 as u32 == WM_LBUTTONUP) {
+            let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
+            let now = now_ms();
+            if let Ok(mut state) = external_click_test_state().lock() {
+                // Expire stale geometry so a crashed/closed widget can never leave a ghost hitbox.
+                let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
+                let inside = fresh
+                    && state.active
+                    && (info.pt.x as f64) >= state.x
+                    && (info.pt.x as f64) < state.x + state.width
+                    && (info.pt.y as f64) >= state.y
+                    && (info.pt.y as f64) < state.y + state.height;
+                if inside {
+                    state.sequence = state.sequence.wrapping_add(1);
+                    if wparam.0 as u32 == WM_LBUTTONUP {
+                        state.click_count = state.click_count.wrapping_add(1);
+                    }
+                    state.event = if wparam.0 as u32 == WM_LBUTTONDOWN {
+                        "down"
+                    } else {
+                        "up"
+                    }
+                    .into();
+                    state.event_x = info.pt.x;
+                    state.event_y = info.pt.y;
+                    state.event_at_ms = now;
+                }
+            }
+        }
+        unsafe { CallNextHookEx(None, code, wparam, lparam) }
+    }
+
+    let hook = unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), None, 0) };
+    let Ok(_hook) = hook else { return };
+    let mut message = MSG::default();
+    while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {}
+}
+
+#[cfg(windows)]
+fn sync_external_click_test(parsed: &Value) -> String {
+    let active = parsed
+        .get("active")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let number = |key: &str| parsed.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    let x = number("x");
+    let y = number("y");
+    let width = number("width");
+    let height = number("height");
+    let valid_geometry = x.is_finite()
+        && y.is_finite()
+        && width.is_finite()
+        && height.is_finite()
+        && x.abs() <= 100_000.0
+        && y.abs() <= 100_000.0
+        && (1.0..=2_000.0).contains(&width)
+        && (1.0..=2_000.0).contains(&height);
+    if active && !valid_geometry {
+        return json_response(false, "외부 클릭 테스트 영역이 올바르지 않습니다.");
+    }
+
+    let now = now_ms();
+    let mut state = match external_click_test_state().lock() {
+        Ok(state) => state,
+        Err(_) => return json_response(false, "외부 클릭 상태 잠금에 실패했습니다."),
+    };
+    state.active = active;
+    if active {
+        state.x = x;
+        state.y = y;
+        state.width = width;
+        state.height = height;
+    }
+    state.geometry_updated_at_ms = now;
+    serde_json::json!({
+        "ok": true,
+        "active": state.active,
+        "sequence": state.sequence,
+        "clickCount": state.click_count,
+        "event": state.event,
+        "eventX": state.event_x,
+        "eventY": state.event_y,
+        "eventAtMs": state.event_at_ms,
+    })
+    .to_string()
+}
+
+#[cfg(windows)]
 fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
     use windows::{
         core::PCWSTR,
@@ -413,11 +568,9 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
                 PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES,
             },
             Storage::FileSystem::{FlushFileBuffers, ReadFile, WriteFile, PIPE_ACCESS_DUPLEX},
-            System::{
-                Pipes::{
-                    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-                    PIPE_TYPE_BYTE, PIPE_WAIT,
-                },
+            System::Pipes::{
+                ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
+                PIPE_TYPE_BYTE, PIPE_WAIT,
             },
         },
     };
@@ -497,7 +650,7 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
 }
 
 #[cfg(windows)]
-fn handle_command(_app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
+fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
     let parsed: Value = match serde_json::from_str(raw) {
         Ok(value) => value,
         Err(_) => return json_response(false, "잘못된 명령 형식입니다."),
@@ -509,9 +662,28 @@ fn handle_command(_app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
 
     if command == "check_overlay_update" {
         tauri::async_runtime::spawn(async move {
-            let _ = check_overlay_update().await;
+            if let Err(error) = check_overlay_update().await {
+                append_gamebar_update_log(&format!("수동 오버레이 업데이트 확인 실패: {error}"));
+            }
         });
         return json_response(true, "오버레이 업데이트 확인을 시작했습니다.");
+    }
+    if command == "open_url" {
+        let Some(url) = parsed.get("url").and_then(Value::as_str) else {
+            return json_response(false, "열 URL이 없습니다.");
+        };
+        if !(url == "https://www.youtube.com/"
+            || url.starts_with("https://www.youtube.com/watch?v="))
+        {
+            return json_response(false, "허용되지 않은 URL입니다.");
+        }
+        return match crate::platform::open_login_url(app, url) {
+            Ok(()) => json_response(true, "기본 브라우저를 열었습니다."),
+            Err(error) => json_response(false, &format!("브라우저 열기 실패: {error}")),
+        };
+    }
+    if command == "sync_external_click_test" {
+        return sync_external_click_test(&parsed);
     }
     if command != "set_status_message" {
         return json_response(false, "허용되지 않은 명령입니다.");
@@ -565,62 +737,143 @@ fn parse_gamebar_release_version(tag: &str) -> Option<(u64, u64, u64)> {
 }
 
 fn select_gamebar_manifest(releases: &Value) -> Option<(String, String)> {
-    releases.as_array()?.iter().filter_map(|release| {
-        if release.get("draft").and_then(Value::as_bool).unwrap_or(false) {
-            return None;
-        }
-        let tag = release.get("tag_name")?.as_str()?;
-        let version = parse_gamebar_release_version(tag)?;
-        let manifest_url = release.get("assets")?.as_array()?.iter().find_map(|asset| {
-            (asset.get("name")?.as_str()? == "gamebar-version.json")
-                .then(|| asset.get("browser_download_url")?.as_str().map(str::to_owned))
-                .flatten()
-        })?;
-        Some((version, tag.to_owned(), manifest_url))
-    }).max_by_key(|(version, _, _)| *version)
-      .map(|(_, tag, url)| (tag, url))
+    releases
+        .as_array()?
+        .iter()
+        .filter_map(|release| {
+            if release
+                .get("draft")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                return None;
+            }
+            let tag = release.get("tag_name")?.as_str()?;
+            let version = parse_gamebar_release_version(tag)?;
+            let manifest_url = release
+                .get("assets")?
+                .as_array()?
+                .iter()
+                .find_map(|asset| {
+                    (asset.get("name")?.as_str()? == "gamebar-version.json")
+                        .then(|| {
+                            asset
+                                .get("browser_download_url")?
+                                .as_str()
+                                .map(str::to_owned)
+                        })
+                        .flatten()
+                })?;
+            Some((version, tag.to_owned(), manifest_url))
+        })
+        .max_by_key(|(version, _, _)| *version)
+        .map(|(_, tag, url)| (tag, url))
+}
+
+#[cfg(windows)]
+fn append_gamebar_update_log(message: &str) {
+    use std::{
+        env,
+        fs::{self, OpenOptions},
+        io::Write,
+        path::PathBuf,
+    };
+    let Some(local_app_data) = env::var_os("LOCALAPPDATA") else {
+        return;
+    };
+    let updater_dir = PathBuf::from(local_app_data)
+        .join("Yummi")
+        .join("GameBarUpdater");
+    if fs::create_dir_all(&updater_dir).is_err() {
+        return;
+    }
+    let path = updater_dir.join("update.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(file, "[{now}] {message}");
+    }
 }
 
 #[cfg(windows)]
 async fn check_overlay_update() -> Result<(), String> {
-    use std::{env, fs, path::PathBuf, process::Command};
     use std::os::windows::process::CommandExt;
+    use std::{env, fs, path::PathBuf, process::Command};
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let local_app_data = env::var_os("LOCALAPPDATA")
-        .ok_or_else(|| "LOCALAPPDATA를 찾지 못했습니다.".to_owned())?;
-    let updater_dir = PathBuf::from(local_app_data).join("Yummi").join("GameBarUpdater");
+    let local_app_data =
+        env::var_os("LOCALAPPDATA").ok_or_else(|| "LOCALAPPDATA를 찾지 못했습니다.".to_owned())?;
+    let updater_dir = PathBuf::from(local_app_data)
+        .join("Yummi")
+        .join("GameBarUpdater");
     let updater = updater_dir.join("Update-YummiGameBar.ps1");
     if !updater.is_file() {
         return Ok(());
     }
+    append_gamebar_update_log("오버레이 업데이트 확인 시작");
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(3))
         .user_agent("Yummi-LCU-Agent-GameBar-Updater")
         .build()
         .map_err(|e| format!("Game Bar 업데이트 클라이언트 생성 실패: {e}"))?;
-    let releases: Value = client.get(GAMEBAR_RELEASES_API).send().await
-        .map_err(|e| format!("Game Bar 릴리즈 조회 실패: {e}"))?
-        .error_for_status().map_err(|e| format!("Game Bar 릴리즈 응답 실패: {e}"))?
-        .json().await.map_err(|e| format!("Game Bar 릴리즈 JSON 실패: {e}"))?;
-    let (selected_release_tag, manifest_url) = select_gamebar_manifest(&releases)
-        .ok_or_else(|| "서명된 Game Bar manifest를 찾지 못했습니다.".to_owned())?;
+    let latest: Value = client
+        .get(GAMEBAR_VERSION_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Game Bar 최신 버전 조회 실패: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Game Bar 최신 버전 응답 실패: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Game Bar 최신 버전 JSON 실패: {e}"))?;
+    let selected_version = latest
+        .get("version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Game Bar 최신 버전 정보가 없습니다.".to_owned())?;
+    let selected_release_tag = format!("gamebar-v{selected_version}");
+    let selected_semver = parse_gamebar_release_version(&selected_release_tag)
+        .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
+    let manifest_url = format!(
+        "https://github.com/Waitence7/YummiLCU/releases/download/{selected_release_tag}/gamebar-version.json"
+    );
+    append_gamebar_update_log(&format!(
+        "최신 오버레이 릴리즈 감지: {selected_release_tag}"
+    ));
 
-    let response = client.get(&manifest_url).send().await.map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?
-        .error_for_status().map_err(|e| format!("Game Bar manifest 응답 실패: {e}"))?;
+    let response = client
+        .get(&manifest_url)
+        .send()
+        .await
+        .map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Game Bar manifest 응답 실패: {e}"))?;
     if response.content_length().unwrap_or(0) > MAX_GAMEBAR_MANIFEST_BYTES as u64 {
         return Err("Game Bar manifest가 너무 큽니다.".into());
     }
-    let bytes = response.bytes().await.map_err(|e| format!("Game Bar manifest 읽기 실패: {e}"))?;
-    if bytes.len() > MAX_GAMEBAR_MANIFEST_BYTES { return Err("Game Bar manifest가 너무 큽니다.".into()); }
-    let root: Value = serde_json::from_slice(&bytes).map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
-    let mut payload = root.get("gamebar").cloned().ok_or_else(|| "Game Bar manifest에 gamebar 블록이 없습니다.".to_owned())?;
-    let signature = payload.as_object_mut().and_then(|o| o.remove("signature"))
-        .and_then(|v| v.as_str().map(str::to_owned)).ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Game Bar manifest 읽기 실패: {e}"))?;
+    if bytes.len() > MAX_GAMEBAR_MANIFEST_BYTES {
+        return Err("Game Bar manifest가 너무 큽니다.".into());
+    }
+    let root: Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
+    let mut payload = root
+        .get("gamebar")
+        .cloned()
+        .ok_or_else(|| "Game Bar manifest에 gamebar 블록이 없습니다.".to_owned())?;
+    let signature = payload
+        .as_object_mut()
+        .and_then(|o| o.remove("signature"))
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
     verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
-    let target: GameBarUpdateTarget = serde_json::from_value(payload).map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
-    let selected_version = selected_release_tag.strip_prefix("gamebar-v").unwrap_or_default();
+    let target: GameBarUpdateTarget =
+        serde_json::from_value(payload).map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
     if target.release_tag != selected_release_tag || target.version != selected_version {
         return Err("Game Bar manifest 버전이 선택된 릴리즈와 일치하지 않습니다.".into());
     }
@@ -628,44 +881,100 @@ async fn check_overlay_update() -> Result<(), String> {
     if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
     }
-    if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 { return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into()); }
-    let parsed = url::Url::parse(&target.url).map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
-    let expected_release_path = format!("/Waitence7/YummiLCU/releases/download/{}/", selected_release_tag);
-    if parsed.scheme() != "https" || parsed.host_str() != Some("github.com") ||
-       !parsed.path().starts_with(&expected_release_path) ||
-       !parsed.path().ends_with(".zip") {
+    if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 {
+        return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into());
+    }
+    let parsed =
+        url::Url::parse(&target.url).map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
+    let expected_release_path = format!(
+        "/Waitence7/YummiLCU/releases/download/{}/",
+        selected_release_tag
+    );
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed.path().starts_with(&expected_release_path)
+        || !parsed.path().ends_with(".zip")
+    {
         return Err("Game Bar 다운로드 URL이 허용되지 않았습니다.".into());
     }
 
     let state_path = updater_dir.join("state.json");
     if let Ok(raw) = fs::read_to_string(&state_path) {
         if let Ok(state) = serde_json::from_str::<GameBarUpdateState>(&raw) {
-            if state.build_id == target.build_id && state.sha256.eq_ignore_ascii_case(&target.sha256) { return Ok(()); }
+            if let Some(installed_semver) = parse_gamebar_release_version(&state.release_tag) {
+                if installed_semver > selected_semver {
+                    append_gamebar_update_log(&format!(
+                        "설치된 오버레이가 최신 채널보다 높아 유지: {}",
+                        state.release_tag
+                    ));
+                    return Ok(());
+                }
+            }
+            if state.build_id == target.build_id
+                && state.sha256.eq_ignore_ascii_case(&target.sha256)
+            {
+                append_gamebar_update_log(&format!(
+                    "이미 최신 오버레이: {} / build {}",
+                    target.release_tag, target.build_id
+                ));
+                return Ok(());
+            }
         }
     }
 
-    let response = client.get(&target.url).send().await.map_err(|e| format!("Game Bar ZIP 다운로드 실패: {e}"))?
-        .error_for_status().map_err(|e| format!("Game Bar ZIP 응답 실패: {e}"))?;
-    if response.content_length().unwrap_or(target.size) != target.size { return Err("Game Bar ZIP 크기가 manifest와 다릅니다.".into()); }
-    let archive = response.bytes().await.map_err(|e| format!("Game Bar ZIP 읽기 실패: {e}"))?;
-    if archive.len() as u64 != target.size || archive.len() > MAX_GAMEBAR_ARCHIVE_BYTES { return Err("Game Bar ZIP 크기 검증 실패".into()); }
+    let response = client
+        .get(&target.url)
+        .send()
+        .await
+        .map_err(|e| format!("Game Bar ZIP 다운로드 실패: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Game Bar ZIP 응답 실패: {e}"))?;
+    if response.content_length().unwrap_or(target.size) != target.size {
+        return Err("Game Bar ZIP 크기가 manifest와 다릅니다.".into());
+    }
+    let archive = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Game Bar ZIP 읽기 실패: {e}"))?;
+    if archive.len() as u64 != target.size || archive.len() > MAX_GAMEBAR_ARCHIVE_BYTES {
+        return Err("Game Bar ZIP 크기 검증 실패".into());
+    }
     let actual = format!("{:x}", Sha256::digest(&archive));
-    if !actual.eq_ignore_ascii_case(&target.sha256) { return Err("Game Bar ZIP SHA256 검증 실패".into()); }
+    if !actual.eq_ignore_ascii_case(&target.sha256) {
+        return Err("Game Bar ZIP SHA256 검증 실패".into());
+    }
 
-    fs::create_dir_all(&updater_dir).map_err(|e| format!("Game Bar updater 폴더 생성 실패: {e}"))?;
+    fs::create_dir_all(&updater_dir)
+        .map_err(|e| format!("Game Bar updater 폴더 생성 실패: {e}"))?;
     let zip_path = updater_dir.join("verified-update.zip");
     fs::write(&zip_path, &archive).map_err(|e| format!("검증된 Game Bar ZIP 저장 실패: {e}"))?;
 
+    append_gamebar_update_log(&format!(
+        "오버레이 업데이트 설치 시작: {} / build {}",
+        target.release_tag, target.build_id
+    ));
     Command::new("powershell.exe")
-        .args(["-NoProfile", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-File"])
+        .args([
+            "-NoProfile",
+            "-WindowStyle",
+            "Hidden",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+        ])
         .arg(&updater)
-        .arg("-PackagePath").arg(&zip_path)
-        .arg("-ExpectedSha256").arg(&target.sha256)
-        .arg("-BuildId").arg(&target.build_id)
-        .arg("-ReleaseTag").arg(&target.release_tag)
+        .arg("-PackagePath")
+        .arg(&zip_path)
+        .arg("-ExpectedSha256")
+        .arg(&target.sha256)
+        .arg("-BuildId")
+        .arg(&target.build_id)
+        .arg("-ReleaseTag")
+        .arg(&target.release_tag)
         .arg("-Quiet")
         .creation_flags(CREATE_NO_WINDOW)
-        .spawn().map_err(|e| format!("Game Bar 설치 실행 실패: {e}"))?;
+        .spawn()
+        .map_err(|e| format!("Game Bar 설치 실행 실패: {e}"))?;
     Ok(())
 }
 
@@ -715,11 +1024,10 @@ fn wide_null(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        lobby_riot_ids, online_friend_riot_ids, parse_gamebar_release_version, riot_id_from_summoner,
-        select_gamebar_manifest, validate_status_message,
+        lobby_riot_ids, online_friend_riot_ids, parse_gamebar_release_version,
+        riot_id_from_summoner, select_gamebar_manifest, validate_status_message,
     };
     use serde_json::json;
-
 
     #[test]
     fn selects_highest_gamebar_release_independent_of_api_order() {

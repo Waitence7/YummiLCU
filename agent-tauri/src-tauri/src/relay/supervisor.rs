@@ -40,8 +40,8 @@ use super::{
     command_auth,
     protocol::{
         Action, AgentDiagnosticReport, AgentEventMessage, AgentHelloMessage, AgentLogChunk,
-        AuthMessage, CommandResult, DeviceProofMessage, IncomingMessage, OAuthCodeMessage, PongMessage,
-        UnexpectedErrorReport, UpdateDiagnosticReport, MAX_RELAY_MESSAGE_BYTES,
+        AuthMessage, CommandResult, DeviceProofMessage, IncomingMessage, OAuthCodeMessage,
+        PongMessage, UnexpectedErrorReport, UpdateDiagnosticReport, MAX_RELAY_MESSAGE_BYTES,
     },
 };
 
@@ -352,8 +352,8 @@ fn native_watchdog_tick() {
 fn schedule_native_agent_restart() -> Result<(), String> {
     use std::os::windows::process::CommandExt;
 
-    let executable = std::env::current_exe()
-        .map_err(|error| format!("current_exe failed: {error}"))?;
+    let executable =
+        std::env::current_exe().map_err(|error| format!("current_exe failed: {error}"))?;
     let executable = executable.to_string_lossy();
     let command = format!(
         "ping 127.0.0.1 -n 3 >nul & start \"\" \"{}\" --background",
@@ -1220,7 +1220,9 @@ impl RelaySupervisor {
         let network_age = if network_last_ms == 0 {
             None
         } else {
-            Some(Duration::from_millis(now_ms.saturating_sub(network_last_ms)))
+            Some(Duration::from_millis(
+                now_ms.saturating_sub(network_last_ms),
+            ))
         };
 
         let (reason, old_task) = {
@@ -1233,9 +1235,8 @@ impl RelaySupervisor {
                 return Ok(false);
             }
 
-            let state_age = Duration::from_millis(
-                now_ms.saturating_sub(control.connection_state_since_ms),
-            );
+            let state_age =
+                Duration::from_millis(now_ms.saturating_sub(control.connection_state_since_ms));
             if control.last_hard_revive_ms != 0
                 && Duration::from_millis(now_ms.saturating_sub(control.last_hard_revive_ms))
                     < RELAY_HARD_REVIVE_COOLDOWN
@@ -1259,7 +1260,9 @@ impl RelaySupervisor {
                         "connection_phase_stuck state={} state_age_ms={} network_age_ms={}",
                         relay_state_label(control.connection_state),
                         state_age.as_millis(),
-                        network_age.map(|age| age.as_millis().to_string()).unwrap_or_else(|| "-1".into()),
+                        network_age
+                            .map(|age| age.as_millis().to_string())
+                            .unwrap_or_else(|| "-1".into()),
                     )
                 }
                 RelayConnectionState::Failed | RelayConnectionState::Reconnecting
@@ -1269,7 +1272,9 @@ impl RelaySupervisor {
                         "reconnect_phase_stuck state={} state_age_ms={} network_age_ms={}",
                         relay_state_label(control.connection_state),
                         state_age.as_millis(),
-                        network_age.map(|age| age.as_millis().to_string()).unwrap_or_else(|| "-1".into()),
+                        network_age
+                            .map(|age| age.as_millis().to_string())
+                            .unwrap_or_else(|| "-1".into()),
                     )
                 }
                 _ => return Ok(false),
@@ -1533,12 +1538,16 @@ async fn run_supervisor(
             Ok(Ok(ConnectionEnd::ForceReconnect { reason })) => {
                 attempt = 0;
                 state
-                    .record_flight("relay_force_reconnect", format!("server_requested reason={reason}"))
+                    .record_flight(
+                        "relay_force_reconnect",
+                        format!("server_requested reason={reason}"),
+                    )
                     .await;
                 state
                     .report_diagnostic("relay", "force_reconnect", &reason)
                     .await;
-                state.log(&app, format!("Relay 서버 강제 재연결 요청: {reason}"))
+                state
+                    .log(&app, format!("Relay 서버 강제 재연결 요청: {reason}"))
                     .await;
             }
             Ok(Ok(ConnectionEnd::SessionConflict)) => {
@@ -1586,7 +1595,8 @@ async fn run_supervisor(
                 let diagnostic_config = config.clone();
                 let trigger = error.to_string();
                 tokio::spawn(async move {
-                    collect_relay_network_diagnostic(diagnostic_state, diagnostic_config, trigger).await;
+                    collect_relay_network_diagnostic(diagnostic_state, diagnostic_config, trigger)
+                        .await;
                 });
             }
             Err(payload) => {
@@ -1746,7 +1756,10 @@ async fn connect_once(
         )
         .await;
     state
-        .log(app, format!("Relay WebSocket 연결 성공 connection_id={connection_id}"))
+        .log(
+            app,
+            format!("Relay WebSocket 연결 성공 connection_id={connection_id}"),
+        )
         .await;
 
     let device_identity = session::load_or_create_device_identity()?;
@@ -1757,6 +1770,7 @@ async fn connect_once(
         Message::Text(
             serde_json::to_string(&AuthMessage::new(
                 &session.ws_token,
+                session.refresh_token.as_deref(),
                 &connection_id,
                 device_identity.device_id(),
                 &device_public_key,
@@ -1783,12 +1797,7 @@ async fn connect_once(
     } else {
         (None, None)
     };
-    let hello = AgentHelloMessage::new(
-        lcu_ready,
-        session.bound_discord_id,
-        puuid,
-        riot_id,
-    );
+    let hello = AgentHelloMessage::new(lcu_ready, session.bound_discord_id, puuid, riot_id);
     send_relay_message(
         &mut websocket,
         Message::Text(serde_json::to_string(&hello)?.into()),
@@ -2264,7 +2273,7 @@ async fn connect_once(
                                     }
                                 }
                             }
-                            IncomingMessage::SessionBound { discord_id, trust_level, .. } => {
+                            IncomingMessage::SessionBound { discord_id, trust_level, refresh_token, .. } => {
                                 let Some(discord_id) = *discord_id else {
                                     return Err(AgentError::Relay(
                                         "Relay session_bound에 Discord ID가 없습니다.".into(),
@@ -2292,6 +2301,25 @@ async fn connect_once(
                                         .await;
                                     state.log(app, format!("Discord 바인딩 pin 차단: {error}")).await;
                                     return Ok(ConnectionEnd::Stopped);
+                                }
+                                if let Some(refresh_token) = refresh_token.clone() {
+                                    if let Err(error) = session::set_refresh_token(session, refresh_token) {
+                                        state
+                                            .record_flight(
+                                                "session_error",
+                                                format!("refresh_token_save_failed: {error}"),
+                                            )
+                                            .await;
+                                        state
+                                            .report_unexpected_error(
+                                                "session",
+                                                "refresh_token_save_failed",
+                                                error.to_string(),
+                                            )
+                                            .await;
+                                    } else {
+                                        state.record_flight("session", "refresh_token_saved").await;
+                                    }
                                 }
                                 *needs_login = false;
                                 let is_new_device = trust_level.as_deref() == Some("new_device");
@@ -3124,6 +3152,7 @@ where
             discord_avatar,
             avatar_url,
             trust_level,
+            refresh_token: _,
         } => {
             state
                 .apply_session_bound(
@@ -3218,8 +3247,7 @@ fn command_is_authorized(
     session_new_device: bool,
     action: Option<Action>,
 ) -> bool {
-    session_bound
-        && (!session_new_device || action.is_some_and(Action::allowed_on_new_device))
+    session_bound && (!session_new_device || action.is_some_and(Action::allowed_on_new_device))
 }
 
 fn safe_avatar_url(value: Option<String>) -> Option<String> {
@@ -3944,7 +3972,6 @@ fn backoff_delay(attempt: u32) -> Duration {
     (base + Duration::from_millis(u64::from(jitter_ms))).min(MAX_BACKOFF)
 }
 
-
 async fn collect_relay_network_diagnostic(
     state: Arc<AppState>,
     config: crate::config::Config,
@@ -3999,7 +4026,9 @@ async fn collect_relay_network_diagnostic(
         https,
         relay_trace_snapshot()
     );
-    state.record_flight("relay_network_diagnostic", detail.clone()).await;
+    state
+        .record_flight("relay_network_diagnostic", detail.clone())
+        .await;
     state
         .report_diagnostic("relay_network", "failure_bundle", detail)
         .await;
@@ -4178,12 +4207,10 @@ mod tests {
         let writer = Arc::new(Mutex::new(futures_util::sink::drain::<Message>()));
         let _guard = writer.lock().await;
 
-        let result = try_send_presence_context_message(
-            &writer,
-            Message::Text("presence-refresh".into()),
-        )
-        .await
-        .unwrap();
+        let result =
+            try_send_presence_context_message(&writer, Message::Text("presence-refresh".into()))
+                .await
+                .unwrap();
 
         assert_eq!(result, PresenceContextSendOutcome::WriterBusy);
     }

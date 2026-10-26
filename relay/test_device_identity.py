@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from relay.app import (
     _device_trusted_redis_key,
+    _mark_device_trusted,
     _mask_ip,
     _trusted_proxy_client_ip,
     _session_auth_source_redis_key,
@@ -118,6 +119,24 @@ class DeviceProofTests(unittest.TestCase):
 
 
 class DeviceTrustTests(unittest.IsolatedAsyncioTestCase):
+    async def test_legacy_bound_session_can_enroll_current_fingerprint_as_trusted(self) -> None:
+        redis = FakeRedis()
+        session_id = str(uuid.uuid4())
+        fingerprint = "c" * 64
+        discord_id = 823814708330627073
+        redis.values[_session_device_fingerprint_redis_key(session_id)] = fingerprint
+
+        await _mark_device_trusted(redis, discord_id, session_id)
+
+        self.assertEqual(
+            await _session_trust_level(redis, discord_id, session_id),
+            "trusted",
+        )
+        self.assertIn(
+            _device_trusted_redis_key(discord_id, fingerprint),
+            redis.values,
+        )
+
     async def test_trust_follows_fingerprint_not_session_id(self) -> None:
         redis = FakeRedis()
         first_session = str(uuid.uuid4())

@@ -38,6 +38,7 @@ class ConnectionManager:
         self._active_session_ws: dict[str, WebSocket] = {}
         self._session_ws: dict[str, WebSocket] = {}
         self._session_ws_token: dict[str, str] = {}  # session_id -> ws_token (에이전트만 보유)
+        self._session_refresh_token_hash: dict[str, str] = {}
         self._ws_discord: dict[int, int] = {}  # id(ws) -> discord_id
         self._ws_trust: dict[int, str] = {}  # id(ws) -> trusted | new_device
         self._ws_session: dict[int, str] = {}  # id(ws) -> session_id (인증 전)
@@ -72,6 +73,7 @@ class ConnectionManager:
         session_id: str,
         ws: WebSocket,
         ws_token: str,
+        refresh_token_hash: str | None = None,
         connection_id: str | None = None,
     ) -> bool:
         """검증된 동일 세션 재접속은 새 WS가 기존 WS를 교체하도록 준비합니다.
@@ -100,6 +102,10 @@ class ConnectionManager:
             self._active_session_ws[session_id] = ws
             self._session_ws[session_id] = ws
             self._session_ws_token[session_id] = ws_token
+            if refresh_token_hash:
+                self._session_refresh_token_hash[session_id] = refresh_token_hash
+            else:
+                self._session_refresh_token_hash.pop(session_id, None)
             wid = id(ws)
             self._ws_session[wid] = session_id
             self._ws_session_id[wid] = session_id
@@ -120,6 +126,7 @@ class ConnectionManager:
         *,
         allow_takeover: bool = False,
         trust_level: str = "trusted",
+        refresh_token: str | None = None,
     ) -> bool:
         """세션을 바인딩하되 다른 정상 연결의 인계는 명시적 OAuth만 허용합니다."""
         if trust_level not in {"trusted", "new_device"}:
@@ -198,6 +205,8 @@ class ConnectionManager:
                     payload["discord_name"] = profile["name"]
                 if profile.get("avatar"):
                     payload["discord_avatar"] = profile["avatar"]
+            if refresh_token:
+                payload["refresh_token"] = refresh_token
             await ws.send_json(payload)
             await self.sync_live_game_polling(discord_id)
         except Exception:
@@ -236,6 +245,7 @@ class ConnectionManager:
         if sid is not None and self._session_ws.get(sid) is ws:
             del self._session_ws[sid]
             self._session_ws_token.pop(sid, None)
+            self._session_refresh_token_hash.pop(sid, None)
         for session_id, active_ws in list(self._active_session_ws.items()):
             if active_ws is ws:
                 del self._active_session_ws[session_id]
@@ -248,6 +258,12 @@ class ConnectionManager:
 
     def session_ws_token(self, session_id: str) -> str | None:
         return self._session_ws_token.get(session_id)
+
+    def session_refresh_token_hash(self, session_id: str) -> str | None:
+        return self._session_refresh_token_hash.get(session_id)
+
+    def set_session_refresh_token_hash(self, session_id: str, token_hash: str) -> None:
+        self._session_refresh_token_hash[session_id] = token_hash
 
     def has_active_session_ws(self, session_id: str) -> bool:
         """OAuth 시작 전 에이전트 WS 가 붙어 있는지."""

@@ -28,6 +28,7 @@ pub(crate) enum IncomingMessage {
         discord_avatar: Option<String>,
         avatar_url: Option<String>,
         trust_level: Option<String>,
+        refresh_token: Option<String>,
     },
     #[serde(rename = "pong")]
     Pong,
@@ -166,6 +167,7 @@ impl IncomingMessage {
                 discord_avatar,
                 avatar_url,
                 trust_level,
+                refresh_token,
             } if discord_id.is_some_and(|value| value == 0)
                 || [discord_name, username]
                     .into_iter()
@@ -177,7 +179,11 @@ impl IncomingMessage {
                     .any(|value| value.len() > 2_048)
                 || trust_level
                     .as_deref()
-                    .is_some_and(|value| !matches!(value, "trusted" | "new_device")) =>
+                    .is_some_and(|value| !matches!(value, "trusted" | "new_device"))
+                || refresh_token.as_ref().is_some_and(|value| {
+                    !(32..=256).contains(&value.len())
+                        || !value.chars().all(|character| character.is_ascii_graphic())
+                }) =>
             {
                 Err("invalid Relay session metadata")
             }
@@ -353,6 +359,8 @@ pub(crate) struct AuthMessage<'a> {
     #[serde(rename = "type")]
     message_type: &'static str,
     ws_token: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_token: Option<&'a str>,
     connection_id: &'a str,
     device_proof_version: u8,
     device_id: &'a str,
@@ -362,6 +370,7 @@ pub(crate) struct AuthMessage<'a> {
 impl<'a> AuthMessage<'a> {
     pub(crate) fn new(
         ws_token: &'a str,
+        refresh_token: Option<&'a str>,
         connection_id: &'a str,
         device_id: &'a str,
         device_public_key: &'a str,
@@ -369,6 +378,7 @@ impl<'a> AuthMessage<'a> {
         Self {
             message_type: "auth",
             ws_token,
+            refresh_token,
             connection_id,
             device_proof_version: 1,
             device_id,

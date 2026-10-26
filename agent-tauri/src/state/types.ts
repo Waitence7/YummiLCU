@@ -98,7 +98,7 @@ export const initialState: AgentState = {
     CheckUpdatesOnStartup: true,
     AutoUpdateEnabled: true,
     UpdateChannel: 'stable',
-    SavedSessionMaxAgeDays: 14,
+    SavedSessionMaxAgeDays: 0,
     RunAtWindowsStartup: true,
     TrayHideEffect: 'book-return-v2',
     TrayEffectPlaybackRate: 1,
