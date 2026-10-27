@@ -59,6 +59,9 @@ struct ExternalClickTestState {
     monitor_y: i32,
     matched_geometry: String,
     event_at_ms: u64,
+    poll_count: u64,
+    poll_updated_at_ms: u64,
+    cursor_source: String,
 }
 
 #[cfg(windows)]
@@ -531,7 +534,7 @@ fn external_mouse_input_thread() {
         Foundation::POINT,
         UI::{
             Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
-            WindowsAndMessaging::GetCursorPos,
+            WindowsAndMessaging::{GetCursorPos, GetPhysicalCursorPos},
         },
     };
 
@@ -542,12 +545,23 @@ fn external_mouse_input_thread() {
     loop {
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
         let mut point = POINT::default();
-        if unsafe { GetCursorPos(&mut point) }.is_ok() {
+        let cursor_source = if unsafe { GetPhysicalCursorPos(&mut point) }.is_ok() {
+            Some("physical")
+        } else if unsafe { GetCursorPos(&mut point) }.is_ok() {
+            Some("logical")
+        } else {
+            None
+        };
+        if let Some(cursor_source) = cursor_source {
             let now = now_ms();
             if let Ok(mut state) = external_click_test_state().lock() {
-                // Cursor diagnostics must update continuously, not only on a
-                // button transition. This also makes geometry debugging useful
-                // while the user simply moves the mouse around the overlay.
+                // Prefer physical screen coordinates because Game Bar window
+                // geometry is ultimately matched against native screen pixels.
+                // Fall back to GetCursorPos for systems where physical cursor
+                // coordinates are unavailable.
+                state.poll_count = state.poll_count.wrapping_add(1);
+                state.poll_updated_at_ms = now;
+                state.cursor_source = cursor_source.into();
                 state.cursor_x = point.x;
                 state.cursor_y = point.y;
                 let (monitor_x, monitor_y) =
@@ -681,6 +695,9 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "altRectWidth": state.alt_width,
         "altRectHeight": state.alt_height,
         "eventAtMs": state.event_at_ms,
+        "pollCount": state.poll_count,
+        "pollUpdatedAtMs": state.poll_updated_at_ms,
+        "cursorSource": state.cursor_source,
     })
     .to_string()
 }

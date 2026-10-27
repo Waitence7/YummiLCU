@@ -191,7 +191,10 @@ fn manifest_public_key() -> AgentResult<[u8; 32]> {
     decode_base64_fixed("manifest public key", raw)
 }
 
-pub(crate) fn verify_manifest_payload_signature(target: &Value, signature: &str) -> AgentResult<()> {
+pub(crate) fn verify_manifest_payload_signature(
+    target: &Value,
+    signature: &str,
+) -> AgentResult<()> {
     let public_key = manifest_public_key()?;
     verify_tauri_manifest_signature_with_key(target, signature, &public_key)
 }
@@ -609,6 +612,29 @@ async fn download_limited(client: &Client, url: Url, max_bytes: usize) -> AgentR
     Ok(bytes)
 }
 
+fn current_build_matches_target(target: &UpdateTarget) -> bool {
+    let current_build = option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local");
+    let current_commit = option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown");
+    target.build_id.as_deref() == Some(current_build)
+        && target.commit.as_deref() == Some(current_commit)
+}
+
+fn persist_release_identity(target_dir: &Path, target: &UpdateTarget) -> AgentResult<()> {
+    let installed_release = serde_json::json!({
+        "version": target.version,
+        "releaseLabel": target.release_label,
+        "channel": target.channel,
+        "buildId": target.build_id,
+        "commit": target.commit,
+    });
+    fs::write(
+        target_dir.join(".yummi-release.json"),
+        serde_json::to_vec_pretty(&installed_release)
+            .map_err(|error| AgentError::Update(format!("릴리즈 메타데이터 생성 실패: {error}")))?,
+    )?;
+    Ok(())
+}
+
 async fn apply_update(
     manifest: UpdateManifest,
     app: &AppHandle,
@@ -769,6 +795,10 @@ async fn apply_update(
     let source_dir = source
         .parent()
         .ok_or_else(|| AgentError::Update("압축 해제 폴더를 찾지 못했습니다.".into()))?;
+    // Persist the promoted release identity next to the executable. Candidate
+    // binaries are reused for beta/stable promotion, so build-time environment
+    // labels alone would otherwise keep showing `candidate.N` after promotion.
+    persist_release_identity(source_dir, &target_manifest)?;
     let backup_dir = work.join("backup");
     let signature_check = windows_signature_check_cmd(&source, expected_thumbprint.as_deref());
     let script_text = format!(
@@ -1013,6 +1043,30 @@ pub(crate) async fn check_and_apply_update(
         }
     };
     if let Some(target) = manifest.tauri.clone() {
+        // A promoted beta/stable release may reuse the exact candidate binary.
+        // In that case no executable update is necessary, but the runtime release
+        // identity must still be synchronized from the signed manifest.
+        if current_build_matches_target(&target) {
+            if let Ok(executable) = std::env::current_exe() {
+                if let Some(dir) = executable.parent() {
+                    if persist_release_identity(dir, &target).is_ok() {
+                        state
+                            .set_release_identity(
+                                app,
+                                target.version.clone(),
+                                target
+                                    .release_label
+                                    .clone()
+                                    .unwrap_or_else(|| target.version.clone()),
+                                target.channel.clone().unwrap_or_else(|| "stable".into()),
+                                target.build_id.clone().unwrap_or_else(|| "unknown".into()),
+                                target.commit.clone().unwrap_or_else(|| "unknown".into()),
+                            )
+                            .await;
+                    }
+                }
+            }
+        }
         if should_apply_target(
             &target,
             env!("CARGO_PKG_VERSION"),

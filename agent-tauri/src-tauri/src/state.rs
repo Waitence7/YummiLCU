@@ -5,7 +5,7 @@ use std::{
     time::{Duration, Instant, UNIX_EPOCH},
 };
 
-use serde::{Serialize, Serializer};
+use serde::{Deserialize, Serialize, Serializer};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 
@@ -21,6 +21,23 @@ static DIAGNOSTIC_DISK_IO: crate::blocking_io::BlockingIo = crate::blocking_io::
 const DIAGNOSTIC_DISK_TIMEOUT: Duration = Duration::from_secs(8);
 
 const MAX_AUTO_LOG_SOURCE_BYTES: usize = 128 * 1024;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstalledReleaseMetadata {
+    version: Option<String>,
+    release_label: Option<String>,
+    channel: Option<String>,
+    build_id: Option<String>,
+    commit: Option<String>,
+}
+
+fn installed_release_metadata() -> Option<InstalledReleaseMetadata> {
+    let executable = std::env::current_exe().ok()?;
+    let path = executable.parent()?.join(".yummi-release.json");
+    let raw = std::fs::read_to_string(path).ok()?;
+    serde_json::from_str(&raw).ok()
+}
 
 use crate::{
     config::Config,
@@ -69,6 +86,7 @@ where
 
 impl UiState {
     fn new(config: Config) -> Self {
+        let installed = installed_release_metadata();
         Self {
             status: "연결 시작 → Discord 로그인".into(),
             relay: false,
@@ -80,19 +98,42 @@ impl UiState {
             logs: VecDeque::new(),
             oauth_pending: false,
             update_message: None,
-            app_version: env!("CARGO_PKG_VERSION").into(),
-            release_label: option_env!("YUMMI_AGENT_RELEASE_LABEL")
-                .unwrap_or(env!("CARGO_PKG_VERSION"))
-                .into(),
-            release_channel: option_env!("YUMMI_AGENT_RELEASE_CHANNEL")
-                .unwrap_or("stable")
-                .into(),
-            build_id: option_env!("YUMMI_AGENT_BUILD_ID")
-                .unwrap_or("local")
-                .into(),
-            git_commit: option_env!("YUMMI_AGENT_GIT_COMMIT")
-                .unwrap_or("unknown")
-                .into(),
+            app_version: installed
+                .as_ref()
+                .and_then(|meta| meta.version.clone())
+                .unwrap_or_else(|| env!("CARGO_PKG_VERSION").into()),
+            release_label: installed
+                .as_ref()
+                .and_then(|meta| meta.release_label.clone())
+                .unwrap_or_else(|| {
+                    option_env!("YUMMI_AGENT_RELEASE_LABEL")
+                        .unwrap_or(env!("CARGO_PKG_VERSION"))
+                        .into()
+                }),
+            release_channel: installed
+                .as_ref()
+                .and_then(|meta| meta.channel.clone())
+                .unwrap_or_else(|| {
+                    option_env!("YUMMI_AGENT_RELEASE_CHANNEL")
+                        .unwrap_or("stable")
+                        .into()
+                }),
+            build_id: installed
+                .as_ref()
+                .and_then(|meta| meta.build_id.clone())
+                .unwrap_or_else(|| {
+                    option_env!("YUMMI_AGENT_BUILD_ID")
+                        .unwrap_or("local")
+                        .into()
+                }),
+            git_commit: installed
+                .as_ref()
+                .and_then(|meta| meta.commit.clone())
+                .unwrap_or_else(|| {
+                    option_env!("YUMMI_AGENT_GIT_COMMIT")
+                        .unwrap_or("unknown")
+                        .into()
+                }),
             downloaded_at: installed_at(),
             config,
         }
@@ -326,6 +367,26 @@ impl AppState {
         message: Option<impl Into<String>>,
     ) {
         self.ui.lock().await.update_message = message.map(Into::into);
+        self.emit(app).await;
+    }
+
+    pub(crate) async fn set_release_identity(
+        &self,
+        app: &AppHandle,
+        version: String,
+        release_label: String,
+        release_channel: String,
+        build_id: String,
+        git_commit: String,
+    ) {
+        {
+            let mut ui = self.ui.lock().await;
+            ui.app_version = version;
+            ui.release_label = release_label;
+            ui.release_channel = release_channel;
+            ui.build_id = build_id;
+            ui.git_commit = git_commit;
+        }
         self.emit(app).await;
     }
 
