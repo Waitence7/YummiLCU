@@ -657,10 +657,39 @@ fn sync_external_click_test(parsed: &Value) -> String {
     }
 
     let now = now_ms();
+
+    // Refresh the cursor synchronously for every Game Bar sync request. This
+    // keeps diagnostics and hit testing fresh even if the background poller is
+    // delayed, starved, or failed to start in a particular Windows/Game Bar
+    // environment.
+    let direct_cursor = {
+        use windows::Win32::{
+            Foundation::POINT,
+            UI::WindowsAndMessaging::{GetCursorPos, GetPhysicalCursorPos},
+        };
+        let mut point = POINT::default();
+        if unsafe { GetPhysicalCursorPos(&mut point) }.is_ok() {
+            Some((point.x, point.y, "direct-physical"))
+        } else if unsafe { GetCursorPos(&mut point) }.is_ok() {
+            Some((point.x, point.y, "direct-logical"))
+        } else {
+            None
+        }
+    };
+
     let mut state = match external_click_test_state().lock() {
         Ok(state) => state,
         Err(_) => return json_response(false, "외부 클릭 상태 잠금에 실패했습니다."),
     };
+    if let Some((cursor_x, cursor_y, source)) = direct_cursor {
+        state.cursor_x = cursor_x;
+        state.cursor_y = cursor_y;
+        let (monitor_x, monitor_y) =
+            monitor_origin_for_point(cursor_x, cursor_y).unwrap_or((0, 0));
+        state.monitor_x = monitor_x;
+        state.monitor_y = monitor_y;
+        state.cursor_source = source.into();
+    }
     state.active = active;
     if active {
         state.x = x;
@@ -698,6 +727,12 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "pollCount": state.poll_count,
         "pollUpdatedAtMs": state.poll_updated_at_ms,
         "cursorSource": state.cursor_source,
+        "pollAgeMs": now.saturating_sub(state.poll_updated_at_ms),
+        "agentPid": std::process::id(),
+        "agentReleaseLabel": option_env!("YUMMI_AGENT_RELEASE_LABEL")
+            .unwrap_or(env!("CARGO_PKG_VERSION")),
+        "agentBuildId": option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
+        "agentCommit": option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
     })
     .to_string()
 }

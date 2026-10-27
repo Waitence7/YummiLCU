@@ -92,6 +92,9 @@ namespace YummiGameBarWidget
         private const string CommandPipeName = @"LOCAL\YummiLcuGameBarCommandV1";
         private bool syncingNativeInput;
         private ulong lastNativeInputSequence;
+        private string lastAgentCommandTransport = "none";
+        private string lastAgentPipeError = "";
+        private string lastAgentTcpError = "";
 
         public Widget()
         {
@@ -995,7 +998,8 @@ namespace YummiGameBarWidget
                     command["altHeight"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
                 }
 
-                var response = JsonObject.Parse(await SendAgentCommandAsync(command.Stringify()));
+                var rawResponse = await SendAgentCommandAsync(command.Stringify());
+                var response = JsonObject.Parse(rawResponse);
                 if (!response.GetNamedBoolean("ok", false))
                 {
                     ClickNativeResult.Text = "Agent native · " + response.GetNamedString("message", "sync failed");
@@ -1006,23 +1010,40 @@ namespace YummiGameBarWidget
                 var eventName = response.GetNamedString("event", "");
                 var cursorX = (int)response.GetNamedNumber("cursorX", 0);
                 var cursorY = (int)response.GetNamedNumber("cursorY", 0);
+                var monitorX = (int)response.GetNamedNumber("monitorX", 0);
+                var monitorY = (int)response.GetNamedNumber("monitorY", 0);
                 var rectX = (int)Math.Round(response.GetNamedNumber("rectX", 0));
                 var rectY = (int)Math.Round(response.GetNamedNumber("rectY", 0));
                 var altRectX = (int)Math.Round(response.GetNamedNumber("altRectX", 0));
                 var altRectY = (int)Math.Round(response.GetNamedNumber("altRectY", 0));
-                if (sequence != lastNativeInputSequence)
-                {
-                    lastNativeInputSequence = sequence;
-                    var eventX = (int)response.GetNamedNumber("eventX", 0);
-                    var eventY = (int)response.GetNamedNumber("eventY", 0);
-                    var matched = response.GetNamedString("matchedGeometry", "?");
-                    ClickNativeResult.Text = "count " + clickCount + " · " + matched + " · " + eventName + " " + eventX + "," + eventY;
-                }
-                else
-                {
-                    ClickNativeResult.Text = "count " + clickCount + " · cursor " + cursorX + "," + cursorY +
-                        " · rect " + rectX + "," + rectY + " / " + altRectX + "," + altRectY;
-                }
+                var pollCount = (ulong)Math.Max(0, response.GetNamedNumber("pollCount", 0));
+                var pollAgeMs = (ulong)Math.Max(0, response.GetNamedNumber("pollAgeMs", 0));
+                var cursorSource = response.GetNamedString("cursorSource", "?");
+                var agentPid = (uint)Math.Max(0, response.GetNamedNumber("agentPid", 0));
+                var agentBuild = response.GetNamedString("agentBuildId", "?");
+                var eventX = (int)response.GetNamedNumber("eventX", 0);
+                var eventY = (int)response.GetNamedNumber("eventY", 0);
+                var matched = response.GetNamedString("matchedGeometry", "?");
+                var active = response.GetNamedBoolean("active", false);
+                var rectWidth = response.GetNamedNumber("rectWidth", 0);
+                var rectHeight = response.GetNamedNumber("rectHeight", 0);
+                var altRectWidth = response.GetNamedNumber("altRectWidth", 0);
+                var altRectHeight = response.GetNamedNumber("altRectHeight", 0);
+                var eventAtMs = (ulong)Math.Max(0, response.GetNamedNumber("eventAtMs", 0));
+                var releaseLabel = response.GetNamedString("agentReleaseLabel", "?");
+                var agentCommit = response.GetNamedString("agentCommit", "?");
+                if (sequence != lastNativeInputSequence) lastNativeInputSequence = sequence;
+
+                ClickNativeResult.Text =
+                    "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError + "\n" +
+                    "agent pid=" + agentPid + " build=" + agentBuild + " release=" + releaseLabel + " commit=" + agentCommit + "\n" +
+                    "active=" + active + " seq=" + sequence + " clicks=" + clickCount + " event=" + eventName +
+                    " eventXY=" + eventX + "," + eventY + " eventAt=" + eventAtMs + " matched=" + matched + "\n" +
+                    "cursor=" + cursorX + "," + cursorY + " source=" + cursorSource + " monitor=" + monitorX + "," + monitorY +
+                    " pollCount=" + pollCount + " pollAgeMs=" + pollAgeMs + "\n" +
+                    "rect=" + rectX + "," + rectY + " " + rectWidth.ToString("0.##") + "x" + rectHeight.ToString("0.##") +
+                    " altRect=" + altRectX + "," + altRectY + " " + altRectWidth.ToString("0.##") + "x" + altRectHeight.ToString("0.##") + "\n" +
+                    "raw=" + rawResponse;
             }
             catch (Exception ex)
             {
@@ -1034,7 +1055,7 @@ namespace YummiGameBarWidget
             }
         }
 
-        private static async Task<string> SendAgentCommandAsync(string payload)
+        private async Task<string> SendAgentCommandAsync(string payload)
         {
             Exception pipeError = null;
             try
@@ -1045,12 +1066,17 @@ namespace YummiGameBarWidget
                     var data = Encoding.UTF8.GetBytes(payload + "\n");
                     await pipe.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
                     await pipe.FlushAsync(timeout.Token).ConfigureAwait(false);
-                    return await NativePipeClient.ReadLineAsync(pipe, timeout.Token).ConfigureAwait(false);
+                    var response = await NativePipeClient.ReadLineAsync(pipe, timeout.Token).ConfigureAwait(false);
+                    lastAgentCommandTransport = "pipe";
+                    lastAgentPipeError = "";
+                    lastAgentTcpError = "";
+                    return response;
                 }
             }
             catch (Exception ex)
             {
                 pipeError = ex;
+                lastAgentPipeError = ErrorCode(ex);
             }
 
             try
@@ -1068,12 +1094,17 @@ namespace YummiGameBarWidget
                         var data = Encoding.UTF8.GetBytes(payload + "\n");
                         await output.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
                         await output.FlushAsync(timeout.Token).ConfigureAwait(false);
-                        return await NativePipeClient.ReadLineAsync(input, timeout.Token).ConfigureAwait(false);
+                        var response = await NativePipeClient.ReadLineAsync(input, timeout.Token).ConfigureAwait(false);
+                        lastAgentCommandTransport = "tcp:19514";
+                        lastAgentTcpError = "";
+                        return response;
                     }
                 }
             }
             catch (Exception socketError)
             {
+                lastAgentTcpError = ErrorCode(socketError);
+                lastAgentCommandTransport = "failed";
                 throw new AggregateException(pipeError, socketError);
             }
         }
