@@ -1,4 +1,4 @@
-name: Build Game Bar Overlay (Windows)
+name: Build/Deploy Game Bar Overlay (manual Actions button)
 
 on:
   workflow_dispatch:

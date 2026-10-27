@@ -1,4 +1,4 @@
-name: Build Tauri Agent (Windows)
+name: Deploy LCU Tauri Agent (manual Actions button)
 
 on:
   push:
