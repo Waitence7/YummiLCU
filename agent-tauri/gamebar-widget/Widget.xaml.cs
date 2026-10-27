@@ -437,16 +437,10 @@ namespace YummiGameBarWidget
             refreshing = true;
             try
             {
-                string line;
-                try { line = await NativePipeClient.ReadSnapshotAsync(); }
-                catch (Exception pipeError)
-                {
-                    try { line = await ReadLoopbackSnapshotAsync(); }
-                    catch (Exception socketError)
-                    {
-                        throw new AggregateException(pipeError, socketError);
-                    }
-                }
+                // Game Bar is a UWP/AppContainer process while the Agent is a desktop app.
+                // Cross-AppContainer named pipes are not supported reliably here, so the
+                // loopback endpoint is the canonical bridge for both snapshots and commands.
+                string line = await ReadLoopbackSnapshotAsync();
                 if (string.IsNullOrWhiteSpace(line)) throw new IOException("empty bridge response");
                 Apply(JsonObject.Parse(line));
             }
@@ -1057,28 +1051,10 @@ namespace YummiGameBarWidget
 
         private async Task<string> SendAgentCommandAsync(string payload)
         {
-            Exception pipeError = null;
-            try
-            {
-                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
-                using (var pipe = NativePipeClient.Open(CommandPipeName, FileAccess.ReadWrite))
-                {
-                    var data = Encoding.UTF8.GetBytes(payload + "\n");
-                    await pipe.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
-                    await pipe.FlushAsync(timeout.Token).ConfigureAwait(false);
-                    var response = await NativePipeClient.ReadLineAsync(pipe, timeout.Token).ConfigureAwait(false);
-                    lastAgentCommandTransport = "pipe";
-                    lastAgentPipeError = "";
-                    lastAgentTcpError = "";
-                    return response;
-                }
-            }
-            catch (Exception ex)
-            {
-                pipeError = ex;
-                lastAgentPipeError = ErrorCode(ex);
-            }
-
+            // Desktop Agent <-> UWP Game Bar uses loopback TCP as the canonical
+            // transport. Named pipes are intentionally skipped because UWP named
+            // pipes are restricted to the same AppContainer app.
+            lastAgentPipeError = "";
             try
             {
                 using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
@@ -1088,8 +1064,7 @@ namespace YummiGameBarWidget
                     using (var output = socket.OutputStream.AsStreamForWrite())
                     using (var input = socket.InputStream.AsStreamForRead())
                     {
-                        // The unified loopback endpoint keeps snapshot compatibility by
-                        // sending the current snapshot immediately after connect.
+                        // Unified endpoint sends the current snapshot first.
                         await NativePipeClient.ReadLineAsync(input, timeout.Token).ConfigureAwait(false);
                         var data = Encoding.UTF8.GetBytes(payload + "\n");
                         await output.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
@@ -1105,7 +1080,7 @@ namespace YummiGameBarWidget
             {
                 lastAgentTcpError = ErrorCode(socketError);
                 lastAgentCommandTransport = "failed";
-                throw new AggregateException(pipeError, socketError);
+                throw;
             }
         }
 
