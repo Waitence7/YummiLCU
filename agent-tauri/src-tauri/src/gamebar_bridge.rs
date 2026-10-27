@@ -62,6 +62,13 @@ struct ExternalClickTestState {
     poll_count: u64,
     poll_updated_at_ms: u64,
     cursor_source: String,
+    physical_x: i32,
+    physical_y: i32,
+    logical_x: i32,
+    logical_y: i32,
+    cursor_info_x: i32,
+    cursor_info_y: i32,
+    cursor_info_valid: bool,
 }
 
 #[cfg(windows)]
@@ -544,13 +551,24 @@ fn external_mouse_input_thread() {
     let mut was_down = false;
     loop {
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
-        let mut point = POINT::default();
-        let cursor_source = if unsafe { GetPhysicalCursorPos(&mut point) }.is_ok() {
-            Some("physical")
-        } else if unsafe { GetCursorPos(&mut point) }.is_ok() {
-            Some("logical")
+        use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
+        let mut physical = POINT::default();
+        let mut logical = POINT::default();
+        let mut cursor_info = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        let physical_ok = unsafe { GetPhysicalCursorPos(&mut physical) }.is_ok();
+        let logical_ok = unsafe { GetCursorPos(&mut logical) }.is_ok();
+        let cursor_info_ok = unsafe { GetCursorInfo(&mut cursor_info) }.is_ok();
+        let (point, cursor_source) = if cursor_info_ok {
+            (cursor_info.ptScreenPos, Some("cursor-info"))
+        } else if physical_ok {
+            (physical, Some("physical"))
+        } else if logical_ok {
+            (logical, Some("logical"))
         } else {
-            None
+            (POINT::default(), None)
         };
         if let Some(cursor_source) = cursor_source {
             let now = now_ms();
@@ -564,6 +582,13 @@ fn external_mouse_input_thread() {
                 state.cursor_source = cursor_source.into();
                 state.cursor_x = point.x;
                 state.cursor_y = point.y;
+                state.physical_x = physical.x;
+                state.physical_y = physical.y;
+                state.logical_x = logical.x;
+                state.logical_y = logical.y;
+                state.cursor_info_x = cursor_info.ptScreenPos.x;
+                state.cursor_info_y = cursor_info.ptScreenPos.y;
+                state.cursor_info_valid = cursor_info_ok;
                 let (monitor_x, monitor_y) =
                     monitor_origin_for_point(point.x, point.y).unwrap_or((0, 0));
                 state.monitor_x = monitor_x;
@@ -665,13 +690,49 @@ fn sync_external_click_test(parsed: &Value) -> String {
     let direct_cursor = {
         use windows::Win32::{
             Foundation::POINT,
-            UI::WindowsAndMessaging::{GetCursorPos, GetPhysicalCursorPos},
+            UI::WindowsAndMessaging::{
+                GetCursorInfo, GetCursorPos, GetPhysicalCursorPos, CURSORINFO,
+            },
         };
-        let mut point = POINT::default();
-        if unsafe { GetPhysicalCursorPos(&mut point) }.is_ok() {
-            Some((point.x, point.y, "direct-physical"))
-        } else if unsafe { GetCursorPos(&mut point) }.is_ok() {
-            Some((point.x, point.y, "direct-logical"))
+        let mut physical = POINT::default();
+        let mut logical = POINT::default();
+        let mut cursor_info = CURSORINFO {
+            cbSize: std::mem::size_of::<CURSORINFO>() as u32,
+            ..Default::default()
+        };
+        let physical_ok = unsafe { GetPhysicalCursorPos(&mut physical) }.is_ok();
+        let logical_ok = unsafe { GetCursorPos(&mut logical) }.is_ok();
+        let cursor_info_ok = unsafe { GetCursorInfo(&mut cursor_info) }.is_ok();
+        if cursor_info_ok {
+            Some((
+                cursor_info.ptScreenPos.x,
+                cursor_info.ptScreenPos.y,
+                "direct-cursor-info",
+                physical,
+                logical,
+                cursor_info.ptScreenPos,
+                true,
+            ))
+        } else if physical_ok {
+            Some((
+                physical.x,
+                physical.y,
+                "direct-physical",
+                physical,
+                logical,
+                cursor_info.ptScreenPos,
+                false,
+            ))
+        } else if logical_ok {
+            Some((
+                logical.x,
+                logical.y,
+                "direct-logical",
+                physical,
+                logical,
+                cursor_info.ptScreenPos,
+                false,
+            ))
         } else {
             None
         }
@@ -681,11 +742,19 @@ fn sync_external_click_test(parsed: &Value) -> String {
         Ok(state) => state,
         Err(_) => return json_response(false, "외부 클릭 상태 잠금에 실패했습니다."),
     };
-    if let Some((cursor_x, cursor_y, source)) = direct_cursor {
+    if let Some((cursor_x, cursor_y, source, physical, logical, cursor_info, cursor_info_valid)) =
+        direct_cursor
+    {
         state.cursor_x = cursor_x;
         state.cursor_y = cursor_y;
-        let (monitor_x, monitor_y) =
-            monitor_origin_for_point(cursor_x, cursor_y).unwrap_or((0, 0));
+        state.physical_x = physical.x;
+        state.physical_y = physical.y;
+        state.logical_x = logical.x;
+        state.logical_y = logical.y;
+        state.cursor_info_x = cursor_info.x;
+        state.cursor_info_y = cursor_info.y;
+        state.cursor_info_valid = cursor_info_valid;
+        let (monitor_x, monitor_y) = monitor_origin_for_point(cursor_x, cursor_y).unwrap_or((0, 0));
         state.monitor_x = monitor_x;
         state.monitor_y = monitor_y;
         state.cursor_source = source.into();
@@ -727,6 +796,13 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "pollCount": state.poll_count,
         "pollUpdatedAtMs": state.poll_updated_at_ms,
         "cursorSource": state.cursor_source,
+        "physicalX": state.physical_x,
+        "physicalY": state.physical_y,
+        "logicalX": state.logical_x,
+        "logicalY": state.logical_y,
+        "cursorInfoX": state.cursor_info_x,
+        "cursorInfoY": state.cursor_info_y,
+        "cursorInfoValid": state.cursor_info_valid,
         "pollAgeMs": now.saturating_sub(state.poll_updated_at_ms),
         "agentPid": std::process::id(),
         "agentReleaseLabel": option_env!("YUMMI_AGENT_RELEASE_LABEL")
