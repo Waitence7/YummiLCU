@@ -561,12 +561,12 @@ fn external_mouse_input_thread() {
         let physical_ok = unsafe { GetPhysicalCursorPos(&mut physical) }.is_ok();
         let logical_ok = unsafe { GetCursorPos(&mut logical) }.is_ok();
         let cursor_info_ok = unsafe { GetCursorInfo(&mut cursor_info) }.is_ok();
-        let (point, cursor_source) = if cursor_info_ok {
-            (cursor_info.ptScreenPos, Some("cursor-info"))
-        } else if physical_ok {
+        let (point, cursor_source) = if physical_ok {
             (physical, Some("physical"))
         } else if logical_ok {
             (logical, Some("logical"))
+        } else if cursor_info_ok {
+            (cursor_info.ptScreenPos, Some("cursor-info-fallback"))
         } else {
             (POINT::default(), None)
         };
@@ -703,17 +703,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
         let physical_ok = unsafe { GetPhysicalCursorPos(&mut physical) }.is_ok();
         let logical_ok = unsafe { GetCursorPos(&mut logical) }.is_ok();
         let cursor_info_ok = unsafe { GetCursorInfo(&mut cursor_info) }.is_ok();
-        if cursor_info_ok {
-            Some((
-                cursor_info.ptScreenPos.x,
-                cursor_info.ptScreenPos.y,
-                "direct-cursor-info",
-                physical,
-                logical,
-                cursor_info.ptScreenPos,
-                true,
-            ))
-        } else if physical_ok {
+        if physical_ok {
             Some((
                 physical.x,
                 physical.y,
@@ -721,7 +711,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
                 physical,
                 logical,
                 cursor_info.ptScreenPos,
-                false,
+                cursor_info_ok,
             ))
         } else if logical_ok {
             Some((
@@ -731,7 +721,17 @@ fn sync_external_click_test(parsed: &Value) -> String {
                 physical,
                 logical,
                 cursor_info.ptScreenPos,
-                false,
+                cursor_info_ok,
+            ))
+        } else if cursor_info_ok {
+            Some((
+                cursor_info.ptScreenPos.x,
+                cursor_info.ptScreenPos.y,
+                "direct-cursor-info-fallback",
+                physical,
+                logical,
+                cursor_info.ptScreenPos,
+                true,
             ))
         } else {
             None
