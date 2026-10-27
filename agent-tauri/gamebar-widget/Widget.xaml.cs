@@ -1024,7 +1024,7 @@ namespace YummiGameBarWidget
                 var eventX = (int)response.GetNamedNumber("eventX", 0);
                 var eventY = (int)response.GetNamedNumber("eventY", 0);
                 var matched = response.GetNamedString("matchedGeometry", "?");
-                var active = response.GetNamedBoolean("active", false);
+                var responseActive = response.GetNamedBoolean("active", false);
                 var rectWidth = response.GetNamedNumber("rectWidth", 0);
                 var rectHeight = response.GetNamedNumber("rectHeight", 0);
                 var altRectWidth = response.GetNamedNumber("altRectWidth", 0);
@@ -1037,7 +1037,7 @@ namespace YummiGameBarWidget
                 ClickNativeResult.Text =
                     "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError + "\n" +
                     "agent pid=" + agentPid + " build=" + agentBuild + " release=" + releaseLabel + " commit=" + agentCommit + "\n" +
-                    "active=" + active + " seq=" + sequence + " clicks=" + clickCount + " event=" + eventName +
+                    "active=" + responseActive + " seq=" + sequence + " clicks=" + clickCount + " event=" + eventName +
                     " eventXY=" + eventX + "," + eventY + " eventAt=" + eventAtMs + " matched=" + matched + "\n" +
                     "cursor=" + cursorX + "," + cursorY + " source=" + cursorSource + " monitor=" + monitorX + "," + monitorY +
                     " pollCount=" + pollCount + " pollAgeMs=" + pollAgeMs + "\n" +
