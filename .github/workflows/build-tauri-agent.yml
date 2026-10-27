@@ -190,10 +190,9 @@ jobs:
 
       - name: Rust tests
         working-directory: agent-tauri/src-tauri
-        # Compile tests with the release profile so dependencies/codegen are reused by
-        # the following Tauri release build instead of building a second debug tree.
-        # Keep the full test set (lib + bin + doctests) rather than narrowing to --lib.
-        run: cargo test --locked --release --target x86_64-pc-windows-msvc --jobs $env:CARGO_BUILD_JOBS
+        # Keep tests on the faster debug profile; release-mode tests caused a second
+        # multi-minute optimized compile instead of meaningfully reusing the Tauri build.
+        run: cargo test --locked --target x86_64-pc-windows-msvc --jobs $env:CARGO_BUILD_JOBS
 
       - name: Build Tauri bundles
         working-directory: agent-tauri
