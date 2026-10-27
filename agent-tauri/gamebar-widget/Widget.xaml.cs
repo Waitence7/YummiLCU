@@ -247,6 +247,12 @@ namespace YummiGameBarWidget
                 widget.PinnedChanged += WidgetStateChanged;
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
+                nativeInputTimer.Start();
+                _ = SyncExternalClickTestAsync(true);
+            }
+            else
+            {
+                ClickNativeResult.Text = "Agent native input unavailable · widget=null";
             }
             base.OnNavigatedTo(e);
         }
@@ -962,12 +968,19 @@ namespace YummiGameBarWidget
 
         private async Task SyncExternalClickTestAsync(bool active)
         {
-            if (syncingNativeInput || widget == null) return;
+            if (syncingNativeInput) return;
+            if (widget == null)
+            {
+                ClickNativeResult.Text = "Agent native input unavailable · widget=null";
+                return;
+            }
             syncingNativeInput = true;
             try
             {
-                var effectiveActive = active && HudPreferences.Visible && HudPanel.Visibility == Visibility.Visible
+                var requestedActive = active && HudPreferences.Visible && HudPanel.Visibility == Visibility.Visible
                     && ClickNativePanel.Visibility == Visibility.Visible;
+                var geometryReady = NativeHookHitbox.ActualWidth > 0 && NativeHookHitbox.ActualHeight > 0;
+                var effectiveActive = requestedActive && geometryReady;
                 var command = new JsonObject
                 {
                     ["command"] = JsonValue.CreateStringValue("sync_external_click_test"),
@@ -975,7 +988,6 @@ namespace YummiGameBarWidget
                 };
                 if (effectiveActive)
                 {
-                    if (NativeHookHitbox.ActualWidth <= 0 || NativeHookHitbox.ActualHeight <= 0) return;
                     var local = NativeHookHitbox.TransformToVisual(RootGrid)
                         .TransformPoint(new Windows.Foundation.Point(0, 0));
                     var bounds = widget.WindowBounds;
@@ -1029,7 +1041,9 @@ namespace YummiGameBarWidget
                 if (sequence != lastNativeInputSequence) lastNativeInputSequence = sequence;
 
                 ClickNativeResult.Text =
-                    "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError + "\n" +
+                    "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError +
+                    " requestedActive=" + requestedActive + " geometryReady=" + geometryReady +
+                    " hitbox=" + NativeHookHitbox.ActualWidth.ToString("0.##") + "x" + NativeHookHitbox.ActualHeight.ToString("0.##") + "\n" +
                     "agent pid=" + agentPid + " build=" + agentBuild + " release=" + releaseLabel + " commit=" + agentCommit + "\n" +
                     "active=" + responseActive + " seq=" + sequence + " clicks=" + clickCount + " event=" + eventName +
                     " eventXY=" + eventX + "," + eventY + " eventAt=" + eventAtMs + " matched=" + matched + "\n" +
