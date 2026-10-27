@@ -39,8 +39,10 @@ windows = { version = "0.60", features = ["Win32_Security_Cryptography", "Win32_
 tauri-plugin-single-instance = "2"
 
 [profile.release]
-lto = true
-codegen-units = 1
+# Thin LTO keeps most cross-crate optimization while avoiding the slow full-LTO bottleneck.
+lto = "thin"
+# Match the 4-vCPU GitHub runner so release codegen can run in parallel.
+codegen-units = 4
 # Keep background-task catch_unwind and relay recovery active in shipped builds.
 panic = "unwind"
 strip = true
