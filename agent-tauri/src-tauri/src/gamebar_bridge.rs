@@ -55,6 +55,8 @@ struct ExternalClickTestState {
     event_y: i32,
     cursor_x: i32,
     cursor_y: i32,
+    monitor_x: i32,
+    monitor_y: i32,
     matched_geometry: String,
     event_at_ms: u64,
 }
@@ -502,6 +504,28 @@ fn pipe_server(state: Arc<AppState>) {
 }
 
 #[cfg(windows)]
+fn monitor_origin_for_point(x: i32, y: i32) -> Option<(i32, i32)> {
+    use std::mem::size_of;
+    use windows::Win32::{
+        Foundation::POINT,
+        Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST},
+    };
+
+    let handle = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+    if handle.0.is_null() {
+        return None;
+    }
+    let mut info = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(handle, &mut info) }.as_bool() {
+        return None;
+    }
+    Some((info.rcMonitor.left, info.rcMonitor.top))
+}
+
+#[cfg(windows)]
 fn external_mouse_input_thread() {
     use windows::Win32::{
         Foundation::POINT,
@@ -517,29 +541,49 @@ fn external_mouse_input_thread() {
     let mut was_down = false;
     loop {
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
-        if down != was_down {
-            let mut point = POINT::default();
-            if unsafe { GetCursorPos(&mut point) }.is_ok() {
-                let now = now_ms();
-                if let Ok(mut state) = external_click_test_state().lock() {
+        let mut point = POINT::default();
+        if unsafe { GetCursorPos(&mut point) }.is_ok() {
+            let now = now_ms();
+            if let Ok(mut state) = external_click_test_state().lock() {
+                // Cursor diagnostics must update continuously, not only on a
+                // button transition. This also makes geometry debugging useful
+                // while the user simply moves the mouse around the overlay.
+                state.cursor_x = point.x;
+                state.cursor_y = point.y;
+                let (monitor_x, monitor_y) =
+                    monitor_origin_for_point(point.x, point.y).unwrap_or((0, 0));
+                state.monitor_x = monitor_x;
+                state.monitor_y = monitor_y;
+
+                if down != was_down {
                     // Expire stale geometry so a crashed/closed widget can never
                     // leave a ghost hitbox active in the Agent.
                     let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
-                    state.cursor_x = point.x;
-                    state.cursor_y = point.y;
-                    let inside_primary = fresh
-                        && state.active
-                        && (point.x as f64) >= state.x
-                        && (point.x as f64) < state.x + state.width
-                        && (point.y as f64) >= state.y
-                        && (point.y as f64) < state.y + state.height;
-                    let inside_alt = fresh
-                        && state.active
-                        && (point.x as f64) >= state.alt_x
-                        && (point.x as f64) < state.alt_x + state.alt_width
-                        && (point.y as f64) >= state.alt_y
-                        && (point.y as f64) < state.alt_y + state.alt_height;
-                    if inside_primary || inside_alt {
+                    let px = point.x as f64;
+                    let py = point.y as f64;
+                    let mx = monitor_x as f64;
+                    let my = monitor_y as f64;
+                    let inside = |rx: f64, ry: f64, rw: f64, rh: f64| {
+                        fresh
+                            && state.active
+                            && px >= rx
+                            && px < rx + rw
+                            && py >= ry
+                            && py < ry + rh
+                    };
+                    let inside_primary = inside(state.x, state.y, state.width, state.height);
+                    let inside_alt =
+                        inside(state.alt_x, state.alt_y, state.alt_width, state.alt_height);
+                    let inside_primary_monitor =
+                        inside(state.x + mx, state.y + my, state.width, state.height);
+                    let inside_alt_monitor = inside(
+                        state.alt_x + mx,
+                        state.alt_y + my,
+                        state.alt_width,
+                        state.alt_height,
+                    );
+                    if inside_primary || inside_alt || inside_primary_monitor || inside_alt_monitor
+                    {
                         state.sequence = state.sequence.wrapping_add(1);
                         if !down {
                             state.click_count = state.click_count.wrapping_add(1);
@@ -547,13 +591,22 @@ fn external_mouse_input_thread() {
                         state.event = if down { "down" } else { "up" }.into();
                         state.event_x = point.x;
                         state.event_y = point.y;
-                        state.matched_geometry = if inside_primary { "scaled-bounds" } else { "raw-bounds" }.into();
+                        state.matched_geometry = if inside_primary {
+                            "scaled-bounds"
+                        } else if inside_alt {
+                            "raw-bounds"
+                        } else if inside_primary_monitor {
+                            "scaled-bounds+monitor"
+                        } else {
+                            "raw-bounds+monitor"
+                        }
+                        .into();
                         state.event_at_ms = now;
                     }
                 }
             }
-            was_down = down;
         }
+        was_down = down;
         std::thread::sleep(Duration::from_millis(8));
     }
 }
@@ -583,8 +636,8 @@ fn sync_external_click_test(parsed: &Value) -> String {
             && (1.0..=2_000.0).contains(&rw)
             && (1.0..=2_000.0).contains(&rh)
     };
-    let valid_geometry = valid_rect(x, y, width, height)
-        && valid_rect(alt_x, alt_y, alt_width, alt_height);
+    let valid_geometry =
+        valid_rect(x, y, width, height) && valid_rect(alt_x, alt_y, alt_width, alt_height);
     if active && !valid_geometry {
         return json_response(false, "외부 클릭 테스트 영역이 올바르지 않습니다.");
     }
@@ -616,6 +669,8 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "eventY": state.event_y,
         "cursorX": state.cursor_x,
         "cursorY": state.cursor_y,
+        "monitorX": state.monitor_x,
+        "monitorY": state.monitor_y,
         "matchedGeometry": state.matched_geometry,
         "rectX": state.x,
         "rectY": state.y,
