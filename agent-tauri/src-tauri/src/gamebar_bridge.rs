@@ -371,9 +371,32 @@ fn now_ms() -> u64 {
 fn loopback_server(app: AppHandle, state: Arc<AppState>) {
     use std::io::{BufRead, BufReader};
 
-    let listener = match TcpListener::bind(GAMEBAR_LOOPBACK_ADDR) {
-        Ok(listener) => listener,
-        Err(_) => return,
+    // During an in-place update the previous Agent can take a moment to fully
+    // release the loopback listener. Retry instead of silently disabling the
+    // Game Bar bridge for the lifetime of the new process.
+    let listener = {
+        let mut bound = None;
+        for attempt in 1..=20 {
+            match TcpListener::bind(GAMEBAR_LOOPBACK_ADDR) {
+                Ok(listener) => {
+                    bound = Some(listener);
+                    break;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[gamebar bridge] loopback bind failed attempt={attempt}/20 addr={GAMEBAR_LOOPBACK_ADDR}: {error}"
+                    );
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+        let Some(listener) = bound else {
+            eprintln!(
+                "[gamebar bridge] loopback bind permanently failed addr={GAMEBAR_LOOPBACK_ADDR}"
+            );
+            return;
+        };
+        listener
     };
 
     for incoming in listener.incoming() {

@@ -807,7 +807,16 @@ async fn apply_update(
          timeout /t 2 /nobreak >nul\r\n\
          del /Q \"{}\" >nul 2>&1\r\n\
          taskkill /F /IM \"{}\" >nul 2>&1\r\n\
+         set \"YUMMI_WAIT_COUNT=0\"\r\n\
+         :wait_old_agent_exit\r\n\
+         tasklist /FI \"IMAGENAME eq {}\" /NH 2>nul | find /I \"{}\" >nul\r\n\
+         if errorlevel 1 goto old_agent_exited\r\n\
+         set /A YUMMI_WAIT_COUNT+=1\r\n\
+         if %YUMMI_WAIT_COUNT% GEQ 15 goto fail\r\n\
+         taskkill /F /IM \"{}\" >nul 2>&1\r\n\
          timeout /t 1 /nobreak >nul\r\n\
+         goto wait_old_agent_exit\r\n\
+         :old_agent_exited\r\n\
          mkdir \"{}\" >nul 2>&1\r\n\
          robocopy \"{}\" \"{}\" /E /XF agent.json .yummi-update.lock >nul\r\n\
          if errorlevel 8 goto fail\r\n\
@@ -820,6 +829,9 @@ async fn apply_update(
          rmdir /S /Q \"{}\" >nul 2>&1\r\n\
          del \"%~f0\"\r\n",
         legacy_update_lock.display(),
+        executable_name,
+        executable_name,
+        executable_name,
         executable_name,
         backup_dir.display(),
         target_dir.display(),
