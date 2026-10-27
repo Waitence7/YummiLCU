@@ -95,10 +95,14 @@ namespace YummiGameBarWidget
         private string lastAgentCommandTransport = "none";
         private string lastAgentPipeError = "";
         private string lastAgentTcpError = "";
+        private double lastGameBarPointerLocalX;
+        private double lastGameBarPointerLocalY;
+        private long lastGameBarPointerAtMs;
 
         public Widget()
         {
             InitializeComponent();
+            RootGrid.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(RootGrid_PointerMoved), true);
             nativeInputTimer.Tick += async (_, __) => await SyncExternalClickTestAsync(true);
             SetVersionText();
             RestorePanelPositions();
@@ -482,6 +486,19 @@ namespace YummiGameBarWidget
             BridgeText.Text = connected ? "LCU 연결됨" : "유미 에이전트 연결됨 · League 대기 중";
             StatusDot.Fill = new SolidColorBrush(connected ? Color.FromArgb(255, 86, 221, 139) : Color.FromArgb(255, 122, 106, 134));
             SaveStatus();
+        }
+
+
+        private void RootGrid_PointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            try
+            {
+                var point = e.GetCurrentPoint(RootGrid).Position;
+                lastGameBarPointerLocalX = point.X;
+                lastGameBarPointerLocalY = point.Y;
+                lastGameBarPointerAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            }
+            catch { }
         }
 
         private void Panel_PointerPressed(object sender, PointerRoutedEventArgs e)
@@ -986,6 +1003,16 @@ namespace YummiGameBarWidget
                     ["command"] = JsonValue.CreateStringValue("sync_external_click_test"),
                     ["active"] = JsonValue.CreateBooleanValue(effectiveActive),
                 };
+                if (lastGameBarPointerAtMs > 0)
+                {
+                    var bounds = widget.WindowBounds;
+                    var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
+                    command["gamebarCursorX"] = JsonValue.CreateNumberValue((bounds.X + lastGameBarPointerLocalX) * scale);
+                    command["gamebarCursorY"] = JsonValue.CreateNumberValue((bounds.Y + lastGameBarPointerLocalY) * scale);
+                    command["gamebarAltCursorX"] = JsonValue.CreateNumberValue(bounds.X + (lastGameBarPointerLocalX * scale));
+                    command["gamebarAltCursorY"] = JsonValue.CreateNumberValue(bounds.Y + (lastGameBarPointerLocalY * scale));
+                    command["gamebarCursorAtMs"] = JsonValue.CreateNumberValue(lastGameBarPointerAtMs);
+                }
                 if (effectiveActive)
                 {
                     var local = NativeHookHitbox.TransformToVisual(RootGrid)

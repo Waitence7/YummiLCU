@@ -688,6 +688,14 @@ fn sync_external_click_test(parsed: &Value) -> String {
     let alt_y = number("altY");
     let alt_width = number("altWidth");
     let alt_height = number("altHeight");
+    let gamebar_cursor_x = number("gamebarCursorX");
+    let gamebar_cursor_y = number("gamebarCursorY");
+    let gamebar_alt_cursor_x = number("gamebarAltCursorX");
+    let gamebar_alt_cursor_y = number("gamebarAltCursorY");
+    let gamebar_cursor_at_ms = parsed
+        .get("gamebarCursorAtMs")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     let valid_rect = |rx: f64, ry: f64, rw: f64, rh: f64| {
         rx.is_finite()
             && ry.is_finite()
@@ -761,6 +769,28 @@ fn sync_external_click_test(parsed: &Value) -> String {
         }
     };
 
+    let gamebar_cursor = if gamebar_cursor_at_ms > 0
+        && now.saturating_sub(gamebar_cursor_at_ms) <= 500
+        && gamebar_cursor_x.is_finite()
+        && gamebar_cursor_y.is_finite()
+        && gamebar_alt_cursor_x.is_finite()
+        && gamebar_alt_cursor_y.is_finite()
+    {
+        let native = direct_cursor.as_ref().map(|cursor| (cursor.0 as f64, cursor.1 as f64));
+        let primary = (gamebar_cursor_x, gamebar_cursor_y);
+        let alternate = (gamebar_alt_cursor_x, gamebar_alt_cursor_y);
+        let chosen = if let Some((nx, ny)) = native {
+            let primary_distance = (primary.0 - nx).powi(2) + (primary.1 - ny).powi(2);
+            let alternate_distance = (alternate.0 - nx).powi(2) + (alternate.1 - ny).powi(2);
+            if alternate_distance < primary_distance { alternate } else { primary }
+        } else {
+            primary
+        };
+        Some((chosen.0.round() as i32, chosen.1.round() as i32))
+    } else {
+        None
+    };
+
     let mut state = match external_click_test_state().lock() {
         Ok(state) => state,
         Err(_) => return json_response(false, "외부 클릭 상태 잠금에 실패했습니다."),
@@ -781,6 +811,14 @@ fn sync_external_click_test(parsed: &Value) -> String {
         state.monitor_x = monitor_x;
         state.monitor_y = monitor_y;
         state.cursor_source = source.into();
+    }
+    if let Some((cursor_x, cursor_y)) = gamebar_cursor {
+        state.cursor_x = cursor_x;
+        state.cursor_y = cursor_y;
+        let (monitor_x, monitor_y) = monitor_origin_for_point(cursor_x, cursor_y).unwrap_or((0, 0));
+        state.monitor_x = monitor_x;
+        state.monitor_y = monitor_y;
+        state.cursor_source = "gamebar-pointer".into();
     }
     state.active = active;
     if active {
@@ -826,6 +864,8 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "cursorInfoX": state.cursor_info_x,
         "cursorInfoY": state.cursor_info_y,
         "cursorInfoValid": state.cursor_info_valid,
+        "gamebarCursorAtMs": gamebar_cursor_at_ms,
+        "gamebarCursorAgeMs": if gamebar_cursor_at_ms > 0 { now.saturating_sub(gamebar_cursor_at_ms) } else { 0 },
         "pollAgeMs": now.saturating_sub(state.poll_updated_at_ms),
         "agentPid": std::process::id(),
         "agentReleaseLabel": option_env!("YUMMI_AGENT_RELEASE_LABEL")
