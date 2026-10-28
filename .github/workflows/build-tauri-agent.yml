@@ -68,6 +68,29 @@ jobs:
       - name: Relay and Agent protocol tests
         run: uv run --frozen python -m unittest discover -s relay -p "test_*.py"
 
+  rust-tests:
+    name: Rust tests
+    if: ${{ github.event_name == 'push' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: agent-tauri/src-tauri
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: agent-tauri/src-tauri
+          cache-targets: true
+          cache-all-crates: true
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Run Rust tests
+        run: cargo test --locked --jobs 4
+
   build:
     if: ${{ github.event_name == 'push' }}
     runs-on: windows-latest
@@ -187,12 +210,6 @@ jobs:
         # tauri build가 tauri.conf.json의 beforeBuildCommand(npm run build)를 실행하므로
         # 여기서는 Vite bundle을 중복 생성하지 않고 타입만 먼저 검사한다.
         run: npm exec -- tsc --noEmit
-
-      - name: Rust tests
-        working-directory: agent-tauri/src-tauri
-        # Keep tests on the faster debug profile; release-mode tests caused a second
-        # multi-minute optimized compile instead of meaningfully reusing the Tauri build.
-        run: cargo test --locked --target x86_64-pc-windows-msvc --jobs $env:CARGO_BUILD_JOBS
 
       - name: Build Tauri bundles
         working-directory: agent-tauri
