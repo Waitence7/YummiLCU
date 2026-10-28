@@ -25,7 +25,7 @@ use crate::{
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 #[cfg(windows)]
-const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(windows)]
 const GAMEBAR_VERSION_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/main/agent-tauri/gamebar-widget/version.json";
 #[cfg(windows)]
@@ -1217,6 +1217,24 @@ async fn check_overlay_update() -> Result<(), String> {
         return Err("Game Bar 다운로드 URL이 허용되지 않았습니다.".into());
     }
 
+    let expected_appx_version = format!("{}.{}", target.version, target.build_id);
+    let installed_appx_version = || -> Option<String> {
+        let output = Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "(Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1).Version.ToString()",
+            ])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        (!value.is_empty()).then_some(value)
+    };
+
     let state_path = updater_dir.join("state.json");
     if let Ok(raw) = fs::read_to_string(&state_path) {
         if let Ok(state) = serde_json::from_str::<GameBarUpdateState>(&raw) {
@@ -1232,11 +1250,22 @@ async fn check_overlay_update() -> Result<(), String> {
             if state.build_id == target.build_id
                 && state.sha256.eq_ignore_ascii_case(&target.sha256)
             {
-                append_gamebar_update_log(&format!(
-                    "이미 최신 오버레이: {} / build {}",
-                    target.release_tag, target.build_id
-                ));
-                return Ok(());
+                match installed_appx_version() {
+                    Some(version) if version == expected_appx_version => {
+                        append_gamebar_update_log(&format!(
+                            "이미 최신 오버레이: {} / build {} / appx {}",
+                            target.release_tag, target.build_id, version
+                        ));
+                        return Ok(());
+                    }
+                    actual => {
+                        append_gamebar_update_log(&format!(
+                            "오버레이 state와 실제 AppX 불일치, 재설치: expected={} actual={}",
+                            expected_appx_version,
+                            actual.as_deref().unwrap_or("missing")
+                        ));
+                    }
+                }
             }
         }
     }

@@ -102,6 +102,7 @@ namespace YummiGameBarWidget
         public Widget()
         {
             InitializeComponent();
+            ClickNativeResult.Text = "Agent native input initializing";
             RootGrid.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(RootGrid_PointerMoved), true);
             nativeInputTimer.Tick += async (_, __) => await SyncExternalClickTestAsync(true);
             SetVersionText();

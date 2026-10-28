@@ -46,6 +46,27 @@ try {
     ) -Wait -PassThru -WindowStyle Hidden
     if ($proc.ExitCode -ne 0) { throw "오버레이 설치가 종료 코드 $($proc.ExitCode)로 실패했습니다." }
 
+    $releaseVersion = $ReleaseTag -replace '^gamebar-v', ''
+    if ($releaseVersion -notmatch '^\d+\.\d+\.\d+$') { throw "Game Bar release tag 형식이 올바르지 않습니다: $ReleaseTag" }
+    $expectedAppxVersion = "$releaseVersion.$BuildId"
+    $installedOverlay = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $installedOverlay) { throw 'Game Bar 설치 후 AppX 패키지를 찾지 못했습니다.' }
+    $actualAppxVersion = $installedOverlay.Version.ToString()
+    if ($actualAppxVersion -ne $expectedAppxVersion) {
+      throw "Game Bar 설치 버전 검증 실패: expected=$expectedAppxVersion actual=$actualAppxVersion"
+    }
+    Write-UpdateLog "오버레이 AppX 검증 완료: $actualAppxVersion"
+
+    # Xbox Game Bar hosts widget code in its own process. Updating the AppX can
+    # leave an already-open host running the previous widget DLL even though
+    # Get-AppxPackage reports the new version. Force only the Game Bar host to
+    # exit so the next Win+G launch loads the newly installed package.
+    $gameBarProcesses = @('GameBar', 'GameBarFTServer')
+    foreach ($processName in $gameBarProcesses) {
+      Get-Process -Name $processName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+    }
+    Write-UpdateLog 'Xbox Game Bar host 종료 요청 완료; 다음 Win+G에서 새 위젯을 로드합니다.'
+
     $newUpdaterStaged = Join-Path $stateDir 'Update-YummiGameBar.ps1.new'
     $currentUpdater = Join-Path $stateDir 'Update-YummiGameBar.ps1'
     if (Test-Path $newUpdaterStaged) { Move-Item $newUpdaterStaged $currentUpdater -Force }
