@@ -41,6 +41,9 @@ try {
   $probeExe = Join-Path $root 'argv.exe'
   Add-Type -TypeDefinition 'public class Argv { public static void Main(string[] args) { foreach (var arg in args) System.Console.WriteLine(arg); } }' -OutputAssembly $probeExe -OutputType ConsoleApplication
   $source = Get-Content (Join-Path $InstallerRoot 'Install-YummiGameBar.ps1') -Raw
+  if ($source -notmatch [regex]::Escape('https://go.microsoft.com/fwlink/p/?LinkId=2124703')) { throw 'Official WebView2 Evergreen bootstrapper link missing' }
+  if ($source -notmatch [regex]::Escape("'/silent /install'")) { throw 'WebView2 silent install arguments missing' }
+  Write-Host 'PASS: installer ensures WebView2 Evergreen Runtime without bundling Chromium'
   $line = ($source -split "`n" | Where-Object { $_ -match 'CheckNetIsolation.exe.*LoopbackExempt' } | Select-Object -First 1).Trim()
   if (-not $line) { throw 'Loopback invocation not found' }
   $line = $line.Replace('"$env:SystemRoot\System32\CheckNetIsolation.exe"', '$probeExe').Replace(' | Out-Null', '')

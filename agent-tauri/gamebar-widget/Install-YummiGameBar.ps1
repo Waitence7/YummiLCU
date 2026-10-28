@@ -25,6 +25,45 @@ trap {
   exit 1
 }
 
+function Test-WebView2Runtime {
+  $roots = @(
+    (Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft\EdgeWebView\Application'),
+    (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Microsoft\EdgeWebView\Application'),
+    (Join-Path $env:LOCALAPPDATA 'Microsoft\EdgeWebView\Application')
+  ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+
+  foreach ($root in $roots) {
+    $runtime = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
+      Where-Object { Test-Path (Join-Path $_.FullName 'msedgewebview2.exe') } |
+      Select-Object -First 1
+    if ($runtime) { return $true }
+  }
+  return $false
+}
+
+function Install-WebView2RuntimeIfMissing {
+  if (Test-WebView2Runtime) {
+    Write-Host 'Microsoft Edge WebView2 Runtime 확인됨.' -ForegroundColor DarkGray
+    return
+  }
+
+  # Microsoft's Evergreen bootstrapper is intentionally downloaded at install
+  # time so Chromium/WebView2 is not bundled into the Yummi overlay archive.
+  $bootstrapperUri = 'https://go.microsoft.com/fwlink/p/?LinkId=2124703'
+  $bootstrapper = Join-Path $env:TEMP 'MicrosoftEdgeWebview2Setup.exe'
+  Write-Host 'WebView2 Runtime이 없어 Microsoft Evergreen Runtime을 설치합니다.' -ForegroundColor Yellow
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri $bootstrapperUri -OutFile $bootstrapper
+    $process = Start-Process -FilePath $bootstrapper -ArgumentList '/silent /install' -Wait -PassThru
+    if ($process.ExitCode -ne 0) { throw "WebView2 설치 종료 코드: $($process.ExitCode)" }
+    if (-not (Test-WebView2Runtime)) { throw '설치 후 WebView2 Runtime을 찾지 못했습니다.' }
+    Write-Host 'WebView2 Runtime 설치 완료.' -ForegroundColor Green
+  }
+  finally {
+    Remove-Item $bootstrapper -Force -ErrorAction SilentlyContinue
+  }
+}
+
 function Restart-InstallerElevated {
   param([string]$InstallerPath)
   # Release the transcript before the elevated process opens the same log.
@@ -116,6 +155,8 @@ foreach ($depPath in $missingDeps) {
   Write-Host "의존성 설치: $([IO.Path]::GetFileName($depPath))"
   Add-AppxPackage -Path $depPath -ForceApplicationShutdown:$Force
 }
+
+Install-WebView2RuntimeIfMissing
 
 Write-Host '유미지지 Xbox Game Bar 오버레이를 설치합니다.'
 Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceUpdateFromAnyVersion

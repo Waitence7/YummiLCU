@@ -52,6 +52,7 @@ struct ExternalClickTestState {
     geometry_updated_at_ms: u64,
     sequence: u64,
     click_count: u64,
+    hud_toggle_sequence: u64,
     event: String,
     event_x: i32,
     event_y: i32,
@@ -727,7 +728,7 @@ fn external_mouse_input_thread() {
     use windows::Win32::{
         Foundation::POINT,
         UI::{
-            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON},
+            Input::KeyboardAndMouse::{GetAsyncKeyState, VK_F9, VK_LBUTTON},
             WindowsAndMessaging::{GetCursorPos, GetPhysicalCursorPos},
         },
     };
@@ -736,8 +737,19 @@ fn external_mouse_input_thread() {
     // Game Bar / elevation combinations allow the Agent to query global mouse
     // state but do not deliver low-level hook callbacks reliably.
     let mut was_down = false;
+    let mut was_f9_down = false;
     loop {
         let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+        let f9_down = unsafe { GetAsyncKeyState(VK_F9.0 as i32) } < 0;
+        if f9_down && !was_f9_down {
+            if let Ok(mut state) = external_click_test_state().lock() {
+                state.hud_toggle_sequence = state.hud_toggle_sequence.wrapping_add(1);
+                append_native_input_log(&format!(
+                    "hud-toggle hotkey=F9 sequence={}",
+                    state.hud_toggle_sequence
+                ));
+            }
+        }
         use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
         let mut physical = POINT::default();
         let mut logical = POINT::default();
@@ -851,6 +863,7 @@ fn external_mouse_input_thread() {
             }
         }
         was_down = down;
+        was_f9_down = f9_down;
         std::thread::sleep(Duration::from_millis(8));
     }
 }
@@ -1078,6 +1091,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "active": state.active,
         "sequence": state.sequence,
         "clickCount": state.click_count,
+        "hudToggleSequence": state.hud_toggle_sequence,
         "event": state.event,
         "eventX": state.event_x,
         "eventY": state.event_y,

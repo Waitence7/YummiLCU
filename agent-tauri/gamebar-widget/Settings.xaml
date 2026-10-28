@@ -42,7 +42,7 @@
           <TextBlock x:Name="YoutubeSettingsStatusText" Text="YouTube는 유미 위젯 안의 작은 카드로 표시됩니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
         </StackPanel>
       </Border>
-      <TextBlock Text="설정은 Game Bar를 연 상태에서 조작할 수 있습니다. 게임 클릭 통과는 Game Bar 상단의 클릭 통과 버튼에서 켜 주세요." Foreground="#BDB1D0" TextWrapping="Wrap"/>
+      <TextBlock Text="F9: 전체 오버레이 UI 표시/숨김 · F8: 투명 영역 확인. F9은 게임이 포커스된 상태에서도 유미지지 데스크톱이 감지합니다. 게임 클릭 통과는 Game Bar 상단의 클릭 통과 버튼에서 켜 주세요." Foreground="#BDB1D0" TextWrapping="Wrap"/>
       <Border Background="#342A203A" CornerRadius="10" Padding="12">
         <StackPanel Spacing="8">
           <TextBlock Text="오버레이 업데이트" Foreground="White" FontWeight="SemiBold"/>

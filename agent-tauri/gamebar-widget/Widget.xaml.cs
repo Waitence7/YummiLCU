@@ -103,6 +103,8 @@ namespace YummiGameBarWidget
         private long syncingNativeInputSinceMs;
         private int nativeInputSyncGeneration;
         private ulong lastNativeInputSequence;
+        private ulong lastHudToggleSequence;
+        private bool hudToggleSequenceInitialized;
         private string lastAgentCommandTransport = "none";
         private string lastAgentPipeError = "";
         private string lastAgentTcpError = "";
@@ -205,11 +207,13 @@ namespace YummiGameBarWidget
 
         private void ApplyPreferences()
         {
-            HudPanel.Visibility = HudPreferences.Visible ? Visibility.Visible : Visibility.Collapsed;
+            var hudVisible = HudPreferences.Visible;
+            HudPanel.Visibility = hudVisible ? Visibility.Visible : Visibility.Collapsed;
             HudPanel.Opacity = HudPreferences.Opacity;
-            RootGrid.Background = HudPreferences.CoverageTint
+            RootGrid.Background = hudVisible && HudPreferences.CoverageTint
                 ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
                 : new SolidColorBrush(Colors.Transparent);
+            ApplyCursorMarkersVisibility(hudVisible && HudPreferences.NativeCursorMarkersVisible);
             UpdatePanelChrome();
             ApplyYoutubePreferences();
             if (string.IsNullOrWhiteSpace(ExtractYoutubeVideoId(YoutubePreferences.Video)))
@@ -1240,6 +1244,19 @@ namespace YummiGameBarWidget
                 }
                 var sequence = (ulong)Math.Max(0, response.GetNamedNumber("sequence", 0));
                 var clickCount = (ulong)Math.Max(0, response.GetNamedNumber("clickCount", 0));
+                var hudToggleSequence = (ulong)Math.Max(0, response.GetNamedNumber("hudToggleSequence", 0));
+                if (!hudToggleSequenceInitialized)
+                {
+                    lastHudToggleSequence = hudToggleSequence;
+                    hudToggleSequenceInitialized = true;
+                }
+                else if (hudToggleSequence != lastHudToggleSequence)
+                {
+                    lastHudToggleSequence = hudToggleSequence;
+                    HudPreferences.Visible = !HudPreferences.Visible;
+                    ApplyPreferences();
+                    App.LogStage("hud-toggle-f9-visible=" + HudPreferences.Visible);
+                }
                 var eventName = response.GetNamedString("event", "");
                 var cursorX = (int)response.GetNamedNumber("cursorX", 0);
                 var cursorY = (int)response.GetNamedNumber("cursorY", 0);
@@ -1344,7 +1361,7 @@ namespace YummiGameBarWidget
             int gamebarPrimaryX, int gamebarPrimaryY, int gamebarAltX, int gamebarAltY,
             int selectedX, int selectedY)
         {
-            if (widget == null || !HudPreferences.NativeCursorMarkersVisible) return;
+            if (widget == null || !HudPreferences.Visible || !HudPreferences.NativeCursorMarkersVisible) return;
             NativeCursorOverlay.Visibility = Visibility.Visible;
             var bounds = widget.WindowBounds;
             var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
