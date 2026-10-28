@@ -29,7 +29,8 @@ namespace YummiGameBarWidget
     public sealed partial class Widget : Page
     {
         private readonly DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        private readonly DispatcherTimer nativeInputTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(100) };
+        private CancellationTokenSource nativeInputLoopCts;
+        private long lastNativeInputSyncOkAtMs;
         private XboxGameBarWidget widget;
         private bool refreshing;
         private double displayWidth;
@@ -104,7 +105,6 @@ namespace YummiGameBarWidget
             InitializeComponent();
             ClickNativeResult.Text = "Agent native input initializing";
             RootGrid.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(RootGrid_PointerMoved), true);
-            nativeInputTimer.Tick += async (_, __) => await SyncExternalClickTestAsync(true);
             SetVersionText();
             RestorePanelPositions();
             RestorePanelSizes();
@@ -113,6 +113,7 @@ namespace YummiGameBarWidget
             Loaded += async (_, __) =>
             {
                 App.LogStage("hud-loaded");
+                StartNativeInputLoop();
                 Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
                 Window.Current.CoreWindow.PointerMoved += CoreWindowPointerMoved;
                 Window.Current.CoreWindow.PointerPressed += CoreWindowPointerChanged;
@@ -129,19 +130,20 @@ namespace YummiGameBarWidget
                     if (adapt) await FitToDisplayAsync();
                 }
                 UpdateInputState();
-                nativeInputTimer.Start();
                 timer.Start();
                 await RefreshAsync();
                 App.LogStage("hud-ready");
             };
             Unloaded += (_, __) =>
             {
+                App.LogStage("hud-unloaded");
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
                 Window.Current.CoreWindow.PointerMoved -= CoreWindowPointerMoved;
                 Window.Current.CoreWindow.PointerPressed -= CoreWindowPointerChanged;
                 Window.Current.CoreWindow.PointerReleased -= CoreWindowPointerChanged;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
-                nativeInputTimer.Stop();
+                // Keep the diagnostic loop alive across transient Game Bar unload/reload cycles.
+                // The watchdog will recover it if the host pauses or drops dispatcher work.
                 _ = SyncExternalClickTestAsync(false);
                 timer.Stop();
             };
@@ -251,6 +253,7 @@ namespace YummiGameBarWidget
         protected override void OnNavigatedTo(NavigationEventArgs e)
         {
             widget = e.Parameter as XboxGameBarWidget;
+            App.LogStage("hud-navigated-to");
             if (widget != null)
             {
                 widget.SettingsClicked += WidgetSettingsClicked;
@@ -258,7 +261,7 @@ namespace YummiGameBarWidget
                 widget.PinnedChanged += WidgetStateChanged;
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
-                nativeInputTimer.Start();
+                StartNativeInputLoop();
                 _ = SyncExternalClickTestAsync(true);
             }
             else
@@ -270,6 +273,7 @@ namespace YummiGameBarWidget
 
         protected override void OnNavigatedFrom(NavigationEventArgs e)
         {
+            App.LogStage("hud-navigated-from");
             if (widget != null)
             {
                 widget.SettingsClicked -= WidgetSettingsClicked;
@@ -1003,6 +1007,55 @@ namespace YummiGameBarWidget
             if (save) SavePanelPosition(panel, transform);
         }
 
+
+        private long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        private void StartNativeInputLoop()
+        {
+            if (nativeInputLoopCts != null && !nativeInputLoopCts.IsCancellationRequested) return;
+            nativeInputLoopCts = new CancellationTokenSource();
+            var token = nativeInputLoopCts.Token;
+            App.LogStage("native-input-loop-start");
+            _ = Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        // Do not await the UI callback itself. Game Bar can transiently
+                        // suspend DispatcherTimer ticks during host lifecycle changes;
+                        // this background loop keeps scheduling probes independently.
+                        _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, async () =>
+                        {
+                            try { await SyncExternalClickTestAsync(true); }
+                            catch (Exception ex) { App.LogStage("native-input-loop-sync-error:" + ErrorCode(ex)); }
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        App.LogStage("native-input-loop-dispatch-error:" + ErrorCode(ex));
+                    }
+
+                    var age = lastNativeInputSyncOkAtMs <= 0 ? -1 : NowMs() - lastNativeInputSyncOkAtMs;
+                    if (age > 1000)
+                    {
+                        App.LogStage("native-input-loop-stale ageMs=" + age);
+                    }
+
+                    try { await Task.Delay(100, token); }
+                    catch (TaskCanceledException) { break; }
+                }
+                App.LogStage("native-input-loop-stop");
+            }, token);
+        }
+
+        private void StopNativeInputLoop()
+        {
+            try { nativeInputLoopCts?.Cancel(); } catch { }
+            try { nativeInputLoopCts?.Dispose(); } catch { }
+            nativeInputLoopCts = null;
+        }
+
         private async Task SyncExternalClickTestAsync(bool active)
         {
             if (syncingNativeInput) return;
@@ -1061,6 +1114,7 @@ namespace YummiGameBarWidget
                 }
 
                 var rawResponse = await SendAgentCommandAsync(command.Stringify());
+                lastNativeInputSyncOkAtMs = NowMs();
                 var response = JsonObject.Parse(rawResponse);
                 if (!response.GetNamedBoolean("ok", false))
                 {
@@ -1110,6 +1164,10 @@ namespace YummiGameBarWidget
                 var gamebarAgeMs = (ulong)Math.Max(0, response.GetNamedNumber("gamebarCursorAgeMs", 0));
                 if (sequence != lastNativeInputSequence) lastNativeInputSequence = sequence;
 
+                UpdateCursorDiagnosticMarkers(
+                    physicalX, physicalY, logicalX, logicalY, cursorInfoX, cursorInfoY, cursorInfoValid,
+                    gamebarPrimaryX, gamebarPrimaryY, gamebarAltX, gamebarAltY, cursorX, cursorY);
+
                 ClickNativeResult.Text =
                     "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError +
                     " requestedActive=" + requestedActive + " geometryReady=" + geometryReady +
@@ -1138,6 +1196,41 @@ namespace YummiGameBarWidget
             {
                 syncingNativeInput = false;
             }
+        }
+
+        private void UpdateCursorDiagnosticMarkers(
+            int physicalX, int physicalY, int logicalX, int logicalY,
+            int cursorInfoX, int cursorInfoY, bool cursorInfoValid,
+            int gamebarPrimaryX, int gamebarPrimaryY, int gamebarAltX, int gamebarAltY,
+            int selectedX, int selectedY)
+        {
+            if (widget == null) return;
+            var bounds = widget.WindowBounds;
+            var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
+
+            void Place(FrameworkElement marker, double screenX, double screenY, bool visible = true)
+            {
+                if (!visible)
+                {
+                    marker.Visibility = Visibility.Collapsed;
+                    return;
+                }
+                // Agent/native coordinates are physical pixels. Convert them back to
+                // the widget's DIP coordinate space so each source can be compared
+                // directly against the real cursor.
+                var localX = (screenX / scale) - bounds.X;
+                var localY = (screenY / scale) - bounds.Y;
+                Canvas.SetLeft(marker, localX - (marker.ActualWidth > 0 ? marker.ActualWidth / 2.0 : 7.0));
+                Canvas.SetTop(marker, localY - (marker.ActualHeight > 0 ? marker.ActualHeight / 2.0 : 7.0));
+                marker.Visibility = Visibility.Visible;
+            }
+
+            Place(CursorMarkerPhysical, physicalX, physicalY);
+            Place(CursorMarkerLogical, logicalX, logicalY);
+            Place(CursorMarkerInfo, cursorInfoX, cursorInfoY, cursorInfoValid);
+            Place(CursorMarkerGameBarPrimary, gamebarPrimaryX, gamebarPrimaryY);
+            Place(CursorMarkerGameBarAlt, gamebarAltX, gamebarAltY);
+            Place(CursorMarkerSelected, selectedX, selectedY);
         }
 
         private async Task<string> SendAgentCommandAsync(string payload)

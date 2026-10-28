@@ -4,6 +4,15 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Background="Transparent">
   <Grid x:Name="RootGrid" Background="Transparent">
+    <Canvas x:Name="NativeCursorOverlay" IsHitTestVisible="False" Panel.ZIndex="9999">
+      <Grid x:Name="CursorMarkerPhysical" Visibility="Collapsed"><Ellipse Width="14" Height="14" Fill="#CCFF3B30" Stroke="White" StrokeThickness="1"/><TextBlock Text="P" Foreground="White" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+      <Grid x:Name="CursorMarkerLogical" Visibility="Collapsed"><Ellipse Width="12" Height="12" Fill="#CCFF9500" Stroke="White" StrokeThickness="1"/><TextBlock Text="L" Foreground="White" FontSize="7" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+      <Grid x:Name="CursorMarkerInfo" Visibility="Collapsed"><Ellipse Width="10" Height="10" Fill="#CCFFCC00" Stroke="White" StrokeThickness="1"/><TextBlock Text="C" Foreground="#FF202020" FontSize="7" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+      <Grid x:Name="CursorMarkerGameBarPrimary" Visibility="Collapsed"><Ellipse Width="14" Height="14" Fill="#CC34C759" Stroke="White" StrokeThickness="1"/><TextBlock Text="G1" Foreground="White" FontSize="6" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+      <Grid x:Name="CursorMarkerGameBarAlt" Visibility="Collapsed"><Ellipse Width="12" Height="12" Fill="#CC00C7BE" Stroke="White" StrokeThickness="1"/><TextBlock Text="G2" Foreground="White" FontSize="6" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+      <Grid x:Name="CursorMarkerGameBarStored" Visibility="Collapsed"><Ellipse Width="10" Height="10" Fill="#CCAF52DE" Stroke="White" StrokeThickness="1"/><TextBlock Text="GS" Foreground="White" FontSize="5" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+      <Grid x:Name="CursorMarkerSelected" Visibility="Collapsed"><Ellipse Width="18" Height="18" Fill="#663A86FF" Stroke="#FF3A86FF" StrokeThickness="2"/><TextBlock Text="S" Foreground="White" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
+    </Canvas>
     <Grid x:Name="HudPanel" Background="Transparent">
       <Border x:Name="LcuPanel"
               Width="240"
