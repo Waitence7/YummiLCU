@@ -4,7 +4,7 @@
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Background="Transparent">
   <Grid x:Name="RootGrid" Background="Transparent">
-    <Canvas x:Name="NativeCursorOverlay" IsHitTestVisible="False" Panel.ZIndex="9999">
+    <Canvas x:Name="NativeCursorOverlay" IsHitTestVisible="False" Canvas.ZIndex="9999">
       <Grid x:Name="CursorMarkerPhysical" Visibility="Collapsed"><Ellipse Width="14" Height="14" Fill="#CCFF3B30" Stroke="White" StrokeThickness="1"/><TextBlock Text="P" Foreground="White" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
       <Grid x:Name="CursorMarkerLogical" Visibility="Collapsed"><Ellipse Width="12" Height="12" Fill="#CCFF9500" Stroke="White" StrokeThickness="1"/><TextBlock Text="L" Foreground="White" FontSize="7" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
       <Grid x:Name="CursorMarkerInfo" Visibility="Collapsed"><Ellipse Width="10" Height="10" Fill="#CCFFCC00" Stroke="White" StrokeThickness="1"/><TextBlock Text="C" Foreground="#FF202020" FontSize="7" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
