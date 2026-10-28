@@ -11,6 +11,7 @@ using Windows.UI.Xaml.Controls.Primitives;
 using Windows.UI.Xaml.Navigation;
 using Windows.UI.Xaml.Input;
 using Windows.System;
+using Windows.UI;
 
 namespace YummiGameBarWidget
 {
@@ -31,6 +32,11 @@ namespace YummiGameBarWidget
                 LcuVisibleToggle.IsOn = HudPreferences.LcuPanelVisible;
                 PartyVisibleToggle.IsOn = HudPreferences.PartyPanelVisible;
                 NativeInputVisibleToggle.IsOn = HudPreferences.NativeInputPanelVisible;
+                VoiceChatLifetimeSlider.Value = HudPreferences.VoiceChatMessageLifetimeSeconds;
+                VoiceChatLifetimeValueText.Text = HudPreferences.VoiceChatMessageLifetimeSeconds.ToString("0") + "초";
+                VoiceChatBackgroundColorPicker.Color = ParseHexColor(HudPreferences.VoiceChatBackgroundColor);
+                VoiceChatBackgroundOpacitySlider.Value = HudPreferences.VoiceChatBackgroundOpacity * 100;
+                VoiceChatBackgroundOpacityValueText.Text = Math.Round(HudPreferences.VoiceChatBackgroundOpacity * 100).ToString("0") + "%";
                 YoutubeVisibleToggle.IsOn = YoutubePreferences.Visible;
                 YoutubeUrlBox.Text = YoutubePreferences.Video;
                 YoutubeVolumeSlider.Value = YoutubePreferences.Volume;
@@ -60,6 +66,37 @@ namespace YummiGameBarWidget
         private void NativeInputVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
             if (preferencesLoaded) HudPreferences.NativeInputPanelVisible = NativeInputVisibleToggle.IsOn;
+        }
+        private void VoiceChatLifetimeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs args)
+        {
+            VoiceChatLifetimeValueText.Text = Math.Round(args.NewValue).ToString("0") + "초";
+            if (preferencesLoaded) HudPreferences.VoiceChatMessageLifetimeSeconds = args.NewValue;
+        }
+        private void VoiceChatBackgroundOpacitySlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs args)
+        {
+            VoiceChatBackgroundOpacityValueText.Text = Math.Round(args.NewValue).ToString("0") + "%";
+            if (preferencesLoaded) HudPreferences.VoiceChatBackgroundOpacity = args.NewValue / 100.0;
+        }
+        private void VoiceChatBackgroundColorPicker_ColorChanged(ColorPicker sender, ColorChangedEventArgs args)
+        {
+            if (preferencesLoaded) HudPreferences.VoiceChatBackgroundColor = ColorToHex(args.NewColor);
+        }
+        private static string ColorToHex(Color color)
+        {
+            return string.Format("#{0:X2}{1:X2}{2:X2}", color.R, color.G, color.B);
+        }
+        private static Color ParseHexColor(string value)
+        {
+            var text = (value ?? "").Trim();
+            if (text.Length == 7 && text[0] == '#')
+            {
+                byte r, g, b;
+                if (byte.TryParse(text.Substring(1, 2), System.Globalization.NumberStyles.HexNumber, null, out r) &&
+                    byte.TryParse(text.Substring(3, 2), System.Globalization.NumberStyles.HexNumber, null, out g) &&
+                    byte.TryParse(text.Substring(5, 2), System.Globalization.NumberStyles.HexNumber, null, out b))
+                    return Color.FromArgb(255, r, g, b);
+            }
+            return Color.FromArgb(255, 20, 16, 32);
         }
         private void CompactHudButton_Click(object sender, RoutedEventArgs args)
         {

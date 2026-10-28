@@ -55,6 +55,37 @@ namespace YummiGameBarWidget
             get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeCursorMarkersVisible", out value) || !(value is bool) || (bool)value; }
             set { Set("NativeCursorMarkersVisible", value); }
         }
+        internal static double VoiceChatMessageLifetimeSeconds
+        {
+            get
+            {
+                object value;
+                if (!ApplicationData.Current.LocalSettings.Values.TryGetValue("VoiceChatMessageLifetimeSeconds", out value) || !(value is double)) return 10.0;
+                return Math.Max(3.0, Math.Min(60.0, (double)value));
+            }
+            set { Set("VoiceChatMessageLifetimeSeconds", Math.Max(3.0, Math.Min(60.0, value))); }
+        }
+        internal static string VoiceChatBackgroundColor
+        {
+            get
+            {
+                object value;
+                if (!ApplicationData.Current.LocalSettings.Values.TryGetValue("VoiceChatBackgroundColor", out value) || !(value is string)) return "#141020";
+                var color = ((string)value).Trim();
+                return color.Length == 7 && color[0] == '#' ? color : "#141020";
+            }
+            set { Set("VoiceChatBackgroundColor", string.IsNullOrWhiteSpace(value) ? "#141020" : value.Trim()); }
+        }
+        internal static double VoiceChatBackgroundOpacity
+        {
+            get
+            {
+                object value;
+                if (!ApplicationData.Current.LocalSettings.Values.TryGetValue("VoiceChatBackgroundOpacity", out value) || !(value is double)) return 0.0;
+                return Math.Max(0.0, Math.Min(1.0, (double)value));
+            }
+            set { Set("VoiceChatBackgroundOpacity", Math.Max(0.0, Math.Min(1.0, value))); }
+        }
         internal static double Opacity
         {
             get

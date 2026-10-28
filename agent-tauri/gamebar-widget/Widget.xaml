@@ -217,15 +217,31 @@
         </Grid>
       </Border>
 
-      <StackPanel x:Name="VoiceChatOverlay"
-                  Width="520"
-                  HorizontalAlignment="Left"
-                  VerticalAlignment="Bottom"
-                  Margin="24,0,0,72"
-                  Spacing="7"
-                  Background="Transparent"
-                  IsHitTestVisible="False"
-                  Visibility="Collapsed"/>
+      <Border x:Name="VoiceChatPanel"
+              Width="520"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Top"
+              Margin="24,24,0,0"
+              Background="Transparent"
+              Visibility="Collapsed"
+              Canvas.ZIndex="9000">
+        <Border.RenderTransform><TranslateTransform x:Name="VoiceChatPanelTransform"/></Border.RenderTransform>
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Border x:Name="VoiceChatMoveBar" Height="24" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="voice-chat"
+                  PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
+            <Grid Padding="8,0,8,0">
+              <TextBlock Text="Discord Chat" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
+            </Grid>
+          </Border>
+          <Border x:Name="VoiceChatBody" Grid.Row="1" Padding="10" CornerRadius="8" Background="Transparent" IsHitTestVisible="False">
+            <Grid>
+              <StackPanel x:Name="VoiceChatOverlay" Width="500" Spacing="7" Visibility="Collapsed"/>
+              <TextBlock x:Name="VoiceChatPlaceholder" Text="새 음성채널 메시지가 여기에 표시됩니다." Foreground="#9E92B1" FontSize="11" TextWrapping="Wrap" Visibility="Collapsed"/>
+            </Grid>
+          </Border>
+        </Grid>
+      </Border>
     </Grid>
   </Grid>
 </Page>

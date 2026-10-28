@@ -100,6 +100,8 @@ namespace YummiGameBarWidget
         private const string ClickNativePanelYSetting = "click-native-panel-y";
         private const string ClickNativePanelWidthSetting = "click-native-panel-width";
         private const string ClickNativePanelHeightSetting = "click-native-panel-height";
+        private const string VoiceChatPanelXSetting = "voice-chat-panel-x";
+        private const string VoiceChatPanelYSetting = "voice-chat-panel-y";
         private const string CommandPipeName = @"LOCAL\YummiLcuGameBarCommandV1";
         private bool syncingNativeInput;
         private long syncingNativeInputSinceMs;
@@ -116,6 +118,9 @@ namespace YummiGameBarWidget
         private double clickNativeExpandedHeight = 300;
         private string voiceChatSignature = "";
         private readonly Dictionary<string, BitmapImage> voiceChatAvatarCache = new Dictionary<string, BitmapImage>(StringComparer.Ordinal);
+        private readonly Dictionary<string, long> voiceChatFirstSeenAtMs = new Dictionary<string, long>(StringComparer.Ordinal);
+        private bool voiceChatHasVisibleMessages;
+        private bool voiceChatPositionNeedsDefault;
         private long lastSnapshotSuccessAtMs;
         private int consecutiveSnapshotFailures;
         private long lastSnapshotFailureLogAtMs;
@@ -130,7 +135,11 @@ namespace YummiGameBarWidget
             SetVersionText();
             RestorePanelPositions();
             RestorePanelSizes();
-            SizeChanged += (_, __) => ClampAllPanelPositions();
+            SizeChanged += (_, __) =>
+            {
+                EnsureDefaultVoiceChatPosition();
+                ClampAllPanelPositions();
+            };
             timer.Tick += async (_, __) => await RefreshAsync();
             Loaded += async (_, __) =>
             {
@@ -144,6 +153,7 @@ namespace YummiGameBarWidget
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
+                EnsureDefaultVoiceChatPosition();
                 // Start large, then adapt once to this display. Never overwrite
                 // a pinned, explicitly configured or previously initialized layout.
                 if (!HudPreferences.InitialFitDone)
@@ -221,6 +231,7 @@ namespace YummiGameBarWidget
                 ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
                 : new SolidColorBrush(Colors.Transparent);
             ApplyCursorMarkersVisibility(hudVisible && HudPreferences.NativeCursorMarkersVisible);
+            ApplyVoiceChatPreferences();
             UpdatePanelChrome();
             ApplyYoutubePreferences();
             if (string.IsNullOrWhiteSpace(ExtractYoutubeVideoId(YoutubePreferences.Video)))
@@ -557,47 +568,60 @@ namespace YummiGameBarWidget
 
         private void ApplyVoiceChat(JsonObject json)
         {
+            var now = NowMs();
             JsonArray messages = null;
             if (json.ContainsKey("voice_chat_messages") && json["voice_chat_messages"].ValueType == JsonValueType.Array)
                 messages = json.GetNamedArray("voice_chat_messages");
 
             if (messages == null || messages.Count == 0)
             {
-                if (voiceChatSignature.Length != 0)
-                {
-                    voiceChatSignature = "";
-                    VoiceChatOverlay.Children.Clear();
-                }
-                VoiceChatOverlay.Visibility = Visibility.Collapsed;
+                voiceChatFirstSeenAtMs.Clear();
+                voiceChatSignature = "";
+                voiceChatHasVisibleMessages = false;
+                VoiceChatOverlay.Children.Clear();
+                UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
                 return;
             }
 
-            var signatureBuilder = new StringBuilder();
+            var lifetimeMs = (long)Math.Round(HudPreferences.VoiceChatMessageLifetimeSeconds * 1000.0);
+            var snapshotKeys = new HashSet<string>(StringComparer.Ordinal);
+            var visible = new List<Tuple<string, JsonObject>>();
             foreach (var value in messages)
             {
                 if (value.ValueType != JsonValueType.Object) continue;
                 var item = value.GetObject();
-                signatureBuilder.Append(item.GetNamedNumber("timestamp_ms", 0));
-                signatureBuilder.Append(':');
-                signatureBuilder.Append(SnapshotJson.String(item, "author_name"));
-                signatureBuilder.Append(':');
-                signatureBuilder.Append(SnapshotJson.String(item, "content"));
-                signatureBuilder.Append('|');
+                var content = SnapshotJson.String(item, "content");
+                if (string.IsNullOrWhiteSpace(content)) continue;
+                var key = VoiceChatMessageKey(item);
+                snapshotKeys.Add(key);
+                long firstSeen;
+                if (!voiceChatFirstSeenAtMs.TryGetValue(key, out firstSeen))
+                {
+                    firstSeen = now;
+                    voiceChatFirstSeenAtMs[key] = firstSeen;
+                }
+                if (now - firstSeen < lifetimeMs) visible.Add(Tuple.Create(key, item));
             }
-            var signature = signatureBuilder.ToString();
-            VoiceChatOverlay.Visibility = Visibility.Visible;
-            if (signature == voiceChatSignature) return;
+
+            foreach (var key in voiceChatFirstSeenAtMs.Keys.Where(key => !snapshotKeys.Contains(key)).ToList())
+                voiceChatFirstSeenAtMs.Remove(key);
+
+            var signature = string.Join("|", visible.Select(item => item.Item1));
+            voiceChatHasVisibleMessages = visible.Count > 0;
+            if (signature == voiceChatSignature)
+            {
+                UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
+                return;
+            }
             voiceChatSignature = signature;
             VoiceChatOverlay.Children.Clear();
 
-            foreach (var value in messages.Skip(Math.Max(0, (int)messages.Count - 6)))
+            foreach (var entry in visible.Skip(Math.Max(0, visible.Count - 6)))
             {
-                if (value.ValueType != JsonValueType.Object) continue;
-                var item = value.GetObject();
+                var item = entry.Item2;
                 var author = SnapshotJson.String(item, "author_name");
                 var content = SnapshotJson.String(item, "content");
                 var avatar = SnapshotJson.String(item, "avatar_url");
-                if (string.IsNullOrWhiteSpace(content)) continue;
 
                 var row = new Grid { Margin = new Thickness(0, 0, 0, 2) };
                 row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });
@@ -613,7 +637,8 @@ namespace YummiGameBarWidget
                 };
                 if (Uri.TryCreate(avatar, UriKind.Absolute, out var avatarUri) && avatarUri.Scheme == Uri.UriSchemeHttps)
                 {
-                    if (!voiceChatAvatarCache.TryGetValue(avatar, out var avatarImage))
+                    BitmapImage avatarImage;
+                    if (!voiceChatAvatarCache.TryGetValue(avatar, out avatarImage))
                     {
                         avatarImage = new BitmapImage
                         {
@@ -648,16 +673,43 @@ namespace YummiGameBarWidget
                     FontWeight = Windows.UI.Text.FontWeights.SemiBold,
                     Foreground = new SolidColorBrush(Colors.White),
                     TextWrapping = TextWrapping.WrapWholeWords,
-                    MaxWidth = 470,
+                    MaxWidth = 450,
                 });
                 Grid.SetColumn(copy, 1);
                 row.Children.Add(copy);
                 VoiceChatOverlay.Children.Add(row);
             }
 
-            VoiceChatOverlay.Visibility = VoiceChatOverlay.Children.Count > 0
-                ? Visibility.Visible
-                : Visibility.Collapsed;
+            voiceChatHasVisibleMessages = VoiceChatOverlay.Children.Count > 0;
+            UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
+        }
+
+        private static string VoiceChatMessageKey(JsonObject item)
+        {
+            return item.GetNamedNumber("timestamp_ms", 0).ToString("0", System.Globalization.CultureInfo.InvariantCulture) + ":" +
+                SnapshotJson.String(item, "author_name") + ":" + SnapshotJson.String(item, "content");
+        }
+
+        private void ApplyVoiceChatPreferences()
+        {
+            var baseColor = ParseHexColor(HudPreferences.VoiceChatBackgroundColor);
+            var alpha = (byte)Math.Round(255.0 * HudPreferences.VoiceChatBackgroundOpacity);
+            VoiceChatBody.Background = new SolidColorBrush(Color.FromArgb(alpha, baseColor.R, baseColor.G, baseColor.B));
+            voiceChatSignature = "";
+        }
+
+        private static Color ParseHexColor(string value)
+        {
+            var text = (value ?? "").Trim();
+            if (text.Length == 7 && text[0] == '#')
+            {
+                byte r, g, b;
+                if (byte.TryParse(text.Substring(1, 2), System.Globalization.NumberStyles.HexNumber, null, out r) &&
+                    byte.TryParse(text.Substring(3, 2), System.Globalization.NumberStyles.HexNumber, null, out g) &&
+                    byte.TryParse(text.Substring(5, 2), System.Globalization.NumberStyles.HexNumber, null, out b))
+                    return Color.FromArgb(255, r, g, b);
+            }
+            return Color.FromArgb(255, 20, 16, 32);
         }
 
 
@@ -950,6 +1002,11 @@ namespace YummiGameBarWidget
             RestorePanelPosition(PartyPanel, PartyPanelTransform, PartyPanelXSetting, PartyPanelYSetting);
             RestorePanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelXSetting, YoutubePanelYSetting);
             RestorePanelPosition(ClickNativePanel, ClickNativePanelTransform, ClickNativePanelXSetting, ClickNativePanelYSetting);
+            var values = ApplicationData.Current.LocalSettings.Values;
+            if (values.ContainsKey(VoiceChatPanelXSetting) || values.ContainsKey(VoiceChatPanelYSetting))
+                RestorePanelPosition(VoiceChatPanel, VoiceChatPanelTransform, VoiceChatPanelXSetting, VoiceChatPanelYSetting);
+            else
+                voiceChatPositionNeedsDefault = true;
         }
 
         private void RestorePanelSizes()
@@ -1018,6 +1075,7 @@ namespace YummiGameBarWidget
             if (key == "party") return PartyPanel;
             if (key == "youtube") return YoutubePanel;
             if (key == "click-native") return ClickNativePanel;
+            if (key == "voice-chat") return VoiceChatPanel;
             return null;
         }
 
@@ -1072,6 +1130,7 @@ namespace YummiGameBarWidget
             ApplyPanelChrome("party", PartyPanel, PartyMoveBar, PartyBody, PartyEyeButton, PartyResizeHandles, pinnedOnly);
             ApplyPanelChrome("youtube", YoutubePanel, YoutubeMoveBar, YoutubeVideoHost, YoutubeEyeButton, YoutubeResizeHandles, pinnedOnly);
             ApplyClickTestPanelChrome(pinnedOnly);
+            UpdateVoiceChatPanelChrome(pinnedOnly);
         }
 
         private void ApplyClickTestPanelChrome(bool pinnedOnly)
@@ -1097,6 +1156,16 @@ namespace YummiGameBarWidget
             }
         }
 
+        private void UpdateVoiceChatPanelChrome(bool pinnedOnly)
+        {
+            var editing = !pinnedOnly;
+            VoiceChatPanel.Visibility = editing || voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
+            VoiceChatMoveBar.Visibility = editing ? Visibility.Visible : Visibility.Collapsed;
+            VoiceChatBody.Visibility = editing || voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
+            VoiceChatOverlay.Visibility = voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
+            VoiceChatPlaceholder.Visibility = editing && !voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         private void ApplyPinnedBodyPositionOffset(bool pinnedOnly)
         {
             if (panelChromePinnedOffsetApplied == pinnedOnly) return;
@@ -1110,6 +1179,7 @@ namespace YummiGameBarWidget
             PartyPanelTransform.Y += delta;
             YoutubePanelTransform.Y += delta;
             ClickNativePanelTransform.Y += delta;
+            VoiceChatPanelTransform.Y += delta;
             panelChromePinnedOffsetApplied = pinnedOnly;
         }
 
@@ -1158,6 +1228,7 @@ namespace YummiGameBarWidget
                 values[YoutubePanelYSetting] = transform.Y;
             }
             else if (panel == ClickNativePanel) { values[ClickNativePanelXSetting] = transform.X; values[ClickNativePanelYSetting] = transform.Y; }
+            else if (panel == VoiceChatPanel) { values[VoiceChatPanelXSetting] = transform.X; values[VoiceChatPanelYSetting] = transform.Y; }
         }
 
         private void ClampAllPanelPositions()
@@ -1166,6 +1237,16 @@ namespace YummiGameBarWidget
             SetPanelPosition(PartyPanel, PartyPanelTransform, PartyPanelTransform.X, PartyPanelTransform.Y, false);
             SetPanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelTransform.X, YoutubePanelTransform.Y, false);
             SetPanelPosition(ClickNativePanel, ClickNativePanelTransform, ClickNativePanelTransform.X, ClickNativePanelTransform.Y, false);
+            SetPanelPosition(VoiceChatPanel, VoiceChatPanelTransform, VoiceChatPanelTransform.X, VoiceChatPanelTransform.Y, false);
+        }
+
+        private void EnsureDefaultVoiceChatPosition()
+        {
+            if (!voiceChatPositionNeedsDefault || RootGrid.ActualHeight <= 0) return;
+            var panelHeight = VoiceChatPanel.ActualHeight > 0 ? VoiceChatPanel.ActualHeight : 150.0;
+            var y = Math.Max(0.0, RootGrid.ActualHeight - VoiceChatPanel.Margin.Top - panelHeight - 72.0);
+            SetPanelPosition(VoiceChatPanel, VoiceChatPanelTransform, 0.0, y, false);
+            voiceChatPositionNeedsDefault = false;
         }
 
         private void SetPanelPosition(FrameworkElement panel, TranslateTransform transform, double x, double y, bool save)
@@ -1898,8 +1979,10 @@ namespace YummiGameBarWidget
             RiotIdText.Text = "유미지지 데스크톱 연결을 확인해 주세요";
             PartyText.Text = "파티 정보 없음";
             voiceChatSignature = "";
+            voiceChatFirstSeenAtMs.Clear();
+            voiceChatHasVisibleMessages = false;
             VoiceChatOverlay.Children.Clear();
-            VoiceChatOverlay.Visibility = Visibility.Collapsed;
+            UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
             var failures = error as AggregateException;
             BridgeText.Text = failures == null ? "에이전트 연결 실패 · " + ErrorCode(error) :
                 "파이프 " + ErrorCode(failures.InnerExceptions[0]) + " · TCP " + ErrorCode(failures.InnerExceptions[1]);

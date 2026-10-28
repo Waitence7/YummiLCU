@@ -25,6 +25,30 @@
         </StackPanel>
       </Border>
       <Border Background="#342A203A" CornerRadius="10" Padding="12">
+        <StackPanel Spacing="10">
+          <TextBlock Text="Discord 채팅" Foreground="White" FontWeight="SemiBold"/>
+          <TextBlock Text="Win+G에서 Discord Chat 제목줄을 드래그하면 메시지가 표시될 위치를 정할 수 있습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
+          <StackPanel Spacing="4">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBlock Text="메시지 표시 시간" Foreground="White"/>
+              <TextBlock x:Name="VoiceChatLifetimeValueText" Grid.Column="1" Text="10초" Foreground="#CDBDE8"/>
+            </Grid>
+            <Slider x:Name="VoiceChatLifetimeSlider" Minimum="3" Maximum="60" StepFrequency="1" Value="10" ValueChanged="VoiceChatLifetimeSlider_ValueChanged"/>
+          </StackPanel>
+          <TextBlock Text="배경색" Foreground="White"/>
+          <ColorPicker x:Name="VoiceChatBackgroundColorPicker" IsAlphaEnabled="False" ColorChanged="VoiceChatBackgroundColorPicker_ColorChanged"/>
+          <StackPanel Spacing="4">
+            <Grid>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBlock Text="배경 불투명도" Foreground="White"/>
+              <TextBlock x:Name="VoiceChatBackgroundOpacityValueText" Grid.Column="1" Text="0%" Foreground="#CDBDE8"/>
+            </Grid>
+            <Slider x:Name="VoiceChatBackgroundOpacitySlider" Minimum="0" Maximum="100" StepFrequency="5" Value="0" ValueChanged="VoiceChatBackgroundOpacitySlider_ValueChanged"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+      <Border Background="#342A203A" CornerRadius="10" Padding="12">
         <StackPanel Spacing="9">
           <TextBlock Text="YouTube 화면" Foreground="White" FontWeight="SemiBold"/>
           <ToggleSwitch x:Name="YoutubeVisibleToggle" Header="YouTube 패널 표시" OnContent="표시" OffContent="숨김" Toggled="YoutubeVisibleToggle_Toggled" Foreground="White"/>
