@@ -142,11 +142,23 @@
       <Border x:Name="ClickNativePanel" Width="560" HorizontalAlignment="Left" VerticalAlignment="Top" Margin="20,425,0,0" CornerRadius="10" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="1">
         <Border.RenderTransform><TranslateTransform x:Name="ClickNativePanelTransform"/></Border.RenderTransform>
         <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-          <Border x:Name="ClickNativeMoveBar" Height="24" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="click-native" PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost"><TextBlock Text="Native Input" Margin="8,0" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/></Border>
-          <Grid x:Name="ClickNativeBody" Grid.Row="1" Height="320" Padding="10" Background="#B8120F1C">
+          <Border x:Name="ClickNativeMoveBar" Height="24" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="click-native" PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
+            <Grid Padding="8,0,3,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <TextBlock Text="Native Input" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
+              <Button x:Name="ClickNativeEyeButton" Grid.Column="1" Tag="click-native" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="PanelEyeButton_Click" ToolTipService.ToolTip="상세 내용 표시">
+                <TextBlock Text="&#xE890;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="White"/>
+              </Button>
+              <Button Grid.Column="2" Tag="click-native" Content="×" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="15" Click="PanelCloseButton_Click" ToolTipService.ToolTip="Native Input 패널 닫기"/>
+            </Grid>
+          </Border>
+          <Grid x:Name="ClickNativeBody" Grid.Row="1" Height="70" Padding="10" Background="#B8120F1C">
             <StackPanel Spacing="6">
               <Border x:Name="NativeHookHitbox" Background="#FF5B3E78" CornerRadius="4" Padding="12,8"><TextBlock Text="NATIVE INPUT" Foreground="White" TextAlignment="Center"/></Border>
-              <ScrollViewer Height="250" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><TextBlock x:Name="ClickNativeResult" Text="Agent native input waiting" FontSize="10" FontFamily="Consolas" Foreground="#BDB1D0" TextWrapping="Wrap"/></ScrollViewer>
+              <StackPanel x:Name="ClickNativeDetails" Spacing="6" Visibility="Collapsed">
+                <ToggleSwitch x:Name="CursorMarkersToggle" Header="마우스 좌표 마커 표시" Toggled="CursorMarkersToggle_Toggled"/>
+                <ScrollViewer Height="220" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><TextBlock x:Name="ClickNativeResult" Text="Agent native input waiting" FontSize="10" FontFamily="Consolas" Foreground="#BDB1D0" TextWrapping="Wrap"/></ScrollViewer>
+              </StackPanel>
             </StackPanel>
           </Grid>
           <Grid x:Name="ClickNativeResizeHandles" Grid.RowSpan="2"><Border Tag="click-native:right" Width="7" HorizontalAlignment="Right" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/><Border Tag="click-native:bottom" Height="7" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/><Border Tag="click-native:bottomright" Width="12" Height="12" HorizontalAlignment="Right" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/></Grid>

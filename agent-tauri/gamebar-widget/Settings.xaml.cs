@@ -30,6 +30,7 @@ namespace YummiGameBarWidget
                 HudOpacitySlider.Value = HudPreferences.Opacity * 100;
                 LcuVisibleToggle.IsOn = HudPreferences.LcuPanelVisible;
                 PartyVisibleToggle.IsOn = HudPreferences.PartyPanelVisible;
+                NativeInputVisibleToggle.IsOn = HudPreferences.NativeInputPanelVisible;
                 YoutubeVisibleToggle.IsOn = YoutubePreferences.Visible;
                 YoutubeUrlBox.Text = YoutubePreferences.Video;
                 YoutubeVolumeSlider.Value = YoutubePreferences.Volume;
@@ -55,6 +56,10 @@ namespace YummiGameBarWidget
         private void PartyVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
             if (preferencesLoaded) HudPreferences.PartyPanelVisible = PartyVisibleToggle.IsOn;
+        }
+        private void NativeInputVisibleToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (preferencesLoaded) HudPreferences.NativeInputPanelVisible = NativeInputVisibleToggle.IsOn;
         }
         private void CompactHudButton_Click(object sender, RoutedEventArgs args)
         {

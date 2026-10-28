@@ -109,10 +109,13 @@ namespace YummiGameBarWidget
         private double lastGameBarPointerLocalX;
         private double lastGameBarPointerLocalY;
         private long lastGameBarPointerAtMs;
+        private double clickNativeExpandedHeight = 300;
 
         public Widget()
         {
             InitializeComponent();
+            CursorMarkersToggle.IsOn = HudPreferences.NativeCursorMarkersVisible;
+            ApplyCursorMarkersVisibility(CursorMarkersToggle.IsOn);
             ClickNativeResult.Text = "Agent native input initializing";
             RootGrid.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(RootGrid_PointerMoved), true);
             SetVersionText();
@@ -811,7 +814,8 @@ namespace YummiGameBarWidget
             RestorePanelSize("lcu", values, LcuPanelWidthSetting, LcuPanelHeightSetting, 240, 145);
             RestorePanelSize("party", values, PartyPanelWidthSetting, PartyPanelHeightSetting, 240, 70);
             RestorePanelSize("youtube", values, YoutubePanelWidthSetting, YoutubePanelHeightSetting, 340, 191);
-            RestorePanelSize("click-native", values, ClickNativePanelWidthSetting, ClickNativePanelHeightSetting, 250, 92);
+            RestorePanelSize("click-native", values, ClickNativePanelWidthSetting, ClickNativePanelHeightSetting, 250, 300);
+            clickNativeExpandedHeight = Math.Max(120, ClickNativeBody.Height);
         }
 
         private void RestorePanelSize(string key, IDictionary<string, object> values, string widthKey, string heightKey, double defaultWidth, double defaultHeight)
@@ -861,7 +865,7 @@ namespace YummiGameBarWidget
                 values[YoutubePanelWidthSetting] = panel.Width;
                 values[YoutubePanelHeightSetting] = body.Height;
             }
-            else if (key == "click-native") { values[ClickNativePanelWidthSetting] = panel.Width; values[ClickNativePanelHeightSetting] = body.Height; }
+            else if (key == "click-native") { values[ClickNativePanelWidthSetting] = panel.Width; values[ClickNativePanelHeightSetting] = GetPanelExpanded(key) ? body.Height : clickNativeExpandedHeight; }
         }
 
         private FrameworkElement GetPanel(string key)
@@ -887,6 +891,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") return HudPreferences.LcuPanelVisible;
             if (key == "party") return HudPreferences.PartyPanelVisible;
             if (key == "youtube") return YoutubePreferences.Visible;
+            if (key == "click-native") return HudPreferences.NativeInputPanelVisible;
             return false;
         }
 
@@ -895,6 +900,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") HudPreferences.LcuPanelVisible = visible;
             else if (key == "party") HudPreferences.PartyPanelVisible = visible;
             else if (key == "youtube") YoutubePreferences.Visible = visible;
+            else if (key == "click-native") HudPreferences.NativeInputPanelVisible = visible;
         }
 
         private bool GetPanelExpanded(string key)
@@ -902,6 +908,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") return HudPreferences.LcuPanelExpanded;
             if (key == "party") return HudPreferences.PartyPanelExpanded;
             if (key == "youtube") return HudPreferences.YoutubePanelExpanded;
+            if (key == "click-native") return HudPreferences.NativeInputPanelExpanded;
             return true;
         }
 
@@ -910,6 +917,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") HudPreferences.LcuPanelExpanded = expanded;
             else if (key == "party") HudPreferences.PartyPanelExpanded = expanded;
             else if (key == "youtube") HudPreferences.YoutubePanelExpanded = expanded;
+            else if (key == "click-native") HudPreferences.NativeInputPanelExpanded = expanded;
         }
 
         private void UpdatePanelChrome()
@@ -919,13 +927,30 @@ namespace YummiGameBarWidget
             ApplyPanelChrome("lcu", LcuPanel, LcuMoveBar, LcuBody, LcuEyeButton, LcuResizeHandles, pinnedOnly);
             ApplyPanelChrome("party", PartyPanel, PartyMoveBar, PartyBody, PartyEyeButton, PartyResizeHandles, pinnedOnly);
             ApplyPanelChrome("youtube", YoutubePanel, YoutubeMoveBar, YoutubeVideoHost, YoutubeEyeButton, YoutubeResizeHandles, pinnedOnly);
-            ApplyClickTestPanelChrome(ClickNativeMoveBar, ClickNativeResizeHandles, pinnedOnly);
+            ApplyClickTestPanelChrome(pinnedOnly);
         }
 
-        private static void ApplyClickTestPanelChrome(FrameworkElement moveBar, FrameworkElement resizeHandles, bool pinnedOnly)
+        private void ApplyClickTestPanelChrome(bool pinnedOnly)
         {
-            moveBar.Visibility = pinnedOnly ? Visibility.Collapsed : Visibility.Visible;
-            resizeHandles.Visibility = pinnedOnly ? Visibility.Collapsed : Visibility.Visible;
+            var visible = HudPreferences.NativeInputPanelVisible;
+            var expanded = HudPreferences.NativeInputPanelExpanded;
+            ClickNativePanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            ClickNativeMoveBar.Visibility = visible && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
+            ClickNativeBody.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            ClickNativeDetails.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
+            ClickNativeEyeButton.Opacity = expanded ? 1.0 : 0.5;
+            ToolTipService.SetToolTip(ClickNativeEyeButton, expanded ? "상세 내용 가리기" : "상세 내용 표시");
+            ClickNativeResizeHandles.Visibility = visible && expanded && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
+
+            if (expanded)
+            {
+                if (ClickNativeBody.Height <= 70) ClickNativeBody.Height = Math.Max(120, clickNativeExpandedHeight);
+            }
+            else
+            {
+                if (ClickNativeBody.Height > 70) clickNativeExpandedHeight = ClickNativeBody.Height;
+                ClickNativeBody.Height = 70;
+            }
         }
 
         private void ApplyPinnedBodyPositionOffset(bool pinnedOnly)
@@ -1300,13 +1325,27 @@ namespace YummiGameBarWidget
             }
         }
 
+        private void CursorMarkersToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            var visible = CursorMarkersToggle != null && CursorMarkersToggle.IsOn;
+            HudPreferences.NativeCursorMarkersVisible = visible;
+            ApplyCursorMarkersVisibility(visible);
+        }
+
+        private void ApplyCursorMarkersVisibility(bool visible)
+        {
+            if (NativeCursorOverlay != null)
+                NativeCursorOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+        }
+
         private void UpdateCursorDiagnosticMarkers(
             int physicalX, int physicalY, int logicalX, int logicalY,
             int cursorInfoX, int cursorInfoY, bool cursorInfoValid,
             int gamebarPrimaryX, int gamebarPrimaryY, int gamebarAltX, int gamebarAltY,
             int selectedX, int selectedY)
         {
-            if (widget == null) return;
+            if (widget == null || !HudPreferences.NativeCursorMarkersVisible) return;
+            NativeCursorOverlay.Visibility = Visibility.Visible;
             var bounds = widget.WindowBounds;
             var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
 

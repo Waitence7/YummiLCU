@@ -20,6 +20,7 @@
           <TextBlock Text="패널 표시" Foreground="White" FontWeight="SemiBold"/>
           <ToggleSwitch x:Name="LcuVisibleToggle" Header="LCU 패널" OnContent="표시" OffContent="숨김" Toggled="LcuVisibleToggle_Toggled" Foreground="White"/>
           <ToggleSwitch x:Name="PartyVisibleToggle" Header="파티 패널" OnContent="표시" OffContent="숨김" Toggled="PartyVisibleToggle_Toggled" Foreground="White"/>
+          <ToggleSwitch x:Name="NativeInputVisibleToggle" Header="Native Input 테스트 패널" OnContent="표시" OffContent="숨김" Toggled="NativeInputVisibleToggle_Toggled" Foreground="White"/>
           <TextBlock Text="제목줄의 눈 버튼은 내용만 접고, × 버튼은 패널을 완전히 숨깁니다. 여기서 다시 켤 수 있습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
         </StackPanel>
       </Border>

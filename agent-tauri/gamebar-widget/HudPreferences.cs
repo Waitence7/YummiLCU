@@ -40,6 +40,21 @@ namespace YummiGameBarWidget
             get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("YoutubePanelExpanded", out value) || !(value is bool) || (bool)value; }
             set { Set("YoutubePanelExpanded", value); }
         }
+        internal static bool NativeInputPanelVisible
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeInputPanelVisible", out value) || !(value is bool) || (bool)value; }
+            set { Set("NativeInputPanelVisible", value); }
+        }
+        internal static bool NativeInputPanelExpanded
+        {
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeInputPanelExpanded", out value) && value is bool && (bool)value; }
+            set { Set("NativeInputPanelExpanded", value); }
+        }
+        internal static bool NativeCursorMarkersVisible
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeCursorMarkersVisible", out value) || !(value is bool) || (bool)value; }
+            set { Set("NativeCursorMarkersVisible", value); }
+        }
         internal static double Opacity
         {
             get
