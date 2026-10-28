@@ -31,6 +31,11 @@ namespace YummiGameBarWidget
         private readonly DispatcherTimer timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         private CancellationTokenSource nativeInputLoopCts;
         private long lastNativeInputSyncOkAtMs;
+        private long lastNativeInputStaleLogAtMs;
+        private string lastNativeInputKeepalivePayload = "";
+        private int nativeInputKeepaliveInFlight;
+        private int nativeInputDispatchInFlight;
+        private long nativeInputDispatchQueuedAtMs;
         private XboxGameBarWidget widget;
         private bool refreshing;
         private double displayWidth;
@@ -92,6 +97,8 @@ namespace YummiGameBarWidget
         private const string ClickNativePanelHeightSetting = "click-native-panel-height";
         private const string CommandPipeName = @"LOCAL\YummiLcuGameBarCommandV1";
         private bool syncingNativeInput;
+        private long syncingNativeInputSinceMs;
+        private int nativeInputSyncGeneration;
         private ulong lastNativeInputSequence;
         private string lastAgentCommandTransport = "none";
         private string lastAgentPipeError = "";
@@ -118,6 +125,7 @@ namespace YummiGameBarWidget
                 Window.Current.CoreWindow.PointerMoved += CoreWindowPointerMoved;
                 Window.Current.CoreWindow.PointerPressed += CoreWindowPointerChanged;
                 Window.Current.CoreWindow.PointerReleased += CoreWindowPointerChanged;
+                Window.Current.Activated += WindowActivated;
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
@@ -141,6 +149,7 @@ namespace YummiGameBarWidget
                 Window.Current.CoreWindow.PointerMoved -= CoreWindowPointerMoved;
                 Window.Current.CoreWindow.PointerPressed -= CoreWindowPointerChanged;
                 Window.Current.CoreWindow.PointerReleased -= CoreWindowPointerChanged;
+                Window.Current.Activated -= WindowActivated;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
                 // Keep the diagnostic loop alive across transient Game Bar unload/reload cycles.
                 // The watchdog will recover it if the host pauses or drops dispatcher work.
@@ -1020,26 +1029,49 @@ namespace YummiGameBarWidget
             {
                 while (!token.IsCancellationRequested)
                 {
-                    try
+                    var dispatchAge = nativeInputDispatchQueuedAtMs <= 0 ? 0 : NowMs() - nativeInputDispatchQueuedAtMs;
+                    if (Volatile.Read(ref nativeInputDispatchInFlight) != 0 && dispatchAge >= 500)
                     {
-                        // Do not await the UI callback itself. Game Bar can transiently
-                        // suspend DispatcherTimer ticks during host lifecycle changes;
-                        // this background loop keeps scheduling probes independently.
-                        _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, async () =>
-                        {
-                            try { await SyncExternalClickTestAsync(true); }
-                            catch (Exception ex) { App.LogStage("native-input-loop-sync-error:" + ErrorCode(ex)); }
-                        });
+                        Interlocked.Exchange(ref nativeInputDispatchInFlight, 0);
+                        nativeInputDispatchQueuedAtMs = 0;
+                        App.LogStage("native-input-dispatch-reset ageMs=" + dispatchAge);
                     }
-                    catch (Exception ex)
+                    if (Interlocked.Exchange(ref nativeInputDispatchInFlight, 1) == 0)
                     {
-                        App.LogStage("native-input-loop-dispatch-error:" + ErrorCode(ex));
+                        nativeInputDispatchQueuedAtMs = NowMs();
+                        try
+                        {
+                            // Keep at most one UI probe queued. If Game Bar starves or
+                            // invalidates its dispatcher during a host state transition,
+                            // piling up callbacks makes recovery worse when it resumes.
+                            _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, async () =>
+                            {
+                                try { await SyncExternalClickTestAsync(true); }
+                                catch (Exception ex) { App.LogStage("native-input-loop-sync-error:" + ErrorCode(ex)); }
+                                finally { Interlocked.Exchange(ref nativeInputDispatchInFlight, 0); nativeInputDispatchQueuedAtMs = 0; }
+                            });
+                        }
+                        catch (Exception ex)
+                        {
+                            Interlocked.Exchange(ref nativeInputDispatchInFlight, 0);
+                            nativeInputDispatchQueuedAtMs = 0;
+                            App.LogStage("native-input-loop-dispatch-error:" + ErrorCode(ex));
+                        }
                     }
 
                     var age = lastNativeInputSyncOkAtMs <= 0 ? -1 : NowMs() - lastNativeInputSyncOkAtMs;
-                    if (age > 1000)
+                    if (age > 500)
                     {
-                        App.LogStage("native-input-loop-stale ageMs=" + age);
+                        // The Game Bar UI dispatcher can become temporarily invalid or
+                        // starved across Alt+Tab/host state changes. Keep the Agent-side
+                        // native hitbox alive without depending on any UI/COM objects.
+                        _ = TryNativeInputKeepaliveAsync();
+                        var now = NowMs();
+                        if (now - lastNativeInputStaleLogAtMs >= 1000)
+                        {
+                            lastNativeInputStaleLogAtMs = now;
+                            App.LogStage("native-input-loop-stale ageMs=" + age);
+                        }
                     }
 
                     try { await Task.Delay(100, token); }
@@ -1056,15 +1088,68 @@ namespace YummiGameBarWidget
             nativeInputLoopCts = null;
         }
 
+        private async Task TryNativeInputKeepaliveAsync()
+        {
+            var payload = lastNativeInputKeepalivePayload;
+            if (string.IsNullOrWhiteSpace(payload)) return;
+            if (Interlocked.Exchange(ref nativeInputKeepaliveInFlight, 1) != 0) return;
+            try
+            {
+                var rawResponse = await SendAgentCommandAsync(payload).ConfigureAwait(false);
+                var response = JsonObject.Parse(rawResponse);
+                if (response.GetNamedBoolean("ok", false))
+                {
+                    lastNativeInputSyncOkAtMs = NowMs();
+                }
+            }
+            catch (Exception ex)
+            {
+                var now = NowMs();
+                if (now - lastNativeInputStaleLogAtMs >= 1000)
+                {
+                    lastNativeInputStaleLogAtMs = now;
+                    App.LogStage("native-input-loop-keepalive-error:" + ErrorCode(ex));
+                }
+            }
+            finally
+            {
+                Interlocked.Exchange(ref nativeInputKeepaliveInFlight, 0);
+            }
+        }
+
+        private void WindowActivated(object sender, WindowActivatedEventArgs e)
+        {
+            App.LogStage("hud-window-activated-" + e.WindowActivationState);
+            // A queued callback can belong to an invalidated Game Bar dispatcher.
+            // Allow a fresh probe as soon as the host/window becomes active again.
+            Interlocked.Exchange(ref nativeInputDispatchInFlight, 0);
+            nativeInputDispatchQueuedAtMs = 0;
+            StartNativeInputLoop();
+            _ = SyncExternalClickTestAsync(true);
+        }
+
         private async Task SyncExternalClickTestAsync(bool active)
         {
-            if (syncingNativeInput) return;
+            var now = NowMs();
+            if (syncingNativeInput)
+            {
+                // A single UI/COM call can occasionally never complete. Do not let
+                // that permanently disable every later native-input sync.
+                var inFlightAge = syncingNativeInputSinceMs <= 0 ? 0 : now - syncingNativeInputSinceMs;
+                if (inFlightAge < 500) return;
+                App.LogStage("native-input-sync-reset ageMs=" + inFlightAge);
+                Interlocked.Increment(ref nativeInputSyncGeneration);
+                syncingNativeInput = false;
+                syncingNativeInputSinceMs = 0;
+            }
             if (widget == null)
             {
                 ClickNativeResult.Text = "Agent native input unavailable · widget=null";
                 return;
             }
             syncingNativeInput = true;
+            syncingNativeInputSinceMs = NowMs();
+            var syncGeneration = Interlocked.Increment(ref nativeInputSyncGeneration);
             try
             {
                 var requestedActive = active && HudPreferences.Visible && HudPanel.Visibility == Visibility.Visible
@@ -1113,7 +1198,9 @@ namespace YummiGameBarWidget
                     command["altHeight"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
                 }
 
-                var rawResponse = await SendAgentCommandAsync(command.Stringify());
+                var payload = command.Stringify();
+                lastNativeInputKeepalivePayload = payload;
+                var rawResponse = await SendAgentCommandAsync(payload);
                 lastNativeInputSyncOkAtMs = NowMs();
                 var response = JsonObject.Parse(rawResponse);
                 if (!response.GetNamedBoolean("ok", false))
@@ -1155,6 +1242,9 @@ namespace YummiGameBarWidget
                 var cursorInfoX = (int)response.GetNamedNumber("cursorInfoX", 0);
                 var cursorInfoY = (int)response.GetNamedNumber("cursorInfoY", 0);
                 var cursorInfoValid = response.GetNamedBoolean("cursorInfoValid", false);
+                var cursorInfoFlags = (uint)Math.Max(0, response.GetNamedNumber("cursorInfoFlags", 0));
+                var cursorInfoShowing = response.GetNamedBoolean("cursorInfoShowing", false);
+                var cursorInfoHandle = response.GetNamedString("cursorInfoHandle", "0x0");
                 var gamebarPrimaryX = (int)Math.Round(response.GetNamedNumber("gamebarPrimaryX", 0));
                 var gamebarPrimaryY = (int)Math.Round(response.GetNamedNumber("gamebarPrimaryY", 0));
                 var gamebarAltX = (int)Math.Round(response.GetNamedNumber("gamebarAltX", 0));
@@ -1177,7 +1267,8 @@ namespace YummiGameBarWidget
                     " eventXY=" + eventX + "," + eventY + " eventAt=" + eventAtMs + " matched=" + matched + "\n" +
                     "physical(GetPhysicalCursorPos) = " + physicalX + "," + physicalY + "\n" +
                     "logical(GetCursorPos)        = " + logicalX + "," + logicalY + "\n" +
-                    "cursorInfo(GetCursorInfo)    = " + cursorInfoX + "," + cursorInfoY + " valid=" + cursorInfoValid + "\n" +
+                    "cursorInfo(GetCursorInfo)    = " + cursorInfoX + "," + cursorInfoY + " valid=" + cursorInfoValid +
+                    " flags=0x" + cursorInfoFlags.ToString("X") + " showing=" + cursorInfoShowing + " hCursor=" + cursorInfoHandle + "\n" +
                     "gamebar-primary              = " + gamebarPrimaryX + "," + gamebarPrimaryY + "\n" +
                     "gamebar-alt                  = " + gamebarAltX + "," + gamebarAltY + "\n" +
                     "gamebar-stored               = " + gamebarStoredX + "," + gamebarStoredY + " ageMs=" + gamebarAgeMs + "\n" +
@@ -1194,7 +1285,13 @@ namespace YummiGameBarWidget
             }
             finally
             {
-                syncingNativeInput = false;
+                // Ignore completion from a sync that was already abandoned by the
+                // watchdog; it must not unlock a newer in-flight operation.
+                if (syncGeneration == Volatile.Read(ref nativeInputSyncGeneration))
+                {
+                    syncingNativeInput = false;
+                    syncingNativeInputSinceMs = 0;
+                }
             }
         }
 

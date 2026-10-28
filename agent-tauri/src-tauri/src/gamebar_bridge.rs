@@ -71,6 +71,8 @@ struct ExternalClickTestState {
     cursor_info_x: i32,
     cursor_info_y: i32,
     cursor_info_valid: bool,
+    cursor_info_flags: u32,
+    cursor_info_handle: u64,
     gamebar_cursor_x: i32,
     gamebar_cursor_y: i32,
     gamebar_cursor_updated_at_ms: u64,
@@ -746,22 +748,21 @@ fn external_mouse_input_thread() {
         let physical_ok = unsafe { GetPhysicalCursorPos(&mut physical) }.is_ok();
         let logical_ok = unsafe { GetCursorPos(&mut logical) }.is_ok();
         let cursor_info_ok = unsafe { GetCursorInfo(&mut cursor_info) }.is_ok();
-        let (point, cursor_source) = if physical_ok {
-            (physical, Some("physical"))
+        let (point, cursor_source) = if cursor_info_ok {
+            (cursor_info.ptScreenPos, Some("cursor-info"))
+        } else if physical_ok {
+            (physical, Some("physical-fallback"))
         } else if logical_ok {
-            (logical, Some("logical"))
-        } else if cursor_info_ok {
-            (cursor_info.ptScreenPos, Some("cursor-info-fallback"))
+            (logical, Some("logical-fallback"))
         } else {
             (POINT::default(), None)
         };
         if let Some(cursor_source) = cursor_source {
             let now = now_ms();
             if let Ok(mut state) = external_click_test_state().lock() {
-                // Prefer physical screen coordinates because Game Bar window
-                // geometry is ultimately matched against native screen pixels.
-                // Fall back to GetCursorPos for systems where physical cursor
-                // coordinates are unavailable.
+                // Prefer GetCursorInfo's screen-space cursor position. It stayed
+                // aligned with the visible cursor most reliably in Game Bar tests.
+                // Keep the other Win32 sources as fallbacks and diagnostics.
                 state.poll_count = state.poll_count.wrapping_add(1);
                 state.poll_updated_at_ms = now;
                 state.cursor_source = cursor_source.into();
@@ -774,6 +775,8 @@ fn external_mouse_input_thread() {
                 state.cursor_info_x = cursor_info.ptScreenPos.x;
                 state.cursor_info_y = cursor_info.ptScreenPos.y;
                 state.cursor_info_valid = cursor_info_ok;
+                state.cursor_info_flags = if cursor_info_ok { cursor_info.flags.0 } else { 0 };
+                state.cursor_info_handle = if cursor_info_ok { cursor_info.hCursor.0 as usize as u64 } else { 0 };
                 let (monitor_x, monitor_y) =
                     monitor_origin_for_point(point.x, point.y).unwrap_or((0, 0));
                 state.monitor_x = monitor_x;
@@ -784,8 +787,11 @@ fn external_mouse_input_thread() {
                     // leave a ghost hitbox active in the Agent.
                     let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
                     let gamebar_fresh = now.saturating_sub(state.gamebar_cursor_updated_at_ms) <= 500;
-                    let hit_x = if gamebar_fresh { state.gamebar_cursor_x } else { point.x };
-                    let hit_y = if gamebar_fresh { state.gamebar_cursor_y } else { point.y };
+                    // Native Win32 cursor coordinates are authoritative for hit testing.
+                    // Game Bar coordinates remain diagnostic-only because they can drift
+                    // or stop updating across host/Alt+Tab state changes.
+                    let hit_x = point.x;
+                    let hit_y = point.y;
                     let (hit_monitor_x, hit_monitor_y) =
                         monitor_origin_for_point(hit_x, hit_y).unwrap_or((0, 0));
                     let px = hit_x as f64;
@@ -910,35 +916,41 @@ fn sync_external_click_test(parsed: &Value) -> String {
         let physical_ok = unsafe { GetPhysicalCursorPos(&mut physical) }.is_ok();
         let logical_ok = unsafe { GetCursorPos(&mut logical) }.is_ok();
         let cursor_info_ok = unsafe { GetCursorInfo(&mut cursor_info) }.is_ok();
-        if physical_ok {
+        if cursor_info_ok {
+            Some((
+                cursor_info.ptScreenPos.x,
+                cursor_info.ptScreenPos.y,
+                "direct-cursor-info",
+                physical,
+                logical,
+                cursor_info.ptScreenPos,
+                true,
+                cursor_info.flags.0,
+                cursor_info.hCursor.0 as usize as u64,
+            ))
+        } else if physical_ok {
             Some((
                 physical.x,
                 physical.y,
-                "direct-physical",
+                "direct-physical-fallback",
                 physical,
                 logical,
                 cursor_info.ptScreenPos,
                 cursor_info_ok,
+                if cursor_info_ok { cursor_info.flags.0 } else { 0 },
+                if cursor_info_ok { cursor_info.hCursor.0 as usize as u64 } else { 0 },
             ))
         } else if logical_ok {
             Some((
                 logical.x,
                 logical.y,
-                "direct-logical",
+                "direct-logical-fallback",
                 physical,
                 logical,
                 cursor_info.ptScreenPos,
                 cursor_info_ok,
-            ))
-        } else if cursor_info_ok {
-            Some((
-                cursor_info.ptScreenPos.x,
-                cursor_info.ptScreenPos.y,
-                "direct-cursor-info-fallback",
-                physical,
-                logical,
-                cursor_info.ptScreenPos,
-                true,
+                if cursor_info_ok { cursor_info.flags.0 } else { 0 },
+                if cursor_info_ok { cursor_info.hCursor.0 as usize as u64 } else { 0 },
             ))
         } else {
             None
@@ -971,7 +983,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
         Ok(state) => state,
         Err(_) => return json_response(false, "외부 클릭 상태 잠금에 실패했습니다."),
     };
-    if let Some((cursor_x, cursor_y, source, physical, logical, cursor_info, cursor_info_valid)) =
+    if let Some((cursor_x, cursor_y, source, physical, logical, cursor_info, cursor_info_valid, cursor_info_flags, cursor_info_handle)) =
         direct_cursor
     {
         state.cursor_x = cursor_x;
@@ -983,21 +995,19 @@ fn sync_external_click_test(parsed: &Value) -> String {
         state.cursor_info_x = cursor_info.x;
         state.cursor_info_y = cursor_info.y;
         state.cursor_info_valid = cursor_info_valid;
+        state.cursor_info_flags = cursor_info_flags;
+        state.cursor_info_handle = cursor_info_handle;
         let (monitor_x, monitor_y) = monitor_origin_for_point(cursor_x, cursor_y).unwrap_or((0, 0));
         state.monitor_x = monitor_x;
         state.monitor_y = monitor_y;
         state.cursor_source = source.into();
     }
     if let Some((cursor_x, cursor_y)) = gamebar_cursor {
+        // Keep Game Bar cursor data for comparison only. Do not overwrite the
+        // selected/native cursor used for hit testing.
         state.gamebar_cursor_x = cursor_x;
         state.gamebar_cursor_y = cursor_y;
         state.gamebar_cursor_updated_at_ms = now;
-        state.cursor_x = cursor_x;
-        state.cursor_y = cursor_y;
-        let (monitor_x, monitor_y) = monitor_origin_for_point(cursor_x, cursor_y).unwrap_or((0, 0));
-        state.monitor_x = monitor_x;
-        state.monitor_y = monitor_y;
-        state.cursor_source = "gamebar-pointer-polled".into();
     }
 
     if let Ok(mut diagnostic) = native_input_diagnostic_state().lock() {
@@ -1029,11 +1039,12 @@ fn sync_external_click_test(parsed: &Value) -> String {
         let source_changed = diagnostic.last_cursor_source != state.cursor_source;
         if source_changed || now.saturating_sub(diagnostic.last_periodic_log_ms) >= 1_000 {
             append_native_input_log(&format!(
-                "sync active={}\n  physical(GetPhysicalCursorPos)=({}, {})\n  logical(GetCursorPos)=({}, {})\n  cursorInfo(GetCursorInfo)=({}, {}) valid={}\n  gamebarPrimary=({:.1}, {:.1})\n  gamebarAlt=({:.1}, {:.1})\n  gamebarStored=({}, {}) ageMs={}\n  selected=({}, {}) source={}\n  monitorOrigin=({}, {})\n  eventHit=({}, {}) matched={}\n  pollAgeMs={}\n  rect=({:.1},{:.1},{:.1},{:.1})\n  altRect=({:.1},{:.1},{:.1},{:.1})",
+                "sync active={}\n  physical(GetPhysicalCursorPos)=({}, {})\n  logical(GetCursorPos)=({}, {})\n  cursorInfo(GetCursorInfo)=({}, {}) valid={} flags=0x{:X} showing={} hCursor=0x{:X}\n  gamebarPrimary=({:.1}, {:.1})\n  gamebarAlt=({:.1}, {:.1})\n  gamebarStored=({}, {}) ageMs={}\n  selected=({}, {}) source={}\n  monitorOrigin=({}, {})\n  eventHit=({}, {}) matched={}\n  pollAgeMs={}\n  rect=({:.1},{:.1},{:.1},{:.1})\n  altRect=({:.1},{:.1},{:.1},{:.1})",
                 active,
                 state.physical_x, state.physical_y,
                 state.logical_x, state.logical_y,
                 state.cursor_info_x, state.cursor_info_y, state.cursor_info_valid,
+                state.cursor_info_flags, state.cursor_info_valid && (state.cursor_info_flags & 1) != 0, state.cursor_info_handle,
                 gamebar_cursor_x, gamebar_cursor_y,
                 gamebar_alt_cursor_x, gamebar_alt_cursor_y,
                 state.gamebar_cursor_x, state.gamebar_cursor_y,
@@ -1094,6 +1105,9 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "cursorInfoX": state.cursor_info_x,
         "cursorInfoY": state.cursor_info_y,
         "cursorInfoValid": state.cursor_info_valid,
+        "cursorInfoFlags": state.cursor_info_flags,
+        "cursorInfoShowing": state.cursor_info_valid && (state.cursor_info_flags & 1) != 0,
+        "cursorInfoHandle": format!("0x{:X}", state.cursor_info_handle),
         "gamebarCursorAtMs": gamebar_cursor_at_ms,
         "gamebarCursorAgeMs": if state.gamebar_cursor_updated_at_ms > 0 { now.saturating_sub(state.gamebar_cursor_updated_at_ms) } else { 0 },
         "gamebarPrimaryX": gamebar_cursor_x,
