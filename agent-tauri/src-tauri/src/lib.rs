@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 mod app;
 mod blocking_io;
 mod commands;

@@ -71,7 +71,7 @@ jobs:
   rust-tests:
     name: Rust tests
     if: ${{ github.event_name == 'push' }}
-    runs-on: ubuntu-latest
+    runs-on: windows-latest
     defaults:
       run:
         working-directory: agent-tauri/src-tauri
