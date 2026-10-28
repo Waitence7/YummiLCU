@@ -31,6 +31,7 @@ cp "$archive" "$release_dir/tauri-latest.zip"
 
 tag="v${version}"
 if [ "$RELEASE_CHANNEL" != "stable" ]; then tag="v${RELEASE_LABEL}"; fi
+github_release_available=true
 if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
   args=(
     "$tag"
@@ -39,16 +40,23 @@ if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
     --notes "Yummi LCU Agent ${RELEASE_LABEL}."
   )
   if [ "$RELEASE_CHANNEL" != "stable" ]; then args+=(--prerelease); fi
-  gh release create "${args[@]}" --repo "$GITHUB_REPOSITORY"
+  if ! gh release create "${args[@]}" --repo "$GITHUB_REPOSITORY"; then
+    echo "warning: GitHub Release create failed; continuing with Agent server deployment" >&2
+    github_release_available=false
+  fi
 fi
-gh release upload "$tag" \
-  "$installer" \
-  "$release_dir/Yummi-LCU-Agent-latest-setup.exe" \
-  "$archive" \
-  "$release_dir/tauri-latest.zip" \
-  "$manifest" \
-  --repo "$GITHUB_REPOSITORY" \
-  --clobber
+if [ "$github_release_available" = true ]; then
+  if ! gh release upload "$tag" \
+    "$installer" \
+    "$release_dir/Yummi-LCU-Agent-latest-setup.exe" \
+    "$archive" \
+    "$release_dir/tauri-latest.zip" \
+    "$manifest" \
+    --repo "$GITHUB_REPOSITORY" \
+    --clobber; then
+    echo "warning: GitHub Release upload failed; continuing with Agent server deployment" >&2
+  fi
+fi
 
 route_channel=""
 if [ "$RELEASE_CHANNEL" != "stable" ]; then route_channel="/$RELEASE_CHANNEL"; fi
