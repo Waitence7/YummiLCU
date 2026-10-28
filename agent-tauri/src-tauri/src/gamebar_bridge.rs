@@ -34,6 +34,8 @@ const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 const MAX_GAMEBAR_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 #[cfg(windows)]
 const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:19514";
+#[cfg(windows)]
+const GAMEBAR_COMMAND_LOOPBACK_ADDR: &str = "127.0.0.1:19515";
 
 #[cfg(windows)]
 #[derive(Clone, Debug, Default)]
@@ -98,6 +100,13 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
         std::thread::Builder::new()
             .name("yummi-gamebar-loopback".into())
             .spawn(move || loopback_server(tcp_app, tcp_state))
+            .ok();
+
+        let command_tcp_app = app.clone();
+        let command_tcp_state = state.clone();
+        std::thread::Builder::new()
+            .name("yummi-gamebar-command-loopback".into())
+            .spawn(move || command_loopback_server(command_tcp_app, command_tcp_state))
             .ok();
 
         let update_state = state.clone();
@@ -428,6 +437,60 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
             if read == 0 {
                 return;
             }
+            let response = if raw.len() > 1024 {
+                json_response(false, "명령을 읽지 못했습니다.")
+            } else {
+                handle_command(&app, state, raw.trim_end_matches(['\r', '\n']))
+            };
+            let mut payload = response.into_bytes();
+            payload.push(b'\n');
+            let _ = stream.write_all(&payload);
+            let _ = stream.flush();
+        });
+    }
+}
+
+
+#[cfg(windows)]
+fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
+    use std::io::{BufRead, BufReader};
+
+    let listener = {
+        let mut bound = None;
+        for attempt in 1..=20 {
+            match TcpListener::bind(GAMEBAR_COMMAND_LOOPBACK_ADDR) {
+                Ok(listener) => {
+                    bound = Some(listener);
+                    break;
+                }
+                Err(error) => {
+                    eprintln!(
+                        "[gamebar bridge] command loopback bind failed attempt={attempt}/20 addr={GAMEBAR_COMMAND_LOOPBACK_ADDR}: {error}"
+                    );
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }
+        }
+        let Some(listener) = bound else {
+            eprintln!(
+                "[gamebar bridge] command loopback bind permanently failed addr={GAMEBAR_COMMAND_LOOPBACK_ADDR}"
+            );
+            return;
+        };
+        listener
+    };
+
+    for incoming in listener.incoming() {
+        let Ok(mut stream) = incoming else { continue };
+        let app = app.clone();
+        let state = state.clone();
+        std::thread::spawn(move || {
+            let Ok(reader_stream) = stream.try_clone() else { return; };
+            let _ = reader_stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut reader = BufReader::new(reader_stream);
+            let mut raw = String::new();
+            let Ok(read) = reader.read_line(&mut raw) else { return; };
+            if read == 0 { return; }
             let response = if raw.len() > 1024 {
                 json_response(false, "명령을 읽지 못했습니다.")
             } else {

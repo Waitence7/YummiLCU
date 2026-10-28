@@ -1118,20 +1118,18 @@ namespace YummiGameBarWidget
             lastAgentPipeError = "";
             try
             {
-                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(1)))
+                using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
                 using (var socket = new StreamSocket())
                 {
-                    await socket.ConnectAsync(new HostName("127.0.0.1"), "19514").AsTask(timeout.Token);
+                    await socket.ConnectAsync(new HostName("127.0.0.1"), "19515").AsTask(timeout.Token);
                     using (var output = socket.OutputStream.AsStreamForWrite())
                     using (var input = socket.InputStream.AsStreamForRead())
                     {
-                        // Unified endpoint sends the current snapshot first.
-                        await NativePipeClient.ReadLineAsync(input, timeout.Token).ConfigureAwait(false);
                         var data = Encoding.UTF8.GetBytes(payload + "\n");
                         await output.WriteAsync(data, 0, data.Length, timeout.Token).ConfigureAwait(false);
                         await output.FlushAsync(timeout.Token).ConfigureAwait(false);
                         var response = await NativePipeClient.ReadLineAsync(input, timeout.Token).ConfigureAwait(false);
-                        lastAgentCommandTransport = "tcp:19514";
+                        lastAgentCommandTransport = "tcp:19515";
                         lastAgentTcpError = "";
                         return response;
                     }
