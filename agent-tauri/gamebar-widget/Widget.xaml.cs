@@ -1018,6 +1018,15 @@ namespace YummiGameBarWidget
                     && ClickNativePanel.Visibility == Visibility.Visible;
                 var geometryReady = NativeHookHitbox.ActualWidth > 0 && NativeHookHitbox.ActualHeight > 0;
                 var effectiveActive = requestedActive && geometryReady;
+                // Do not depend on PointerMoved events staying alive after a click.
+                // CoreWindow.PointerPosition can be polled directly and returns the
+                // current client-space pointer position in DIPs.
+                try
+                {
+                    UpdateGameBarPointer(Window.Current.CoreWindow.PointerPosition);
+                }
+                catch { }
+
                 var command = new JsonObject
                 {
                     ["command"] = JsonValue.CreateStringValue("sync_external_click_test"),
@@ -1085,6 +1094,20 @@ namespace YummiGameBarWidget
                 var eventAtMs = (ulong)Math.Max(0, response.GetNamedNumber("eventAtMs", 0));
                 var releaseLabel = response.GetNamedString("agentReleaseLabel", "?");
                 var agentCommit = response.GetNamedString("agentCommit", "?");
+                var physicalX = (int)response.GetNamedNumber("physicalX", 0);
+                var physicalY = (int)response.GetNamedNumber("physicalY", 0);
+                var logicalX = (int)response.GetNamedNumber("logicalX", 0);
+                var logicalY = (int)response.GetNamedNumber("logicalY", 0);
+                var cursorInfoX = (int)response.GetNamedNumber("cursorInfoX", 0);
+                var cursorInfoY = (int)response.GetNamedNumber("cursorInfoY", 0);
+                var cursorInfoValid = response.GetNamedBoolean("cursorInfoValid", false);
+                var gamebarPrimaryX = (int)Math.Round(response.GetNamedNumber("gamebarPrimaryX", 0));
+                var gamebarPrimaryY = (int)Math.Round(response.GetNamedNumber("gamebarPrimaryY", 0));
+                var gamebarAltX = (int)Math.Round(response.GetNamedNumber("gamebarAltX", 0));
+                var gamebarAltY = (int)Math.Round(response.GetNamedNumber("gamebarAltY", 0));
+                var gamebarStoredX = (int)response.GetNamedNumber("gamebarStoredCursorX", 0);
+                var gamebarStoredY = (int)response.GetNamedNumber("gamebarStoredCursorY", 0);
+                var gamebarAgeMs = (ulong)Math.Max(0, response.GetNamedNumber("gamebarCursorAgeMs", 0));
                 if (sequence != lastNativeInputSequence) lastNativeInputSequence = sequence;
 
                 ClickNativeResult.Text =
@@ -1094,8 +1117,15 @@ namespace YummiGameBarWidget
                     "agent pid=" + agentPid + " build=" + agentBuild + " release=" + releaseLabel + " commit=" + agentCommit + "\n" +
                     "active=" + responseActive + " seq=" + sequence + " clicks=" + clickCount + " event=" + eventName +
                     " eventXY=" + eventX + "," + eventY + " eventAt=" + eventAtMs + " matched=" + matched + "\n" +
-                    "cursor=" + cursorX + "," + cursorY + " source=" + cursorSource + " monitor=" + monitorX + "," + monitorY +
-                    " pollCount=" + pollCount + " pollAgeMs=" + pollAgeMs + "\n" +
+                    "physical(GetPhysicalCursorPos) = " + physicalX + "," + physicalY + "\n" +
+                    "logical(GetCursorPos)        = " + logicalX + "," + logicalY + "\n" +
+                    "cursorInfo(GetCursorInfo)    = " + cursorInfoX + "," + cursorInfoY + " valid=" + cursorInfoValid + "\n" +
+                    "gamebar-primary              = " + gamebarPrimaryX + "," + gamebarPrimaryY + "\n" +
+                    "gamebar-alt                  = " + gamebarAltX + "," + gamebarAltY + "\n" +
+                    "gamebar-stored               = " + gamebarStoredX + "," + gamebarStoredY + " ageMs=" + gamebarAgeMs + "\n" +
+                    "selected                      = " + cursorX + "," + cursorY + " source=" + cursorSource + "\n" +
+                    "monitor-origin                = " + monitorX + "," + monitorY + " pollCount=" + pollCount + " pollAgeMs=" + pollAgeMs + "\n" +
+                    "hit-test event                = " + eventX + "," + eventY + " matched=" + matched + "\n" +
                     "rect=" + rectX + "," + rectY + " " + rectWidth.ToString("0.##") + "x" + rectHeight.ToString("0.##") +
                     " altRect=" + altRectX + "," + altRectY + " " + altRectWidth.ToString("0.##") + "x" + altRectHeight.ToString("0.##") + "\n" +
                     "raw=" + rawResponse;

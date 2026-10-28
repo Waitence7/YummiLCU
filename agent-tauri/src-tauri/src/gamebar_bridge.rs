@@ -71,6 +71,9 @@ struct ExternalClickTestState {
     cursor_info_x: i32,
     cursor_info_y: i32,
     cursor_info_valid: bool,
+    gamebar_cursor_x: i32,
+    gamebar_cursor_y: i32,
+    gamebar_cursor_updated_at_ms: u64,
 }
 
 #[cfg(windows)]
@@ -81,6 +84,43 @@ fn external_click_test_state() -> &'static Mutex<ExternalClickTestState> {
     EXTERNAL_CLICK_TEST.get_or_init(|| Mutex::new(ExternalClickTestState::default()))
 }
 
+#[cfg(windows)]
+#[derive(Debug, Default)]
+struct NativeInputDiagnosticState {
+    last_periodic_log_ms: u64,
+    last_native_x: i32,
+    last_native_y: i32,
+    native_unchanged_since_ms: u64,
+    native_stale_reported: bool,
+    last_cursor_source: String,
+}
+
+#[cfg(windows)]
+static NATIVE_INPUT_DIAGNOSTIC: OnceLock<Mutex<NativeInputDiagnosticState>> = OnceLock::new();
+
+#[cfg(windows)]
+fn native_input_diagnostic_state() -> &'static Mutex<NativeInputDiagnosticState> {
+    NATIVE_INPUT_DIAGNOSTIC.get_or_init(|| Mutex::new(NativeInputDiagnosticState::default()))
+}
+
+#[cfg(windows)]
+fn append_native_input_log(message: &str) {
+    use std::{
+        env,
+        fs::{self, OpenOptions},
+        io::Write,
+        path::PathBuf,
+    };
+
+    let Some(local_app_data) = env::var_os("LOCALAPPDATA") else { return; };
+    let log_dir = PathBuf::from(local_app_data).join("Yummi").join("Agent");
+    if fs::create_dir_all(&log_dir).is_err() { return; }
+    let path = log_dir.join("native-input.log");
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "[{}] {}", now_ms(), message);
+    }
+}
+
 pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     let watcher_state = state.clone();
     tauri::async_runtime::spawn(async move {
@@ -89,6 +129,14 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
 
     #[cfg(windows)]
     {
+        append_native_input_log(&format!(
+            "agent-start pid={} release={} build={} commit={} snapshotAddr={} commandAddr={}",
+            std::process::id(),
+            option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(env!("CARGO_PKG_VERSION")),
+            option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
+            option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
+            GAMEBAR_LOOPBACK_ADDR, GAMEBAR_COMMAND_LOOPBACK_ADDR,
+        ));
         let snapshot_state = state.clone();
         std::thread::Builder::new()
             .name("yummi-gamebar-pipe".into())
@@ -388,10 +436,12 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
         for attempt in 1..=20 {
             match TcpListener::bind(GAMEBAR_LOOPBACK_ADDR) {
                 Ok(listener) => {
+                    append_native_input_log(&format!("snapshot-tcp bind-ok addr={GAMEBAR_LOOPBACK_ADDR} attempt={attempt}"));
                     bound = Some(listener);
                     break;
                 }
                 Err(error) => {
+                    append_native_input_log(&format!("snapshot-tcp bind-failed addr={GAMEBAR_LOOPBACK_ADDR} attempt={attempt}/20 error={error}"));
                     eprintln!(
                         "[gamebar bridge] loopback bind failed attempt={attempt}/20 addr={GAMEBAR_LOOPBACK_ADDR}: {error}"
                     );
@@ -400,6 +450,7 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
             }
         }
         let Some(listener) = bound else {
+            append_native_input_log(&format!("snapshot-tcp bind-permanent-failure addr={GAMEBAR_LOOPBACK_ADDR}"));
             eprintln!(
                 "[gamebar bridge] loopback bind permanently failed addr={GAMEBAR_LOOPBACK_ADDR}"
             );
@@ -409,7 +460,14 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
     };
 
     for incoming in listener.incoming() {
-        let Ok(mut stream) = incoming else { continue };
+        let mut stream = match incoming {
+            Ok(stream) => stream,
+            Err(error) => {
+                append_native_input_log(&format!("snapshot-tcp accept-failed error={error}"));
+                continue;
+            }
+        };
+        append_native_input_log("snapshot-tcp accepted");
         let app = app.clone();
         let state = state.clone();
         std::thread::spawn(move || {
@@ -418,7 +476,12 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
             let mut snapshot =
                 serde_json::to_vec(&state.gamebar_snapshot()).unwrap_or_else(|_| b"{}".to_vec());
             snapshot.push(b'\n');
-            if stream.write_all(&snapshot).is_err() || stream.flush().is_err() {
+            if let Err(error) = stream.write_all(&snapshot) {
+                append_native_input_log(&format!("snapshot-tcp snapshot-write-failed error={error}"));
+                return;
+            }
+            if let Err(error) = stream.flush() {
+                append_native_input_log(&format!("snapshot-tcp snapshot-flush-failed error={error}"));
                 return;
             }
 
@@ -460,10 +523,12 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
         for attempt in 1..=20 {
             match TcpListener::bind(GAMEBAR_COMMAND_LOOPBACK_ADDR) {
                 Ok(listener) => {
+                    append_native_input_log(&format!("command-tcp bind-ok addr={GAMEBAR_COMMAND_LOOPBACK_ADDR} attempt={attempt}"));
                     bound = Some(listener);
                     break;
                 }
                 Err(error) => {
+                    append_native_input_log(&format!("command-tcp bind-failed addr={GAMEBAR_COMMAND_LOOPBACK_ADDR} attempt={attempt}/20 error={error}"));
                     eprintln!(
                         "[gamebar bridge] command loopback bind failed attempt={attempt}/20 addr={GAMEBAR_COMMAND_LOOPBACK_ADDR}: {error}"
                     );
@@ -472,6 +537,7 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
             }
         }
         let Some(listener) = bound else {
+            append_native_input_log(&format!("command-tcp bind-permanent-failure addr={GAMEBAR_COMMAND_LOOPBACK_ADDR}"));
             eprintln!(
                 "[gamebar bridge] command loopback bind permanently failed addr={GAMEBAR_COMMAND_LOOPBACK_ADDR}"
             );
@@ -481,16 +547,42 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
     };
 
     for incoming in listener.incoming() {
-        let Ok(mut stream) = incoming else { continue };
+        let mut stream = match incoming {
+            Ok(stream) => stream,
+            Err(error) => {
+                append_native_input_log(&format!("command-tcp accept-failed error={error}"));
+                continue;
+            }
+        };
+        append_native_input_log("command-tcp accepted");
         let app = app.clone();
         let state = state.clone();
         std::thread::spawn(move || {
-            let Ok(reader_stream) = stream.try_clone() else { return; };
+            let reader_stream = match stream.try_clone() {
+                Ok(stream) => stream,
+                Err(error) => {
+                    append_native_input_log(&format!("command-tcp clone-failed error={error}"));
+                    return;
+                }
+            };
             let _ = reader_stream.set_read_timeout(Some(Duration::from_secs(2)));
             let mut reader = BufReader::new(reader_stream);
             let mut raw = String::new();
-            let Ok(read) = reader.read_line(&mut raw) else { return; };
-            if read == 0 { return; }
+            let read = match reader.read_line(&mut raw) {
+                Ok(read) => read,
+                Err(error) => {
+                    append_native_input_log(&format!("command-tcp read-failed error={error}"));
+                    return;
+                }
+            };
+            if read == 0 {
+                append_native_input_log("command-tcp eof-before-command");
+                return;
+            }
+            let command_name = serde_json::from_str::<Value>(&raw).ok()
+                .and_then(|value| value.get("command").and_then(Value::as_str).map(str::to_owned))
+                .unwrap_or_else(|| "invalid-json".to_owned());
+            append_native_input_log(&format!("command-tcp request command={command_name} bytes={read}"));
             let response = if raw.len() > 1024 {
                 json_response(false, "명령을 읽지 못했습니다.")
             } else {
@@ -498,8 +590,15 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
             };
             let mut payload = response.into_bytes();
             payload.push(b'\n');
-            let _ = stream.write_all(&payload);
-            let _ = stream.flush();
+            if let Err(error) = stream.write_all(&payload) {
+                append_native_input_log(&format!("command-tcp response-write-failed command={command_name} error={error}"));
+                return;
+            }
+            if let Err(error) = stream.flush() {
+                append_native_input_log(&format!("command-tcp response-flush-failed command={command_name} error={error}"));
+                return;
+            }
+            append_native_input_log(&format!("command-tcp response-ok command={command_name} bytes={}", payload.len()));
         });
     }
 }
@@ -684,10 +783,15 @@ fn external_mouse_input_thread() {
                     // Expire stale geometry so a crashed/closed widget can never
                     // leave a ghost hitbox active in the Agent.
                     let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
-                    let px = point.x as f64;
-                    let py = point.y as f64;
-                    let mx = monitor_x as f64;
-                    let my = monitor_y as f64;
+                    let gamebar_fresh = now.saturating_sub(state.gamebar_cursor_updated_at_ms) <= 500;
+                    let hit_x = if gamebar_fresh { state.gamebar_cursor_x } else { point.x };
+                    let hit_y = if gamebar_fresh { state.gamebar_cursor_y } else { point.y };
+                    let (hit_monitor_x, hit_monitor_y) =
+                        monitor_origin_for_point(hit_x, hit_y).unwrap_or((0, 0));
+                    let px = hit_x as f64;
+                    let py = hit_y as f64;
+                    let mx = hit_monitor_x as f64;
+                    let my = hit_monitor_y as f64;
                     let inside = |rx: f64, ry: f64, rw: f64, rh: f64| {
                         fresh
                             && state.active
@@ -707,6 +811,15 @@ fn external_mouse_input_thread() {
                         state.alt_width,
                         state.alt_height,
                     );
+                    append_native_input_log(&format!(
+                        "button={} native=({}, {}) hit=({}, {}) gamebarFresh={} gamebar=({}, {}) active={} fresh={} inside=[{},{},{},{}] rect=({:.1},{:.1},{:.1},{:.1}) alt=({:.1},{:.1},{:.1},{:.1})",
+                        if down { "down" } else { "up" },
+                        point.x, point.y, hit_x, hit_y, gamebar_fresh,
+                        state.gamebar_cursor_x, state.gamebar_cursor_y, state.active, fresh,
+                        inside_primary, inside_alt, inside_primary_monitor, inside_alt_monitor,
+                        state.x, state.y, state.width, state.height,
+                        state.alt_x, state.alt_y, state.alt_width, state.alt_height,
+                    ));
                     if inside_primary || inside_alt || inside_primary_monitor || inside_alt_monitor
                     {
                         state.sequence = state.sequence.wrapping_add(1);
@@ -714,8 +827,8 @@ fn external_mouse_input_thread() {
                             state.click_count = state.click_count.wrapping_add(1);
                         }
                         state.event = if down { "down" } else { "up" }.into();
-                        state.event_x = point.x;
-                        state.event_y = point.y;
+                        state.event_x = hit_x;
+                        state.event_y = hit_y;
                         state.matched_geometry = if inside_primary {
                             "scaled-bounds"
                         } else if inside_alt {
@@ -876,13 +989,67 @@ fn sync_external_click_test(parsed: &Value) -> String {
         state.cursor_source = source.into();
     }
     if let Some((cursor_x, cursor_y)) = gamebar_cursor {
+        state.gamebar_cursor_x = cursor_x;
+        state.gamebar_cursor_y = cursor_y;
+        state.gamebar_cursor_updated_at_ms = now;
         state.cursor_x = cursor_x;
         state.cursor_y = cursor_y;
         let (monitor_x, monitor_y) = monitor_origin_for_point(cursor_x, cursor_y).unwrap_or((0, 0));
         state.monitor_x = monitor_x;
         state.monitor_y = monitor_y;
-        state.cursor_source = "gamebar-pointer".into();
+        state.cursor_source = "gamebar-pointer-polled".into();
     }
+
+    if let Ok(mut diagnostic) = native_input_diagnostic_state().lock() {
+        let native_x = state.physical_x;
+        let native_y = state.physical_y;
+        if native_x != diagnostic.last_native_x || native_y != diagnostic.last_native_y {
+            diagnostic.last_native_x = native_x;
+            diagnostic.last_native_y = native_y;
+            diagnostic.native_unchanged_since_ms = now;
+            diagnostic.native_stale_reported = false;
+        } else if diagnostic.native_unchanged_since_ms == 0 {
+            diagnostic.native_unchanged_since_ms = now;
+        } else if !diagnostic.native_stale_reported
+            && now.saturating_sub(diagnostic.native_unchanged_since_ms) >= 1_000
+        {
+            append_native_input_log(&format!(
+                "native-stale ageMs={}\n  physical(GetPhysicalCursorPos)=({}, {})\n  logical(GetCursorPos)=({}, {})\n  cursorInfo(GetCursorInfo)=({}, {}) valid={}\n  gamebarStored=({}, {}) ageMs={}\n  selected=({}, {}) source={}",
+                now.saturating_sub(diagnostic.native_unchanged_since_ms),
+                state.physical_x, state.physical_y,
+                state.logical_x, state.logical_y,
+                state.cursor_info_x, state.cursor_info_y, state.cursor_info_valid,
+                state.gamebar_cursor_x, state.gamebar_cursor_y,
+                now.saturating_sub(state.gamebar_cursor_updated_at_ms),
+                state.cursor_x, state.cursor_y, state.cursor_source,
+            ));
+            diagnostic.native_stale_reported = true;
+        }
+
+        let source_changed = diagnostic.last_cursor_source != state.cursor_source;
+        if source_changed || now.saturating_sub(diagnostic.last_periodic_log_ms) >= 1_000 {
+            append_native_input_log(&format!(
+                "sync active={}\n  physical(GetPhysicalCursorPos)=({}, {})\n  logical(GetCursorPos)=({}, {})\n  cursorInfo(GetCursorInfo)=({}, {}) valid={}\n  gamebarPrimary=({:.1}, {:.1})\n  gamebarAlt=({:.1}, {:.1})\n  gamebarStored=({}, {}) ageMs={}\n  selected=({}, {}) source={}\n  monitorOrigin=({}, {})\n  eventHit=({}, {}) matched={}\n  pollAgeMs={}\n  rect=({:.1},{:.1},{:.1},{:.1})\n  altRect=({:.1},{:.1},{:.1},{:.1})",
+                active,
+                state.physical_x, state.physical_y,
+                state.logical_x, state.logical_y,
+                state.cursor_info_x, state.cursor_info_y, state.cursor_info_valid,
+                gamebar_cursor_x, gamebar_cursor_y,
+                gamebar_alt_cursor_x, gamebar_alt_cursor_y,
+                state.gamebar_cursor_x, state.gamebar_cursor_y,
+                now.saturating_sub(state.gamebar_cursor_updated_at_ms),
+                state.cursor_x, state.cursor_y, state.cursor_source,
+                state.monitor_x, state.monitor_y,
+                state.event_x, state.event_y, state.matched_geometry,
+                now.saturating_sub(state.poll_updated_at_ms),
+                x, y, width, height,
+                alt_x, alt_y, alt_width, alt_height,
+            ));
+            diagnostic.last_periodic_log_ms = now;
+            diagnostic.last_cursor_source = state.cursor_source.clone();
+        }
+    }
+
     state.active = active;
     if active {
         state.x = x;
@@ -928,7 +1095,13 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "cursorInfoY": state.cursor_info_y,
         "cursorInfoValid": state.cursor_info_valid,
         "gamebarCursorAtMs": gamebar_cursor_at_ms,
-        "gamebarCursorAgeMs": if gamebar_cursor_at_ms > 0 { now.saturating_sub(gamebar_cursor_at_ms) } else { 0 },
+        "gamebarCursorAgeMs": if state.gamebar_cursor_updated_at_ms > 0 { now.saturating_sub(state.gamebar_cursor_updated_at_ms) } else { 0 },
+        "gamebarPrimaryX": gamebar_cursor_x,
+        "gamebarPrimaryY": gamebar_cursor_y,
+        "gamebarAltX": gamebar_alt_cursor_x,
+        "gamebarAltY": gamebar_alt_cursor_y,
+        "gamebarStoredCursorX": state.gamebar_cursor_x,
+        "gamebarStoredCursorY": state.gamebar_cursor_y,
         "pollAgeMs": now.saturating_sub(state.poll_updated_at_ms),
         "agentPid": std::process::id(),
         "agentReleaseLabel": option_env!("YUMMI_AGENT_RELEASE_LABEL")
@@ -1001,18 +1174,25 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
             let _ = LocalFree(Some(HLOCAL(descriptor.0)));
         }
         if pipe == INVALID_HANDLE_VALUE {
+            append_native_input_log("command-pipe create-failed");
             std::thread::sleep(Duration::from_secs(2));
             continue;
         }
 
         if named_pipe_connected(unsafe { ConnectNamedPipe(pipe, None) }) {
+            append_native_input_log("command-pipe connected");
             let mut buffer = [0u8; MAX_REQUEST_BYTES];
             let mut read = 0u32;
             let read_result = unsafe { ReadFile(pipe, Some(&mut buffer), Some(&mut read), None) };
             let response = if read_result.is_ok() && read > 0 {
                 let raw = String::from_utf8_lossy(&buffer[..read as usize]);
+                let command_name = serde_json::from_str::<Value>(&raw).ok()
+                    .and_then(|value| value.get("command").and_then(Value::as_str).map(str::to_owned))
+                    .unwrap_or_else(|| "invalid-json".to_owned());
+                append_native_input_log(&format!("command-pipe request command={command_name} bytes={read}"));
                 handle_command(&app, state.clone(), raw.trim_end_matches(['\r', '\n']))
             } else {
+                append_native_input_log("command-pipe read-failed-or-empty");
                 json_response(false, "명령을 읽지 못했습니다.")
             };
 
@@ -1035,12 +1215,18 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
 fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
     let parsed: Value = match serde_json::from_str(raw) {
         Ok(value) => value,
-        Err(_) => return json_response(false, "잘못된 명령 형식입니다."),
+        Err(error) => {
+            append_native_input_log(&format!("command parse-failed bytes={} error={error}", raw.len()));
+            return json_response(false, "잘못된 명령 형식입니다.");
+        }
     };
     let command = parsed
         .get("command")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    if command != "sync_external_click_test" {
+        append_native_input_log(&format!("command handle name={command}"));
+    }
 
     if command == "check_overlay_update" {
         tauri::async_runtime::spawn(async move {
@@ -1177,6 +1363,7 @@ fn append_gamebar_update_log(message: &str) {
             .unwrap_or(0);
         let _ = writeln!(file, "[{now}] {message}");
     }
+    append_native_input_log(&format!("update {message}"));
 }
 
 #[cfg(windows)]
