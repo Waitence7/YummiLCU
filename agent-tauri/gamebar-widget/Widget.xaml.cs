@@ -115,6 +115,10 @@ namespace YummiGameBarWidget
         private long lastGameBarPointerAtMs;
         private double clickNativeExpandedHeight = 300;
         private string voiceChatSignature = "";
+        private readonly Dictionary<string, BitmapImage> voiceChatAvatarCache = new Dictionary<string, BitmapImage>(StringComparer.Ordinal);
+        private long lastSnapshotSuccessAtMs;
+        private int consecutiveSnapshotFailures;
+        private long lastSnapshotFailureLogAtMs;
 
         public Widget()
         {
@@ -488,14 +492,41 @@ namespace YummiGameBarWidget
                 string line = await ReadLoopbackSnapshotAsync();
                 if (string.IsNullOrWhiteSpace(line)) throw new IOException("empty bridge response");
                 Apply(JsonObject.Parse(line));
+                lastSnapshotSuccessAtMs = NowMs();
+                consecutiveSnapshotFailures = 0;
             }
-            catch (Exception ex) { SetOffline(ex); }
+            catch (Exception ex) { HandleSnapshotFailure(ex); }
             finally { refreshing = false; }
+        }
+
+        private void HandleSnapshotFailure(Exception error)
+        {
+            var now = NowMs();
+            consecutiveSnapshotFailures++;
+            var recentSuccess = lastSnapshotSuccessAtMs > 0 && now - lastSnapshotSuccessAtMs <= 10000;
+
+            // A single localhost timeout does not mean the desktop Agent died.
+            // Keep the last good snapshot visible while the 1s poll retries.
+            if (recentSuccess && consecutiveSnapshotFailures <= 2)
+            {
+                bridgeStatus = "delayed";
+                bridgeError = ErrorCode(error);
+                BridgeText.Text = "에이전트 응답 지연 · 자동 재시도 중";
+                if (now - lastSnapshotFailureLogAtMs >= 5000)
+                {
+                    lastSnapshotFailureLogAtMs = now;
+                    App.LogStage("snapshot-transient-failure count=" + consecutiveSnapshotFailures + " error=" + bridgeError);
+                }
+                SaveStatus();
+                return;
+            }
+
+            SetOffline(error);
         }
 
         private async Task<string> ReadLoopbackSnapshotAsync()
         {
-            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2)))
+            using (var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(3)))
             using (var socket = new StreamSocket())
             {
                 await socket.ConnectAsync(new HostName("127.0.0.1"), "19514").AsTask(timeout.Token);
@@ -582,9 +613,19 @@ namespace YummiGameBarWidget
                 };
                 if (Uri.TryCreate(avatar, UriKind.Absolute, out var avatarUri) && avatarUri.Scheme == Uri.UriSchemeHttps)
                 {
+                    if (!voiceChatAvatarCache.TryGetValue(avatar, out var avatarImage))
+                    {
+                        avatarImage = new BitmapImage
+                        {
+                            DecodePixelWidth = 56,
+                            UriSource = avatarUri,
+                        };
+                        if (voiceChatAvatarCache.Count >= 32) voiceChatAvatarCache.Clear();
+                        voiceChatAvatarCache[avatar] = avatarImage;
+                    }
                     avatarCircle.Fill = new ImageBrush
                     {
-                        ImageSource = new BitmapImage(avatarUri),
+                        ImageSource = avatarImage,
                         Stretch = Stretch.UniformToFill,
                     };
                 }

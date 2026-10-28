@@ -472,7 +472,8 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
                 continue;
             }
         };
-        append_native_input_log("snapshot-tcp accepted");
+        let _ = stream.set_nodelay(true);
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
         let app = app.clone();
         let state = state.clone();
         std::thread::spawn(move || {
@@ -559,7 +560,8 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
                 continue;
             }
         };
-        append_native_input_log("command-tcp accepted");
+        let _ = stream.set_nodelay(true);
+        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
         let app = app.clone();
         let state = state.clone();
         std::thread::spawn(move || {
@@ -587,7 +589,10 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
             let command_name = serde_json::from_str::<Value>(&raw).ok()
                 .and_then(|value| value.get("command").and_then(Value::as_str).map(str::to_owned))
                 .unwrap_or_else(|| "invalid-json".to_owned());
-            append_native_input_log(&format!("command-tcp request command={command_name} bytes={read}"));
+            let noisy_native_sync = command_name == "sync_external_click_test";
+            if !noisy_native_sync {
+                append_native_input_log(&format!("command-tcp request command={command_name} bytes={read}"));
+            }
             let response = if raw.len() > 1024 {
                 json_response(false, "명령을 읽지 못했습니다.")
             } else {
@@ -603,7 +608,9 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
                 append_native_input_log(&format!("command-tcp response-flush-failed command={command_name} error={error}"));
                 return;
             }
-            append_native_input_log(&format!("command-tcp response-ok command={command_name} bytes={}", payload.len()));
+            if !noisy_native_sync {
+                append_native_input_log(&format!("command-tcp response-ok command={command_name} bytes={}", payload.len()));
+            }
         });
     }
 }
