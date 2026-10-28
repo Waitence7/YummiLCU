@@ -21,6 +21,7 @@ using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Controls.Primitives;
 using Windows.UI.Xaml.Media;
+using Windows.UI.Xaml.Media.Animation;
 using Windows.UI.Xaml.Media.Imaging;
 using Windows.UI.Xaml.Shapes;
 using Windows.UI.Xaml.Input;
@@ -119,6 +120,7 @@ namespace YummiGameBarWidget
         private string voiceChatSignature = "";
         private readonly Dictionary<string, BitmapImage> voiceChatAvatarCache = new Dictionary<string, BitmapImage>(StringComparer.Ordinal);
         private readonly Dictionary<string, long> voiceChatFirstSeenAtMs = new Dictionary<string, long>(StringComparer.Ordinal);
+        private readonly HashSet<string> voiceChatRenderedKeys = new HashSet<string>(StringComparer.Ordinal);
         private bool voiceChatHasVisibleMessages;
         private bool voiceChatPositionNeedsDefault;
         private long lastSnapshotSuccessAtMs;
@@ -579,6 +581,7 @@ namespace YummiGameBarWidget
                 voiceChatSignature = "";
                 voiceChatHasVisibleMessages = false;
                 VoiceChatOverlay.Children.Clear();
+                voiceChatRenderedKeys.Clear();
                 UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
                 return;
             }
@@ -614,10 +617,14 @@ namespace YummiGameBarWidget
                 return;
             }
             voiceChatSignature = signature;
+            var previouslyRendered = new HashSet<string>(voiceChatRenderedKeys, StringComparer.Ordinal);
+            voiceChatRenderedKeys.Clear();
             VoiceChatOverlay.Children.Clear();
+            var addedNewMessage = false;
 
             foreach (var entry in visible.Skip(Math.Max(0, visible.Count - 6)))
             {
+                var key = entry.Item1;
                 var item = entry.Item2;
                 var author = SnapshotJson.String(item, "author_name");
                 var content = SnapshotJson.String(item, "content");
@@ -678,10 +685,77 @@ namespace YummiGameBarWidget
                 Grid.SetColumn(copy, 1);
                 row.Children.Add(copy);
                 VoiceChatOverlay.Children.Add(row);
+                voiceChatRenderedKeys.Add(key);
+                if (!previouslyRendered.Contains(key))
+                {
+                    addedNewMessage = true;
+                    AnimateVoiceChatEntry(row);
+                }
             }
 
+            if (addedNewMessage) AnimateVoiceChatStack();
             voiceChatHasVisibleMessages = VoiceChatOverlay.Children.Count > 0;
             UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
+        }
+
+
+        private static void AnimateVoiceChatEntry(FrameworkElement row)
+        {
+            var translate = new TranslateTransform { Y = 8 };
+            row.RenderTransform = translate;
+            row.Opacity = 0;
+
+            var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
+            var storyboard = new Storyboard();
+            var slide = new DoubleAnimation
+            {
+                From = 8,
+                To = 0,
+                Duration = TimeSpan.FromMilliseconds(190),
+                EasingFunction = easing,
+                EnableDependentAnimation = true,
+            };
+            Storyboard.SetTarget(slide, translate);
+            Storyboard.SetTargetProperty(slide, "Y");
+
+            var fade = new DoubleAnimation
+            {
+                From = 0,
+                To = 1,
+                Duration = TimeSpan.FromMilliseconds(150),
+                EasingFunction = easing,
+            };
+            Storyboard.SetTarget(fade, row);
+            Storyboard.SetTargetProperty(fade, "Opacity");
+
+            storyboard.Children.Add(slide);
+            storyboard.Children.Add(fade);
+            storyboard.Begin();
+        }
+
+        private void AnimateVoiceChatStack()
+        {
+            var translate = VoiceChatOverlay.RenderTransform as TranslateTransform;
+            if (translate == null)
+            {
+                translate = new TranslateTransform();
+                VoiceChatOverlay.RenderTransform = translate;
+            }
+            translate.Y = 4;
+
+            var slide = new DoubleAnimation
+            {
+                From = 4,
+                To = 0,
+                Duration = TimeSpan.FromMilliseconds(180),
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
+                EnableDependentAnimation = true,
+            };
+            Storyboard.SetTarget(slide, translate);
+            Storyboard.SetTargetProperty(slide, "Y");
+            var storyboard = new Storyboard();
+            storyboard.Children.Add(slide);
+            storyboard.Begin();
         }
 
         private static string VoiceChatMessageKey(JsonObject item)
@@ -692,10 +766,32 @@ namespace YummiGameBarWidget
 
         private void ApplyVoiceChatPreferences()
         {
-            var baseColor = ParseHexColor(HudPreferences.VoiceChatBackgroundColor);
-            var alpha = (byte)Math.Round(255.0 * HudPreferences.VoiceChatBackgroundOpacity);
-            VoiceChatBody.Background = new SolidColorBrush(Color.FromArgb(alpha, baseColor.R, baseColor.G, baseColor.B));
+            ApplyVoiceChatBodyChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
             voiceChatSignature = "";
+        }
+
+        private void ApplyVoiceChatBodyChrome(bool pinnedOnly)
+        {
+            var baseColor = ParseHexColor(HudPreferences.VoiceChatBackgroundColor);
+            var configuredAlpha = (byte)Math.Round(255.0 * HudPreferences.VoiceChatBackgroundOpacity);
+            if (pinnedOnly)
+            {
+                // In the real pinned overlay there is no editor box. Preserve the
+                // user's optional background setting; its default alpha is zero.
+                VoiceChatBody.Background = new SolidColorBrush(Color.FromArgb(
+                    configuredAlpha, baseColor.R, baseColor.G, baseColor.B));
+                VoiceChatBody.BorderBrush = new SolidColorBrush(Colors.Transparent);
+                VoiceChatBody.BorderThickness = new Thickness(0);
+                return;
+            }
+
+            // Win+G is layout/edit mode: always expose the exact viewport so the
+            // user can see where Discord messages are allowed to render.
+            var editorAlpha = Math.Max(configuredAlpha, (byte)128);
+            VoiceChatBody.Background = new SolidColorBrush(Color.FromArgb(
+                (byte)editorAlpha, baseColor.R, baseColor.G, baseColor.B));
+            VoiceChatBody.BorderBrush = new SolidColorBrush(Color.FromArgb(150, 123, 90, 166));
+            VoiceChatBody.BorderThickness = new Thickness(1);
         }
 
         private static Color ParseHexColor(string value)
@@ -1164,6 +1260,7 @@ namespace YummiGameBarWidget
             VoiceChatBody.Visibility = editing || voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
             VoiceChatOverlay.Visibility = voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
             VoiceChatPlaceholder.Visibility = editing && !voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
+            ApplyVoiceChatBodyChrome(pinnedOnly);
         }
 
         private void ApplyPinnedBodyPositionOffset(bool pinnedOnly)
@@ -1980,6 +2077,7 @@ namespace YummiGameBarWidget
             PartyText.Text = "파티 정보 없음";
             voiceChatSignature = "";
             voiceChatFirstSeenAtMs.Clear();
+            voiceChatRenderedKeys.Clear();
             voiceChatHasVisibleMessages = false;
             VoiceChatOverlay.Children.Clear();
             UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);

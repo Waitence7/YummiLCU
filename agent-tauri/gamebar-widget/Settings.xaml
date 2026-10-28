@@ -27,7 +27,7 @@
       <Border Background="#342A203A" CornerRadius="10" Padding="12">
         <StackPanel Spacing="10">
           <TextBlock Text="Discord 채팅" Foreground="White" FontWeight="SemiBold"/>
-          <TextBlock Text="Win+G에서 Discord Chat 제목줄을 드래그하면 메시지가 표시될 위치를 정할 수 있습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
+          <TextBlock Text="Win+G 편집 화면에서는 Discord Chat 위치 박스가 보입니다. 실제 고정 오버레이에서는 편집 박스가 숨겨지고 새 메시지가 아래에서 위로 쌓입니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
           <StackPanel Spacing="4">
             <Grid>
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
