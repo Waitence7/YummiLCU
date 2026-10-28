@@ -58,6 +58,9 @@ namespace YummiGameBarWidget
         private Microsoft.UI.Xaml.Controls.WebView2 youtubeWebView2;
         private bool youtubeWebView2Unavailable;
         private bool youtubeUsingFallback;
+        private bool youtubeBrowseMode;
+        private double youtubePlayerHeightBeforeBrowse;
+        private XboxGameBarWidgetNotificationManager notificationManager;
         private string youtubePendingPlayerUrl;
         private string youtubeLoadedVideoId;
         private long youtubeLastActionRequest;
@@ -265,6 +268,7 @@ namespace YummiGameBarWidget
             App.LogStage("hud-navigated-to");
             if (widget != null)
             {
+                notificationManager = new XboxGameBarWidgetNotificationManager(widget);
                 widget.SettingsClicked += WidgetSettingsClicked;
                 widget.WindowBoundsChanged += WidgetStateChanged;
                 widget.PinnedChanged += WidgetStateChanged;
@@ -291,6 +295,7 @@ namespace YummiGameBarWidget
                 widget.ClickThroughEnabledChanged -= WidgetStateChanged;
                 widget.GameBarDisplayModeChanged -= DisplayModeChanged;
             }
+            notificationManager = null;
             base.OnNavigatedFrom(e);
         }
 
@@ -1363,6 +1368,122 @@ namespace YummiGameBarWidget
             }
         }
 
+        private async void YoutubeSearchButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (youtubeBrowseMode)
+            {
+                await CloseYoutubeBrowserAsync();
+                return;
+            }
+            await OpenYoutubeBrowserAsync();
+        }
+
+        private async void YoutubeNotificationTestButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (widget == null)
+            {
+                App.LogStage("notification-test-widget-null");
+                return;
+            }
+            try
+            {
+                if (notificationManager == null)
+                    notificationManager = new XboxGameBarWidgetNotificationManager(widget);
+                var notification = new XboxGameBarWidgetNotificationBuilder("유미지지 오버레이 알림 테스트")
+                    .Content("Game Bar 알림이 정상적으로 동작하고 있습니다.")
+                    .BuildNotification();
+                var result = await notificationManager.TryShowAsync(notification);
+                App.LogStage("notification-test-result-" + result);
+            }
+            catch (Exception ex)
+            {
+                App.LogStage("notification-test-error-" + ErrorCode(ex));
+            }
+        }
+
+        private async Task OpenYoutubeBrowserAsync()
+        {
+            youtubeBrowseMode = true;
+            youtubeReady = false;
+            youtubePlaying = false;
+            YoutubeSearchIcon.Text = "\uE72B";
+            ToolTipService.SetToolTip(YoutubeSearchButton, "플레이어로 돌아가기");
+            youtubePlayerHeightBeforeBrowse = YoutubeVideoHost.Height;
+            if (YoutubeVideoHost.Height < 360) YoutubeVideoHost.Height = 360;
+            SetYoutubeInlineState(true, "YouTube를 여는 중…");
+
+            const string youtubeHome = "https://www.youtube.com/";
+            if (await EnsureYoutubeWebView2Async())
+            {
+                youtubeUsingFallback = false;
+                YoutubeFallbackWebView.Visibility = Visibility.Collapsed;
+                youtubeWebView2.Visibility = Visibility.Visible;
+                youtubeWebView2.Source = new Uri(youtubeHome);
+                return;
+            }
+
+            youtubeUsingFallback = true;
+            YoutubeFallbackWebView.Visibility = Visibility.Visible;
+            YoutubeFallbackWebView.Navigate(new Uri(youtubeHome));
+        }
+
+        private async Task CloseYoutubeBrowserAsync()
+        {
+            youtubeBrowseMode = false;
+            RestoreYoutubePlayerHeightAfterBrowse();
+            YoutubeSearchIcon.Text = "\uE721";
+            ToolTipService.SetToolTip(YoutubeSearchButton, "YouTube에서 영상 찾기");
+            if (!string.IsNullOrWhiteSpace(youtubeLoadedVideoId))
+            {
+                await LoadYoutubeVideoAsync(youtubeLoadedVideoId);
+            }
+            else
+            {
+                youtubeReady = false;
+                SetYoutubeInlineState(true, "설정에서 YouTube 영상을 선택해 주세요");
+            }
+        }
+
+        private async Task SelectYoutubeVideoAsync(string videoId)
+        {
+            if (string.IsNullOrWhiteSpace(videoId)) return;
+            youtubeBrowseMode = false;
+            RestoreYoutubePlayerHeightAfterBrowse();
+            YoutubeSearchIcon.Text = "\uE721";
+            ToolTipService.SetToolTip(YoutubeSearchButton, "YouTube에서 영상 찾기");
+            youtubeLoadedVideoId = videoId;
+            YoutubePreferences.Video = "https://www.youtube.com/watch?v=" + videoId;
+            App.LogStage("youtube-browser-selected-" + videoId);
+            await LoadYoutubeVideoAsync(videoId);
+        }
+
+        private void RestoreYoutubePlayerHeightAfterBrowse()
+        {
+            if (youtubePlayerHeightBeforeBrowse > 0)
+                YoutubeVideoHost.Height = youtubePlayerHeightBeforeBrowse;
+            youtubePlayerHeightBeforeBrowse = 0;
+        }
+
+        private void YoutubeCoreWebView2_NavigationStarting(
+            Microsoft.Web.WebView2.Core.CoreWebView2 sender,
+            Microsoft.Web.WebView2.Core.CoreWebView2NavigationStartingEventArgs args)
+        {
+            if (!youtubeBrowseMode) return;
+            var videoId = ExtractYoutubeVideoId(args.Uri);
+            if (string.IsNullOrWhiteSpace(videoId)) return;
+            args.Cancel = true;
+            _ = SelectYoutubeVideoAsync(videoId);
+        }
+
+        private void YoutubeFallbackWebView_NavigationStarting(WebView sender, WebViewNavigationStartingEventArgs args)
+        {
+            if (!youtubeBrowseMode || args.Uri == null) return;
+            var videoId = ExtractYoutubeVideoId(args.Uri.AbsoluteUri);
+            if (string.IsNullOrWhiteSpace(videoId)) return;
+            args.Cancel = true;
+            _ = SelectYoutubeVideoAsync(videoId);
+        }
+
         private async Task LoadYoutubeVideoAsync(string videoId)
         {
             youtubeReady = false;
@@ -1404,6 +1525,8 @@ namespace YummiGameBarWidget
 
                 await youtubeWebView2.EnsureCoreWebView2Async();
                 if (youtubeWebView2.CoreWebView2 == null) throw new InvalidOperationException("CoreWebView2 is unavailable");
+                youtubeWebView2.CoreWebView2.NavigationStarting -= YoutubeCoreWebView2_NavigationStarting;
+                youtubeWebView2.CoreWebView2.NavigationStarting += YoutubeCoreWebView2_NavigationStarting;
                 youtubeWebView2.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
                 youtubeWebView2.CoreWebView2.Settings.AreDevToolsEnabled = false;
                 youtubeWebView2.CoreWebView2.Settings.IsStatusBarEnabled = false;
@@ -1443,7 +1566,13 @@ namespace YummiGameBarWidget
             if (!args.IsSuccess)
             {
                 youtubeReady = false;
-                SetYoutubeInlineState(true, "YouTube 영상을 불러오지 못했습니다.\n링크를 확인해 주세요.");
+                SetYoutubeInlineState(true, youtubeBrowseMode ? "YouTube를 열지 못했습니다." : "YouTube 영상을 불러오지 못했습니다.\n링크를 확인해 주세요.");
+                return;
+            }
+            if (youtubeBrowseMode)
+            {
+                youtubeReady = false;
+                SetYoutubeInlineState(false, null);
                 return;
             }
             youtubeReady = true;
@@ -1456,7 +1585,13 @@ namespace YummiGameBarWidget
             if (!args.IsSuccess)
             {
                 youtubeReady = false;
-                SetYoutubeInlineState(true, "YouTube 영상을 불러오지 못했습니다.\n링크를 확인해 주세요.");
+                SetYoutubeInlineState(true, youtubeBrowseMode ? "YouTube를 열지 못했습니다." : "YouTube 영상을 불러오지 못했습니다.\n링크를 확인해 주세요.");
+                return;
+            }
+            if (youtubeBrowseMode)
+            {
+                youtubeReady = false;
+                SetYoutubeInlineState(false, null);
                 return;
             }
             youtubeReady = true;

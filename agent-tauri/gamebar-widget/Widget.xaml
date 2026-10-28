@@ -170,17 +170,23 @@
           <Border x:Name="YoutubeMoveBar" Grid.Row="0" Height="24" Visibility="Collapsed" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="youtube"
                   PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
             <Grid Padding="8,0,3,0">
-              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <TextBlock Text="YouTube Player" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
-              <Button x:Name="YoutubeEyeButton" Grid.Column="1" Tag="youtube" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="PanelEyeButton_Click" ToolTipService.ToolTip="YouTube 내용 가리기/표시">
+              <Button x:Name="YoutubeSearchButton" Grid.Column="1" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="YoutubeSearchButton_Click" ToolTipService.ToolTip="YouTube에서 영상 찾기">
+                <TextBlock x:Name="YoutubeSearchIcon" Text="&#xE721;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="White"/>
+              </Button>
+              <Button x:Name="YoutubeNotificationTestButton" Grid.Column="2" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="YoutubeNotificationTestButton_Click" ToolTipService.ToolTip="Game Bar 알림 테스트">
+                <TextBlock Text="!" FontSize="13" FontWeight="SemiBold" Foreground="White"/>
+              </Button>
+              <Button x:Name="YoutubeEyeButton" Grid.Column="3" Tag="youtube" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="PanelEyeButton_Click" ToolTipService.ToolTip="YouTube 내용 가리기/표시">
                 <TextBlock x:Name="YoutubeEyeIcon" Text="&#xE890;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="White"/>
               </Button>
-              <Button Grid.Column="2" Tag="youtube" Content="×" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="15" Click="PanelCloseButton_Click" ToolTipService.ToolTip="YouTube 패널 닫기"/>
+              <Button Grid.Column="4" Tag="youtube" Content="×" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="15" Click="PanelCloseButton_Click" ToolTipService.ToolTip="YouTube 패널 닫기"/>
             </Grid>
           </Border>
           <Grid x:Name="YoutubeVideoHost" Grid.Row="1" Height="191" Background="Black">
             <Grid x:Name="YoutubeWebHost">
-              <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
+              <WebView x:Name="YoutubeFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationStarting="YoutubeFallbackWebView_NavigationStarting" NavigationCompleted="YoutubeFallbackWebView_NavigationCompleted"/>
             </Grid>
             <Border x:Name="YoutubeInlineState" Background="#C8120F1C" Visibility="Visible">
               <TextBlock x:Name="YoutubeInlineStateText" Text="설정에서 YouTube 영상을 선택해 주세요" Foreground="#D9CFE8" FontSize="11" TextAlignment="Center" TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16"/>
