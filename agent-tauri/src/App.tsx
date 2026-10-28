@@ -18,6 +18,7 @@ import { GuildMatchTab } from './tabs/GuildMatchTab';
 import { MatchHistoryTab } from './tabs/MatchHistoryTab';
 import { LogsTab } from './tabs/LogsTab';
 import { PatchNotesTab } from './tabs/PatchNotesTab';
+import { RecordingTab } from './tabs/RecordingTab';
 import { SettingsTab } from './tabs/SettingsTab';
 import { VoiceTab } from './tabs/VoiceTab';
 import { playTrayHideEffect } from './trayEffects';
@@ -38,7 +39,7 @@ type ResizeDirection =
   | 'SouthWest'
   | 'West';
 
-type TabId = 'guild' | 'history' | 'settings' | 'voice' | 'logs' | 'patchNotes';
+type TabId = 'guild' | 'history' | 'recording' | 'settings' | 'voice' | 'logs' | 'patchNotes';
 
 const RESIZE_HANDLES: { direction: ResizeDirection; className: string }[] = [
   { direction: 'North', className: 'yummi-resize-north' },
@@ -74,6 +75,7 @@ function WindowResizeHandles() {
 const TABS: { id: TabId; label: string; badge?: string }[] = [
   { id: 'guild', label: '내전' },
   { id: 'history', label: '전적' },
+  { id: 'recording', label: '녹화' },
   { id: 'settings', label: '편의기능' },
   { id: 'voice', label: '음성', badge: '예정' },
   { id: 'logs', label: '로그' },
@@ -215,6 +217,7 @@ export function App() {
         <div hidden={tab !== 'history'} className="h-full">
           <MatchHistoryTab connected={state.lcu} active={tab === 'history'} />
         </div>
+        {tab === 'recording' && <RecordingTab />}
         {tab === 'guild' && (
           <GuildMatchTab
             state={state}

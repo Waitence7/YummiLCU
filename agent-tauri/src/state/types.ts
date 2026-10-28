@@ -64,6 +64,22 @@ export type AgentState = {
   config: Config;
 };
 
+
+export type RecordingCaptureSource = 'monitor' | 'leagueWindow';
+
+export type RecordingStatus = {
+  supported: boolean;
+  recording: boolean;
+  clipBuffer: boolean;
+  recordingPath?: string | null;
+  bufferedSeconds: number;
+  lastClipPath?: string | null;
+  lastError?: string | null;
+  videoOnly: boolean;
+  recordingSource: RecordingCaptureSource;
+  clipSource: RecordingCaptureSource;
+};
+
 export type RecentMatch = {
   champion: string | number;
   champion_id: number;

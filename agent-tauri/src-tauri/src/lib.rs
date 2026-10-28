@@ -10,6 +10,7 @@ mod gamebar_bridge;
 mod http_diagnostics;
 mod lcu;
 mod platform;
+mod recording;
 mod relay;
 mod session;
 mod state;

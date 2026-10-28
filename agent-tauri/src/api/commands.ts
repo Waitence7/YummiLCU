@@ -3,6 +3,8 @@ import type {
   BetaReleaseInfo,
   Config,
   RecentMatch,
+  RecordingStatus,
+  RecordingCaptureSource,
 } from "../state/types";
 import type {
   MatchFightAnalysis,
@@ -108,3 +110,13 @@ export const reportUiFailure = (operation: string, error: unknown) =>
   reportOperationFailure("ui_operation_failed", operation, error);
 export const reportTrayEffectDiagnostic = (code: string, detail: string) =>
   call<void>("report_tray_effect_diagnostic", { code, detail });
+
+export const getRecordingStatus = () => call<RecordingStatus>("get_recording_status");
+export const startRecording = (source: RecordingCaptureSource) =>
+  call<RecordingStatus>("start_recording", { source });
+export const stopRecording = () => call<RecordingStatus>("stop_recording");
+export const startClipBuffer = (source: RecordingCaptureSource) =>
+  call<RecordingStatus>("start_clip_buffer", { source });
+export const stopClipBuffer = () => call<RecordingStatus>("stop_clip_buffer");
+export const saveLastClip = (seconds: number) =>
+  call<RecordingStatus>("save_last_clip", { seconds });

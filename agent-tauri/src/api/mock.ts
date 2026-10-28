@@ -7,6 +7,7 @@ import {
   type AgentState,
   type Config,
   type RecentMatch,
+  type RecordingStatus,
 } from "../state/types";
 import { previewHistory, previewReplay } from "./mock-matches";
 
@@ -15,6 +16,19 @@ const MAX_UI_LOGS = 2_000;
 let state: AgentState = structuredClone(initialState);
 const listeners = new Set<(state: AgentState) => void>();
 const timers: ReturnType<typeof setTimeout>[] = [];
+
+let recordingStatus: RecordingStatus = {
+  supported: true,
+  recording: false,
+  clipBuffer: false,
+  recordingPath: null,
+  bufferedSeconds: 0,
+  lastClipPath: null,
+  lastError: null,
+  videoOnly: true,
+  recordingSource: "monitor",
+  clipSource: "leagueWindow",
+};
 
 function emit() {
   const snapshot = structuredClone(state);
@@ -181,6 +195,38 @@ export async function mockInvoke<T>(
       );
       emit();
       return undefined as T;
+    }
+    case "get_recording_status":
+      return structuredClone(recordingStatus) as T;
+    case "start_recording":
+      recordingStatus = {
+        ...recordingStatus,
+        recording: true,
+        recordingSource: args?.source === "leagueWindow" ? "leagueWindow" : "monitor",
+        recordingPath: "Videos/Yummi/Recordings/Yummi-recording-preview.mp4",
+      };
+      return structuredClone(recordingStatus) as T;
+    case "stop_recording":
+      recordingStatus = { ...recordingStatus, recording: false };
+      return structuredClone(recordingStatus) as T;
+    case "start_clip_buffer":
+      recordingStatus = {
+        ...recordingStatus,
+        clipBuffer: true,
+        clipSource: args?.source === "monitor" ? "monitor" : "leagueWindow",
+        bufferedSeconds: 42,
+      };
+      return structuredClone(recordingStatus) as T;
+    case "stop_clip_buffer":
+      recordingStatus = { ...recordingStatus, clipBuffer: false, bufferedSeconds: 0 };
+      return structuredClone(recordingStatus) as T;
+    case "save_last_clip": {
+      const seconds = Number(args?.seconds ?? 30);
+      recordingStatus = {
+        ...recordingStatus,
+        lastClipPath: `Videos/Yummi/Clips/Yummi-clip-${seconds}s-preview.mp4`,
+      };
+      return structuredClone(recordingStatus) as T;
     }
     case "recent_match": {
       if (!state.lcu) throw new Error("League Client가 연결되지 않았습니다.");
