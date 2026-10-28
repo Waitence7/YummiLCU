@@ -113,6 +113,9 @@ namespace YummiGameBarWidget
             {
                 App.LogStage("hud-loaded");
                 Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
+                Window.Current.CoreWindow.PointerMoved += CoreWindowPointerMoved;
+                Window.Current.CoreWindow.PointerPressed += CoreWindowPointerChanged;
+                Window.Current.CoreWindow.PointerReleased += CoreWindowPointerChanged;
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
@@ -133,6 +136,9 @@ namespace YummiGameBarWidget
             Unloaded += (_, __) =>
             {
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
+                Window.Current.CoreWindow.PointerMoved -= CoreWindowPointerMoved;
+                Window.Current.CoreWindow.PointerPressed -= CoreWindowPointerChanged;
+                Window.Current.CoreWindow.PointerReleased -= CoreWindowPointerChanged;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
                 nativeInputTimer.Stop();
                 _ = SyncExternalClickTestAsync(false);
@@ -489,15 +495,28 @@ namespace YummiGameBarWidget
         }
 
 
+        private void UpdateGameBarPointer(Windows.Foundation.Point point)
+        {
+            lastGameBarPointerLocalX = point.X;
+            lastGameBarPointerLocalY = point.Y;
+            lastGameBarPointerAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        }
+
         private void RootGrid_PointerMoved(object sender, PointerRoutedEventArgs e)
         {
-            try
-            {
-                var point = e.GetCurrentPoint(RootGrid).Position;
-                lastGameBarPointerLocalX = point.X;
-                lastGameBarPointerLocalY = point.Y;
-                lastGameBarPointerAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            }
+            try { UpdateGameBarPointer(e.GetCurrentPoint(RootGrid).Position); }
+            catch { }
+        }
+
+        private void CoreWindowPointerMoved(CoreWindow sender, PointerEventArgs args)
+        {
+            try { UpdateGameBarPointer(args.CurrentPoint.Position); }
+            catch { }
+        }
+
+        private void CoreWindowPointerChanged(CoreWindow sender, PointerEventArgs args)
+        {
+            try { UpdateGameBarPointer(args.CurrentPoint.Position); }
             catch { }
         }
 
