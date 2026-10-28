@@ -321,6 +321,8 @@ async fn collect_snapshot(
         phase,
         party_members,
         online_friends,
+        voice_chat_channel_id: None,
+        voice_chat_messages: Vec::new(),
         updated_at_ms: now_ms(),
     }
 }

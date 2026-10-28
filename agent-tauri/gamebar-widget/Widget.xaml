@@ -216,6 +216,16 @@
           </Grid>
         </Grid>
       </Border>
+
+      <StackPanel x:Name="VoiceChatOverlay"
+                  Width="520"
+                  HorizontalAlignment="Left"
+                  VerticalAlignment="Bottom"
+                  Margin="24,0,0,72"
+                  Spacing="7"
+                  Background="Transparent"
+                  IsHitTestVisible="False"
+                  Visibility="Collapsed"/>
     </Grid>
   </Grid>
 </Page>

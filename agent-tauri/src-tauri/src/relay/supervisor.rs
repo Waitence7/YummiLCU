@@ -33,7 +33,10 @@ use crate::{
     lcu::{lockfile_path, lockfile_path_nonblocking, LcuClient, LcuEventPoller},
     platform::{launch_league_client, league_game_process_ids, open_login_url},
     session,
-    state::{AgentEvent, AppState, DiscordJoinResolution, DiscordPresenceMatchContext},
+    state::{
+        AgentEvent, AppState, DiscordJoinResolution, DiscordPresenceMatchContext,
+        VoiceChatOverlayMessage,
+    },
 };
 
 use super::{
@@ -3212,6 +3215,44 @@ where
                         "discord_presence_context",
                         format!("active={active} status={status}"),
                     )
+                    .await;
+            }
+        }
+        IncomingMessage::DiscordVoiceChatMessage {
+            guild_id,
+            channel_id,
+            message_id,
+            author_id,
+            author_name,
+            avatar_url,
+            content,
+            timestamp_ms,
+        } => {
+            if session_bound {
+                state.push_gamebar_voice_chat_message(VoiceChatOverlayMessage {
+                    channel_id,
+                    message_id,
+                    author_id,
+                    author_name,
+                    avatar_url: safe_avatar_url(avatar_url),
+                    content,
+                    timestamp_ms,
+                });
+                state
+                    .record_flight(
+                        "discord_voice_chat",
+                        format!(
+                            "message guild_id={guild_id} channel_id={channel_id} message_id={message_id}"
+                        ),
+                    )
+                    .await;
+            }
+        }
+        IncomingMessage::DiscordVoiceChatClear => {
+            if session_bound {
+                state.clear_gamebar_voice_chat();
+                state
+                    .record_flight("discord_voice_chat", "clear")
                     .await;
             }
         }

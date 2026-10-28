@@ -1,6 +1,6 @@
 import unittest
 
-from relay.app import _agent_release_asset
+from relay.app import _agent_release_asset, _agent_tracked_download_signature
 
 
 class AgentReleaseProxyMappingTests(unittest.TestCase):
@@ -40,6 +40,17 @@ class AgentReleaseProxyMappingTests(unittest.TestCase):
     def test_unknown_or_traversal_like_paths_are_rejected(self):
         self.assertIsNone(_agent_release_asset("/agent/nope"))
         self.assertIsNone(_agent_release_asset("/agent/releases/tauri/../../secret"))
+
+    def test_tracked_download_signature_is_stable(self) -> None:
+        import hashlib
+        import hmac
+
+        expected = hmac.new(
+            b"test-secret", b"agent-download-v1:123:1600", hashlib.sha256
+        ).hexdigest()
+        self.assertEqual(
+            _agent_tracked_download_signature("test-secret", 123, 1600), expected
+        )
 
 
 if __name__ == "__main__":

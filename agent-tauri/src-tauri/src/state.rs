@@ -157,12 +157,25 @@ fn installed_at() -> Option<u64> {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub(crate) struct VoiceChatOverlayMessage {
+    pub(crate) channel_id: u64,
+    pub(crate) message_id: u64,
+    pub(crate) author_id: u64,
+    pub(crate) author_name: String,
+    pub(crate) avatar_url: Option<String>,
+    pub(crate) content: String,
+    pub(crate) timestamp_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub(crate) struct GameBarSnapshot {
     pub(crate) connected: bool,
     pub(crate) riot_id: Option<String>,
     pub(crate) phase: String,
     pub(crate) party_members: Vec<String>,
     pub(crate) online_friends: Vec<String>,
+    pub(crate) voice_chat_channel_id: Option<u64>,
+    pub(crate) voice_chat_messages: Vec<VoiceChatOverlayMessage>,
     pub(crate) updated_at_ms: u64,
 }
 
@@ -174,6 +187,8 @@ impl Default for GameBarSnapshot {
             phase: "Offline".into(),
             party_members: Vec::new(),
             online_friends: Vec::new(),
+            voice_chat_channel_id: None,
+            voice_chat_messages: Vec::new(),
             updated_at_ms: 0,
         }
     }
@@ -509,6 +524,7 @@ impl AppState {
                 self.ui.lock().await.relay = relay_ready;
                 if !relay_ready {
                     *self.discord_presence_match.write().await = None;
+                    self.clear_gamebar_voice_chat();
                 }
                 self.emit(app).await;
                 self.report_diagnostic("relay", "state", relay_state_flight_label(next))
@@ -528,9 +544,39 @@ impl AppState {
             .unwrap_or_default()
     }
 
-    pub(crate) fn set_gamebar_snapshot(&self, snapshot: GameBarSnapshot) {
+    pub(crate) fn set_gamebar_snapshot(&self, mut snapshot: GameBarSnapshot) {
         if let Ok(mut current) = self.gamebar_snapshot.write() {
+            snapshot.voice_chat_channel_id = current.voice_chat_channel_id;
+            snapshot.voice_chat_messages = current.voice_chat_messages.clone();
             *current = snapshot;
+        }
+    }
+
+    pub(crate) fn push_gamebar_voice_chat_message(&self, message: VoiceChatOverlayMessage) {
+        if let Ok(mut snapshot) = self.gamebar_snapshot.write() {
+            if snapshot.voice_chat_channel_id != Some(message.channel_id) {
+                snapshot.voice_chat_channel_id = Some(message.channel_id);
+                snapshot.voice_chat_messages.clear();
+            }
+            if snapshot
+                .voice_chat_messages
+                .iter()
+                .any(|current| current.message_id == message.message_id)
+            {
+                return;
+            }
+            snapshot.voice_chat_messages.push(message);
+            if snapshot.voice_chat_messages.len() > 6 {
+                let remove = snapshot.voice_chat_messages.len() - 6;
+                snapshot.voice_chat_messages.drain(0..remove);
+            }
+        }
+    }
+
+    pub(crate) fn clear_gamebar_voice_chat(&self) {
+        if let Ok(mut snapshot) = self.gamebar_snapshot.write() {
+            snapshot.voice_chat_channel_id = None;
+            snapshot.voice_chat_messages.clear();
         }
     }
 

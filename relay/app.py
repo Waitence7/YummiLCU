@@ -11,6 +11,7 @@ import asyncio
 import base64
 import binascii
 import hashlib
+import hmac
 import html
 import ipaddress
 import json
@@ -50,7 +51,13 @@ from relay.lcu_linked import (
     mark_lcu_linked,
 )
 from relay.lcu_recent import mark_recent_lcu_data, recent_lcu_data, recent_lcu_data_map
-from relay.lcu_audit import append_agent_history, agent_state_map, remember_agent_state
+from relay.lcu_audit import (
+    agent_event_stats_map,
+    agent_state_map,
+    append_agent_history,
+    observe_agent_event,
+    remember_agent_state,
+)
 from relay.logging_safety import redact_log_text
 
 logger = logging.getLogger("yummi_lcu.relay")
@@ -906,6 +913,12 @@ _AGENT_PROXY_ALLOWED_HOSTS = frozenset({
     "release-assets.githubusercontent.com",
     "objects.githubusercontent.com",
 })
+_AGENT_TRACKED_DOWNLOAD_MAX_TTL_SEC = 7 * 24 * 60 * 60
+
+
+def _agent_tracked_download_signature(secret: str, discord_id: int, expires: int) -> str:
+    message = f"agent-download-v1:{int(discord_id)}:{int(expires)}".encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), message, hashlib.sha256).hexdigest()
 
 
 def _agent_release_asset(path: str) -> tuple[str, str, str | None] | None:
@@ -1046,7 +1059,13 @@ async def _agent_resolve_upstream(request: Request, upstream: str) -> str:
     return f"{_AGENT_RELEASE_BASE}/{tag}/{asset_name}"
 
 
-async def _agent_proxy_response(request: Request, path: str) -> Response:
+async def _agent_proxy_response(
+    request: Request,
+    path: str,
+    *,
+    audit_discord_id: int | None = None,
+    audit_started_at_ms: int | None = None,
+) -> Response:
     asset = _agent_release_asset(path)
     if asset is None:
         raise HTTPException(404, "agent asset not found")
@@ -1085,13 +1104,103 @@ async def _agent_proxy_response(request: Request, path: str) -> Response:
         return Response(status_code=200, media_type=media_type, headers=headers)
 
     async def body():
+        sent_bytes = 0
+        completed = False
         try:
             async for chunk in upstream.content.iter_chunked(256 * 1024):
+                sent_bytes += len(chunk)
                 yield chunk
+            completed = True
         finally:
             upstream.close()
+            if audit_discord_id is not None:
+                completed_at_ms = int(time.time() * 1000)
+                event_name = "download_http_completed" if completed else "download_http_interrupted"
+                try:
+                    await observe_agent_event(
+                        request.app.state.redis,
+                        audit_discord_id,
+                        event_name,
+                        occurred_at_ms=completed_at_ms,
+                        message_bytes=sent_bytes,
+                    )
+                    await remember_agent_state(
+                        request.app.state.redis,
+                        audit_discord_id,
+                        last_download_event=event_name,
+                        last_download_at_ms=completed_at_ms,
+                        last_download_bytes=sent_bytes,
+                    )
+                    await append_agent_history(
+                        request.app.state.redis,
+                        audit_discord_id,
+                        event_name,
+                        occurred_at_ms=completed_at_ms,
+                        bytes=sent_bytes,
+                        expected_bytes=int(length) if length and length.isdigit() else None,
+                        elapsed_ms=max(
+                            0, completed_at_ms - int(audit_started_at_ms or completed_at_ms)
+                        ),
+                        asset_path=path,
+                    )
+                except Exception:
+                    logger.exception(
+                        "tracked Agent download completion audit failed discord_id=%s",
+                        audit_discord_id,
+                    )
 
     return StreamingResponse(body(), media_type=media_type, headers=headers)
+
+
+@app.get("/agent/tracked-download")
+async def tracked_agent_download(
+    request: Request,
+    uid: int = Query(..., gt=0),
+    expires: int = Query(..., gt=0),
+    sig: str = Query(..., min_length=64, max_length=64),
+) -> Response:
+    """Per-user signed installer URL used to audit actual HTTP transfer."""
+    now_sec = int(time.time())
+    if expires < now_sec or expires > now_sec + _AGENT_TRACKED_DOWNLOAD_MAX_TTL_SEC:
+        raise HTTPException(403, "download link expired")
+    secret = config.relay_internal_secret()
+    expected = _agent_tracked_download_signature(secret, uid, expires) if secret else ""
+    if not expected or not hmac.compare_digest(sig, expected):
+        raise HTTPException(403, "invalid download link")
+
+    started_at_ms = int(time.time() * 1000)
+    user_agent = request.headers.get("user-agent", "")[:256]
+    try:
+        await observe_agent_event(
+            request.app.state.redis,
+            uid,
+            "download_http_requested",
+            occurred_at_ms=started_at_ms,
+        )
+        await remember_agent_state(
+            request.app.state.redis,
+            uid,
+            last_download_event="download_http_requested",
+            last_download_at_ms=started_at_ms,
+            last_download_user_agent=user_agent,
+        )
+        await append_agent_history(
+            request.app.state.redis,
+            uid,
+            "download_http_requested",
+            occurred_at_ms=started_at_ms,
+            user_agent=user_agent,
+            asset_path="/agent/releases/tauri/latest-setup.exe",
+        )
+    except Exception:
+        logger.exception("tracked Agent download request audit failed discord_id=%s", uid)
+
+    return await _agent_proxy_response(
+        request,
+        "/agent/releases/tauri/latest-setup.exe",
+        audit_discord_id=uid,
+        audit_started_at_ms=started_at_ms,
+    )
 
 
 @app.api_route("/agent/{asset_path:path}", methods=["GET", "HEAD"])
@@ -3077,6 +3186,16 @@ async def _handle_agent_message(
     msg_type = data.get("type")
     if not isinstance(msg_type, str):
         return
+    observed_discord_id = conn.discord_id_for_ws(websocket)
+    if observed_discord_id is not None:
+        await observe_agent_event(
+            websocket.app.state.redis,
+            observed_discord_id,
+            msg_type,
+            message_bytes=len(msg.encode("utf-8")),
+            session_id=conn.ws_session_id(websocket),
+            connection_id=conn.ws_connection_id(websocket),
+        )
     if msg_type == "device_proof":
         challenge = conn.device_challenge_for_ws(websocket)
         session_id = conn.ws_session_id(websocket)
@@ -3388,6 +3507,28 @@ async def _handle_agent_message(
             logger.warning("guild_match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return
         event_id = _relay_event_id(data)
+        eog_at_ms = int(time.time() * 1000)
+        participants = payload.get("participants")
+        await remember_agent_state(
+            websocket.app.state.redis,
+            discord_id,
+            last_seen_at_ms=eog_at_ms,
+            last_guild_match_eog_at_ms=eog_at_ms,
+            last_eog_game_id=str(payload.get("gameId") or "")[:64],
+            last_eog_participant_count=len(participants) if isinstance(participants, list) else 0,
+            last_eog_none_reason=str(payload.get("eog_none_reason") or "")[:256],
+        )
+        await append_agent_history(
+            websocket.app.state.redis,
+            discord_id,
+            "guild_match_eog_received",
+            occurred_at_ms=eog_at_ms,
+            event_id=event_id or "",
+            game_id=str(payload.get("gameId") or "")[:64],
+            participant_count=len(participants) if isinstance(participants, list) else 0,
+            none_reason=str(payload.get("eog_none_reason") or "")[:256],
+            gameflow_phase=str(payload.get("gameflowPhase") or "")[:64],
+        )
         logger.info(
             "guild_match_eog 수신 discord_id=%s context=%s",
             discord_id,
@@ -3461,6 +3602,28 @@ async def _handle_agent_message(
             logger.warning("match_eog 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return
         event_id = _relay_event_id(data)
+        eog_at_ms = int(time.time() * 1000)
+        participants = payload.get("participants")
+        await remember_agent_state(
+            websocket.app.state.redis,
+            discord_id,
+            last_seen_at_ms=eog_at_ms,
+            last_match_eog_at_ms=eog_at_ms,
+            last_eog_game_id=str(payload.get("gameId") or "")[:64],
+            last_eog_participant_count=len(participants) if isinstance(participants, list) else 0,
+            last_eog_none_reason=str(payload.get("eog_none_reason") or "")[:256],
+        )
+        await append_agent_history(
+            websocket.app.state.redis,
+            discord_id,
+            "match_eog_received",
+            occurred_at_ms=eog_at_ms,
+            event_id=event_id or "",
+            game_id=str(payload.get("gameId") or "")[:64],
+            participant_count=len(participants) if isinstance(participants, list) else 0,
+            none_reason=str(payload.get("eog_none_reason") or "")[:256],
+            gameflow_phase=str(payload.get("gameflowPhase") or "")[:64],
+        )
         logger.info(
             "match_eog 수신 discord_id=%s context=%s",
             discord_id,
@@ -3490,6 +3653,31 @@ async def _handle_agent_message(
             logger.warning("match_rofl 무시: discord_id=%s payload=%s", discord_id, type(payload))
             return
         event_id = _relay_event_id(data)
+        rofl_at_ms = int(time.time() * 1000)
+        participants = payload.get("participants")
+        await remember_agent_state(
+            websocket.app.state.redis,
+            discord_id,
+            last_seen_at_ms=rofl_at_ms,
+            last_rofl_at_ms=rofl_at_ms,
+            last_rofl_game_id=str(payload.get("gameId") or "")[:64],
+            last_rofl_kind=str(payload.get("kind") or "")[:64],
+            last_rofl_part=str(payload.get("part") or "")[:32],
+            last_rofl_parts=str(payload.get("parts") or "")[:32],
+        )
+        await append_agent_history(
+            websocket.app.state.redis,
+            discord_id,
+            "match_rofl_received",
+            occurred_at_ms=rofl_at_ms,
+            event_id=event_id or "",
+            game_id=str(payload.get("gameId") or "")[:64],
+            kind=str(payload.get("kind") or "")[:64],
+            part=payload.get("part"),
+            parts=payload.get("parts"),
+            participant_count=len(participants) if isinstance(participants, list) else 0,
+            client_version=str(payload.get("clientVersion") or "")[:64],
+        )
         http: aiohttp.ClientSession = websocket.app.state.http
         persisted = await _forward_match_rofl(http, discord_id, payload, event_id)
         if persisted:
@@ -3676,6 +3864,29 @@ async def _handle_agent_message(
         await mark_lcu_linked(r, discord_id)
         await mark_lcu_agent_version(r, discord_id, info["version"])
         hello_at_ms = int(time.time() * 1000)
+        raw_auth_source = None
+        if session_id and hasattr(r, "get"):
+            raw_auth_source = await r.get(_session_auth_source_redis_key(session_id))
+        if isinstance(raw_auth_source, bytes):
+            raw_auth_source = raw_auth_source.decode("utf-8", errors="ignore")
+        auth_source = str(raw_auth_source or "unknown")[:32]
+        fingerprint_for_ws = getattr(conn, "device_fingerprint_for_ws", None)
+        device_id_for_ws = getattr(conn, "device_id_for_ws", None)
+        device_fingerprint = (
+            fingerprint_for_ws(websocket) if callable(fingerprint_for_ws) else None
+        ) or ""
+        device_id = (device_id_for_ws(websocket) if callable(device_id_for_ws) else None) or ""
+        connection_id = conn.ws_connection_id(websocket) or ""
+        if observed_discord_id is None:
+            await observe_agent_event(
+                r,
+                discord_id,
+                "agent_hello",
+                occurred_at_ms=hello_at_ms,
+                message_bytes=len(msg.encode("utf-8")),
+                session_id=session_id,
+                connection_id=connection_id,
+            )
         await remember_agent_state(
             r,
             discord_id,
@@ -3686,8 +3897,13 @@ async def _handle_agent_message(
             os=info["os"],
             lcu_ready=info["lcu_ready"],
             protocol_version=info["protocol_version"],
-            session_id=conn.ws_session_id(websocket) or "",
-            connection_id=conn.ws_connection_id(websocket) or "",
+            session_id=session_id,
+            connection_id=connection_id,
+            trust_level=trust_level,
+            auth_source=auth_source,
+            auto_login_source=auto_login_source,
+            device_fingerprint_prefix=device_fingerprint[:16],
+            device_id_prefix=device_id[:8],
         )
         await append_agent_history(
             r,
@@ -3698,8 +3914,13 @@ async def _handle_agent_message(
             os=info["os"],
             lcu_ready=info["lcu_ready"],
             protocol_version=info["protocol_version"],
-            session_id=conn.ws_session_id(websocket) or "",
-            connection_id=conn.ws_connection_id(websocket) or "",
+            session_id=session_id,
+            connection_id=connection_id,
+            trust_level=trust_level,
+            auth_source=auth_source,
+            auto_login_source=auto_login_source,
+            device_fingerprint_prefix=device_fingerprint[:16],
+            device_id_prefix=device_id[:8],
         )
         cached_status = conn.get_participant_status(discord_id)
         if cached_status is not None:
@@ -3725,6 +3946,25 @@ async def _handle_agent_message(
         payload = data.get("data")
         if discord_id is None or not isinstance(payload, dict):
             return
+        party_at_ms = int(time.time() * 1000)
+        party_members = payload.get("riot_ids_in_party")
+        party_member_count = len(party_members) if isinstance(party_members, list) else 0
+        await remember_agent_state(
+            websocket.app.state.redis,
+            discord_id,
+            last_seen_at_ms=party_at_ms,
+            last_party_lobby_at_ms=party_at_ms,
+            party_in_lobby=bool(payload.get("in_lobby")),
+            party_member_count=party_member_count,
+        )
+        await append_agent_history(
+            websocket.app.state.redis,
+            discord_id,
+            "party_lobby",
+            occurred_at_ms=party_at_ms,
+            in_lobby=bool(payload.get("in_lobby")),
+            member_count=party_member_count,
+        )
         await conn.forward_party_lobby_update(discord_id, payload)
         return
 
@@ -3733,6 +3973,25 @@ async def _handle_agent_message(
         payload = data.get("data")
         if discord_id is None or not isinstance(payload, dict):
             return
+        ready_at_ms = int(time.time() * 1000)
+        await remember_agent_state(
+            websocket.app.state.redis,
+            discord_id,
+            last_seen_at_ms=ready_at_ms,
+            last_ready_check_at_ms=ready_at_ms,
+            ready_check_active=bool(payload.get("active")),
+            ready_check_state=str(payload.get("state") or "")[:64],
+            ready_check_player_response=str(payload.get("player_response") or "")[:64],
+        )
+        await append_agent_history(
+            websocket.app.state.redis,
+            discord_id,
+            "ready_check",
+            occurred_at_ms=ready_at_ms,
+            active=bool(payload.get("active")),
+            state=str(payload.get("state") or "")[:64],
+            player_response=str(payload.get("player_response") or "")[:64],
+        )
         await conn.forward_ready_check_update(discord_id, payload)
         return
 
@@ -3741,6 +4000,39 @@ async def _handle_agent_message(
         payload = data.get("data")
         if discord_id is None or not isinstance(payload, dict):
             return
+        champ_at_ms = int(time.time() * 1000)
+        current_action = payload.get("current_action")
+        current_action = current_action if isinstance(current_action, dict) else {}
+        my_team = payload.get("my_team")
+        their_team = payload.get("their_team")
+        await remember_agent_state(
+            websocket.app.state.redis,
+            discord_id,
+            last_seen_at_ms=champ_at_ms,
+            last_champ_select_at_ms=champ_at_ms,
+            champ_select_active=bool(payload.get("active")),
+            champ_select_game_id=str(payload.get("game_id") or "")[:64],
+            champ_select_phase=str(payload.get("phase") or "")[:64],
+            champ_select_timer_ms=payload.get("timer_ms") or 0,
+            champ_select_spectating=bool(payload.get("is_spectating")),
+            champ_select_current_action=str(current_action.get("type") or "")[:32],
+            champ_select_current_champion_id=current_action.get("champion_id") or 0,
+        )
+        await append_agent_history(
+            websocket.app.state.redis,
+            discord_id,
+            "champ_select",
+            occurred_at_ms=champ_at_ms,
+            active=bool(payload.get("active")),
+            game_id=str(payload.get("game_id") or "")[:64],
+            phase=str(payload.get("phase") or "")[:64],
+            timer_ms=payload.get("timer_ms") or 0,
+            is_spectating=bool(payload.get("is_spectating")),
+            my_team_count=len(my_team) if isinstance(my_team, list) else 0,
+            their_team_count=len(their_team) if isinstance(their_team, list) else 0,
+            current_action_type=str(current_action.get("type") or "")[:32],
+            current_action_champion_id=current_action.get("champion_id") or 0,
+        )
         await conn.forward_champ_select_update(discord_id, payload)
         _enqueue_tournament_broadcast_lcu(
             websocket.app, discord_id, "champ_select", payload
@@ -3876,6 +4168,27 @@ async def _handle_agent_message(
             )
             await r.delete(_live_delta_api_block_key(discord_id, prepared["stream_id"]))
 
+        live_at_ms = int(time.time() * 1000)
+        game = full_state.get("game")
+        game = game if isinstance(game, dict) else {}
+        players = full_state.get("players")
+        await remember_agent_state(
+            r,
+            discord_id,
+            last_seen_at_ms=live_at_ms,
+            last_live_game_at_ms=live_at_ms,
+            live_stream_id=str(prepared.get("stream_id") or "legacy")[:128],
+            live_seq=prepared.get("seq") or 0,
+            live_matched=bool(matched),
+            live_game_id=str(
+                game.get("game_id")
+                or game.get("gameId")
+                or full_state.get("game_id")
+                or full_state.get("gameId")
+                or ""
+            )[:64],
+            live_player_count=len(players) if isinstance(players, list) else 0,
+        )
         await conn.forward_live_game_update(discord_id, full_state)
         _enqueue_tournament_broadcast_lcu(
             websocket.app, discord_id, "live_game", full_state
@@ -4161,6 +4474,10 @@ async def ws_agent(
                             last_disconnect_code=1001, last_disconnect_reason="activity timeout",
                             session_id=session_id, connection_id=connection_id,
                         )
+                        await observe_agent_event(
+                            r, discord_id, "activity_timeout", occurred_at_ms=timeout_at_ms,
+                            session_id=session_id, connection_id=connection_id,
+                        )
                         await append_agent_history(
                             r, discord_id, "activity_timeout", occurred_at_ms=timeout_at_ms,
                             session_id=session_id, connection_id=connection_id, detail=timeout_detail,
@@ -4295,10 +4612,18 @@ async def ws_agent(
                 last_disconnect_reason=reason or "", session_id=session_id,
                 connection_id=connection_id,
             )
+            await observe_agent_event(
+                r, discord_id, "disconnect", occurred_at_ms=disconnect_at_ms,
+                session_id=session_id, connection_id=connection_id,
+            )
             await append_agent_history(
                 r, discord_id, "disconnect", occurred_at_ms=disconnect_at_ms,
                 code=code if code is not None else "unknown", reason=reason or "",
-                session_id=session_id, connection_id=connection_id, detail=disconnect_detail,
+                session_id=session_id, connection_id=connection_id,
+                connected_ms=connected_ms, idle_ms=idle_ms,
+                received=received_count, pings=ping_count, non_ping=non_ping_count,
+                pongs_sent=pong_sent_count, handler_max_ms=handler_max_ms,
+                last_type=last_message_type, detail=disconnect_detail,
             )
         logger.info(
             "Agent websocket disconnected discord_id=%s %s",
@@ -4360,6 +4685,57 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
                 "1",
                 ex=30 * 24 * 60 * 60,
             )
+        return
+
+    if msg_type == "voice_chat_message":
+        raw_ids = data.get("discord_ids")
+        raw_event = data.get("data")
+        if not isinstance(raw_ids, list) or not isinstance(raw_event, dict):
+            return
+        targets = sorted(
+            {value for value in raw_ids[:100] if isinstance(value, int) and not isinstance(value, bool) and value > 0}
+        )
+        guild_id = raw_event.get("guild_id")
+        channel_id = raw_event.get("channel_id")
+        message_id = raw_event.get("message_id")
+        author_id = raw_event.get("author_id")
+        author_name = raw_event.get("author_name")
+        avatar_url = raw_event.get("avatar_url")
+        content = raw_event.get("content")
+        timestamp_ms = raw_event.get("timestamp_ms")
+        if (
+            not targets
+            or not all(isinstance(value, int) and not isinstance(value, bool) and value > 0 for value in (guild_id, channel_id, message_id, author_id, timestamp_ms))
+            or not isinstance(author_name, str)
+            or not author_name.strip()
+            or len(author_name) > 128
+            or not isinstance(content, str)
+            or not content.strip()
+            or len(content) > 800
+            or (avatar_url is not None and (not isinstance(avatar_url, str) or len(avatar_url) > 2048))
+        ):
+            return
+        packet = {
+            "type": "discord_voice_chat_message",
+            "guild_id": guild_id,
+            "channel_id": channel_id,
+            "message_id": message_id,
+            "author_id": author_id,
+            "author_name": author_name.strip(),
+            "avatar_url": avatar_url,
+            "content": content.strip(),
+            "timestamp_ms": timestamp_ms,
+        }
+        await asyncio.gather(
+            *(conn.send_command(discord_id, packet) for discord_id in targets),
+            return_exceptions=True,
+        )
+        return
+
+    if msg_type == "voice_chat_clear":
+        raw_id = data.get("discord_id")
+        if isinstance(raw_id, int) and not isinstance(raw_id, bool) and raw_id > 0:
+            await conn.send_command(raw_id, {"type": "discord_voice_chat_clear"})
         return
 
     if msg_type == "subscribe_party":
@@ -4549,6 +4925,21 @@ async def internal_command(
         ):
             raise HTTPException(400, "summoner_id required")
     req_id = secrets.token_hex(8)
+    r: redis.Redis = request.app.state.redis
+    command_at_ms = int(time.time() * 1000)
+    await observe_agent_event(
+        r, body.discord_id, "command_sent", occurred_at_ms=command_at_ms
+    )
+    await append_agent_history(
+        r,
+        body.discord_id,
+        "command_sent",
+        occurred_at_ms=command_at_ms,
+        request_id=req_id,
+        action=body.action,
+        trust_level=trust_level,
+        payload_keys=sorted(str(key)[:64] for key in body.payload)[:32],
+    )
     pending = conn.register_pending_result(body.discord_id, req_id)
     ok = await conn.send_command(
         body.discord_id,
@@ -4561,6 +4952,14 @@ async def internal_command(
     )
     if not ok:
         conn.cancel_pending_result(body.discord_id, req_id)
+        failed_at_ms = int(time.time() * 1000)
+        await observe_agent_event(
+            r, body.discord_id, "command_send_failed", occurred_at_ms=failed_at_ms
+        )
+        await append_agent_history(
+            r, body.discord_id, "command_send_failed", occurred_at_ms=failed_at_ms,
+            request_id=req_id, action=body.action,
+        )
         raise HTTPException(502, "failed to send to agent")
 
     timeout_sec = policy.timeout_sec
@@ -4568,10 +4967,37 @@ async def internal_command(
         result = await asyncio.wait_for(pending, timeout=timeout_sec)
     except asyncio.TimeoutError:
         conn.cancel_pending_result(body.discord_id, req_id)
+        timeout_at_ms = int(time.time() * 1000)
+        await observe_agent_event(
+            r, body.discord_id, "command_timeout", occurred_at_ms=timeout_at_ms
+        )
+        await append_agent_history(
+            r, body.discord_id, "command_timeout", occurred_at_ms=timeout_at_ms,
+            request_id=req_id, action=body.action, timeout_sec=timeout_sec,
+        )
         raise HTTPException(504, "agent response timeout") from None
     except asyncio.CancelledError:
+        disconnected_at_ms = int(time.time() * 1000)
+        await observe_agent_event(
+            r, body.discord_id, "command_disconnected", occurred_at_ms=disconnected_at_ms
+        )
+        await append_agent_history(
+            r, body.discord_id, "command_disconnected", occurred_at_ms=disconnected_at_ms,
+            request_id=req_id, action=body.action,
+        )
         raise HTTPException(502, "agent disconnected") from None
 
+    result_at_ms = int(time.time() * 1000)
+    result_ok = bool(result.get("ok")) if isinstance(result, dict) else False
+    result_message = str(result.get("message") or "")[:256] if isinstance(result, dict) else ""
+    await observe_agent_event(
+        r, body.discord_id, "command_result", occurred_at_ms=result_at_ms
+    )
+    await append_agent_history(
+        r, body.discord_id, "command_result", occurred_at_ms=result_at_ms,
+        request_id=req_id, action=body.action, ok=result_ok, message=result_message,
+        elapsed_ms=max(0, result_at_ms - command_at_ms),
+    )
     return JSONResponse({"ok": True, "request_id": req_id, "result": result})
 
 
@@ -4712,6 +5138,7 @@ async def internal_agent_audit(
     await _verify_internal_secret(request, x_relay_internal_secret)
     r: redis.Redis = request.app.state.redis
     states = await agent_state_map(r, [discord_id])
+    event_stats = await agent_event_stats_map(r, [discord_id])
     rows = await r.lrange(f"lcu:agent_history:v1:{int(discord_id)}", -limit, -1)
     history: list[dict[str, Any]] = []
     for raw in rows:
@@ -4724,6 +5151,7 @@ async def internal_agent_audit(
     return JSONResponse({
         "discord_id": discord_id,
         "state": states.get(discord_id, {}),
+        "event_stats": event_stats.get(discord_id, {}),
         "history": history,
     })
 

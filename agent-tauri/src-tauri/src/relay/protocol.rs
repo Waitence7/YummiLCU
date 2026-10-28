@@ -70,6 +70,19 @@ pub(crate) enum IncomingMessage {
         invite_code: Option<String>,
         discord_guild_id: Option<String>,
     },
+    #[serde(rename = "discord_voice_chat_message")]
+    DiscordVoiceChatMessage {
+        guild_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        author_id: u64,
+        author_name: String,
+        avatar_url: Option<String>,
+        content: String,
+        timestamp_ms: u64,
+    },
+    #[serde(rename = "discord_voice_chat_clear")]
+    DiscordVoiceChatClear,
     #[serde(other)]
     Unknown,
 }
@@ -141,6 +154,30 @@ impl IncomingMessage {
                 || (*active && (invite_code.is_none() || discord_guild_id.is_none())) =>
             {
                 Err("invalid Discord presence context")
+            }
+            Self::DiscordVoiceChatMessage {
+                guild_id,
+                channel_id,
+                message_id,
+                author_id,
+                author_name,
+                avatar_url,
+                content,
+                timestamp_ms,
+            } if *guild_id == 0
+                || *channel_id == 0
+                || *message_id == 0
+                || *author_id == 0
+                || *timestamp_ms == 0
+                || author_name.is_empty()
+                || author_name.chars().count() > 128
+                || content.is_empty()
+                || content.chars().count() > 800
+                || avatar_url
+                    .as_ref()
+                    .is_some_and(|value| value.is_empty() || value.len() > 2_048) =>
+            {
+                Err("invalid Discord voice chat message")
             }
             Self::ServerHello { capabilities, .. }
                 if capabilities.len() > 64
@@ -1054,6 +1091,31 @@ mod tests {
             let action = Action::parse(action_name).unwrap();
             assert!(!action.allowed_on_new_device(), "{action_name}");
         }
+    }
+
+    #[test]
+    fn discord_voice_chat_message_is_validated() {
+        let parsed = IncomingMessage::parse(
+            r#"{"type":"discord_voice_chat_message","guild_id":1,"channel_id":2,"message_id":3,"author_id":4,"author_name":"Yummi","avatar_url":"https://cdn.discordapp.com/avatars/4/a.png","content":"안녕","timestamp_ms":123456}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            parsed,
+            IncomingMessage::DiscordVoiceChatMessage {
+                channel_id: 2,
+                message_id: 3,
+                ref content,
+                ..
+            } if content == "안녕"
+        ));
+        assert!(IncomingMessage::parse(
+            r#"{"type":"discord_voice_chat_message","guild_id":1,"channel_id":2,"message_id":3,"author_id":4,"author_name":"Yummi","content":"","timestamp_ms":123456}"#
+        )
+        .is_err());
+        assert!(matches!(
+            IncomingMessage::parse(r#"{"type":"discord_voice_chat_clear"}"#).unwrap(),
+            IncomingMessage::DiscordVoiceChatClear
+        ));
     }
 
     #[test]

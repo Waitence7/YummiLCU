@@ -19,6 +19,7 @@ from relay.audit_archive import append_archive_record
 LCU_AGENT_AUDIT_USERS_KEY = "lcu:agent_audit_users:v1"
 LCU_AGENT_STATE_KEY = "lcu:agent_state:v1:{discord_id}"
 LCU_AGENT_HISTORY_KEY = "lcu:agent_history:v1:{discord_id}"
+LCU_AGENT_EVENT_STATS_KEY = "lcu:agent_event_stats:v1:{discord_id}"
 
 
 def _state_key(discord_id: int) -> str:
@@ -27,6 +28,15 @@ def _state_key(discord_id: int) -> str:
 
 def _history_key(discord_id: int) -> str:
     return LCU_AGENT_HISTORY_KEY.format(discord_id=int(discord_id))
+
+
+def _event_stats_key(discord_id: int) -> str:
+    return LCU_AGENT_EVENT_STATS_KEY.format(discord_id=int(discord_id))
+
+
+def _event_name(value: str) -> str:
+    raw = str(value or "unknown")[:96]
+    return "".join(ch if ch.isalnum() or ch in "_:-" else "_" for ch in raw) or "unknown"
 
 
 def _clean_value(value: Any) -> str:
@@ -88,6 +98,81 @@ async def append_agent_history(
     await r.sadd(LCU_AGENT_AUDIT_USERS_KEY, str(uid))
     # Append-only by design: no EXPIRE/LTRIM. Redis AOF + persistent volume is the archive.
     await r.rpush(_history_key(uid), encoded)
+
+
+async def observe_agent_event(
+    r: redis.Redis,
+    discord_id: int,
+    event: str,
+    *,
+    occurred_at_ms: int | None = None,
+    message_bytes: int | None = None,
+    session_id: str | None = None,
+    connection_id: str | None = None,
+) -> None:
+    """Persist compact per-event counters/timestamps without retaining raw payloads.
+
+    High-frequency frames such as live-game deltas are counted here instead of
+    being appended one-by-one to the permanent lifecycle list. Redis AOF rewrites
+    compact these counters, keeping long-running sessions bounded.
+    """
+    uid = int(discord_id)
+    if uid <= 0:
+        return
+    name = _event_name(event)
+    when = int(occurred_at_ms if occurred_at_ms is not None else time.time() * 1000)
+    byte_count = max(0, int(message_bytes or 0))
+    if not hasattr(r, "pipeline"):
+        return
+    pipe = r.pipeline()
+    required = ("sadd", "hincrby", "hsetnx", "hset")
+    if not all(hasattr(pipe, method) for method in required):
+        return
+    stats_key = _event_stats_key(uid)
+    state_key = _state_key(uid)
+    pipe.sadd(LCU_AGENT_AUDIT_USERS_KEY, str(uid))
+    pipe.hincrby(stats_key, f"{name}.count", 1)
+    pipe.hsetnx(stats_key, f"{name}.first_at_ms", str(when))
+    pipe.hset(stats_key, f"{name}.last_at_ms", str(when))
+    if byte_count:
+        pipe.hincrby(stats_key, f"{name}.bytes", byte_count)
+    pipe.hset(state_key, "last_event_type", name)
+    pipe.hset(state_key, "last_event_at_ms", str(when))
+    if session_id is not None:
+        pipe.hset(state_key, "last_event_session_id", str(session_id)[:128])
+    if connection_id is not None:
+        pipe.hset(state_key, "last_event_connection_id", str(connection_id)[:128])
+    await pipe.execute()
+
+
+async def agent_event_stats_map(
+    r: redis.Redis, discord_ids: list[int]
+) -> dict[int, dict[str, dict[str, int]]]:
+    ids = sorted({int(value) for value in discord_ids if int(value) > 0})
+    if not ids or not hasattr(r, "pipeline"):
+        return {uid: {} for uid in ids}
+    pipe = r.pipeline()
+    for uid in ids:
+        pipe.hgetall(_event_stats_key(uid))
+    rows = await pipe.execute()
+    result: dict[int, dict[str, dict[str, int]]] = {}
+    for uid, row in zip(ids, rows, strict=True):
+        parsed: dict[str, dict[str, int]] = {}
+        for raw_key, raw_value in dict(row or {}).items():
+            key = raw_key.decode("utf-8", errors="ignore") if isinstance(raw_key, bytes) else str(raw_key)
+            value = raw_value.decode("utf-8", errors="ignore") if isinstance(raw_value, bytes) else str(raw_value)
+            if "." not in key:
+                continue
+            name, metric = key.rsplit(".", 1)
+            if metric not in {"count", "first_at_ms", "last_at_ms", "bytes"}:
+                continue
+            try:
+                numeric = int(value)
+            except (TypeError, ValueError):
+                continue
+            parsed.setdefault(name, {})[metric] = numeric
+        result[uid] = parsed
+    return result
 
 
 async def agent_state_map(r: redis.Redis, discord_ids: list[int]) -> dict[int, dict[str, str]]:

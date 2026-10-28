@@ -21,6 +21,8 @@ using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Controls.Primitives;
 using Windows.UI.Xaml.Media;
+using Windows.UI.Xaml.Media.Imaging;
+using Windows.UI.Xaml.Shapes;
 using Windows.UI.Xaml.Input;
 using Windows.UI.Xaml.Navigation;
 
@@ -112,6 +114,7 @@ namespace YummiGameBarWidget
         private double lastGameBarPointerLocalY;
         private long lastGameBarPointerAtMs;
         private double clickNativeExpandedHeight = 300;
+        private string voiceChatSignature = "";
 
         public Widget()
         {
@@ -517,7 +520,103 @@ namespace YummiGameBarWidget
             bridgeError = "";
             BridgeText.Text = connected ? "LCU 연결됨" : "유미 에이전트 연결됨 · League 대기 중";
             StatusDot.Fill = new SolidColorBrush(connected ? Color.FromArgb(255, 86, 221, 139) : Color.FromArgb(255, 122, 106, 134));
+            ApplyVoiceChat(json);
             SaveStatus();
+        }
+
+        private void ApplyVoiceChat(JsonObject json)
+        {
+            JsonArray messages = null;
+            if (json.ContainsKey("voice_chat_messages") && json["voice_chat_messages"].ValueType == JsonValueType.Array)
+                messages = json.GetNamedArray("voice_chat_messages");
+
+            if (messages == null || messages.Count == 0)
+            {
+                if (voiceChatSignature.Length != 0)
+                {
+                    voiceChatSignature = "";
+                    VoiceChatOverlay.Children.Clear();
+                }
+                VoiceChatOverlay.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            var signatureBuilder = new StringBuilder();
+            foreach (var value in messages)
+            {
+                if (value.ValueType != JsonValueType.Object) continue;
+                var item = value.GetObject();
+                signatureBuilder.Append(item.GetNamedNumber("timestamp_ms", 0));
+                signatureBuilder.Append(':');
+                signatureBuilder.Append(SnapshotJson.String(item, "author_name"));
+                signatureBuilder.Append(':');
+                signatureBuilder.Append(SnapshotJson.String(item, "content"));
+                signatureBuilder.Append('|');
+            }
+            var signature = signatureBuilder.ToString();
+            VoiceChatOverlay.Visibility = Visibility.Visible;
+            if (signature == voiceChatSignature) return;
+            voiceChatSignature = signature;
+            VoiceChatOverlay.Children.Clear();
+
+            foreach (var value in messages.Skip(Math.Max(0, (int)messages.Count - 6)))
+            {
+                if (value.ValueType != JsonValueType.Object) continue;
+                var item = value.GetObject();
+                var author = SnapshotJson.String(item, "author_name");
+                var content = SnapshotJson.String(item, "content");
+                var avatar = SnapshotJson.String(item, "avatar_url");
+                if (string.IsNullOrWhiteSpace(content)) continue;
+
+                var row = new Grid { Margin = new Thickness(0, 0, 0, 2) };
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(34) });
+                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+                var avatarCircle = new Ellipse
+                {
+                    Width = 28,
+                    Height = 28,
+                    VerticalAlignment = VerticalAlignment.Top,
+                    Margin = new Thickness(0, 1, 6, 0),
+                    Fill = new SolidColorBrush(Color.FromArgb(255, 54, 57, 63)),
+                };
+                if (Uri.TryCreate(avatar, UriKind.Absolute, out var avatarUri) && avatarUri.Scheme == Uri.UriSchemeHttps)
+                {
+                    avatarCircle.Fill = new ImageBrush
+                    {
+                        ImageSource = new BitmapImage(avatarUri),
+                        Stretch = Stretch.UniformToFill,
+                    };
+                }
+                Grid.SetColumn(avatarCircle, 0);
+                row.Children.Add(avatarCircle);
+
+                var copy = new StackPanel { Spacing = 0 };
+                copy.Children.Add(new TextBlock
+                {
+                    Text = author,
+                    FontSize = 11,
+                    FontWeight = Windows.UI.Text.FontWeights.SemiBold,
+                    Foreground = new SolidColorBrush(Color.FromArgb(255, 222, 214, 238)),
+                    TextTrimming = TextTrimming.CharacterEllipsis,
+                });
+                copy.Children.Add(new TextBlock
+                {
+                    Text = content,
+                    FontSize = 13,
+                    FontWeight = Windows.UI.Text.FontWeights.SemiBold,
+                    Foreground = new SolidColorBrush(Colors.White),
+                    TextWrapping = TextWrapping.WrapWholeWords,
+                    MaxWidth = 470,
+                });
+                Grid.SetColumn(copy, 1);
+                row.Children.Add(copy);
+                VoiceChatOverlay.Children.Add(row);
+            }
+
+            VoiceChatOverlay.Visibility = VoiceChatOverlay.Children.Count > 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
         }
 
 
@@ -1757,6 +1856,9 @@ namespace YummiGameBarWidget
             PhaseText.Text = "Offline";
             RiotIdText.Text = "유미지지 데스크톱 연결을 확인해 주세요";
             PartyText.Text = "파티 정보 없음";
+            voiceChatSignature = "";
+            VoiceChatOverlay.Children.Clear();
+            VoiceChatOverlay.Visibility = Visibility.Collapsed;
             var failures = error as AggregateException;
             BridgeText.Text = failures == null ? "에이전트 연결 실패 · " + ErrorCode(error) :
                 "파이프 " + ErrorCode(failures.InnerExceptions[0]) + " · TCP " + ErrorCode(failures.InnerExceptions[1]);
