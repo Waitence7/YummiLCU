@@ -129,6 +129,8 @@ namespace YummiGameBarWidget
         private long lastSnapshotFailureLogAtMs;
         private long lastTutorialResetGeneration;
         private bool tutorialResetAwaitingUnpin;
+        private int tutorialRefreshGeneration;
+        private bool hudLoaded;
 
         public Widget()
         {
@@ -144,11 +146,13 @@ namespace YummiGameBarWidget
             {
                 EnsureDefaultVoiceChatPosition();
                 ClampAllPanelPositions();
+                UpdatePinTutorial();
             };
             timer.Tick += async (_, __) => await RefreshAsync();
             Loaded += async (_, __) =>
             {
                 App.LogStage("hud-loaded");
+                hudLoaded = true;
                 StartNativeInputLoop();
                 Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
                 Window.Current.CoreWindow.PointerMoved += CoreWindowPointerMoved;
@@ -169,13 +173,16 @@ namespace YummiGameBarWidget
                 }
                 UpdateInputState();
                 UpdatePinTutorial();
+                QueueTutorialStateRefresh("loaded");
                 timer.Start();
                 await RefreshAsync();
+                QueueTutorialStateRefresh("ready");
                 App.LogStage("hud-ready");
             };
             Unloaded += (_, __) =>
             {
                 App.LogStage("hud-unloaded");
+                hudLoaded = false;
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
                 Window.Current.CoreWindow.PointerMoved -= CoreWindowPointerMoved;
                 Window.Current.CoreWindow.PointerPressed -= CoreWindowPointerChanged;
@@ -185,6 +192,7 @@ namespace YummiGameBarWidget
                 // Keep the diagnostic loop alive across transient Game Bar unload/reload cycles.
                 // The watchdog will recover it if the host pauses or drops dispatcher work.
                 _ = SyncExternalClickTestAsync(false);
+                Interlocked.Increment(ref tutorialRefreshGeneration);
                 timer.Stop();
             };
         }
@@ -308,6 +316,7 @@ namespace YummiGameBarWidget
                 StartNativeInputLoop();
                 _ = SyncExternalClickTestAsync(true);
                 UpdatePinTutorial();
+                QueueTutorialStateRefresh("navigated");
             }
             else
             {
@@ -414,6 +423,38 @@ namespace YummiGameBarWidget
             displayScale = display.RawPixelsPerViewPixel;
             displayWidth = HudGeometry.ToLogicalPixels(display.ScreenWidthInRawPixels, displayScale);
             displayHeight = HudGeometry.ToLogicalPixels(display.ScreenHeightInRawPixels, displayScale);
+        }
+
+        private void QueueTutorialStateRefresh(string reason)
+        {
+            var generation = Interlocked.Increment(ref tutorialRefreshGeneration);
+            _ = RefreshTutorialStateAfterHostSettlesAsync(generation, reason);
+        }
+
+        private async Task RefreshTutorialStateAfterHostSettlesAsync(int generation, string reason)
+        {
+            // Xbox Game Bar can expose a provisional PinnedOnly display mode while
+            // the widget is first being activated. Re-check for a short bounded
+            // window so the first Win+G does not depend on a later resize event.
+            var delays = new[] { 50, 150, 350, 700 };
+            foreach (var delayMs in delays)
+            {
+                await Task.Delay(delayMs);
+                if (generation != Volatile.Read(ref tutorialRefreshGeneration)) return;
+                if (widget == null || !hudLoaded) return;
+
+                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+                {
+                    if (generation != Volatile.Read(ref tutorialRefreshGeneration)) return;
+                    UpdatePinTutorial();
+                });
+
+                if (widget != null && widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
+                {
+                    App.LogStage("tutorial-host-settled reason=" + reason + " delayMs=" + delayMs);
+                    return;
+                }
+            }
         }
 
         private void UpdatePinTutorial()
@@ -1557,6 +1598,8 @@ namespace YummiGameBarWidget
             nativeInputDispatchQueuedAtMs = 0;
             StartNativeInputLoop();
             _ = SyncExternalClickTestAsync(true);
+            UpdatePinTutorial();
+            QueueTutorialStateRefresh("window-activated-" + e.WindowActivationState);
         }
 
         private async Task SyncExternalClickTestAsync(bool active)
