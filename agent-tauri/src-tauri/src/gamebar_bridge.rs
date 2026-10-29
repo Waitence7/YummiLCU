@@ -1645,12 +1645,62 @@ async fn check_overlay_update() -> Result<(), String> {
                         return Ok(());
                     }
                     actual if state.pending_registration => {
+                        let widget_running = Command::new("powershell.exe")
+                            .args([
+                                "-NoProfile",
+                                "-Command",
+                                "if (Get-Process -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
+                            ])
+                            .creation_flags(CREATE_NO_WINDOW)
+                            .status()
+                            .map(|status| status.success())
+                            .unwrap_or(false);
+                        if widget_running {
+                            append_gamebar_update_log(&format!(
+                                "오버레이 업데이트 등록 대기 중: expected={} active={} widget=running (오버레이를 닫으면 자동 적용)",
+                                expected_appx_version,
+                                actual.as_deref().unwrap_or("missing")
+                            ));
+                            return Ok(());
+                        }
+
+                        let pending_zip = updater_dir.join("verified-update.zip");
+                        if pending_zip.is_file() {
+                            append_gamebar_update_log(&format!(
+                                "오버레이 위젯 종료 감지, 예약 업데이트 재등록 시도: expected={} active={}",
+                                expected_appx_version,
+                                actual.as_deref().unwrap_or("missing")
+                            ));
+                            Command::new("powershell.exe")
+                                .args([
+                                    "-NoProfile",
+                                    "-WindowStyle",
+                                    "Hidden",
+                                    "-ExecutionPolicy",
+                                    "Bypass",
+                                    "-File",
+                                ])
+                                .arg(&updater)
+                                .arg("-PackagePath")
+                                .arg(&pending_zip)
+                                .arg("-ExpectedSha256")
+                                .arg(&target.sha256)
+                                .arg("-BuildId")
+                                .arg(&target.build_id)
+                                .arg("-ReleaseTag")
+                                .arg(&target.release_tag)
+                                .arg("-Quiet")
+                                .creation_flags(CREATE_NO_WINDOW)
+                                .spawn()
+                                .map_err(|e| format!("예약 Game Bar 재등록 실행 실패: {e}"))?;
+                            return Ok(());
+                        }
+
                         append_gamebar_update_log(&format!(
-                            "오버레이 업데이트 등록 대기 중: expected={} active={}",
+                            "오버레이 예약 ZIP 없음, 다시 다운로드: expected={} active={}",
                             expected_appx_version,
                             actual.as_deref().unwrap_or("missing")
                         ));
-                        return Ok(());
                     }
                     actual => {
                         append_gamebar_update_log(&format!(

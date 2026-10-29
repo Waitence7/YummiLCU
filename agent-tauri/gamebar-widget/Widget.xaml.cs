@@ -439,25 +439,38 @@ namespace YummiGameBarWidget
                 widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
         }
 
+        private double HostChromeHeight()
+        {
+            if (widget == null) return 0.0;
+            var bounds = widget.WindowBounds;
+            if (bounds.Height <= 0 || ActualHeight <= 0) return 0.0;
+            return Math.Max(0.0, bounds.Height - ActualHeight);
+        }
+
+        private bool HostChromeVisible()
+        {
+            // Game Bar temporarily reserves vertical space for its title/pin chrome
+            // while the pointer is near the top edge. Fighting that reservation with
+            // TryResizeWindowAsync makes a fullscreen widget extend off-screen by
+            // approximately the chrome height. Wait until the chrome is gone instead.
+            return HostChromeHeight() > 2.0;
+        }
+
         private bool PinnedCoverageNeedsRestore()
         {
-            if (!IsPinnedFullSizeMode()) return false;
+            if (!IsPinnedFullSizeMode() || HostChromeVisible()) return false;
             UpdateDisplayMetrics();
             var bounds = widget.WindowBounds;
             var contentWidth = ActualWidth > 0 ? ActualWidth : bounds.Width;
             var contentHeight = ActualHeight > 0 ? ActualHeight : bounds.Height;
             const double tolerance = 2.0;
 
-            // WindowBounds is the widget position on the display. In pinned-only
-            // mode the content is expected to cover the display in full-size mode.
-            // A stale title/chrome reservation shows up as a small positive bottom
-            // or right gap (and often a non-zero Y).
-            var rightGap = displayWidth - (bounds.X + contentWidth);
-            var bottomGap = displayHeight - (bounds.Y + contentHeight);
-            // Preserve the window position chosen by the user. A non-zero X/Y
-            // is valid; only restore when the hosted content actually stops short
-            // of the display's right or bottom edge.
-            return rightGap > tolerance || bottomGap > tolerance;
+            // Full-size mode is intentionally screen-filling. Once Game Bar chrome
+            // has disappeared, restore both size and position. Compact mode remains
+            // the path for user-positioned/manual layouts.
+            return Math.Abs(contentWidth - displayWidth) > tolerance ||
+                Math.Abs(contentHeight - displayHeight) > tolerance ||
+                Math.Abs(bounds.X) > tolerance || Math.Abs(bounds.Y) > tolerance;
         }
 
         private void QueuePinnedCoverageRestore(string reason)
@@ -478,6 +491,7 @@ namespace YummiGameBarWidget
                 await Task.Delay(delayMs);
                 if (generation != Volatile.Read(ref pinnedCoverageRestoreGeneration)) return;
                 if (!IsPinnedFullSizeMode()) return;
+                if (HostChromeVisible()) continue;
                 if (!PinnedCoverageNeedsRestore()) return;
                 if (pinnedCoverageRestoreInFlight) return;
 
@@ -486,7 +500,7 @@ namespace YummiGameBarWidget
                 {
                     App.LogStage("pinned-coverage-restore reason=" + reason + " delayMs=" + delayMs +
                         " bounds=" + widget.WindowBounds + " content=" + ActualWidth.ToString("0.#") + "x" + ActualHeight.ToString("0.#"));
-                    await FitToDisplayAsync(false);
+                    await FitToDisplayAsync(true);
                 }
                 finally
                 {
@@ -648,7 +662,8 @@ namespace YummiGameBarWidget
                     ["width"] = JsonValue.CreateNumberValue(bounds.Width),
                     ["height"] = JsonValue.CreateNumberValue(bounds.Height),
                     ["displayWidth"] = JsonValue.CreateNumberValue(displayWidth),
-                    ["displayHeight"] = JsonValue.CreateNumberValue(displayHeight)
+                    ["displayHeight"] = JsonValue.CreateNumberValue(displayHeight),
+                    ["hostChromeHeight"] = JsonValue.CreateNumberValue(HostChromeHeight())
                 }.Stringify();
                 // One bounded local state file, updated only on changes. No LCU
                 // payload, account name or credentials are written.

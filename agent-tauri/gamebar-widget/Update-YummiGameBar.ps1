@@ -11,6 +11,7 @@ $stateDir = Join-Path $env:LOCALAPPDATA 'Yummi\GameBarUpdater'
 $statePath = Join-Path $stateDir 'state.json'
 $logPath = Join-Path $stateDir 'update.log'
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+$pendingRegistration = $false
 
 function Write-UpdateLog([string]$message) {
   $line = "[$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')] $message"
@@ -84,7 +85,7 @@ try {
   }
   finally {
     Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
-    Remove-Item $PackagePath -Force -ErrorAction SilentlyContinue
+    if (-not $pendingRegistration) { Remove-Item $PackagePath -Force -ErrorAction SilentlyContinue }
   }
 }
 catch {
