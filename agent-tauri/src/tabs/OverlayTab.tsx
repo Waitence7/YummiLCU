@@ -36,11 +36,13 @@ function GuideStep({
   );
 }
 
-export function OverlayTab() {
+export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
   const [status, setStatus] = useState<OverlayInstallStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resettingTutorial, setResettingTutorial] = useState(false);
+  const [tutorialResetMessage, setTutorialResetMessage] = useState<string | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -70,6 +72,26 @@ export function OverlayTab() {
       setInstalling(false);
     }
   };
+
+  const resetTutorial = async () => {
+    setResettingTutorial(true);
+    setTutorialResetMessage(null);
+    try {
+      await api.resetOverlayTutorial();
+      setTutorialResetMessage(
+        "초기화 요청 완료 · 현재 핀 상태라면 Win+G에서 핀을 한 번 해제하면 1단계부터 다시 시작합니다.",
+      );
+    } catch (cause) {
+      setTutorialResetMessage(
+        `초기화 실패 · ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      void api.reportUiFailure("overlay_tutorial_reset", cause);
+    } finally {
+      setResettingTutorial(false);
+    }
+  };
+
+  const developerToolsVisible = releaseChannel === "beta" || releaseChannel === "dev";
 
   return (
     <div className="space-y-3">
@@ -146,6 +168,29 @@ export function OverlayTab() {
           </GuideStep>
         </div>
       </Card>
+
+      {developerToolsVisible && (
+        <Card title="개발 도구">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-3">
+            <div className="min-w-0">
+              <strong className="block text-[11px] text-amber-900">튜토리얼 상태 초기화</strong>
+              <span className="mt-0.5 block text-[10px] leading-relaxed text-amber-700">
+                핀/조작 튜토리얼 완료 상태를 지웁니다. 현재 핀 상태라면 Win+G에서 핀을 한 번 해제한 뒤 다시 진행하세요.
+              </span>
+            </div>
+            <Button
+              variant="default"
+              disabled={resettingTutorial}
+              onClick={() => void resetTutorial()}
+            >
+              {resettingTutorial ? "초기화 중…" : "튜토리얼 초기화"}
+            </Button>
+          </div>
+          {tutorialResetMessage && (
+            <p className="mt-2 text-[10px] text-slate-600">{tutorialResetMessage}</p>
+          )}
+        </Card>
+      )}
 
       <Card title="오버레이가 안 보일 때">
         <div className="grid gap-2 text-[10px] leading-relaxed text-slate-600 sm:grid-cols-2">

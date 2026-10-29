@@ -343,6 +343,7 @@ async fn collect_snapshot(
         online_friends,
         voice_chat_channel_id: None,
         voice_chat_messages: Vec::new(),
+        tutorial_reset_generation: 0,
         updated_at_ms: now_ms(),
     }
 }

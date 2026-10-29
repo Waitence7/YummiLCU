@@ -176,6 +176,7 @@ pub(crate) struct GameBarSnapshot {
     pub(crate) online_friends: Vec<String>,
     pub(crate) voice_chat_channel_id: Option<u64>,
     pub(crate) voice_chat_messages: Vec<VoiceChatOverlayMessage>,
+    pub(crate) tutorial_reset_generation: u64,
     pub(crate) updated_at_ms: u64,
 }
 
@@ -189,6 +190,7 @@ impl Default for GameBarSnapshot {
             online_friends: Vec::new(),
             voice_chat_channel_id: None,
             voice_chat_messages: Vec::new(),
+            tutorial_reset_generation: 0,
             updated_at_ms: 0,
         }
     }
@@ -548,6 +550,7 @@ impl AppState {
         if let Ok(mut current) = self.gamebar_snapshot.write() {
             snapshot.voice_chat_channel_id = current.voice_chat_channel_id;
             snapshot.voice_chat_messages = current.voice_chat_messages.clone();
+            snapshot.tutorial_reset_generation = current.tutorial_reset_generation;
             *current = snapshot;
         }
     }
@@ -578,6 +581,14 @@ impl AppState {
             snapshot.voice_chat_channel_id = None;
             snapshot.voice_chat_messages.clear();
         }
+    }
+
+    pub(crate) fn request_gamebar_tutorial_reset(&self) -> u64 {
+        let generation = diagnostic_now_ms();
+        if let Ok(mut snapshot) = self.gamebar_snapshot.write() {
+            snapshot.tutorial_reset_generation = generation;
+        }
+        generation
     }
 
     pub(crate) fn lcu_lockfile_path(&self) -> Option<PathBuf> {

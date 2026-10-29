@@ -119,6 +119,12 @@ namespace YummiGameBarWidget
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("HudControlsTutorialCompleted", out value) && value is bool && (bool)value; }
         }
         internal static void MarkControlsTutorialCompleted() { Set("HudControlsTutorialCompleted", true); }
+        internal static void ResetTutorials()
+        {
+            ApplicationData.Current.LocalSettings.Values.Remove("HudPinTutorialCompleted");
+            ApplicationData.Current.LocalSettings.Values.Remove("HudControlsTutorialCompleted");
+            ApplicationData.Current.SignalDataChanged();
+        }
         internal static void RequestFit()
         {
             Set("HudCompactLayout", false);

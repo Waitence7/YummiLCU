@@ -127,6 +127,8 @@ namespace YummiGameBarWidget
         private long lastSnapshotSuccessAtMs;
         private int consecutiveSnapshotFailures;
         private long lastSnapshotFailureLogAtMs;
+        private long lastTutorialResetGeneration;
+        private bool tutorialResetAwaitingUnpin;
 
         public Widget()
         {
@@ -420,7 +422,13 @@ namespace YummiGameBarWidget
 
             bool gameBarOpen = widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly;
 
-            if (widget.Pinned && !HudPreferences.PinTutorialCompleted)
+            if (tutorialResetAwaitingUnpin && !widget.Pinned)
+            {
+                tutorialResetAwaitingUnpin = false;
+                App.LogStage("tutorial-reset-unpinned");
+            }
+
+            if (widget.Pinned && !tutorialResetAwaitingUnpin && !HudPreferences.PinTutorialCompleted)
             {
                 HudPreferences.MarkPinTutorialCompleted();
                 App.LogStage("pin-tutorial-completed");
@@ -598,6 +606,7 @@ namespace YummiGameBarWidget
 
         private void Apply(JsonObject json)
         {
+            ApplyTutorialResetRequest(json);
             bool connected = json.GetNamedBoolean("connected", false);
             string phase = SnapshotJson.String(json, "phase", connected ? "Unknown" : "Offline");
             string riotId = SnapshotJson.String(json, "riot_id");
@@ -614,6 +623,28 @@ namespace YummiGameBarWidget
             StatusDot.Fill = new SolidColorBrush(connected ? Color.FromArgb(255, 86, 221, 139) : Color.FromArgb(255, 122, 106, 134));
             ApplyVoiceChat(json);
             SaveStatus();
+        }
+
+        private void ApplyTutorialResetRequest(JsonObject json)
+        {
+            long generation = 0;
+            try
+            {
+                if (json.ContainsKey("tutorial_reset_generation") &&
+                    json["tutorial_reset_generation"].ValueType == JsonValueType.Number)
+                {
+                    generation = (long)json.GetNamedNumber("tutorial_reset_generation", 0);
+                }
+            }
+            catch { generation = 0; }
+
+            if (generation <= 0 || generation == lastTutorialResetGeneration) return;
+            lastTutorialResetGeneration = generation;
+            HudPreferences.ResetTutorials();
+            controlsTutorialShownThisSession = false;
+            tutorialResetAwaitingUnpin = widget != null && widget.Pinned;
+            UpdatePinTutorial();
+            App.LogStage("tutorial-reset generation=" + generation);
         }
 
         private void ApplyVoiceChat(JsonObject json)

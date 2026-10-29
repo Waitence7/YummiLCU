@@ -60,3 +60,17 @@ pub(crate) async fn install_overlay(
         }
     }
 }
+
+#[tauri::command]
+pub(crate) async fn reset_overlay_tutorial(
+    state: State<'_, Arc<AppState>>,
+) -> Result<u64, String> {
+    let generation = state.request_gamebar_tutorial_reset();
+    state
+        .record_flight(
+            "overlay_tutorial",
+            format!("developer_reset_requested generation={generation}"),
+        )
+        .await;
+    Ok(generation)
+}

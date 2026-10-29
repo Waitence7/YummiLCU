@@ -263,7 +263,9 @@ export function App() {
             <MatchHistoryTab connected={state.lcu} active={tab === "history"} />
           </div>
           {tab === "recording" && <RecordingTab connected={state.lcu} />}
-          {tab === "overlay" && <OverlayTab />}
+          {tab === "overlay" && (
+            <OverlayTab releaseChannel={state.release_channel ?? state.config.UpdateChannel} />
+          )}
           {tab === "guild" && (
             <GuildMatchTab
               state={state}

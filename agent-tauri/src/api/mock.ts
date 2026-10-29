@@ -259,6 +259,10 @@ export async function mockInvoke<T>(
           location: "mid",
         },
       } as T;
+    case "reset_overlay_tutorial":
+      log("개발용 오버레이 튜토리얼 초기화 요청");
+      emit();
+      return Date.now() as T;
     case "request_borderless_capture_access":
       recordingStatus = {
         ...recordingStatus,
