@@ -130,6 +130,8 @@ namespace YummiGameBarWidget
         private long lastTutorialResetGeneration;
         private bool tutorialResetAwaitingUnpin;
         private int tutorialRefreshGeneration;
+        private int pinnedCoverageRestoreGeneration;
+        private bool pinnedCoverageRestoreInFlight;
         private bool hudLoaded;
 
         public Widget()
@@ -147,6 +149,7 @@ namespace YummiGameBarWidget
                 EnsureDefaultVoiceChatPosition();
                 ClampAllPanelPositions();
                 UpdatePinTutorial();
+                QueuePinnedCoverageRestore("size-changed");
             };
             timer.Tick += async (_, __) => await RefreshAsync();
             Loaded += async (_, __) =>
@@ -193,6 +196,7 @@ namespace YummiGameBarWidget
                 // The watchdog will recover it if the host pauses or drops dispatcher work.
                 _ = SyncExternalClickTestAsync(false);
                 Interlocked.Increment(ref tutorialRefreshGeneration);
+                Interlocked.Increment(ref pinnedCoverageRestoreGeneration);
                 timer.Stop();
             };
         }
@@ -360,6 +364,7 @@ namespace YummiGameBarWidget
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
+                QueuePinnedCoverageRestore("widget-state");
             });
         }
 
@@ -367,11 +372,14 @@ namespace YummiGameBarWidget
         {
             await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                // Opening/closing Game Bar must not resize or recenter a layout
-                // that the user positioned and pinned through the host UI.
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
+                // In full-size mode Game Bar's hover/title chrome may temporarily
+                // reserve a strip of the host window. Restore coverage only after
+                // the widget returns to pinned-only mode; compact/manual setup is
+                // intentionally left untouched.
+                QueuePinnedCoverageRestore("display-mode");
             });
         }
 
@@ -423,6 +431,74 @@ namespace YummiGameBarWidget
             displayScale = display.RawPixelsPerViewPixel;
             displayWidth = HudGeometry.ToLogicalPixels(display.ScreenWidthInRawPixels, displayScale);
             displayHeight = HudGeometry.ToLogicalPixels(display.ScreenHeightInRawPixels, displayScale);
+        }
+
+        private bool IsPinnedFullSizeMode()
+        {
+            return widget != null && hudLoaded && !HudPreferences.CompactLayout &&
+                widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+        }
+
+        private bool PinnedCoverageNeedsRestore()
+        {
+            if (!IsPinnedFullSizeMode()) return false;
+            UpdateDisplayMetrics();
+            var bounds = widget.WindowBounds;
+            var contentWidth = ActualWidth > 0 ? ActualWidth : bounds.Width;
+            var contentHeight = ActualHeight > 0 ? ActualHeight : bounds.Height;
+            const double tolerance = 2.0;
+
+            // WindowBounds is the widget position on the display. In pinned-only
+            // mode the content is expected to cover the display in full-size mode.
+            // A stale title/chrome reservation shows up as a small positive bottom
+            // or right gap (and often a non-zero Y).
+            var rightGap = displayWidth - (bounds.X + contentWidth);
+            var bottomGap = displayHeight - (bounds.Y + contentHeight);
+            // Preserve the window position chosen by the user. A non-zero X/Y
+            // is valid; only restore when the hosted content actually stops short
+            // of the display's right or bottom edge.
+            return rightGap > tolerance || bottomGap > tolerance;
+        }
+
+        private void QueuePinnedCoverageRestore(string reason)
+        {
+            if (!IsPinnedFullSizeMode()) return;
+            var generation = Interlocked.Increment(ref pinnedCoverageRestoreGeneration);
+            _ = RestorePinnedCoverageAfterChromeAsync(generation, reason);
+        }
+
+        private async Task RestorePinnedCoverageAfterChromeAsync(int generation, string reason)
+        {
+            // Host title/pin chrome can linger briefly after hover or Win+G closes.
+            // Retry only for a short window and only while the full-size pinned mode
+            // is still active. A later bounds event starts a fresh generation.
+            var delays = new[] { 120, 320, 700 };
+            foreach (var delayMs in delays)
+            {
+                await Task.Delay(delayMs);
+                if (generation != Volatile.Read(ref pinnedCoverageRestoreGeneration)) return;
+                if (!IsPinnedFullSizeMode()) return;
+                if (!PinnedCoverageNeedsRestore()) return;
+                if (pinnedCoverageRestoreInFlight) return;
+
+                pinnedCoverageRestoreInFlight = true;
+                try
+                {
+                    App.LogStage("pinned-coverage-restore reason=" + reason + " delayMs=" + delayMs +
+                        " bounds=" + widget.WindowBounds + " content=" + ActualWidth.ToString("0.#") + "x" + ActualHeight.ToString("0.#"));
+                    await FitToDisplayAsync(false);
+                }
+                finally
+                {
+                    pinnedCoverageRestoreInFlight = false;
+                }
+
+                if (!PinnedCoverageNeedsRestore())
+                {
+                    App.LogStage("pinned-coverage-restored reason=" + reason);
+                    return;
+                }
+            }
         }
 
         private void QueueTutorialStateRefresh(string reason)
@@ -1600,6 +1676,7 @@ namespace YummiGameBarWidget
             _ = SyncExternalClickTestAsync(true);
             UpdatePinTutorial();
             QueueTutorialStateRefresh("window-activated-" + e.WindowActivationState);
+            QueuePinnedCoverageRestore("window-activated-" + e.WindowActivationState);
         }
 
         private async Task SyncExternalClickTestAsync(bool active)
