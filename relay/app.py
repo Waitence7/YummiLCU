@@ -176,6 +176,8 @@ _AGENT_DIAGNOSTIC_CATEGORIES = frozenset({
     "lifecycle",
     "session",
     "updater",
+    "recording",
+    "replay",
 })
 _AGENT_DIAGNOSTIC_TTL_SEC = 30 * 24 * 60 * 60
 _AGENT_DIAGNOSTIC_MAX_ENTRIES = 2000
@@ -1626,6 +1628,23 @@ async def agent_replay_analysis_job(
         request,
         discord_id,
         f"/api/bot/lcu/replays/analysis-jobs/{job_id}",
+    )
+
+
+@app.get("/agent/recording-context")
+@app.get("/lcu/recording-context")
+async def agent_recording_context(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+    game_id: str = Query(..., min_length=1, max_length=64),
+) -> Response:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
+        raise HTTPException(400, "invalid game_id")
+    return await _proxy_agent_rofl_analysis_get(
+        request,
+        discord_id,
+        f"/api/bot/lcu/recordings/context/{game_id}",
     )
 
 

@@ -1,3 +1,11 @@
+
+export type OverlayInstallStatus = {
+  supported: boolean;
+  installed: boolean;
+  installedVersion?: string | null;
+  updaterReady: boolean;
+};
+
 export type BetaReleaseInfo = {
   version: string;
   releaseLabel: string;
@@ -78,6 +86,41 @@ export type RecordingStatus = {
   videoOnly: boolean;
   recordingSource: RecordingCaptureSource;
   clipSource: RecordingCaptureSource;
+  borderlessCaptureRequested: boolean;
+  borderlessCaptureAllowed: boolean;
+  borderlessCaptureStatus: string;
+  autoGameRecording: boolean;
+  autoGameId?: string | null;
+  activeRecordingMetadataPath?: string | null;
+};
+
+export type RecordingSession = {
+  schema: string;
+  gameId?: string | null;
+  riotId?: string | null;
+  videoPath: string;
+  source: RecordingCaptureSource | string;
+  automatic: boolean;
+  startedAtMs: number;
+  endedAtMs?: number | null;
+  gameClockOffsetMs: number;
+  roflPath?: string | null;
+};
+
+export type RecordingPotg = {
+  gameId: string;
+  playerName: string;
+  championName: string;
+  startMs: number;
+  endMs: number;
+  kills: number;
+  score: number;
+  location?: string | null;
+};
+
+export type RecordingGameContext = {
+  gameId: string;
+  potg?: RecordingPotg | null;
 };
 
 export type RecentMatch = {

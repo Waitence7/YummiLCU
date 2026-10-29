@@ -254,5 +254,98 @@
         </Grid>
       </Border>
     </Grid>
+
+    <Grid x:Name="PinTutorialOverlay"
+          Visibility="Collapsed"
+          IsHitTestVisible="False"
+          Canvas.ZIndex="20000">
+      <Border Background="#8A09070F"/>
+      <Border Width="420"
+              MaxWidth="520"
+              Padding="22"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Top"
+              Margin="0,44,0,0"
+              CornerRadius="14"
+              Background="#F21A1426"
+              BorderBrush="#B48D6BC3"
+              BorderThickness="1">
+        <StackPanel Spacing="8">
+          <TextBlock Text="↑"
+                     HorizontalAlignment="Center"
+                     FontSize="28"
+                     FontWeight="Bold"
+                     Foreground="#D9C2F0"/>
+          <TextBlock Text="오버레이를 핀으로 고정해 주세요"
+                     HorizontalAlignment="Center"
+                     TextAlignment="Center"
+                     FontSize="17"
+                     FontWeight="SemiBold"
+                     Foreground="White"/>
+          <TextBlock Text="Game Bar 위쪽 제목 표시줄의 핀 아이콘을 누르면 Win+G를 닫아도 게임 위에 유미지지 오버레이가 계속 표시됩니다."
+                     TextAlignment="Center"
+                     TextWrapping="Wrap"
+                     FontSize="12"
+                     LineHeight="18"
+                     Foreground="#DED5E8"/>
+          <Border Margin="0,5,0,0" Padding="10,7" CornerRadius="8" Background="#452F2140">
+            <TextBlock Text="핀을 누르면 이 안내는 다시 표시되지 않습니다."
+                       HorizontalAlignment="Center"
+                       TextAlignment="Center"
+                       FontSize="10"
+                       Foreground="#C7B7D4"/>
+          </Border>
+        </StackPanel>
+      </Border>
+    </Grid>
+
+    <Grid x:Name="ControlsTutorialOverlay"
+          Visibility="Collapsed"
+          IsHitTestVisible="False"
+          Canvas.ZIndex="19999">
+      <Border Width="440"
+              MaxWidth="540"
+              Padding="20"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Bottom"
+              Margin="0,0,0,36"
+              CornerRadius="14"
+              Background="#F21A1426"
+              BorderBrush="#9E8D6BC3"
+              BorderThickness="1">
+        <StackPanel Spacing="9">
+          <TextBlock Text="오버레이 기본 조작"
+                     HorizontalAlignment="Center"
+                     FontSize="16"
+                     FontWeight="SemiBold"
+                     Foreground="White"/>
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="&#xE890;" FontFamily="Segoe MDL2 Assets" FontSize="17" Foreground="#D9C2F0" VerticalAlignment="Top"/>
+            <TextBlock Grid.Column="1" Text="눈 아이콘을 누르면 해당 패널 내용을 가리거나 다시 표시할 수 있습니다." TextWrapping="Wrap" FontSize="11" LineHeight="17" Foreground="#DED5E8"/>
+          </Grid>
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="&#xE7C2;" FontFamily="Segoe MDL2 Assets" FontSize="17" Foreground="#D9C2F0" VerticalAlignment="Top"/>
+            <TextBlock Grid.Column="1" Text="Win+G가 열린 상태에서는 패널 제목 표시줄을 드래그해 위치를 옮기고 가장자리에서 크기를 조절할 수 있습니다." TextWrapping="Wrap" FontSize="11" LineHeight="17" Foreground="#DED5E8"/>
+          </Grid>
+          <Grid ColumnSpacing="10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <TextBlock Text="&#xE713;" FontFamily="Segoe MDL2 Assets" FontSize="17" Foreground="#D9C2F0" VerticalAlignment="Top"/>
+            <TextBlock Grid.Column="1" Text="Game Bar의 위젯 설정을 열면 표시 방식과 오버레이 옵션을 바꿀 수 있습니다." TextWrapping="Wrap" FontSize="11" LineHeight="17" Foreground="#DED5E8"/>
+          </Grid>
+          <TextBlock Margin="0,3,0,0" Text="Win+G를 닫으면 이 안내는 완료되고 다시 표시되지 않습니다." HorizontalAlignment="Center" TextAlignment="Center" FontSize="10" Foreground="#BFAFCC"/>
+        </StackPanel>
+      </Border>
+    </Grid>
   </Grid>
 </Page>

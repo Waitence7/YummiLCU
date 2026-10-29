@@ -17,6 +17,9 @@ let state: AgentState = structuredClone(initialState);
 const listeners = new Set<(state: AgentState) => void>();
 const timers: ReturnType<typeof setTimeout>[] = [];
 
+
+let mockOverlayInstalled = false;
+
 let recordingStatus: RecordingStatus = {
   supported: true,
   recording: false,
@@ -28,7 +31,28 @@ let recordingStatus: RecordingStatus = {
   videoOnly: true,
   recordingSource: "monitor",
   clipSource: "leagueWindow",
+  borderlessCaptureRequested: false,
+  borderlessCaptureAllowed: false,
+  borderlessCaptureStatus: "not_requested",
+  autoGameRecording: false,
+  autoGameId: null,
+  activeRecordingMetadataPath: null,
 };
+
+const mockRecordingSessions = [
+  {
+    schema: "yummi-recording-session/v1",
+    gameId: "8393991955",
+    riotId: "Waitence#KR1",
+    videoPath: "Videos/Yummi/Recordings/Yummi-game-8393991955-preview.mp4",
+    source: "leagueWindow",
+    automatic: true,
+    startedAtMs: Date.now() - 32 * 60 * 1000,
+    endedAtMs: Date.now() - 2 * 60 * 1000,
+    gameClockOffsetMs: 12_000,
+    roflPath: "Replays/8393991955.rofl",
+  },
+];
 
 function emit() {
   const snapshot = structuredClone(state);
@@ -58,6 +82,26 @@ export async function mockInvoke<T>(
   args?: Record<string, unknown>,
 ): Promise<T> {
   switch (command) {
+    case "get_overlay_install_status":
+      return {
+        supported: true,
+        installed: mockOverlayInstalled,
+        installedVersion: mockOverlayInstalled ? "0.1.60.40687111802" : null,
+        updaterReady: mockOverlayInstalled,
+      } as T;
+    case "install_overlay":
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      mockOverlayInstalled = true;
+      log("유미지지 오버레이 설치 완료");
+      emit();
+      return {
+        supported: true,
+        installed: true,
+        installedVersion: "0.1.60.40687111802",
+        updaterReady: true,
+      } as T;
+    case "report_recording_diagnostic":
+      return undefined as T;
     case "match_history": {
       if (!state.lcu) throw new Error("롤 클라이언트가 연결되지 않았습니다.");
       await new Promise((resolve) => setTimeout(resolve, 300));
@@ -70,6 +114,7 @@ export async function mockInvoke<T>(
           : { searched: false }),
       } as T;
     }
+    case "match_replay_remote":
     case "match_replay":
       await new Promise((resolve) => setTimeout(resolve, 450));
       return previewReplay(String(args?.gameId)) as T;
@@ -197,6 +242,30 @@ export async function mockInvoke<T>(
       return undefined as T;
     }
     case "get_recording_status":
+      return structuredClone(recordingStatus) as T;
+    case "list_recording_sessions":
+      return structuredClone(mockRecordingSessions) as T;
+    case "recording_game_context":
+      return {
+        gameId: String(args?.gameId ?? "8393991955"),
+        potg: {
+          gameId: String(args?.gameId ?? "8393991955"),
+          playerName: "Waitence",
+          championName: "Wukong",
+          startMs: 720_000,
+          endMs: 748_000,
+          kills: 3,
+          score: 91.4,
+          location: "mid",
+        },
+      } as T;
+    case "request_borderless_capture_access":
+      recordingStatus = {
+        ...recordingStatus,
+        borderlessCaptureRequested: true,
+        borderlessCaptureAllowed: true,
+        borderlessCaptureStatus: "allowed",
+      };
       return structuredClone(recordingStatus) as T;
     case "start_recording":
       recordingStatus = {

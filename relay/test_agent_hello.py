@@ -195,6 +195,22 @@ class AgentHelloTests(unittest.TestCase):
         self.assertEqual(report["category"], "lcu")
         self.assertEqual(report["code"], "authentication_failed")
         self.assertNotIn("secret", report["detail"])
+        recording = _agent_diagnostic_report({
+            "type": "agent_diagnostic_report",
+            "report_id": "223e4567-e89b-42d3-a456-426614174000",
+            "occurred_at_ms": 2,
+            "category": "recording",
+            "code": "video_load_failed",
+            "detail": "game_id=8393991955 media_error_code=4",
+            "app_version": "0.8.0",
+            "release_label": "0.8.0-beta.1",
+            "release_channel": "beta",
+            "build_id": "build-2",
+            "git_commit": "def456",
+        })
+        self.assertIsNotNone(recording)
+        self.assertEqual(recording["category"], "recording")
+        self.assertEqual(recording["code"], "video_load_failed")
         self.assertIsNone(_agent_diagnostic_report({
             "report_id": "123e4567-e89b-42d3-a456-426614174000",
             "occurred_at_ms": 1,

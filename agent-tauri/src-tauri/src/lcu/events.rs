@@ -23,8 +23,8 @@ use uuid::Uuid;
 use crate::{config::Config, error::AgentError, state::AppState};
 
 use super::{
-    collect_replay_bundle, collect_replay_file, find_existing_replay_path,
-    LcuClient, LcuIdentity, LockfileDiscovery, RoflMatchHint,
+    collect_replay_bundle, collect_replay_file, find_existing_replay_path, LcuClient, LcuIdentity,
+    LockfileDiscovery, RoflMatchHint,
 };
 
 const GAMEFLOW_PHASE: &str = "/lol-gameflow/v1/gameflow-phase";
@@ -671,7 +671,10 @@ impl LcuEventPoller {
             ));
         }
         if previous_phase.as_deref() != Some(phase.as_str())
-            && matches!(phase.as_str(), "None" | "Lobby" | "Matchmaking" | "ReadyCheck")
+            && matches!(
+                phase.as_str(),
+                "None" | "Lobby" | "Matchmaking" | "ReadyCheck"
+            )
         {
             self.authoritative_game_id = None;
         }
@@ -682,17 +685,17 @@ impl LcuEventPoller {
             json!({"phase": phase, "lcu_ready": true}),
             &mut events,
         );
-        let entering_game_identity_phase = matches!(
-            phase.as_str(),
-            "ChampSelect" | "GameStart" | "InProgress"
-        ) && previous_phase.as_deref() != Some(phase.as_str());
+        let entering_game_identity_phase =
+            matches!(phase.as_str(), "ChampSelect" | "GameStart" | "InProgress")
+                && previous_phase.as_deref() != Some(phase.as_str());
         let mut active_gameflow_session = None;
         if matches!(phase.as_str(), "ChampSelect" | "GameStart" | "InProgress")
             && (entering_game_identity_phase || self.authoritative_game_id.is_none())
         {
             match client.request(Method::GET, GAMEFLOW_SESSION, None).await {
                 Ok(session) => {
-                    self.schema_warnings.remove("live_gameflow_session_request_failed");
+                    self.schema_warnings
+                        .remove("live_gameflow_session_request_failed");
                     if let Some(game_id) = gameflow_session_game_id(&session) {
                         if self.authoritative_game_id.as_deref() != Some(game_id.as_str()) {
                             self.diagnostic(format!(
@@ -706,7 +709,10 @@ impl LcuEventPoller {
                     active_gameflow_session = Some(session);
                 }
                 Err(error) => {
-                    if self.schema_warnings.insert("live_gameflow_session_request_failed") {
+                    if self
+                        .schema_warnings
+                        .insert("live_gameflow_session_request_failed")
+                    {
                         self.diagnostic(format!(
                             "게임 중 Gameflow session 조회 실패; Live Client 데이터만 사용: {error}"
                         ));
@@ -1027,6 +1033,13 @@ impl LcuEventPoller {
                                         .unwrap_or("replay.rofl")
                                         .to_owned();
                                     let file_path = file.path.to_string_lossy().into_owned();
+                                    if let Err(error) =
+                                        crate::recording::link_rofl(&game_id, &file_path)
+                                    {
+                                        crate::diagnostics::write_bootstrap_error(&format!(
+                                            "recording_rofl_link_failed game_id={game_id} error={error}"
+                                        ));
+                                    }
                                     let delete_after_upload =
                                         self.rofl_auto_download_owned_game_id.as_deref()
                                             == Some(game_id.as_str())
@@ -1413,8 +1426,7 @@ fn json_scalar_id(value: Option<&Value>) -> Option<String> {
 }
 
 fn champ_select_game_id(value: &Value) -> Option<String> {
-    json_scalar_id(value.get("gameId"))
-        .or_else(|| json_scalar_id(value.get("game_id")))
+    json_scalar_id(value.get("gameId")).or_else(|| json_scalar_id(value.get("game_id")))
 }
 
 fn gameflow_session_game_id(value: &Value) -> Option<String> {
@@ -1507,8 +1519,8 @@ async fn eog_payload(
     // Some clients skip EndOfGame and jump straight from WaitingForStats to Lobby.
     // Keep polling eog-stats during the bounded post-game recovery window as long
     // as we already know which game we are recovering.
-    let query_eog_stats = is_eog_phase(phase)
-        || (matches!(phase, "Lobby" | "None") && expected_game_id.is_some());
+    let query_eog_stats =
+        is_eog_phase(phase) || (matches!(phase, "Lobby" | "None") && expected_game_id.is_some());
     let (eog, eog_request_status, eog_request_error) = if query_eog_stats {
         match client.request(Method::GET, EOG_STATS, None).await {
             Ok(value) => (Some(value), "ok", None),

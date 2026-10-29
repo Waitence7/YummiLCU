@@ -545,6 +545,10 @@ pub(crate) struct AgentDiagnosticReport {
 }
 
 impl AgentDiagnosticReport {
+    pub(crate) fn category(&self) -> &'static str {
+        self.category
+    }
+
     pub(crate) fn new(category: &'static str, code: &'static str, detail: String) -> Self {
         let occurred_at_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)

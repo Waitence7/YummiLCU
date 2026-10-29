@@ -123,6 +123,7 @@ namespace YummiGameBarWidget
         private readonly HashSet<string> voiceChatRenderedKeys = new HashSet<string>(StringComparer.Ordinal);
         private bool voiceChatHasVisibleMessages;
         private bool voiceChatPositionNeedsDefault;
+        private bool controlsTutorialShownThisSession;
         private long lastSnapshotSuccessAtMs;
         private int consecutiveSnapshotFailures;
         private long lastSnapshotFailureLogAtMs;
@@ -165,6 +166,7 @@ namespace YummiGameBarWidget
                     if (adapt) await FitToDisplayAsync();
                 }
                 UpdateInputState();
+                UpdatePinTutorial();
                 timer.Start();
                 await RefreshAsync();
                 App.LogStage("hud-ready");
@@ -303,6 +305,7 @@ namespace YummiGameBarWidget
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
                 StartNativeInputLoop();
                 _ = SyncExternalClickTestAsync(true);
+                UpdatePinTutorial();
             }
             else
             {
@@ -345,6 +348,7 @@ namespace YummiGameBarWidget
             {
                 UpdateDisplayState();
                 UpdateInputState();
+                UpdatePinTutorial();
             });
         }
 
@@ -356,6 +360,7 @@ namespace YummiGameBarWidget
                 // that the user positioned and pinned through the host UI.
                 UpdateDisplayState();
                 UpdateInputState();
+                UpdatePinTutorial();
             });
         }
 
@@ -407,6 +412,49 @@ namespace YummiGameBarWidget
             displayScale = display.RawPixelsPerViewPixel;
             displayWidth = HudGeometry.ToLogicalPixels(display.ScreenWidthInRawPixels, displayScale);
             displayHeight = HudGeometry.ToLogicalPixels(display.ScreenHeightInRawPixels, displayScale);
+        }
+
+        private void UpdatePinTutorial()
+        {
+            if (PinTutorialOverlay == null || ControlsTutorialOverlay == null || widget == null) return;
+
+            bool gameBarOpen = widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly;
+
+            if (widget.Pinned && !HudPreferences.PinTutorialCompleted)
+            {
+                HudPreferences.MarkPinTutorialCompleted();
+                App.LogStage("pin-tutorial-completed");
+            }
+
+            bool showPinTutorial = gameBarOpen && !widget.Pinned && !HudPreferences.PinTutorialCompleted;
+            PinTutorialOverlay.Visibility = showPinTutorial ? Visibility.Visible : Visibility.Collapsed;
+            if (showPinTutorial)
+            {
+                ControlsTutorialOverlay.Visibility = Visibility.Collapsed;
+                App.LogStage("pin-tutorial-visible");
+                return;
+            }
+
+            if (!gameBarOpen)
+            {
+                PinTutorialOverlay.Visibility = Visibility.Collapsed;
+                ControlsTutorialOverlay.Visibility = Visibility.Collapsed;
+                if (controlsTutorialShownThisSession && !HudPreferences.ControlsTutorialCompleted)
+                {
+                    HudPreferences.MarkControlsTutorialCompleted();
+                    controlsTutorialShownThisSession = false;
+                    App.LogStage("controls-tutorial-completed");
+                }
+                return;
+            }
+
+            bool showControlsTutorial = HudPreferences.PinTutorialCompleted && !HudPreferences.ControlsTutorialCompleted;
+            ControlsTutorialOverlay.Visibility = showControlsTutorial ? Visibility.Visible : Visibility.Collapsed;
+            if (showControlsTutorial && !controlsTutorialShownThisSession)
+            {
+                controlsTutorialShownThisSession = true;
+                App.LogStage("controls-tutorial-visible");
+            }
         }
 
         private void UpdateDisplayState()

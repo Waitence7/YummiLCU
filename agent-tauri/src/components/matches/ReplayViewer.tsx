@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   downloadMatchReplay,
   matchReplay,
+  matchReplayRemote,
   matchReplayAnalysis,
+  reportRecordingDiagnostic,
 } from "../../api/commands";
 import {
   matchTime,
@@ -318,9 +320,15 @@ function percent(value: number | null, maximum: number | null) {
 export function ReplayViewer({
   match,
   connected,
+  controlledTimeMs,
+  onSeek,
+  forceRemoteApi = false,
 }: {
   match: Match;
   connected: boolean;
+  controlledTimeMs?: number;
+  onSeek?: (timeMs: number) => void;
+  forceRemoteApi?: boolean;
 }) {
   const [replay, setReplay] = useState<MatchReplay | null>(null);
   const [busy, setBusy] = useState<
@@ -334,8 +342,19 @@ export function ReplayViewer({
   const generation = useRef(0);
   const timer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const duration = replay?.durationMs ?? match.duration * 1000;
+  const externallyControlled = controlledTimeMs != null;
+  const displayTime = Math.max(0, Math.min(duration, controlledTimeMs ?? time));
+  const assetVersion = replay?.version ?? match.version;
   const supportedMap = match.mapId === 11;
   const ready = replay?.status === "ready" && supportedMap;
+  const reportRemoteFailure = useCallback((stage: string, cause: unknown) => {
+    if (!forceRemoteApi) return;
+    const detail = cause instanceof Error ? cause.message : String(cause);
+    void reportRecordingDiagnostic(
+      "replay_api_failed",
+      `game_id=${match.id} stage=${stage} error=${detail}`,
+    ).catch(() => undefined);
+  }, [forceRemoteApi, match.id]);
 
   const load = useCallback(
     async (download = false) => {
@@ -350,7 +369,9 @@ export function ReplayViewer({
         const read = async (): Promise<void> => {
           if (request !== generation.current) return;
           try {
-            const result = await matchReplay(match.id);
+            const result = forceRemoteApi
+              ? await matchReplayRemote(match.id)
+              : await matchReplay(match.id);
             if (request !== generation.current) return;
             if (
               download &&
@@ -382,6 +403,7 @@ export function ReplayViewer({
                   setBusy(null);
                 } catch (caught) {
                   if (request !== generation.current) return;
+                  reportRemoteFailure("poll", caught);
                   setError(
                     caught instanceof Error ? caught.message : String(caught),
                   );
@@ -402,6 +424,7 @@ export function ReplayViewer({
             setBusy(null);
           } catch (caught) {
             if (request !== generation.current) return;
+            reportRemoteFailure("load", caught);
             if (download && Date.now() - started < 45_000) {
               timer.current = setTimeout(() => void read(), 1500);
               return;
@@ -413,11 +436,12 @@ export function ReplayViewer({
         await read();
       } catch (caught) {
         if (request !== generation.current) return;
+        reportRemoteFailure("prepare", caught);
         setError(caught instanceof Error ? caught.message : String(caught));
         setBusy(null);
       }
     },
-    [match.id, match.version],
+    [forceRemoteApi, match.id, match.version, reportRemoteFailure],
   );
 
   useEffect(() => {
@@ -429,7 +453,7 @@ export function ReplayViewer({
   }, [load]);
 
   useEffect(() => {
-    if (!playing || !ready) return;
+    if (externallyControlled || !playing || !ready) return;
     let previous = performance.now();
     const interval = setInterval(() => {
       const now = performance.now();
@@ -438,17 +462,20 @@ export function ReplayViewer({
       setTime((current) => Math.min(duration, current + elapsed));
     }, 50);
     return () => clearInterval(interval);
-  }, [playing, ready, duration, speed]);
+  }, [externallyControlled, playing, ready, duration, speed]);
 
   useEffect(() => {
-    if (time >= duration) setPlaying(false);
-  }, [time, duration]);
+    if (!externallyControlled && time >= duration) setPlaying(false);
+  }, [externallyControlled, time, duration]);
 
   function seek(next: number) {
-    setTime(Math.max(0, Math.min(duration, next)));
+    const bounded = Math.max(0, Math.min(duration, next));
+    if (externallyControlled) onSeek?.(bounded);
+    else setTime(bounded);
   }
 
   function togglePlay() {
+    if (externallyControlled) return;
     if (time >= duration) setTime(0);
     setPlaying((value) => !value);
   }
@@ -530,14 +557,14 @@ export function ReplayViewer({
     selected ?? participantList[0]?.participantIndex ?? null;
   const selectedParticipant =
     selectedIndex == null ? undefined : participants.get(selectedIndex);
-  const states = replayStatesAt(replay, time);
+  const states = replayStatesAt(replay, displayTime);
   const selectedState =
     selectedIndex == null ? undefined : states.get(selectedIndex);
 
   const recentEvents = (replay.events ?? [])
     .filter(
       (event) =>
-        event.atMs <= time &&
+        event.atMs <= displayTime &&
         !HIDDEN_RECENT_EVENT_KINDS.has(event.kind) &&
         (selectedIndex == null ||
           event.participantIndex === selectedIndex ||
@@ -580,11 +607,11 @@ export function ReplayViewer({
         }
         if (event.code === "ArrowLeft") {
           event.preventDefault();
-          seek(time - 10000);
+          seek(displayTime - 10000);
         }
         if (event.code === "ArrowRight") {
           event.preventDefault();
-          seek(time + 10000);
+          seek(displayTime + 10000);
         }
       }}
     >
@@ -602,13 +629,13 @@ export function ReplayViewer({
         <div
           className="replay-map"
           style={{ backgroundImage: "url(" + mapImage + ")" }}
-          aria-label={matchTime(time / 1000) + " 선수 위치"}
+          aria-label={matchTime(displayTime / 1000) + " 선수 위치"}
         >
           {participantList.map((participant) => {
             const point = replayPosition(
               replay.movements ?? [],
               participant.participantIndex,
-              time,
+              displayTime,
             );
             if (!point) return null;
             const markerClass =
@@ -643,7 +670,7 @@ export function ReplayViewer({
               </button>
             );
           })}
-          <span className="replay-map-clock">{matchTime(time / 1000)}</span>
+          <span className="replay-map-clock">{matchTime(displayTime / 1000)}</span>
         </div>
 
         <aside className="replay-sidebar">
@@ -728,7 +755,7 @@ export function ReplayViewer({
             <div className="replay-loadout-row">
               <SpellPair
                 spells={selectedParticipant?.summonerSpells ?? []}
-                version={match.version}
+                version={assetVersion}
                 compact
               />
               <div className="replay-skills" aria-label="스킬 레벨">
@@ -748,7 +775,7 @@ export function ReplayViewer({
                   <ItemIcon
                     key={slot}
                     id={selectedState?.items[slot] ?? 0}
-                    version={match.version}
+                    version={assetVersion}
                     small
                   />
                 ))}
@@ -768,7 +795,7 @@ export function ReplayViewer({
                       <ItemIcon
                         key={item + "-" + index}
                         id={item}
-                        version={match.version}
+                        version={assetVersion}
                         small
                       />
                     ))}
@@ -828,7 +855,7 @@ export function ReplayViewer({
           <section className="replay-events">
             <header>
               <strong>최근 이벤트</strong>
-              <span>{matchTime(time / 1000)}</span>
+              <span>{matchTime(displayTime / 1000)}</span>
             </header>
             {recentEvents.length ? (
               <ol>
@@ -855,11 +882,11 @@ export function ReplayViewer({
             min={0}
             max={duration}
             step={250}
-            value={time}
+            value={displayTime}
             onChange={(event) => seek(Number(event.target.value))}
             aria-label="재생 위치"
             aria-valuetext={
-              matchTime(time / 1000) + " / " + matchTime(duration / 1000)
+              matchTime(displayTime / 1000) + " / " + matchTime(duration / 1000)
             }
           />
           <div className="replay-event-track" aria-label="주요 이벤트">
@@ -894,43 +921,49 @@ export function ReplayViewer({
             <button
               type="button"
               className="match-button"
-              onClick={() => seek(time - 10000)}
+              onClick={() => seek(displayTime - 10000)}
               aria-label="10초 이전"
             >
               −10초
             </button>
-            <button
-              type="button"
-              className="match-button match-button-primary replay-play"
-              onClick={togglePlay}
-              aria-label={playing ? "일시정지" : "재생"}
-            >
-              {playing ? "Ⅱ" : "▶"}
-            </button>
+            {!externallyControlled && (
+              <button
+                type="button"
+                className="match-button match-button-primary replay-play"
+                onClick={togglePlay}
+                aria-label={playing ? "일시정지" : "재생"}
+              >
+                {playing ? "Ⅱ" : "▶"}
+              </button>
+            )}
             <button
               type="button"
               className="match-button"
-              onClick={() => seek(time + 10000)}
+              onClick={() => seek(displayTime + 10000)}
               aria-label="10초 이후"
             >
               +10초
             </button>
           </div>
           <span className="replay-time">
-            {matchTime(time / 1000)}{" "}
+            {matchTime(displayTime / 1000)}{" "}
             <span>/ {matchTime(duration / 1000)}</span>
           </span>
-          <select
-            aria-label="재생 속도"
-            value={speed}
-            onChange={(event) => setSpeed(Number(event.target.value))}
-          >
-            {[0.25, 0.5, 1, 2, 4, 8].map((value) => (
-              <option key={value} value={value}>
-                {value}×
-              </option>
-            ))}
-          </select>
+          {externallyControlled ? (
+            <span className="replay-time">실제 녹화와 동기화</span>
+          ) : (
+            <select
+              aria-label="재생 속도"
+              value={speed}
+              onChange={(event) => setSpeed(Number(event.target.value))}
+            >
+              {[0.25, 0.5, 1, 2, 4, 8].map((value) => (
+                <option key={value} value={value}>
+                  {value}×
+                </option>
+              ))}
+            </select>
+          )}
         </div>
       </div>
     </section>

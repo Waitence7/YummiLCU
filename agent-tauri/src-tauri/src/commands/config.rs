@@ -50,11 +50,7 @@ pub(crate) async fn save_config(
             )
             .await;
         state
-            .report_unexpected_error(
-                "config",
-                "windows_startup_registration_failed",
-                &summary,
-            )
+            .report_unexpected_error("config", "windows_startup_registration_failed", &summary)
             .await;
         return Err(summary);
     }
@@ -66,7 +62,9 @@ pub(crate) async fn save_config(
         state
             .report_diagnostic("command", "config_save_failed", &summary)
             .await;
-        state.log(&app, format!("설정 파일 저장 실패: {summary}")).await;
+        state
+            .log(&app, format!("설정 파일 저장 실패: {summary}"))
+            .await;
         state
             .report_unexpected_error("config", "save_failed", &summary)
             .await;
@@ -84,7 +82,10 @@ pub(crate) async fn save_config(
         if let Err(error) = RelaySupervisor::restart(app.clone(), state.inner().clone()).await {
             let summary = error.to_string();
             state
-                .record_flight("relay_error", format!("restart_after_config_failed: {summary}"))
+                .record_flight(
+                    "relay_error",
+                    format!("restart_after_config_failed: {summary}"),
+                )
                 .await;
             state
                 .log(&app, format!("설정 변경 후 Relay 재시작 실패: {summary}"))

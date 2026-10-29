@@ -124,6 +124,22 @@ pub(crate) async fn remote_replay_analysis_viewer(
     response_json(response, "ROFL 서버 재생 데이터 조회").await
 }
 
+pub(crate) async fn remote_recording_context(
+    config: &Config,
+    session: &Session,
+    game_id: &str,
+) -> AgentResult<Value> {
+    let response = client()?
+        .get(config.recording_context_url(&session.session_id, game_id)?)
+        .header("x-yummi-ws-token", &session.ws_token)
+        .send()
+        .await
+        .map_err(|error| {
+            AgentError::Relay(format!("녹화 경기 컨텍스트 조회 연결 실패: {error}"))
+        })?;
+    response_json(response, "녹화 경기 컨텍스트 조회").await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

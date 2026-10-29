@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import {
   getRecordingStatus,
+  requestBorderlessCaptureAccess,
   saveLastClip,
   startClipBuffer,
   startRecording,
@@ -9,6 +10,7 @@ import {
   stopRecording,
 } from '../api/commands';
 import type { RecordingCaptureSource, RecordingStatus } from '../state/types';
+import { RecordingReview } from '../components/recording/RecordingReview';
 
 const EMPTY: RecordingStatus = {
   supported: true,
@@ -21,6 +23,12 @@ const EMPTY: RecordingStatus = {
   videoOnly: true,
   recordingSource: 'monitor',
   clipSource: 'leagueWindow',
+  borderlessCaptureRequested: false,
+  borderlessCaptureAllowed: false,
+  borderlessCaptureStatus: 'not_requested',
+  autoGameRecording: false,
+  autoGameId: null,
+  activeRecordingMetadataPath: null,
 };
 
 function fileName(path?: string | null) {
@@ -28,7 +36,7 @@ function fileName(path?: string | null) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
-export function RecordingTab() {
+export function RecordingTab({ connected }: { connected: boolean }) {
   const [status, setStatus] = useState<RecordingStatus>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -63,7 +71,26 @@ export function RecordingTab() {
   }, [refresh]);
 
   return (
-    <div className="mx-auto flex w-full max-w-3xl flex-col gap-3">
+    <div className="mx-auto flex w-full max-w-6xl flex-col gap-3">
+      <RecordingReview connected={connected} />
+      <section className="rounded-xl border border-violet-200 bg-violet-50 p-4 shadow-sm">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-violet-950">자동 게임 녹화</h2>
+            <p className="mt-1 text-xs leading-5 text-violet-800/75">League가 InProgress가 되면 게임 창 녹화를 자동 시작하고 경기 종료를 확인하면 자동 저장합니다.</p>
+          </div>
+          <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${status.autoGameRecording ? 'bg-red-100 text-red-700' : 'bg-white text-violet-700'}`}>
+            {status.autoGameRecording ? `REC · ${status.autoGameId ?? 'game'}` : '자동 감지 대기'}
+          </span>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button type="button" disabled={busy || status.borderlessCaptureRequested} onClick={() => void run(requestBorderlessCaptureAccess)} className="rounded-lg border border-violet-300 bg-white px-3 py-2 text-xs font-semibold text-violet-800 disabled:cursor-not-allowed disabled:opacity-50">
+            {status.borderlessCaptureAllowed ? '테두리 없는 캡처 허용됨' : status.borderlessCaptureRequested ? '캡처 권한 요청 완료' : '테두리 없는 캡처 권한 1회 요청'}
+          </button>
+          <span className="text-[10px] text-violet-700/70">상태: {status.borderlessCaptureStatus}</span>
+        </div>
+      </section>
+
       <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
@@ -181,7 +208,7 @@ export function RecordingTab() {
       </section>
 
       <section className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[11px] leading-5 text-amber-900">
-        <b>Windows 10 1903 이상 / Windows 11 지원.</b> 호환성을 위해 Windows 11 전용 캡처 옵션은 사용하지 않습니다. 현재 1차 구현은 영상 전용이며 오디오는 다음 단계입니다.
+        <b>Windows 10 1903 이상 / Windows 11 지원.</b> Borderless 권한 API가 지원되지 않거나 앱 패키지 권한이 없으면 기존 WGC 테두리 모드로 자동 fallback합니다. 현재 영상 전용이며 오디오는 다음 단계입니다.
       </section>
 
       {(error || status.lastError) && (

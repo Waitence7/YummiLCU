@@ -5,6 +5,9 @@ import type {
   RecentMatch,
   RecordingStatus,
   RecordingCaptureSource,
+  RecordingGameContext,
+  RecordingSession,
+  OverlayInstallStatus,
 } from "../state/types";
 import type {
   MatchFightAnalysis,
@@ -47,6 +50,8 @@ export const matchFights = (gameId: string) =>
   call<MatchFightAnalysis>("match_fights", { gameId });
 export const matchReplay = (gameId: string) =>
   call<MatchReplay>("match_replay", { gameId });
+export const matchReplayRemote = (gameId: string) =>
+  call<MatchReplay>("match_replay_remote", { gameId });
 export const matchReplayAnalysis = (gameId: string, jobId: string) =>
   call<MatchReplay>("match_replay_analysis", { gameId, jobId });
 export const downloadMatchReplay = (gameId: string, gameVersion?: string) =>
@@ -76,6 +81,10 @@ export const getBetaReleaseInfo = () =>
   call<BetaReleaseInfo>("get_beta_release_info");
 export const openBetaDownload = () => call<void>("open_beta_download");
 export const applyBetaUpdateNow = () => call<void>("apply_beta_update_now");
+export const getOverlayInstallStatus = () =>
+  call<OverlayInstallStatus>("get_overlay_install_status");
+export const installOverlay = () =>
+  call<OverlayInstallStatus>("install_overlay");
 
 export const getDiagnosticBundle = () => call<string>("get_diagnostic_bundle");
 export const exportDiagnosticBundle = () =>
@@ -110,8 +119,14 @@ export const reportUiFailure = (operation: string, error: unknown) =>
   reportOperationFailure("ui_operation_failed", operation, error);
 export const reportTrayEffectDiagnostic = (code: string, detail: string) =>
   call<void>("report_tray_effect_diagnostic", { code, detail });
+export const reportRecordingDiagnostic = (code: string, detail: string) =>
+  call<void>("report_recording_diagnostic", { code, detail });
 
 export const getRecordingStatus = () => call<RecordingStatus>("get_recording_status");
+export const listRecordingSessions = () => call<RecordingSession[]>("list_recording_sessions");
+export const recordingGameContext = (gameId: string) =>
+  call<RecordingGameContext>("recording_game_context", { gameId });
+export const requestBorderlessCaptureAccess = () => call<RecordingStatus>("request_borderless_capture_access");
 export const startRecording = (source: RecordingCaptureSource) =>
   call<RecordingStatus>("start_recording", { source });
 export const stopRecording = () => call<RecordingStatus>("stop_recording");

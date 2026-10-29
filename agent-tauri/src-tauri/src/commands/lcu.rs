@@ -355,6 +355,19 @@ pub(crate) async fn match_replay(
 }
 
 #[tauri::command]
+pub(crate) async fn match_replay_remote(
+    state: State<'_, Arc<AppState>>,
+    game_id: String,
+) -> Result<Value, String> {
+    validate_game_id(&game_id)?;
+    let (local, replay_dir) = local_replay_viewer(state.inner(), &game_id).await?;
+    if local.get("status").and_then(Value::as_str) == Some("missing") {
+        return Ok(local);
+    }
+    Ok(start_remote_for_local_replay(state.inner(), &game_id, local, replay_dir).await)
+}
+
+#[tauri::command]
 pub(crate) async fn match_replay_analysis(
     state: State<'_, Arc<AppState>>,
     game_id: String,

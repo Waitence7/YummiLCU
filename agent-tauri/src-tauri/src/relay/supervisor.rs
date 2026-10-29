@@ -2593,8 +2593,12 @@ async fn connect_once(
                 mark_relay_branch(8);
                 match report {
                     Ok(report) => {
+                        let sync_recording_logs = matches!(report.category(), "recording" | "replay");
                         let message = serde_json::to_string(&report)?;
                         send_shared_relay_message(&writer, Message::Text(message.into()), "운영 진단 전송 실패").await?;
+                        if sync_recording_logs && diagnostic_log_chunks_enabled {
+                            diagnostic_log_initial_sync_pending = true;
+                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
                         state.record_flight(
@@ -3251,9 +3255,7 @@ where
         IncomingMessage::DiscordVoiceChatClear => {
             if session_bound {
                 state.clear_gamebar_voice_chat();
-                state
-                    .record_flight("discord_voice_chat", "clear")
-                    .await;
+                state.record_flight("discord_voice_chat", "clear").await;
             }
         }
         IncomingMessage::LiveGamePolling { enabled } => {

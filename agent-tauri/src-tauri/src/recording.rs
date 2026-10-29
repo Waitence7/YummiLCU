@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,6 +13,27 @@ pub(crate) struct RecordingStatus {
     pub video_only: bool,
     pub recording_source: String,
     pub clip_source: String,
+    pub borderless_capture_requested: bool,
+    pub borderless_capture_allowed: bool,
+    pub borderless_capture_status: String,
+    pub auto_game_recording: bool,
+    pub auto_game_id: Option<String>,
+    pub active_recording_metadata_path: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RecordingSessionMetadata {
+    pub schema: String,
+    pub game_id: Option<String>,
+    pub riot_id: Option<String>,
+    pub video_path: String,
+    pub source: String,
+    pub automatic: bool,
+    pub started_at_ms: u64,
+    pub ended_at_ms: Option<u64>,
+    pub game_clock_offset_ms: i64,
+    pub rofl_path: Option<String>,
 }
 
 #[cfg(windows)]
@@ -25,13 +46,16 @@ mod imp {
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
+    use serde::{Deserialize, Serialize};
     use windows::{
         core::HSTRING,
         Foundation::TimeSpan,
+        Graphics::Capture::{GraphicsCaptureAccess, GraphicsCaptureAccessKind},
         Media::{
             Editing::{MediaClip, MediaComposition},
             Transcoding::TranscodeFailureReason,
         },
+        Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus,
         Storage::StorageFile,
         Win32::System::WinRT::{RoInitialize, RoUninitialize, RO_INIT_MULTITHREADED},
     };
@@ -51,7 +75,7 @@ mod imp {
         window::Window,
     };
 
-    use super::RecordingStatus;
+    use super::{RecordingSessionMetadata, RecordingStatus};
 
     const VIDEO_BITRATE: u32 = 15_000_000;
     const VIDEO_FPS: u32 = 60;
@@ -317,6 +341,13 @@ mod imp {
         clip_exporting: bool,
         recording_source: String,
         clip_source: String,
+        borderless_capture_requested: bool,
+        borderless_capture_allowed: bool,
+        borderless_capture_status: String,
+        auto_game_recording: bool,
+        auto_game_id: Option<String>,
+        active_recording_metadata_path: Option<PathBuf>,
+        active_recording_metadata: Option<RecordingSessionMetadata>,
     }
 
     impl RecordingManager {
@@ -331,6 +362,13 @@ mod imp {
                 clip_exporting: false,
                 recording_source: "monitor".into(),
                 clip_source: "leagueWindow".into(),
+                borderless_capture_requested: false,
+                borderless_capture_allowed: false,
+                borderless_capture_status: "not_requested".into(),
+                auto_game_recording: false,
+                auto_game_id: None,
+                active_recording_metadata_path: None,
+                active_recording_metadata: None,
             }
         }
 
@@ -377,6 +415,15 @@ mod imp {
                 video_only: true,
                 recording_source: self.recording_source.clone(),
                 clip_source: self.clip_source.clone(),
+                borderless_capture_requested: self.borderless_capture_requested,
+                borderless_capture_allowed: self.borderless_capture_allowed,
+                borderless_capture_status: self.borderless_capture_status.clone(),
+                auto_game_recording: self.auto_game_recording,
+                auto_game_id: self.auto_game_id.clone(),
+                active_recording_metadata_path: self
+                    .active_recording_metadata_path
+                    .as_ref()
+                    .map(path_string),
             }
         }
     }
@@ -384,7 +431,15 @@ mod imp {
     static MANAGER: OnceLock<Mutex<RecordingManager>> = OnceLock::new();
 
     fn manager() -> &'static Mutex<RecordingManager> {
-        MANAGER.get_or_init(|| Mutex::new(RecordingManager::new()))
+        MANAGER.get_or_init(|| {
+            let mut manager = RecordingManager::new();
+            if let Some(state) = load_borderless_state() {
+                manager.borderless_capture_requested = state.requested;
+                manager.borderless_capture_allowed = state.allowed;
+                manager.borderless_capture_status = state.status;
+            }
+            Mutex::new(manager)
+        })
     }
 
     fn lock_manager() -> Result<MutexGuard<'static, RecordingManager>, String> {
@@ -441,6 +496,85 @@ mod imp {
             .join("recording-buffer")
     }
 
+    fn borderless_state_path() -> PathBuf {
+        dirs::data_local_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join("Yummi")
+            .join("capture-borderless.json")
+    }
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct BorderlessState {
+        requested: bool,
+        allowed: bool,
+        status: String,
+    }
+
+    fn load_borderless_state() -> Option<BorderlessState> {
+        let raw = fs::read_to_string(borderless_state_path()).ok()?;
+        serde_json::from_str(&raw).ok()
+    }
+
+    fn save_borderless_state(state: &BorderlessState) {
+        let path = borderless_state_path();
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(raw) = serde_json::to_vec_pretty(state) {
+            let _ = fs::write(path, raw);
+        }
+    }
+
+    fn metadata_path_for_video(video: &Path) -> PathBuf {
+        video.with_extension("json")
+    }
+
+    fn write_session_metadata(
+        path: &Path,
+        metadata: &RecordingSessionMetadata,
+    ) -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("녹화 메타데이터 폴더 생성 실패: {error}"))?;
+        }
+        let raw = serde_json::to_vec_pretty(metadata)
+            .map_err(|error| format!("녹화 메타데이터 직렬화 실패: {error}"))?;
+        fs::write(path, raw).map_err(|error| format!("녹화 메타데이터 저장 실패: {error}"))
+    }
+
+    fn read_session_metadata(path: &Path) -> Option<RecordingSessionMetadata> {
+        let raw = fs::read(path).ok()?;
+        serde_json::from_slice(&raw).ok()
+    }
+
+    fn persisted_sessions() -> Vec<(PathBuf, RecordingSessionMetadata)> {
+        let Ok(entries) = fs::read_dir(recording_directory()) else {
+            return Vec::new();
+        };
+        let mut rows = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                if path.extension().and_then(|value| value.to_str()) != Some("json") {
+                    return None;
+                }
+                read_session_metadata(&path).map(|metadata| (path, metadata))
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|(_, metadata)| std::cmp::Reverse(metadata.started_at_ms));
+        rows.truncate(100);
+        rows
+    }
+
+    fn draw_border_setting(manager: &RecordingManager) -> DrawBorderSettings {
+        if manager.borderless_capture_allowed {
+            DrawBorderSettings::WithoutBorder
+        } else {
+            DrawBorderSettings::Default
+        }
+    }
+
     fn league_window() -> Result<Window, String> {
         let windows =
             Window::enumerate().map_err(|error| format!("Windows 창 목록 조회 실패: {error}"))?;
@@ -479,6 +613,7 @@ mod imp {
     fn general_monitor_settings(
         monitor: Monitor,
         output_path: PathBuf,
+        draw_border: DrawBorderSettings,
     ) -> Result<Settings<EncoderFlags, Monitor>, String> {
         let width = monitor
             .width()
@@ -489,7 +624,7 @@ mod imp {
         Ok(Settings::new(
             monitor,
             CursorCaptureSettings::Default,
-            DrawBorderSettings::Default,
+            draw_border,
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
@@ -505,6 +640,7 @@ mod imp {
     fn rolling_window_settings(
         window: Window,
         directory: PathBuf,
+        draw_border: DrawBorderSettings,
     ) -> Result<Settings<RollingFlags, Window>, String> {
         let width = u32::try_from(
             window
@@ -521,7 +657,7 @@ mod imp {
         Ok(Settings::new(
             window,
             CursorCaptureSettings::Default,
-            DrawBorderSettings::Default,
+            draw_border,
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
@@ -537,6 +673,7 @@ mod imp {
     fn general_window_settings(
         window: Window,
         output_path: PathBuf,
+        draw_border: DrawBorderSettings,
     ) -> Result<Settings<EncoderFlags, Window>, String> {
         let width = u32::try_from(
             window
@@ -553,7 +690,7 @@ mod imp {
         Ok(Settings::new(
             window,
             CursorCaptureSettings::Default,
-            DrawBorderSettings::Default,
+            draw_border,
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
@@ -569,6 +706,7 @@ mod imp {
     fn rolling_monitor_settings(
         monitor: Monitor,
         directory: PathBuf,
+        draw_border: DrawBorderSettings,
     ) -> Result<Settings<RollingFlags, Monitor>, String> {
         let width = monitor
             .width()
@@ -579,7 +717,7 @@ mod imp {
         Ok(Settings::new(
             monitor,
             CursorCaptureSettings::Default,
-            DrawBorderSettings::Default,
+            draw_border,
             SecondaryWindowSettings::Default,
             MinimumUpdateIntervalSettings::Default,
             DirtyRegionSettings::Default,
@@ -604,9 +742,15 @@ mod imp {
         Ok(lock_manager()?.status())
     }
 
-    pub(super) fn start_recording(source: Option<&str>) -> Result<RecordingStatus, String> {
+    fn start_recording_inner(
+        source: Option<&str>,
+        automatic: bool,
+        game_id: Option<String>,
+        riot_id: Option<String>,
+        game_clock_offset_ms: i64,
+    ) -> Result<RecordingStatus, String> {
         ensure_capture_supported()?;
-        let source = normalized_source(source, "monitor")?;
+        let source = normalized_source(source, if automatic { "leagueWindow" } else { "monitor" })?;
         let mut manager = lock_manager()?;
         manager.cleanup_finished();
         if manager.general.is_some() {
@@ -615,23 +759,75 @@ mod imp {
 
         let directory = recording_directory();
         fs::create_dir_all(&directory).map_err(|error| format!("녹화 폴더 생성 실패: {error}"))?;
-        let path = directory.join(format!("Yummi-recording-{}.mp4", timestamp_ms()));
+        let started_at_ms = timestamp_ms() as u64;
+        let path = if automatic {
+            let game = game_id
+                .as_deref()
+                .unwrap_or("unknown")
+                .chars()
+                .filter(|value| value.is_ascii_alphanumeric() || *value == '-' || *value == '_')
+                .collect::<String>();
+            directory.join(format!("Yummi-game-{game}-{started_at_ms}.mp4"))
+        } else {
+            directory.join(format!("Yummi-recording-{started_at_ms}.mp4"))
+        };
+        let draw_border = draw_border_setting(&manager);
         let control = if source == "leagueWindow" {
-            let settings = general_window_settings(league_window()?, path.clone())?;
+            let settings = general_window_settings(league_window()?, path.clone(), draw_border)?;
             GeneralCapture::start_free_threaded(settings)
                 .map_err(|error| format!("일반 녹화 시작 실패: {error}"))?
         } else {
-            let settings =
-                general_monitor_settings(monitor_for_general_recording()?, path.clone())?;
+            let settings = general_monitor_settings(
+                monitor_for_general_recording()?,
+                path.clone(),
+                draw_border,
+            )?;
             GeneralCapture::start_free_threaded(settings)
                 .map_err(|error| format!("일반 녹화 시작 실패: {error}"))?
         };
 
+        let metadata_path = metadata_path_for_video(&path);
+        let metadata = RecordingSessionMetadata {
+            schema: "yummi-recording-session/v1".into(),
+            game_id: game_id.clone(),
+            riot_id,
+            video_path: path_string(&path),
+            source: source.into(),
+            automatic,
+            started_at_ms,
+            ended_at_ms: None,
+            game_clock_offset_ms,
+            rofl_path: None,
+        };
+        write_session_metadata(&metadata_path, &metadata)?;
+
         manager.general = Some(control);
         manager.recording_path = Some(path);
         manager.recording_source = source.into();
+        manager.auto_game_recording = automatic;
+        manager.auto_game_id = if automatic { game_id } else { None };
+        manager.active_recording_metadata_path = Some(metadata_path);
+        manager.active_recording_metadata = Some(metadata);
         manager.last_error = None;
         Ok(manager.status())
+    }
+
+    pub(super) fn start_recording(source: Option<&str>) -> Result<RecordingStatus, String> {
+        start_recording_inner(source, false, None, None, 0)
+    }
+
+    pub(super) fn start_auto_game_recording(
+        game_id: String,
+        riot_id: Option<String>,
+        game_clock_offset_ms: i64,
+    ) -> Result<RecordingStatus, String> {
+        start_recording_inner(
+            Some("leagueWindow"),
+            true,
+            Some(game_id),
+            riot_id,
+            game_clock_offset_ms,
+        )
     }
 
     pub(super) fn stop_recording() -> Result<RecordingStatus, String> {
@@ -645,7 +841,28 @@ mod imp {
                 .stop()
                 .map_err(|error| format!("일반 녹화 중지 실패: {error}"))?;
         }
-        Ok(lock_manager()?.status())
+        let mut manager = lock_manager()?;
+        if let (Some(path), Some(mut metadata)) = (
+            manager.active_recording_metadata_path.clone(),
+            manager.active_recording_metadata.take(),
+        ) {
+            metadata.ended_at_ms = Some(timestamp_ms() as u64);
+            if let Err(error) = write_session_metadata(&path, &metadata) {
+                manager.last_error = Some(error);
+            }
+        }
+        manager.auto_game_recording = false;
+        manager.auto_game_id = None;
+        manager.active_recording_metadata_path = None;
+        Ok(manager.status())
+    }
+
+    pub(super) fn stop_auto_game_recording() -> Result<RecordingStatus, String> {
+        let automatic = lock_manager()?.auto_game_recording;
+        if !automatic {
+            return status();
+        }
+        stop_recording()
     }
 
     pub(super) fn start_clip_buffer(source: Option<&str>) -> Result<RecordingStatus, String> {
@@ -662,12 +879,19 @@ mod imp {
         let directory = root.join(format!("session-{}", timestamp_ms()));
         fs::create_dir_all(&directory).map_err(|error| format!("클립 버퍼 생성 실패: {error}"))?;
         let control = if source == "monitor" {
-            let settings =
-                rolling_monitor_settings(monitor_for_general_recording()?, directory.clone())?;
+            let settings = rolling_monitor_settings(
+                monitor_for_general_recording()?,
+                directory.clone(),
+                draw_border_setting(&manager),
+            )?;
             RollingCapture::start_free_threaded(settings)
                 .map_err(|error| format!("클립 버퍼 시작 실패: {error}"))?
         } else {
-            let settings = rolling_window_settings(league_window()?, directory.clone())?;
+            let settings = rolling_window_settings(
+                league_window()?,
+                directory.clone(),
+                draw_border_setting(&manager),
+            )?;
             RollingCapture::start_free_threaded(settings)
                 .map_err(|error| format!("클립 버퍼 시작 실패: {error}"))?
         };
@@ -744,6 +968,93 @@ mod imp {
             }
         }
         Ok(manager.status())
+    }
+
+    pub(super) fn request_borderless_access() -> Result<RecordingStatus, String> {
+        {
+            let manager = lock_manager()?;
+            if manager.borderless_capture_requested {
+                drop(manager);
+                return status();
+            }
+        }
+        let request_result = WinRtGuard::new().and_then(|_winrt| {
+            GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
+                .map_err(|error| format!("테두리 없는 캡처 권한 요청 시작 실패: {error}"))?
+                .get()
+                .map_err(|error| format!("테두리 없는 캡처 권한 요청 실패: {error}"))
+        });
+        let (allowed, label, request_error) = match request_result {
+            Ok(result) if result == AppCapabilityAccessStatus::Allowed => (true, "allowed", None),
+            Ok(result) if result == AppCapabilityAccessStatus::DeniedByUser => {
+                (false, "denied_by_user", None)
+            }
+            Ok(result) if result == AppCapabilityAccessStatus::NotDeclaredByApp => {
+                (false, "not_declared_by_app", None)
+            }
+            Ok(result) if result == AppCapabilityAccessStatus::DeniedBySystem => {
+                (false, "denied_by_system", None)
+            }
+            Ok(result) if result == AppCapabilityAccessStatus::UserPromptRequired => {
+                (false, "prompt_required", None)
+            }
+            Ok(_) => (false, "unknown", None),
+            Err(error) => (false, "unavailable", Some(error)),
+        };
+        let persisted = BorderlessState {
+            requested: true,
+            allowed,
+            status: label.into(),
+        };
+        save_borderless_state(&persisted);
+        let mut manager = lock_manager()?;
+        manager.borderless_capture_requested = true;
+        manager.borderless_capture_allowed = allowed;
+        manager.borderless_capture_status = label.into();
+        if let Some(error) = request_error {
+            manager.last_error = Some(format!("{error} · 기본 WGC 테두리 모드로 계속합니다."));
+        }
+        Ok(manager.status())
+    }
+
+    pub(super) fn list_sessions() -> Result<Vec<RecordingSessionMetadata>, String> {
+        Ok(persisted_sessions()
+            .into_iter()
+            .map(|(_, metadata)| metadata)
+            .collect())
+    }
+
+    pub(super) fn session_for_game(
+        game_id: &str,
+    ) -> Result<Option<RecordingSessionMetadata>, String> {
+        Ok(persisted_sessions()
+            .into_iter()
+            .map(|(_, metadata)| metadata)
+            .find(|metadata| metadata.game_id.as_deref() == Some(game_id)))
+    }
+
+    pub(super) fn link_rofl(game_id: &str, rofl_path: &str) -> Result<(), String> {
+        for (path, mut metadata) in persisted_sessions() {
+            if metadata.game_id.as_deref() != Some(game_id) {
+                continue;
+            }
+            metadata.rofl_path = Some(rofl_path.to_owned());
+            write_session_metadata(&path, &metadata)?;
+            let mut manager = lock_manager()?;
+            if manager.auto_game_id.as_deref() == Some(game_id) {
+                if let Some(active) = manager.active_recording_metadata.as_mut() {
+                    active.rofl_path = Some(rofl_path.to_owned());
+                }
+            }
+            return Ok(());
+        }
+        Ok(())
+    }
+
+    pub(super) fn auto_game_id() -> Option<String> {
+        lock_manager()
+            .ok()
+            .and_then(|manager| manager.auto_game_id.clone())
     }
 
     struct WinRtGuard;
@@ -835,7 +1146,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::RecordingStatus;
+    use super::{RecordingSessionMetadata, RecordingStatus};
 
     fn unsupported() -> String {
         "녹화 기능은 Windows 10 1903 이상에서 지원됩니다.".into()
@@ -866,6 +1177,33 @@ mod imp {
     pub(super) fn save_last_clip(_seconds: u64) -> Result<RecordingStatus, String> {
         Err(unsupported())
     }
+    pub(super) fn request_borderless_access() -> Result<RecordingStatus, String> {
+        Err(unsupported())
+    }
+    pub(super) fn start_auto_game_recording(
+        _game_id: String,
+        _riot_id: Option<String>,
+        _game_clock_offset_ms: i64,
+    ) -> Result<RecordingStatus, String> {
+        Err(unsupported())
+    }
+    pub(super) fn stop_auto_game_recording() -> Result<RecordingStatus, String> {
+        Err(unsupported())
+    }
+    pub(super) fn list_sessions() -> Result<Vec<RecordingSessionMetadata>, String> {
+        Ok(Vec::new())
+    }
+    pub(super) fn session_for_game(
+        _game_id: &str,
+    ) -> Result<Option<RecordingSessionMetadata>, String> {
+        Ok(None)
+    }
+    pub(super) fn link_rofl(_game_id: &str, _rofl_path: &str) -> Result<(), String> {
+        Ok(())
+    }
+    pub(super) fn auto_game_id() -> Option<String> {
+        None
+    }
 }
 
 pub(crate) fn status() -> Result<RecordingStatus, String> {
@@ -885,4 +1223,29 @@ pub(crate) fn stop_clip_buffer() -> Result<RecordingStatus, String> {
 }
 pub(crate) fn save_last_clip(seconds: u64) -> Result<RecordingStatus, String> {
     imp::save_last_clip(seconds)
+}
+pub(crate) fn request_borderless_access() -> Result<RecordingStatus, String> {
+    imp::request_borderless_access()
+}
+pub(crate) fn start_auto_game_recording(
+    game_id: String,
+    riot_id: Option<String>,
+    game_clock_offset_ms: i64,
+) -> Result<RecordingStatus, String> {
+    imp::start_auto_game_recording(game_id, riot_id, game_clock_offset_ms)
+}
+pub(crate) fn stop_auto_game_recording() -> Result<RecordingStatus, String> {
+    imp::stop_auto_game_recording()
+}
+pub(crate) fn list_sessions() -> Result<Vec<RecordingSessionMetadata>, String> {
+    imp::list_sessions()
+}
+pub(crate) fn session_for_game(game_id: &str) -> Result<Option<RecordingSessionMetadata>, String> {
+    imp::session_for_game(game_id)
+}
+pub(crate) fn link_rofl(game_id: &str, rofl_path: &str) -> Result<(), String> {
+    imp::link_rofl(game_id, rofl_path)
+}
+pub(crate) fn auto_game_id() -> Option<String> {
+    imp::auto_game_id()
 }

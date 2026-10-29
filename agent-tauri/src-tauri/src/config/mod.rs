@@ -74,6 +74,7 @@ pub struct Config {
     /// Sliding multiplier for custom Windows window inertia. None means no friction (infinity).
     pub window_glide_strength: Option<f64>,
     pub window_free_rotation: bool,
+    pub auto_record_league_games: bool,
     pub ui_test_mode: bool,
 }
 
@@ -101,6 +102,7 @@ impl Default for Config {
             tray_effect_playback_rate: 1.0,
             window_glide_strength: Some(1.0),
             window_free_rotation: false,
+            auto_record_league_games: true,
             ui_test_mode: false,
         }
     }
@@ -404,6 +406,20 @@ impl Config {
         url.query_pairs_mut()
             .append_pair("session_id", session_id)
             .append_pair("job_id", job_id);
+        Ok(url.into())
+    }
+
+    pub(crate) fn recording_context_url(
+        &self,
+        session_id: &str,
+        game_id: &str,
+    ) -> AgentResult<String> {
+        let mut url = validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
+        url.set_path("/lcu/recording-context");
+        url.set_query(None);
+        url.query_pairs_mut()
+            .append_pair("session_id", session_id)
+            .append_pair("game_id", game_id);
         Ok(url.into())
     }
 }

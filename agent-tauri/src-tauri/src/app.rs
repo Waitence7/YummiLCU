@@ -80,14 +80,21 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::diagnostics::get_diagnostic_bundle,
             crate::commands::diagnostics::export_diagnostic_bundle,
             crate::commands::diagnostics::report_unexpected_error,
+            crate::commands::diagnostics::report_recording_diagnostic,
             crate::commands::diagnostics::report_tray_effect_diagnostic,
             crate::commands::lcu::recent_match,
             crate::commands::lcu::match_history,
             crate::commands::lcu::match_fights,
             crate::commands::lcu::match_replay,
+            crate::commands::lcu::match_replay_remote,
             crate::commands::lcu::match_replay_analysis,
             crate::commands::lcu::download_match_replay,
+            crate::commands::overlay::get_overlay_install_status,
+            crate::commands::overlay::install_overlay,
             crate::commands::recording::get_recording_status,
+            crate::commands::recording::list_recording_sessions,
+            crate::commands::recording::recording_game_context,
+            crate::commands::recording::request_borderless_capture_access,
             crate::commands::recording::start_recording,
             crate::commands::recording::stop_recording,
             crate::commands::recording::start_clip_buffer,
@@ -175,6 +182,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
 
             tray::setup(app)?;
             crate::gamebar_bridge::start(app.handle().clone(), update_state.clone());
+            crate::recording_http::start(update_state.clone());
             crate::commands::window::start_window_ui_watchdog(
                 app.handle().clone(),
                 update_state.clone(),
@@ -199,6 +207,13 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 "updater",
                 "task_panicked",
                 auto_update_on_startup(handle.clone(), update_state),
+            );
+            let recording_state = lcu_state.clone();
+            spawn_monitored(
+                recording_state.clone(),
+                "recording_watcher",
+                "task_panicked",
+                watch_game_recording(handle.clone(), recording_state),
             );
             spawn_monitored(
                 lcu_state.clone(),
@@ -460,6 +475,337 @@ async fn watch_relay_supervisor(app: AppHandle, state: Arc<AppState>) {
                 if changed.is_err() || *shutdown.borrow() {
                     break;
                 }
+            }
+        }
+    }
+}
+
+fn recording_game_id(session: &serde_json::Value) -> Option<String> {
+    session
+        .pointer("/gameData/gameId")
+        .or_else(|| session.pointer("/gameData/id"))
+        .or_else(|| session.get("gameId"))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_u64().map(|id| id.to_string()))
+        })
+        .filter(|value| !value.trim().is_empty() && value != "0")
+}
+
+fn recording_game_clock_ms(value: &serde_json::Value) -> i64 {
+    value
+        .pointer("/gameData/gameTime")
+        .and_then(serde_json::Value::as_f64)
+        .filter(|seconds| seconds.is_finite() && *seconds >= 0.0)
+        .map(|seconds| (seconds * 1000.0).round() as i64)
+        .unwrap_or(0)
+}
+
+fn recording_riot_id(value: &serde_json::Value) -> Option<String> {
+    let name = value
+        .get("gameName")
+        .or_else(|| value.get("riotIdGameName"))
+        .or_else(|| value.get("displayName"))
+        .and_then(serde_json::Value::as_str)?
+        .trim();
+    if name.is_empty() {
+        return None;
+    }
+    let tag = value
+        .get("tagLine")
+        .or_else(|| value.get("riotIdTagLine"))
+        .or_else(|| value.get("riotIdTagline"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    Some(match tag {
+        Some(tag) if !name.contains('#') => format!("{name}#{tag}"),
+        _ => name.to_owned(),
+    })
+}
+
+async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
+    let mut shutdown = state.shutdown_receiver();
+    let mut inactive_ticks = 0u8;
+    let mut last_start_error: Option<String> = None;
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+
+        let enabled = state.config.read().await.auto_record_league_games;
+        let mut active_game: Option<(String, Option<String>, i64)> = None;
+        if enabled {
+            let config = state.config.read().await.clone();
+            match discover_lockfile_nonblocking(&config).await {
+                Ok(discovery) => {
+                    if let Some(path) = discovery.path {
+                        match LcuClient::from_lockfile(&path)
+                            .or_else(|_| LcuClient::from_lockfile_legacy(&path))
+                        {
+                            Ok(client) => match client.gameflow_phase().await {
+                                Ok(phase) if phase == "InProgress" => {
+                                    match client.gameflow_session().await {
+                                        Ok(session) => {
+                                            if let Some(game_id) = recording_game_id(&session) {
+                                                let riot_id = match client.current_summoner().await
+                                                {
+                                                    Ok(value) => recording_riot_id(&value),
+                                                    Err(error) => {
+                                                        state
+                                                            .report_diagnostic(
+                                                                "recording",
+                                                                "identity_probe_failed",
+                                                                format!("game_id={game_id} error={error}"),
+                                                            )
+                                                            .await;
+                                                        None
+                                                    }
+                                                };
+                                                let game_clock_offset_ms =
+                                                    match LcuClient::live_game_request(
+                                                        "/liveclientdata/allgamedata",
+                                                    )
+                                                    .await
+                                                    {
+                                                        Ok(value) => {
+                                                            recording_game_clock_ms(&value)
+                                                        }
+                                                        Err(error) => {
+                                                            state
+                                                            .report_diagnostic(
+                                                                "recording",
+                                                                "live_clock_probe_failed",
+                                                                format!("game_id={game_id} error={error}"),
+                                                            )
+                                                            .await;
+                                                            0
+                                                        }
+                                                    };
+                                                active_game =
+                                                    Some((game_id, riot_id, game_clock_offset_ms));
+                                            } else {
+                                                state
+                                                    .report_diagnostic(
+                                                        "recording",
+                                                        "game_id_missing",
+                                                        "phase=InProgress gameflow_session_missing_game_id",
+                                                    )
+                                                    .await;
+                                            }
+                                        }
+                                        Err(error) => {
+                                            state
+                                                .report_diagnostic(
+                                                    "recording",
+                                                    "gameflow_session_failed",
+                                                    error.to_string(),
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    state
+                                        .report_diagnostic(
+                                            "recording",
+                                            "gameflow_phase_failed",
+                                            error.to_string(),
+                                        )
+                                        .await;
+                                }
+                            },
+                            Err(error) => {
+                                state
+                                    .report_diagnostic(
+                                        "recording",
+                                        "lcu_client_init_failed",
+                                        error.to_string(),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    state
+                        .report_diagnostic(
+                            "recording",
+                            "lockfile_discovery_failed",
+                            error.to_string(),
+                        )
+                        .await;
+                }
+            }
+        }
+
+        if let Some((game_id, riot_id, game_clock_offset_ms)) = active_game {
+            inactive_ticks = 0;
+            let previous_game = crate::recording::auto_game_id();
+            if previous_game
+                .as_deref()
+                .is_some_and(|previous| previous != game_id)
+            {
+                let old_game = previous_game.clone().unwrap_or_default();
+                match tokio::task::spawn_blocking(crate::recording::stop_auto_game_recording).await
+                {
+                    Ok(Ok(_)) => {
+                        state
+                            .record_flight(
+                                "recording",
+                                format!("auto_switch_stop game_id={old_game}"),
+                            )
+                            .await;
+                    }
+                    Ok(Err(error)) => {
+                        let detail = format!("game_id={old_game} error={error}");
+                        state
+                            .record_flight(
+                                "recording_error",
+                                format!("auto_switch_stop_failed {detail}"),
+                            )
+                            .await;
+                        state
+                            .report_diagnostic("recording", "auto_switch_stop_failed", &detail)
+                            .await;
+                    }
+                    Err(error) => {
+                        let detail = format!("game_id={old_game} worker_error={error}");
+                        state
+                            .record_flight(
+                                "recording_error",
+                                format!("auto_switch_stop_worker_failed {detail}"),
+                            )
+                            .await;
+                        state
+                            .report_diagnostic(
+                                "recording",
+                                "auto_switch_stop_worker_failed",
+                                &detail,
+                            )
+                            .await;
+                    }
+                }
+            }
+            if crate::recording::auto_game_id().as_deref() != Some(game_id.as_str()) {
+                let game_id_for_worker = game_id.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    crate::recording::start_auto_game_recording(
+                        game_id_for_worker,
+                        riot_id,
+                        game_clock_offset_ms,
+                    )
+                })
+                .await;
+                match result {
+                    Ok(Ok(status)) if status.auto_game_recording => {
+                        last_start_error = None;
+                        state
+                            .record_flight(
+                                "recording",
+                                format!(
+                                    "auto_start game_id={game_id} path={}",
+                                    status.recording_path.as_deref().unwrap_or("unknown")
+                                ),
+                            )
+                            .await;
+                        state
+                            .log(&app, format!("게임 자동 녹화 시작 · {game_id}"))
+                            .await;
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        if last_start_error.as_deref() != Some(error.as_str()) {
+                            let detail = format!("game_id={game_id} error={error}");
+                            state
+                                .record_flight(
+                                    "recording_error",
+                                    format!("auto_start_failed {detail}"),
+                                )
+                                .await;
+                            state
+                                .report_diagnostic("recording", "auto_start_failed", &detail)
+                                .await;
+                            last_start_error = Some(error);
+                        }
+                    }
+                    Err(error) => {
+                        let message = format!("auto recording worker failed: {error}");
+                        if last_start_error.as_deref() != Some(message.as_str()) {
+                            state.record_flight("recording_error", &message).await;
+                            state
+                                .report_diagnostic(
+                                    "recording",
+                                    "auto_start_worker_failed",
+                                    format!("game_id={game_id} error={error}"),
+                                )
+                                .await;
+                            last_start_error = Some(message);
+                        }
+                    }
+                }
+            }
+        } else if crate::recording::auto_game_id().is_some() {
+            inactive_ticks = inactive_ticks.saturating_add(1);
+            if inactive_ticks >= 3 {
+                let stopped_game = crate::recording::auto_game_id();
+                let result =
+                    tokio::task::spawn_blocking(crate::recording::stop_auto_game_recording).await;
+                match result {
+                    Ok(Ok(status)) => {
+                        state
+                            .record_flight(
+                                "recording",
+                                format!(
+                                    "auto_stop game_id={} path={}",
+                                    stopped_game.as_deref().unwrap_or("unknown"),
+                                    status.recording_path.as_deref().unwrap_or("unknown")
+                                ),
+                            )
+                            .await;
+                        state.log(&app, "게임 자동 녹화 저장 완료").await;
+                    }
+                    Ok(Err(error)) => {
+                        let detail = format!(
+                            "game_id={} error={error}",
+                            stopped_game.as_deref().unwrap_or("unknown")
+                        );
+                        state
+                            .record_flight("recording_error", format!("auto_stop_failed {detail}"))
+                            .await;
+                        state
+                            .report_diagnostic("recording", "auto_stop_failed", &detail)
+                            .await;
+                    }
+                    Err(error) => {
+                        let detail = format!(
+                            "game_id={} worker_error={error}",
+                            stopped_game.as_deref().unwrap_or("unknown")
+                        );
+                        state
+                            .record_flight(
+                                "recording_error",
+                                format!("auto_stop_worker_failed {detail}"),
+                            )
+                            .await;
+                        state
+                            .report_diagnostic("recording", "auto_stop_worker_failed", &detail)
+                            .await;
+                    }
+                }
+                inactive_ticks = 0;
+            }
+        } else {
+            inactive_ticks = 0;
+        }
+
+        tokio::select! {
+            _ = sleep(Duration::from_secs(2)) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() { break; }
             }
         }
     }

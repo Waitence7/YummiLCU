@@ -11,6 +11,7 @@ mod http_diagnostics;
 mod lcu;
 mod platform;
 mod recording;
+mod recording_http;
 mod relay;
 mod session;
 mod state;

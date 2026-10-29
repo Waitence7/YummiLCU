@@ -45,6 +45,37 @@ pub(crate) async fn report_unexpected_error(
     Ok(())
 }
 
+fn validate_recording_diagnostic_code(code: &str) -> Option<&'static str> {
+    match code {
+        "recording_list_failed" => Some("recording_list_failed"),
+        "recording_context_failed" => Some("recording_context_failed"),
+        "video_load_failed" => Some("video_load_failed"),
+        "video_metadata_invalid" => Some("video_metadata_invalid"),
+        "video_seek_failed" => Some("video_seek_failed"),
+        "replay_api_failed" => Some("replay_api_failed"),
+        _ => None,
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn report_recording_diagnostic(
+    state: State<'_, Arc<AppState>>,
+    code: String,
+    detail: String,
+) -> Result<(), String> {
+    let code = validate_recording_diagnostic_code(&code)
+        .ok_or_else(|| "지원하지 않는 녹화 진단 코드입니다.".to_string())?;
+    let detail = sanitize_tray_effect_detail(&detail);
+    if detail.is_empty() {
+        return Err("녹화 진단 내용이 비어 있습니다.".into());
+    }
+    state
+        .record_flight("recording_ui_error", format!("{code}: {detail}"))
+        .await;
+    state.report_diagnostic("recording", code, &detail).await;
+    Ok(())
+}
+
 #[tauri::command]
 pub(crate) async fn report_tray_effect_diagnostic(
     app: AppHandle,
@@ -102,7 +133,23 @@ fn sanitize_tray_effect_detail(detail: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_tray_effect_detail, validate_tray_effect_diagnostic_code};
+    use super::{
+        sanitize_tray_effect_detail, validate_recording_diagnostic_code,
+        validate_tray_effect_diagnostic_code,
+    };
+
+    #[test]
+    fn recording_diagnostics_accept_only_known_codes() {
+        assert_eq!(
+            validate_recording_diagnostic_code("video_load_failed"),
+            Some("video_load_failed")
+        );
+        assert_eq!(
+            validate_recording_diagnostic_code("replay_api_failed"),
+            Some("replay_api_failed")
+        );
+        assert_eq!(validate_recording_diagnostic_code("arbitrary"), None);
+    }
 
     #[test]
     fn tray_effect_diagnostics_accept_only_known_codes() {

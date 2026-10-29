@@ -37,6 +37,21 @@ const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:19514";
 #[cfg(windows)]
 const GAMEBAR_COMMAND_LOOPBACK_ADDR: &str = "127.0.0.1:19515";
 
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OverlayInstallStatus {
+    pub supported: bool,
+    pub installed: bool,
+    pub installed_version: Option<String>,
+    pub updater_ready: bool,
+}
+
+#[cfg(windows)]
+fn overlay_install_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 #[cfg(windows)]
 #[derive(Clone, Debug, Default)]
 struct ExternalClickTestState {
@@ -115,9 +130,13 @@ fn append_native_input_log(message: &str) {
         path::PathBuf,
     };
 
-    let Some(local_app_data) = env::var_os("LOCALAPPDATA") else { return; };
+    let Some(local_app_data) = env::var_os("LOCALAPPDATA") else {
+        return;
+    };
     let log_dir = PathBuf::from(local_app_data).join("Yummi").join("Agent");
-    if fs::create_dir_all(&log_dir).is_err() { return; }
+    if fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
     let path = log_dir.join("native-input.log");
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[{}] {}", now_ms(), message);
@@ -138,7 +157,8 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
             option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(env!("CARGO_PKG_VERSION")),
             option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
             option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
-            GAMEBAR_LOOPBACK_ADDR, GAMEBAR_COMMAND_LOOPBACK_ADDR,
+            GAMEBAR_LOOPBACK_ADDR,
+            GAMEBAR_COMMAND_LOOPBACK_ADDR,
         ));
         let snapshot_state = state.clone();
         std::thread::Builder::new()
@@ -441,7 +461,9 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
         for attempt in 1..=20 {
             match TcpListener::bind(GAMEBAR_LOOPBACK_ADDR) {
                 Ok(listener) => {
-                    append_native_input_log(&format!("snapshot-tcp bind-ok addr={GAMEBAR_LOOPBACK_ADDR} attempt={attempt}"));
+                    append_native_input_log(&format!(
+                        "snapshot-tcp bind-ok addr={GAMEBAR_LOOPBACK_ADDR} attempt={attempt}"
+                    ));
                     bound = Some(listener);
                     break;
                 }
@@ -455,7 +477,9 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
             }
         }
         let Some(listener) = bound else {
-            append_native_input_log(&format!("snapshot-tcp bind-permanent-failure addr={GAMEBAR_LOOPBACK_ADDR}"));
+            append_native_input_log(&format!(
+                "snapshot-tcp bind-permanent-failure addr={GAMEBAR_LOOPBACK_ADDR}"
+            ));
             eprintln!(
                 "[gamebar bridge] loopback bind permanently failed addr={GAMEBAR_LOOPBACK_ADDR}"
             );
@@ -483,11 +507,15 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
                 serde_json::to_vec(&state.gamebar_snapshot()).unwrap_or_else(|_| b"{}".to_vec());
             snapshot.push(b'\n');
             if let Err(error) = stream.write_all(&snapshot) {
-                append_native_input_log(&format!("snapshot-tcp snapshot-write-failed error={error}"));
+                append_native_input_log(&format!(
+                    "snapshot-tcp snapshot-write-failed error={error}"
+                ));
                 return;
             }
             if let Err(error) = stream.flush() {
-                append_native_input_log(&format!("snapshot-tcp snapshot-flush-failed error={error}"));
+                append_native_input_log(&format!(
+                    "snapshot-tcp snapshot-flush-failed error={error}"
+                ));
                 return;
             }
 
@@ -519,7 +547,6 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
     }
 }
 
-
 #[cfg(windows)]
 fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
     use std::io::{BufRead, BufReader};
@@ -543,7 +570,9 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
             }
         }
         let Some(listener) = bound else {
-            append_native_input_log(&format!("command-tcp bind-permanent-failure addr={GAMEBAR_COMMAND_LOOPBACK_ADDR}"));
+            append_native_input_log(&format!(
+                "command-tcp bind-permanent-failure addr={GAMEBAR_COMMAND_LOOPBACK_ADDR}"
+            ));
             eprintln!(
                 "[gamebar bridge] command loopback bind permanently failed addr={GAMEBAR_COMMAND_LOOPBACK_ADDR}"
             );
@@ -586,12 +615,20 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
                 append_native_input_log("command-tcp eof-before-command");
                 return;
             }
-            let command_name = serde_json::from_str::<Value>(&raw).ok()
-                .and_then(|value| value.get("command").and_then(Value::as_str).map(str::to_owned))
+            let command_name = serde_json::from_str::<Value>(&raw)
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                })
                 .unwrap_or_else(|| "invalid-json".to_owned());
             let noisy_native_sync = command_name == "sync_external_click_test";
             if !noisy_native_sync {
-                append_native_input_log(&format!("command-tcp request command={command_name} bytes={read}"));
+                append_native_input_log(&format!(
+                    "command-tcp request command={command_name} bytes={read}"
+                ));
             }
             let response = if raw.len() > 1024 {
                 json_response(false, "명령을 읽지 못했습니다.")
@@ -601,15 +638,22 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
             let mut payload = response.into_bytes();
             payload.push(b'\n');
             if let Err(error) = stream.write_all(&payload) {
-                append_native_input_log(&format!("command-tcp response-write-failed command={command_name} error={error}"));
+                append_native_input_log(&format!(
+                    "command-tcp response-write-failed command={command_name} error={error}"
+                ));
                 return;
             }
             if let Err(error) = stream.flush() {
-                append_native_input_log(&format!("command-tcp response-flush-failed command={command_name} error={error}"));
+                append_native_input_log(&format!(
+                    "command-tcp response-flush-failed command={command_name} error={error}"
+                ));
                 return;
             }
             if !noisy_native_sync {
-                append_native_input_log(&format!("command-tcp response-ok command={command_name} bytes={}", payload.len()));
+                append_native_input_log(&format!(
+                    "command-tcp response-ok command={command_name} bytes={}",
+                    payload.len()
+                ));
             }
         });
     }
@@ -796,8 +840,16 @@ fn external_mouse_input_thread() {
                 state.cursor_info_x = cursor_info.ptScreenPos.x;
                 state.cursor_info_y = cursor_info.ptScreenPos.y;
                 state.cursor_info_valid = cursor_info_ok;
-                state.cursor_info_flags = if cursor_info_ok { cursor_info.flags.0 } else { 0 };
-                state.cursor_info_handle = if cursor_info_ok { cursor_info.hCursor.0 as usize as u64 } else { 0 };
+                state.cursor_info_flags = if cursor_info_ok {
+                    cursor_info.flags.0
+                } else {
+                    0
+                };
+                state.cursor_info_handle = if cursor_info_ok {
+                    cursor_info.hCursor.0 as usize as u64
+                } else {
+                    0
+                };
                 let (monitor_x, monitor_y) =
                     monitor_origin_for_point(point.x, point.y).unwrap_or((0, 0));
                 state.monitor_x = monitor_x;
@@ -807,7 +859,8 @@ fn external_mouse_input_thread() {
                     // Expire stale geometry so a crashed/closed widget can never
                     // leave a ghost hitbox active in the Agent.
                     let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
-                    let gamebar_fresh = now.saturating_sub(state.gamebar_cursor_updated_at_ms) <= 500;
+                    let gamebar_fresh =
+                        now.saturating_sub(state.gamebar_cursor_updated_at_ms) <= 500;
                     // Native Win32 cursor coordinates are authoritative for hit testing.
                     // Game Bar coordinates remain diagnostic-only because they can drift
                     // or stop updating across host/Alt+Tab state changes.
@@ -959,8 +1012,16 @@ fn sync_external_click_test(parsed: &Value) -> String {
                 logical,
                 cursor_info.ptScreenPos,
                 cursor_info_ok,
-                if cursor_info_ok { cursor_info.flags.0 } else { 0 },
-                if cursor_info_ok { cursor_info.hCursor.0 as usize as u64 } else { 0 },
+                if cursor_info_ok {
+                    cursor_info.flags.0
+                } else {
+                    0
+                },
+                if cursor_info_ok {
+                    cursor_info.hCursor.0 as usize as u64
+                } else {
+                    0
+                },
             ))
         } else if logical_ok {
             Some((
@@ -971,8 +1032,16 @@ fn sync_external_click_test(parsed: &Value) -> String {
                 logical,
                 cursor_info.ptScreenPos,
                 cursor_info_ok,
-                if cursor_info_ok { cursor_info.flags.0 } else { 0 },
-                if cursor_info_ok { cursor_info.hCursor.0 as usize as u64 } else { 0 },
+                if cursor_info_ok {
+                    cursor_info.flags.0
+                } else {
+                    0
+                },
+                if cursor_info_ok {
+                    cursor_info.hCursor.0 as usize as u64
+                } else {
+                    0
+                },
             ))
         } else {
             None
@@ -986,13 +1055,19 @@ fn sync_external_click_test(parsed: &Value) -> String {
         && gamebar_alt_cursor_x.is_finite()
         && gamebar_alt_cursor_y.is_finite()
     {
-        let native = direct_cursor.as_ref().map(|cursor| (cursor.0 as f64, cursor.1 as f64));
+        let native = direct_cursor
+            .as_ref()
+            .map(|cursor| (cursor.0 as f64, cursor.1 as f64));
         let primary = (gamebar_cursor_x, gamebar_cursor_y);
         let alternate = (gamebar_alt_cursor_x, gamebar_alt_cursor_y);
         let chosen = if let Some((nx, ny)) = native {
             let primary_distance = (primary.0 - nx).powi(2) + (primary.1 - ny).powi(2);
             let alternate_distance = (alternate.0 - nx).powi(2) + (alternate.1 - ny).powi(2);
-            if alternate_distance < primary_distance { alternate } else { primary }
+            if alternate_distance < primary_distance {
+                alternate
+            } else {
+                primary
+            }
         } else {
             primary
         };
@@ -1005,8 +1080,17 @@ fn sync_external_click_test(parsed: &Value) -> String {
         Ok(state) => state,
         Err(_) => return json_response(false, "외부 클릭 상태 잠금에 실패했습니다."),
     };
-    if let Some((cursor_x, cursor_y, source, physical, logical, cursor_info, cursor_info_valid, cursor_info_flags, cursor_info_handle)) =
-        direct_cursor
+    if let Some((
+        cursor_x,
+        cursor_y,
+        source,
+        physical,
+        logical,
+        cursor_info,
+        cursor_info_valid,
+        cursor_info_flags,
+        cursor_info_handle,
+    )) = direct_cursor
     {
         state.cursor_x = cursor_x;
         state.cursor_y = cursor_y;
@@ -1223,10 +1307,18 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
             let read_result = unsafe { ReadFile(pipe, Some(&mut buffer), Some(&mut read), None) };
             let response = if read_result.is_ok() && read > 0 {
                 let raw = String::from_utf8_lossy(&buffer[..read as usize]);
-                let command_name = serde_json::from_str::<Value>(&raw).ok()
-                    .and_then(|value| value.get("command").and_then(Value::as_str).map(str::to_owned))
+                let command_name = serde_json::from_str::<Value>(&raw)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("command")
+                            .and_then(Value::as_str)
+                            .map(str::to_owned)
+                    })
                     .unwrap_or_else(|| "invalid-json".to_owned());
-                append_native_input_log(&format!("command-pipe request command={command_name} bytes={read}"));
+                append_native_input_log(&format!(
+                    "command-pipe request command={command_name} bytes={read}"
+                ));
                 handle_command(&app, state.clone(), raw.trim_end_matches(['\r', '\n']))
             } else {
                 append_native_input_log("command-pipe read-failed-or-empty");
@@ -1253,7 +1345,10 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
     let parsed: Value = match serde_json::from_str(raw) {
         Ok(value) => value,
         Err(error) => {
-            append_native_input_log(&format!("command parse-failed bytes={} error={error}", raw.len()));
+            append_native_input_log(&format!(
+                "command parse-failed bytes={} error={error}",
+                raw.len()
+            ));
             return json_response(false, "잘못된 명령 형식입니다.");
         }
     };
@@ -1405,6 +1500,7 @@ fn append_gamebar_update_log(message: &str) {
 
 #[cfg(windows)]
 async fn check_overlay_update() -> Result<(), String> {
+    let _guard = overlay_install_lock().lock().await;
     use std::os::windows::process::CommandExt;
     use std::{env, fs, path::PathBuf, process::Command};
 
@@ -1611,6 +1707,257 @@ async fn check_overlay_update() -> Result<(), String> {
         .spawn()
         .map_err(|e| format!("Game Bar 설치 실행 실패: {e}"))?;
     Ok(())
+}
+
+
+#[cfg(windows)]
+fn gamebar_updater_dir() -> Result<std::path::PathBuf, String> {
+    let local_app_data = std::env::var_os("LOCALAPPDATA")
+        .ok_or_else(|| "LOCALAPPDATA를 찾지 못했습니다.".to_owned())?;
+    Ok(std::path::PathBuf::from(local_app_data)
+        .join("Yummi")
+        .join("GameBarUpdater"))
+}
+
+#[cfg(windows)]
+fn installed_overlay_appx_version() -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "(Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1).Version.ToString()",
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (!value.is_empty()).then_some(value)
+}
+
+pub(crate) fn overlay_install_status() -> Result<OverlayInstallStatus, String> {
+    #[cfg(windows)]
+    {
+        let updater = gamebar_updater_dir()?.join("Update-YummiGameBar.ps1");
+        let installed_version = installed_overlay_appx_version();
+        return Ok(OverlayInstallStatus {
+            supported: true,
+            installed: installed_version.is_some(),
+            installed_version,
+            updater_ready: updater.is_file(),
+        });
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(OverlayInstallStatus {
+            supported: false,
+            installed: false,
+            installed_version: None,
+            updater_ready: false,
+        })
+    }
+}
+
+#[cfg(windows)]
+async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8>), String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(3))
+        .user_agent("Yummi-LCU-Agent-GameBar-Installer")
+        .build()
+        .map_err(|e| format!("Game Bar 설치 클라이언트 생성 실패: {e}"))?;
+    let latest: Value = client
+        .get(GAMEBAR_VERSION_URL)
+        .send()
+        .await
+        .map_err(|e| format!("Game Bar 최신 버전 조회 실패: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Game Bar 최신 버전 응답 실패: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("Game Bar 최신 버전 JSON 실패: {e}"))?;
+    let selected_version = latest
+        .get("version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Game Bar 최신 버전 정보가 없습니다.".to_owned())?;
+    let selected_release_tag = format!("gamebar-v{selected_version}");
+    parse_gamebar_release_version(&selected_release_tag)
+        .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
+    let manifest_url = format!(
+        "https://github.com/Waitence7/YummiLCU/releases/download/{selected_release_tag}/gamebar-version.json"
+    );
+    let response = client
+        .get(&manifest_url)
+        .send()
+        .await
+        .map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Game Bar manifest 응답 실패: {e}"))?;
+    if response.content_length().unwrap_or(0) > MAX_GAMEBAR_MANIFEST_BYTES as u64 {
+        return Err("Game Bar manifest가 너무 큽니다.".into());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Game Bar manifest 읽기 실패: {e}"))?;
+    if bytes.len() > MAX_GAMEBAR_MANIFEST_BYTES {
+        return Err("Game Bar manifest가 너무 큽니다.".into());
+    }
+    let root: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
+    let mut payload = root
+        .get("gamebar")
+        .cloned()
+        .ok_or_else(|| "Game Bar manifest에 gamebar 블록이 없습니다.".to_owned())?;
+    let signature = payload
+        .as_object_mut()
+        .and_then(|o| o.remove("signature"))
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
+    verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
+    let target: GameBarUpdateTarget = serde_json::from_value(payload)
+        .map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
+    if target.release_tag != selected_release_tag || target.version != selected_version {
+        return Err("Game Bar manifest 버전이 선택된 릴리즈와 일치하지 않습니다.".into());
+    }
+    if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
+    }
+    if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 {
+        return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into());
+    }
+    let parsed = url::Url::parse(&target.url)
+        .map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
+    let expected_release_path = format!(
+        "/Waitence7/YummiLCU/releases/download/{}/",
+        selected_release_tag
+    );
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed.path().starts_with(&expected_release_path)
+        || !parsed.path().ends_with(".zip")
+    {
+        return Err("Game Bar 다운로드 URL이 허용되지 않았습니다.".into());
+    }
+    let response = client
+        .get(&target.url)
+        .send()
+        .await
+        .map_err(|e| format!("Game Bar ZIP 다운로드 실패: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Game Bar ZIP 응답 실패: {e}"))?;
+    if response.content_length().unwrap_or(target.size) != target.size {
+        return Err("Game Bar ZIP 크기가 manifest와 다릅니다.".into());
+    }
+    let archive = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Game Bar ZIP 읽기 실패: {e}"))?
+        .to_vec();
+    if archive.len() as u64 != target.size || archive.len() > MAX_GAMEBAR_ARCHIVE_BYTES {
+        return Err("Game Bar ZIP 크기 검증 실패".into());
+    }
+    let actual = format!("{:x}", Sha256::digest(&archive));
+    if !actual.eq_ignore_ascii_case(&target.sha256) {
+        return Err("Game Bar ZIP SHA256 검증 실패".into());
+    }
+    Ok((target, archive))
+}
+
+#[cfg(windows)]
+fn stage_overlay_updater(archive: &[u8], updater_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    use std::io::{Cursor, Read};
+    let mut zip = zip::ZipArchive::new(Cursor::new(archive))
+        .map_err(|e| format!("Game Bar ZIP 열기 실패: {e}"))?;
+    let mut entry = zip
+        .by_name("Update-YummiGameBar.ps1")
+        .map_err(|_| "검증된 Game Bar ZIP에 updater 스크립트가 없습니다.".to_owned())?;
+    if entry.size() == 0 || entry.size() > 512 * 1024 {
+        return Err("Game Bar updater 스크립트 크기가 올바르지 않습니다.".into());
+    }
+    let mut bytes = Vec::with_capacity(entry.size() as usize);
+    entry
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("Game Bar updater 스크립트 읽기 실패: {e}"))?;
+    std::fs::create_dir_all(updater_dir)
+        .map_err(|e| format!("Game Bar updater 폴더 생성 실패: {e}"))?;
+    let path = updater_dir.join("Update-YummiGameBar.ps1");
+    std::fs::write(&path, bytes)
+        .map_err(|e| format!("Game Bar updater 스크립트 저장 실패: {e}"))?;
+    Ok(path)
+}
+
+#[cfg(windows)]
+pub(crate) async fn install_overlay_latest() -> Result<OverlayInstallStatus, String> {
+    use std::os::windows::process::CommandExt;
+    use std::process::Command;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let _guard = overlay_install_lock().lock().await;
+    append_gamebar_update_log("Agent 버튼에서 오버레이 최초 설치 시작");
+    let (target, archive) = fetch_verified_overlay_archive().await?;
+    let updater_dir = gamebar_updater_dir()?;
+    let updater = stage_overlay_updater(&archive, &updater_dir)?;
+    let zip_path = updater_dir.join("verified-install.zip");
+    std::fs::write(&zip_path, &archive)
+        .map_err(|e| format!("검증된 Game Bar ZIP 저장 실패: {e}"))?;
+    let expected_version = format!("{}.{}", target.version, target.build_id);
+    let updater_for_worker = updater.clone();
+    let zip_for_worker = zip_path.clone();
+    let sha = target.sha256.clone();
+    let build_id = target.build_id.clone();
+    let release_tag = target.release_tag.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&updater_for_worker)
+            .arg("-PackagePath")
+            .arg(&zip_for_worker)
+            .arg("-ExpectedSha256")
+            .arg(&sha)
+            .arg("-BuildId")
+            .arg(&build_id)
+            .arg("-ReleaseTag")
+            .arg(&release_tag)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| format!("Game Bar 설치 프로세스 시작 실패: {e}"))
+    })
+    .await
+    .map_err(|e| format!("Game Bar 설치 worker 실패: {e}"))??;
+    if !status.success() {
+        return Err(format!(
+            "Game Bar 설치가 종료 코드 {}로 실패했습니다.",
+            status.code().map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+        ));
+    }
+    let actual = installed_overlay_appx_version()
+        .ok_or_else(|| "Game Bar 설치 후 AppX 패키지를 찾지 못했습니다.".to_owned())?;
+    if actual != expected_version {
+        return Err(format!(
+            "Game Bar 설치 버전 검증 실패: expected={expected_version} actual={actual}"
+        ));
+    }
+    append_gamebar_update_log(&format!(
+        "Agent 버튼 오버레이 설치 완료: {} / appx {}",
+        target.release_tag, actual
+    ));
+    overlay_install_status()
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn install_overlay_latest() -> Result<OverlayInstallStatus, String> {
+    Err("Xbox Game Bar 오버레이 설치는 Windows에서만 지원됩니다.".into())
 }
 
 async fn set_status_message(state: Arc<AppState>, value: String) -> Result<(), String> {
