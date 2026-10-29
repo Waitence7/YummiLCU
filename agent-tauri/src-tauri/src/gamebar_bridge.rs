@@ -1423,6 +1423,8 @@ struct GameBarUpdateState {
     build_id: String,
     sha256: String,
     release_tag: String,
+    #[serde(default)]
+    pending_registration: bool,
 }
 
 fn parse_gamebar_release_version(tag: &str) -> Option<(u64, u64, u64)> {
@@ -1639,6 +1641,14 @@ async fn check_overlay_update() -> Result<(), String> {
                         append_gamebar_update_log(&format!(
                             "이미 최신 오버레이: {} / build {} / appx {}",
                             target.release_tag, target.build_id, version
+                        ));
+                        return Ok(());
+                    }
+                    actual if state.pending_registration => {
+                        append_gamebar_update_log(&format!(
+                            "오버레이 업데이트 등록 대기 중: expected={} active={}",
+                            expected_appx_version,
+                            actual.as_deref().unwrap_or("missing")
                         ));
                         return Ok(());
                     }

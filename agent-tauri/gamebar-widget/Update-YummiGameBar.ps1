@@ -42,7 +42,7 @@ try {
     if (Test-Path $newUpdater) { Copy-Item $newUpdater (Join-Path $stateDir 'Update-YummiGameBar.ps1.new') -Force }
 
     $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $installer + '"'), '-Force', '-SkipAutoUpdateSetup'
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $installer + '"'), '-BackgroundUpdate', '-SkipAutoUpdateSetup'
     ) -Wait -PassThru -WindowStyle Hidden
     if ($proc.ExitCode -ne 0) { throw "오버레이 설치가 종료 코드 $($proc.ExitCode)로 실패했습니다." }
 
@@ -52,20 +52,16 @@ try {
     $installedOverlay = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $installedOverlay) { throw 'Game Bar 설치 후 AppX 패키지를 찾지 못했습니다.' }
     $actualAppxVersion = $installedOverlay.Version.ToString()
-    if ($actualAppxVersion -ne $expectedAppxVersion) {
-      throw "Game Bar 설치 버전 검증 실패: expected=$expectedAppxVersion actual=$actualAppxVersion"
+    $pendingRegistration = $actualAppxVersion -ne $expectedAppxVersion
+    if ($pendingRegistration) {
+      Write-UpdateLog "오버레이 업데이트 등록 지연: expected=$expectedAppxVersion active=$actualAppxVersion (Game Bar/위젯 종료 후 자동 적용)"
+    } else {
+      Write-UpdateLog "오버레이 AppX 검증 완료: $actualAppxVersion"
     }
-    Write-UpdateLog "오버레이 AppX 검증 완료: $actualAppxVersion"
 
-    # Xbox Game Bar hosts widget code in its own process. Updating the AppX can
-    # leave an already-open host running the previous widget DLL even though
-    # Get-AppxPackage reports the new version. Force only the Game Bar host to
-    # exit so the next Win+G launch loads the newly installed package.
-    $gameBarProcesses = @('GameBar', 'GameBarFTServer')
-    foreach ($processName in $gameBarProcesses) {
-      Get-Process -Name $processName -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    }
-    Write-UpdateLog 'Xbox Game Bar host 종료 요청 완료; 다음 Win+G에서 새 위젯을 로드합니다.'
+    # Never force-close Xbox Game Bar here. Force-closing an in-use widget makes
+    # Game Bar briefly show '위젯에 문제가 있습니다' and can expose a transient
+    # standalone UWP window. Deferred registration avoids that disruption.
 
     $newUpdaterStaged = Join-Path $stateDir 'Update-YummiGameBar.ps1.new'
     $currentUpdater = Join-Path $stateDir 'Update-YummiGameBar.ps1'
@@ -76,9 +72,15 @@ try {
       sha256 = $ExpectedSha256.ToLowerInvariant()
       release_tag = $ReleaseTag
       installed_at = (Get-Date).ToString('o')
+      pending_registration = $pendingRegistration
     }
     Write-UpdateState -Path $statePath -State $installedState
-    Write-UpdateLog "오버레이 업데이트 완료: $ReleaseTag / build $BuildId"
+    $completionMessage = if ($pendingRegistration) {
+      "오버레이 업데이트 예약 완료: $ReleaseTag / build $BuildId"
+    } else {
+      "오버레이 업데이트 완료: $ReleaseTag / build $BuildId"
+    }
+    Write-UpdateLog $completionMessage
   }
   finally {
     Remove-Item $tempRoot -Recurse -Force -ErrorAction SilentlyContinue

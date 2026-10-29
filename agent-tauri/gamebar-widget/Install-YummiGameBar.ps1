@@ -1,6 +1,7 @@
 ﻿param(
   [switch]$Force,
   [switch]$SkipAutoUpdateSetup,
+  [switch]$BackgroundUpdate,
   [string]$LogPath = (Join-Path $env:TEMP 'Yummi-GameBar-install.log')
 )
 $ErrorActionPreference = 'Stop'
@@ -74,7 +75,8 @@ function Restart-InstallerElevated {
   $quote = [char]34
   $forceArg = if ($Force) { ' -Force' } else { '' }
   $skipArg = if ($SkipAutoUpdateSetup) { ' -SkipAutoUpdateSetup' } else { '' }
-  $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + $quote + $InstallerPath + $quote + $forceArg + $skipArg + ' -LogPath ' + $quote + $LogPath + $quote
+  $backgroundArg = if ($BackgroundUpdate) { ' -BackgroundUpdate' } else { '' }
+  $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + $quote + $InstallerPath + $quote + $forceArg + $skipArg + $backgroundArg + ' -LogPath ' + $quote + $LogPath + $quote
   $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
   if ($process.ExitCode -ne 0) {
     if (Test-Path $logPath) {
@@ -159,7 +161,13 @@ foreach ($depPath in $missingDeps) {
 Install-WebView2RuntimeIfMissing
 
 Write-Host '유미지지 Xbox Game Bar 오버레이를 설치합니다.'
-Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceUpdateFromAnyVersion
+if ($BackgroundUpdate) {
+  # Do not tear down an active Game Bar/widget during an automatic update.
+  # Windows will finish registration after the package is no longer in use.
+  Add-AppxPackage -Path $package.FullName -ForceUpdateFromAnyVersion -DeferRegistrationWhenPackagesAreInUse
+} else {
+  Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceUpdateFromAnyVersion
+}
 
 # UWP/Game Bar widgets are AppContainer processes. Enable the documented
 # localhost exemption so the overlay can reach the full-trust Agent fallback

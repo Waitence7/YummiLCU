@@ -22,6 +22,15 @@ namespace YummiGameBarWidget
             Suspending += (_, __) => widgets.Clear();
         }
 
+        protected override void OnLaunched(LaunchActivatedEventArgs args)
+        {
+            // This package is a Game Bar extension only. A normal shell launch
+            // can occur transiently around package registration on some Windows
+            // builds; never expose an empty standalone UWP window to the user.
+            LogStage("launch-ignored");
+            Exit();
+        }
+
         protected override void OnActivated(IActivatedEventArgs args)
         {
             try

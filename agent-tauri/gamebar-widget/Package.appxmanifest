@@ -21,7 +21,7 @@
               <GameBarWidget Type="Standard">
                 <HomeMenuVisible>true</HomeMenuVisible>
                 <PinningSupported>true</PinningSupported>
-                <ActivateAfterInstall>true</ActivateAfterInstall>
+                <ActivateAfterInstall>false</ActivateAfterInstall>
                 <SettingsSupported AppExtensionId="YummiLCUSettings" />
                 <Window>
                   <AllowForegroundTransparency>true</AllowForegroundTransparency>
