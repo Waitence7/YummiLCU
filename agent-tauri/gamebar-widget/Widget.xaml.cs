@@ -132,6 +132,12 @@ namespace YummiGameBarWidget
         private int tutorialRefreshGeneration;
         private int pinnedCoverageRestoreGeneration;
         private bool pinnedCoverageRestoreInFlight;
+        private CancellationTokenSource snapshotWebSocketLoopCts;
+        private MessageWebSocket snapshotWebSocket;
+        private volatile bool snapshotWebSocketConnected;
+        private int snapshotWebSocketGeneration;
+        private long lastSnapshotWebSocketMessageAtMs;
+        private long lastSnapshotWebSocketFailureLogAtMs;
         private bool hudLoaded;
 
         public Widget()
@@ -151,7 +157,12 @@ namespace YummiGameBarWidget
                 UpdatePinTutorial();
                 QueuePinnedCoverageRestore("size-changed");
             };
-            timer.Tick += async (_, __) => await RefreshAsync();
+            timer.Tick += async (_, __) =>
+            {
+                // The WebSocket is the primary realtime transport. The legacy
+                // snapshot TCP endpoint is polled only while WS is unavailable.
+                if (!snapshotWebSocketConnected) await RefreshAsync();
+            };
             Loaded += async (_, __) =>
             {
                 App.LogStage("hud-loaded");
@@ -177,7 +188,10 @@ namespace YummiGameBarWidget
                 UpdateInputState();
                 UpdatePinTutorial();
                 QueueTutorialStateRefresh("loaded");
+                StartSnapshotWebSocketLoop();
                 timer.Start();
+                // One immediate legacy fetch keeps compatibility with older Agents.
+                // Once WS connects the timer stops issuing snapshot requests.
                 await RefreshAsync();
                 QueueTutorialStateRefresh("ready");
                 App.LogStage("hud-ready");
@@ -197,6 +211,7 @@ namespace YummiGameBarWidget
                 _ = SyncExternalClickTestAsync(false);
                 Interlocked.Increment(ref tutorialRefreshGeneration);
                 Interlocked.Increment(ref pinnedCoverageRestoreGeneration);
+                StopSnapshotWebSocketLoop();
                 timer.Stop();
             };
         }
@@ -663,7 +678,10 @@ namespace YummiGameBarWidget
                     ["height"] = JsonValue.CreateNumberValue(bounds.Height),
                     ["displayWidth"] = JsonValue.CreateNumberValue(displayWidth),
                     ["displayHeight"] = JsonValue.CreateNumberValue(displayHeight),
-                    ["hostChromeHeight"] = JsonValue.CreateNumberValue(HostChromeHeight())
+                    ["hostChromeHeight"] = JsonValue.CreateNumberValue(HostChromeHeight()),
+                    ["snapshotTransport"] = JsonValue.CreateStringValue(snapshotWebSocketConnected ? "ws" : "tcp-fallback"),
+                    ["snapshotWsLastMessageAgeMs"] = JsonValue.CreateNumberValue(
+                        lastSnapshotWebSocketMessageAtMs > 0 ? Math.Max(0, NowMs() - lastSnapshotWebSocketMessageAtMs) : -1)
                 }.Stringify();
                 // One bounded local state file, updated only on changes. No LCU
                 // payload, account name or credentials are written.
@@ -679,6 +697,135 @@ namespace YummiGameBarWidget
                 finally { statusWrite.Release(); }
             }
             catch { }
+        }
+
+        private void StartSnapshotWebSocketLoop()
+        {
+            StopSnapshotWebSocketLoop();
+            var cts = new CancellationTokenSource();
+            snapshotWebSocketLoopCts = cts;
+            var generation = Interlocked.Increment(ref snapshotWebSocketGeneration);
+            _ = SnapshotWebSocketLoopAsync(generation, cts.Token);
+        }
+
+        private void StopSnapshotWebSocketLoop()
+        {
+            Interlocked.Increment(ref snapshotWebSocketGeneration);
+            var cts = snapshotWebSocketLoopCts;
+            snapshotWebSocketLoopCts = null;
+            if (cts != null)
+            {
+                try { cts.Cancel(); } catch { }
+                cts.Dispose();
+            }
+            var socket = snapshotWebSocket;
+            snapshotWebSocket = null;
+            snapshotWebSocketConnected = false;
+            if (socket != null)
+            {
+                try { socket.Dispose(); } catch { }
+            }
+        }
+
+        private async Task SnapshotWebSocketLoopAsync(int generation, CancellationToken token)
+        {
+            while (!token.IsCancellationRequested && generation == Volatile.Read(ref snapshotWebSocketGeneration))
+            {
+                var socket = new MessageWebSocket();
+                var closed = new TaskCompletionSource<bool>();
+                socket.Control.MessageType = SocketMessageType.Utf8;
+                socket.MessageReceived += SnapshotWebSocket_MessageReceived;
+                socket.Closed += (_, args) =>
+                {
+                    if (generation == Volatile.Read(ref snapshotWebSocketGeneration))
+                    {
+                        snapshotWebSocketConnected = false;
+                        App.LogStage("snapshot-ws-closed code=" + args.Code);
+                    }
+                    closed.TrySetResult(true);
+                };
+
+                try
+                {
+                    await socket.ConnectAsync(new Uri("ws://127.0.0.1:19517/")).AsTask(token);
+                    if (token.IsCancellationRequested || generation != Volatile.Read(ref snapshotWebSocketGeneration))
+                        break;
+                    snapshotWebSocket = socket;
+                    snapshotWebSocketConnected = true;
+                    App.LogStage("snapshot-ws-connected");
+
+                    using (token.Register(() => closed.TrySetCanceled()))
+                    {
+                        try { await closed.Task; }
+                        catch (TaskCanceledException) { }
+                    }
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    if (generation == Volatile.Read(ref snapshotWebSocketGeneration))
+                    {
+                        snapshotWebSocketConnected = false;
+                        var now = NowMs();
+                        if (now - lastSnapshotWebSocketFailureLogAtMs >= 5000)
+                        {
+                            lastSnapshotWebSocketFailureLogAtMs = now;
+                            App.LogStage("snapshot-ws-connect-failed error=" + ErrorCode(ex));
+                        }
+                    }
+                }
+                finally
+                {
+                    socket.MessageReceived -= SnapshotWebSocket_MessageReceived;
+                    if (ReferenceEquals(snapshotWebSocket, socket)) snapshotWebSocket = null;
+                    if (generation == Volatile.Read(ref snapshotWebSocketGeneration))
+                        snapshotWebSocketConnected = false;
+                    try { socket.Dispose(); } catch { }
+                }
+
+                if (token.IsCancellationRequested || generation != Volatile.Read(ref snapshotWebSocketGeneration))
+                    break;
+                try { await Task.Delay(500, token); }
+                catch (TaskCanceledException) { break; }
+            }
+        }
+
+        private async void SnapshotWebSocket_MessageReceived(
+            MessageWebSocket sender, MessageWebSocketMessageReceivedEventArgs args)
+        {
+            string payload;
+            try
+            {
+                using (var reader = args.GetDataReader())
+                {
+                    reader.UnicodeEncoding = Windows.Storage.Streams.UnicodeEncoding.Utf8;
+                    payload = reader.ReadString(reader.UnconsumedBufferLength);
+                }
+            }
+            catch (Exception ex)
+            {
+                App.LogStage("snapshot-ws-read-failed error=" + ErrorCode(ex));
+                return;
+            }
+            if (string.IsNullOrWhiteSpace(payload)) return;
+
+            await Dispatcher.RunAsync(CoreDispatcherPriority.High, () =>
+            {
+                try
+                {
+                    Apply(JsonObject.Parse(payload));
+                    lastSnapshotWebSocketMessageAtMs = NowMs();
+                    lastSnapshotSuccessAtMs = lastSnapshotWebSocketMessageAtMs;
+                    consecutiveSnapshotFailures = 0;
+                }
+                catch (Exception ex)
+                {
+                    App.LogStage("snapshot-ws-apply-failed error=" + ErrorCode(ex));
+                }
+            });
         }
 
         private async Task RefreshAsync()
@@ -707,7 +854,7 @@ namespace YummiGameBarWidget
             var recentSuccess = lastSnapshotSuccessAtMs > 0 && now - lastSnapshotSuccessAtMs <= 10000;
 
             // A single localhost timeout does not mean the desktop Agent died.
-            // Keep the last good snapshot visible while the 1s poll retries.
+            // Keep the last good snapshot visible while the fast local snapshot poll retries.
             if (recentSuccess && consecutiveSnapshotFailures <= 2)
             {
                 bridgeStatus = "delayed";
@@ -922,7 +1069,7 @@ namespace YummiGameBarWidget
             {
                 From = 8,
                 To = 0,
-                Duration = TimeSpan.FromMilliseconds(190),
+                Duration = TimeSpan.FromMilliseconds(110),
                 EasingFunction = easing,
                 EnableDependentAnimation = true,
             };
@@ -933,7 +1080,7 @@ namespace YummiGameBarWidget
             {
                 From = 0,
                 To = 1,
-                Duration = TimeSpan.FromMilliseconds(150),
+                Duration = TimeSpan.FromMilliseconds(90),
                 EasingFunction = easing,
             };
             Storyboard.SetTarget(fade, row);
@@ -958,7 +1105,7 @@ namespace YummiGameBarWidget
             {
                 From = 4,
                 To = 0,
-                Duration = TimeSpan.FromMilliseconds(180),
+                Duration = TimeSpan.FromMilliseconds(110),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut },
                 EnableDependentAnimation = true,
             };
@@ -971,6 +1118,9 @@ namespace YummiGameBarWidget
 
         private static string VoiceChatMessageKey(JsonObject item)
         {
+            var messageId = item.GetNamedNumber("message_id", 0);
+            if (messageId > 0)
+                return "id:" + messageId.ToString("0", System.Globalization.CultureInfo.InvariantCulture);
             return item.GetNamedNumber("timestamp_ms", 0).ToString("0", System.Globalization.CultureInfo.InvariantCulture) + ":" +
                 SnapshotJson.String(item, "author_name") + ":" + SnapshotJson.String(item, "content");
         }

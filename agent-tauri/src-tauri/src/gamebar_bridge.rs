@@ -9,6 +9,8 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(windows)]
+use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(windows)]
@@ -36,6 +38,8 @@ const MAX_GAMEBAR_ARCHIVE_BYTES: usize = 128 * 1024 * 1024;
 const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:19514";
 #[cfg(windows)]
 const GAMEBAR_COMMAND_LOOPBACK_ADDR: &str = "127.0.0.1:19515";
+#[cfg(windows)]
+const GAMEBAR_WS_LOOPBACK_ADDR: &str = "127.0.0.1:19517";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,13 +156,14 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     #[cfg(windows)]
     {
         append_native_input_log(&format!(
-            "agent-start pid={} release={} build={} commit={} snapshotAddr={} commandAddr={}",
+            "agent-start pid={} release={} build={} commit={} snapshotAddr={} commandAddr={} wsAddr={}",
             std::process::id(),
             option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(env!("CARGO_PKG_VERSION")),
             option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
             option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown"),
             GAMEBAR_LOOPBACK_ADDR,
             GAMEBAR_COMMAND_LOOPBACK_ADDR,
+            GAMEBAR_WS_LOOPBACK_ADDR,
         ));
         let snapshot_state = state.clone();
         std::thread::Builder::new()
@@ -179,6 +184,11 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
             .name("yummi-gamebar-command-loopback".into())
             .spawn(move || command_loopback_server(command_tcp_app, command_tcp_state))
             .ok();
+
+        let ws_state = state.clone();
+        tauri::async_runtime::spawn(async move {
+            gamebar_ws_server(ws_state).await;
+        });
 
         let update_state = state.clone();
         tauri::async_runtime::spawn(async move {
@@ -546,6 +556,143 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
             let _ = stream.flush();
         });
     }
+}
+
+#[cfg(windows)]
+async fn gamebar_ws_server(state: Arc<AppState>) {
+    use tokio::net::TcpListener as TokioTcpListener;
+
+    let listener = {
+        let mut bound = None;
+        for attempt in 1..=20 {
+            match TokioTcpListener::bind(GAMEBAR_WS_LOOPBACK_ADDR).await {
+                Ok(listener) => {
+                    append_native_input_log(&format!(
+                        "snapshot-ws bind-ok addr={GAMEBAR_WS_LOOPBACK_ADDR} attempt={attempt}"
+                    ));
+                    bound = Some(listener);
+                    break;
+                }
+                Err(error) => {
+                    append_native_input_log(&format!(
+                        "snapshot-ws bind-failed addr={GAMEBAR_WS_LOOPBACK_ADDR} attempt={attempt}/20 error={error}"
+                    ));
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }
+        }
+        let Some(listener) = bound else {
+            append_native_input_log(&format!(
+                "snapshot-ws bind-permanent-failure addr={GAMEBAR_WS_LOOPBACK_ADDR}"
+            ));
+            return;
+        };
+        listener
+    };
+
+    let mut shutdown = state.shutdown_receiver();
+    loop {
+        tokio::select! {
+            incoming = listener.accept() => {
+                match incoming {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nodelay(true);
+                        let client_state = state.clone();
+                        tauri::async_runtime::spawn(async move {
+                            gamebar_ws_connection(stream, client_state).await;
+                        });
+                    }
+                    Err(error) => {
+                        append_native_input_log(&format!("snapshot-ws accept-failed error={error}"));
+                    }
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn gamebar_ws_connection(stream: tokio::net::TcpStream, state: Arc<AppState>) {
+    use tokio::sync::broadcast::error::RecvError;
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    let socket = match accept_async(stream).await {
+        Ok(socket) => socket,
+        Err(error) => {
+            append_native_input_log(&format!("snapshot-ws handshake-failed error={error}"));
+            return;
+        }
+    };
+    append_native_input_log("snapshot-ws connected");
+    let (mut writer, mut reader) = socket.split();
+    let mut updates = state.gamebar_snapshot_update_receiver();
+
+    if send_gamebar_ws_snapshot(&mut writer, &state).await.is_err() {
+        return;
+    }
+
+    let mut heartbeat = tokio::time::interval(Duration::from_secs(15));
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Consume the immediate first tick; the initial full snapshot above is enough.
+    heartbeat.tick().await;
+
+    loop {
+        tokio::select! {
+            update = updates.recv() => {
+                match update {
+                    Ok(()) | Err(RecvError::Lagged(_)) => {
+                        if send_gamebar_ws_snapshot(&mut writer, &state).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(RecvError::Closed) => break,
+                }
+            }
+            incoming = reader.next() => {
+                match incoming {
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(payload))) => {
+                        if writer.send(Message::Pong(payload)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(error)) => {
+                        append_native_input_log(&format!("snapshot-ws read-failed error={error}"));
+                        break;
+                    }
+                }
+            }
+            _ = heartbeat.tick() => {
+                if writer.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    append_native_input_log("snapshot-ws disconnected");
+}
+
+#[cfg(windows)]
+async fn send_gamebar_ws_snapshot<S>(writer: &mut S, state: &Arc<AppState>) -> Result<(), ()>
+where
+    S: futures_util::Sink<tokio_tungstenite::tungstenite::Message> + Unpin,
+    S::Error: std::fmt::Display,
+{
+    use tokio_tungstenite::tungstenite::Message;
+
+    let payload = serde_json::to_string(&state.gamebar_snapshot()).unwrap_or_else(|_| "{}".into());
+    writer
+        .send(Message::Text(payload.into()))
+        .await
+        .map_err(|error| {
+            append_native_input_log(&format!("snapshot-ws write-failed error={error}"));
+        })
 }
 
 #[cfg(windows)]
