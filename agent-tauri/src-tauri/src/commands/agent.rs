@@ -78,11 +78,16 @@ async fn revoke_persisted_refresh(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
-#[tauri::command]
-pub(crate) async fn logout(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
-    state.record_flight("command", "discord_logout").await;
+pub(crate) async fn logout_inner(
+    app: &AppHandle,
+    state: &Arc<AppState>,
+    reason: &'static str,
+) -> Result<(), String> {
     state
-        .report_diagnostic("command", "discord_logout", "user requested Discord logout")
+        .record_flight("command", format!("discord_logout reason={reason}"))
+        .await;
+    state
+        .report_diagnostic("command", "discord_logout", format!("reason={reason}"))
         .await;
     let config = state.config.read().await.clone();
     if let Err(error) = revoke_persisted_refresh(&config).await {
@@ -91,7 +96,7 @@ pub(crate) async fn logout(app: AppHandle, state: State<'_, Arc<AppState>>) -> R
             .await;
         state
             .log(
-                &app,
+                app,
                 "서버 refresh 세션 폐기에 실패했지만 로컬 로그아웃은 계속합니다.",
             )
             .await;
@@ -100,10 +105,15 @@ pub(crate) async fn logout(app: AppHandle, state: State<'_, Arc<AppState>>) -> R
             .record_flight("session", "refresh_revoked_on_logout")
             .await;
     }
-    RelaySupervisor::stop(&app, state.inner()).await;
+    RelaySupervisor::stop(app, state).await;
     session::remove().map_err(|error| error.to_string())?;
     session::suppress_auto_login().map_err(|error| error.to_string())?;
-    state.mark_logged_out(&app).await;
-    state.log(&app, "Discord 로그아웃 완료").await;
+    state.mark_logged_out(app).await;
+    state.log(app, "Discord 로그아웃 완료").await;
     Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn logout(app: AppHandle, state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    logout_inner(&app, state.inner(), "user_requested").await
 }

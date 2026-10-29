@@ -92,6 +92,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::overlay::get_overlay_install_status,
             crate::commands::overlay::install_overlay,
             crate::commands::overlay::reset_overlay_tutorial,
+            crate::commands::overlay::reset_development_onboarding,
             crate::commands::recording::get_recording_status,
             crate::commands::recording::list_recording_sessions,
             crate::commands::recording::recording_game_context,

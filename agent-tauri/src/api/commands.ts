@@ -87,6 +87,8 @@ export const installOverlay = () =>
   call<OverlayInstallStatus>("install_overlay");
 export const resetOverlayTutorial = () =>
   call<number>("reset_overlay_tutorial");
+export const resetDevelopmentOnboarding = () =>
+  call<OverlayInstallStatus>("reset_development_onboarding");
 
 export const getDiagnosticBundle = () => call<string>("get_diagnostic_bundle");
 export const exportDiagnosticBundle = () =>

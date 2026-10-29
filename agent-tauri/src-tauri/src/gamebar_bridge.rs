@@ -1710,7 +1710,6 @@ async fn check_overlay_update() -> Result<(), String> {
     Ok(())
 }
 
-
 #[cfg(windows)]
 fn gamebar_updater_dir() -> Result<std::path::PathBuf, String> {
     let local_app_data = std::env::var_os("LOCALAPPDATA")
@@ -1808,8 +1807,8 @@ async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8
     if bytes.len() > MAX_GAMEBAR_MANIFEST_BYTES {
         return Err("Game Bar manifest가 너무 큽니다.".into());
     }
-    let root: Value = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
+    let root: Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
     let mut payload = root
         .get("gamebar")
         .cloned()
@@ -1820,8 +1819,8 @@ async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8
         .and_then(|v| v.as_str().map(str::to_owned))
         .ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
     verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
-    let target: GameBarUpdateTarget = serde_json::from_value(payload)
-        .map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
+    let target: GameBarUpdateTarget =
+        serde_json::from_value(payload).map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
     if target.release_tag != selected_release_tag || target.version != selected_version {
         return Err("Game Bar manifest 버전이 선택된 릴리즈와 일치하지 않습니다.".into());
     }
@@ -1831,8 +1830,8 @@ async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8
     if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 {
         return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into());
     }
-    let parsed = url::Url::parse(&target.url)
-        .map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
+    let parsed =
+        url::Url::parse(&target.url).map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
     let expected_release_path = format!(
         "/Waitence7/YummiLCU/releases/download/{}/",
         selected_release_tag
@@ -1870,7 +1869,10 @@ async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8
 }
 
 #[cfg(windows)]
-fn stage_overlay_updater(archive: &[u8], updater_dir: &std::path::Path) -> Result<std::path::PathBuf, String> {
+fn stage_overlay_updater(
+    archive: &[u8],
+    updater_dir: &std::path::Path,
+) -> Result<std::path::PathBuf, String> {
     use std::io::{Cursor, Read};
     let mut zip = zip::ZipArchive::new(Cursor::new(archive))
         .map_err(|e| format!("Game Bar ZIP 열기 실패: {e}"))?;
@@ -1939,7 +1941,9 @@ pub(crate) async fn install_overlay_latest() -> Result<OverlayInstallStatus, Str
     if !status.success() {
         return Err(format!(
             "Game Bar 설치가 종료 코드 {}로 실패했습니다.",
-            status.code().map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+            status
+                .code()
+                .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
         ));
     }
     let actual = installed_overlay_appx_version()
@@ -1954,6 +1958,167 @@ pub(crate) async fn install_overlay_latest() -> Result<OverlayInstallStatus, Str
         target.release_tag, actual
     ));
     overlay_install_status()
+}
+
+#[cfg(windows)]
+pub(crate) async fn reset_overlay_installation_for_development(
+) -> Result<OverlayInstallStatus, String> {
+    use std::os::windows::process::CommandExt;
+    use std::{env, fs, process::Command};
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let _guard = overlay_install_lock().lock().await;
+    append_gamebar_update_log("개발용 오버레이 완전 초기화 시작");
+
+    let script = r#"param([Parameter(Mandatory=$true)][string]$ResultPath)
+$ErrorActionPreference = 'Stop'
+
+function Write-ResetResult([string]$text) {
+  try { [IO.File]::WriteAllText($ResultPath, $text, [Text.UTF8Encoding]::new($false)) } catch {}
+}
+
+try {
+  $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $principal = New-Object Security.Principal.WindowsPrincipal($identity)
+  $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  if (-not $isAdmin) {
+    $quote = [char]34
+    $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + $quote + $PSCommandPath + $quote + ' -ResultPath ' + $quote + $ResultPath + $quote
+    $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
+    exit $process.ExitCode
+  }
+
+  $package = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
+  $family = $null
+  $signerThumbprint = $null
+  $signerSubject = $null
+  $signerIssuer = $null
+
+  if ($package) {
+    $family = $package.PackageFamilyName
+    try {
+      $candidate = Get-ChildItem -LiteralPath $package.InstallLocation -Filter '*.exe' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+      if ($candidate) {
+        $signature = Get-AuthenticodeSignature -FilePath $candidate.FullName
+        if ($signature.SignerCertificate) {
+          $signerThumbprint = $signature.SignerCertificate.Thumbprint
+          $signerSubject = $signature.SignerCertificate.Subject
+          $signerIssuer = $signature.SignerCertificate.Issuer
+        }
+      }
+    } catch {}
+    if (-not $signerSubject -and $package.Publisher -match '(?i)Yummi Game Bar Overlay') {
+      $signerSubject = $package.Publisher
+      $signerIssuer = $package.Publisher
+    }
+  }
+
+  Get-Process -Name 'GameBar','GameBarFTServer' -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+
+  if ($family) {
+    try {
+      & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -d ('-n=' + $family) | Out-Null
+    } catch {}
+  }
+
+  if ($package) {
+    Remove-AppxPackage -Package $package.PackageFullName -ErrorAction Stop
+  }
+
+  $updaterDir = Join-Path $env:LOCALAPPDATA 'Yummi\GameBarUpdater'
+  Remove-Item $updaterDir -Recurse -Force -ErrorAction SilentlyContinue
+  Get-ChildItem $env:TEMP -Directory -Filter 'YummiGameBarUpdate-*' -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  Remove-Item (Join-Path $env:TEMP 'Yummi-GameBar-install.log') -Force -ErrorAction SilentlyContinue
+
+  $certRemoved = $false
+  if ($signerSubject -and $signerIssuer -and
+      $signerSubject -eq $signerIssuer -and
+      $signerSubject -match '(?i)Yummi Game Bar Overlay') {
+    foreach ($store in @('TrustedPeople','Root')) {
+      $storePath = "Cert:\LocalMachine\$store"
+      $matches = Get-ChildItem $storePath -ErrorAction SilentlyContinue | Where-Object {
+        $_.Subject -eq $signerSubject -and $_.Issuer -eq $signerIssuer -and
+        ((-not $signerThumbprint) -or $_.Thumbprint -eq $signerThumbprint)
+      }
+      foreach ($cert in $matches) {
+        Remove-Item $cert.PSPath -Force -ErrorAction Stop
+        $certRemoved = $true
+      }
+    }
+  }
+
+  Write-ResetResult ("ok package_removed=" + [bool]$package + " loopback_family=" + [bool]$family + " cert_removed=" + $certRemoved)
+  exit 0
+} catch {
+  Write-ResetResult ("error " + $_.Exception.Message)
+  exit 1
+}
+"#;
+
+    let marker = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let temp_dir = env::temp_dir();
+    let script_path = temp_dir.join(format!(
+        "YummiOverlayReset-{}-{marker}.ps1",
+        std::process::id()
+    ));
+    let result_path = temp_dir.join(format!(
+        "YummiOverlayReset-{}-{marker}.result",
+        std::process::id()
+    ));
+    fs::write(&script_path, script)
+        .map_err(|e| format!("오버레이 초기화 스크립트 생성 실패: {e}"))?;
+
+    let script_for_worker = script_path.clone();
+    let result_for_worker = result_path.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-WindowStyle",
+                "Hidden",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+            ])
+            .arg(&script_for_worker)
+            .arg("-ResultPath")
+            .arg(&result_for_worker)
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map_err(|e| format!("오버레이 초기화 프로세스 시작 실패: {e}"))
+    })
+    .await
+    .map_err(|e| format!("오버레이 초기화 worker 실패: {e}"))??;
+
+    let result = fs::read_to_string(&result_path).unwrap_or_default();
+    let _ = fs::remove_file(&script_path);
+    let _ = fs::remove_file(&result_path);
+    if !status.success() {
+        let detail = result.trim();
+        return Err(if detail.is_empty() {
+            format!(
+                "오버레이 초기화가 종료 코드 {}로 실패했습니다.",
+                status
+                    .code()
+                    .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+            )
+        } else {
+            format!("오버레이 초기화 실패: {detail}")
+        });
+    }
+
+    // Do not append to the Game Bar updater log after cleanup: that helper
+    // creates the updater directory, defeating a true first-install state.
+    overlay_install_status()
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn reset_overlay_installation_for_development(
+) -> Result<OverlayInstallStatus, String> {
+    Err("오버레이 완전 초기화는 Windows에서만 지원됩니다.".into())
 }
 
 #[cfg(not(windows))]

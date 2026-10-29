@@ -43,6 +43,8 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
   const [error, setError] = useState<string | null>(null);
   const [resettingTutorial, setResettingTutorial] = useState(false);
   const [tutorialResetMessage, setTutorialResetMessage] = useState<string | null>(null);
+  const [fullResetting, setFullResetting] = useState(false);
+  const [fullResetMessage, setFullResetMessage] = useState<string | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -88,6 +90,31 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
       void api.reportUiFailure("overlay_tutorial_reset", cause);
     } finally {
       setResettingTutorial(false);
+    }
+  };
+
+  const resetEverything = async () => {
+    const confirmed = window.confirm(
+      "Discord 인증 세션과 유미지지 오버레이 설치를 모두 초기화합니다.\n\n오버레이 AppX, loopback 예외, updater/state가 제거되고 앱은 미인증 상태로 돌아갑니다. 녹화 파일과 일반 설정은 유지됩니다. 계속할까요?",
+    );
+    if (!confirmed) return;
+
+    setFullResetting(true);
+    setFullResetMessage(null);
+    try {
+      const next = await api.resetDevelopmentOnboarding();
+      setStatus(next);
+      setFullResetMessage(
+        "완전 초기화 완료 · 앱을 다시 불러와 설치/인증부터 처음 상태로 전환합니다.",
+      );
+      window.setTimeout(() => window.location.reload(), 700);
+    } catch (cause) {
+      setFullResetMessage(
+        `완전 초기화 실패 · ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      void api.reportUiFailure("overlay_full_onboarding_reset", cause);
+    } finally {
+      setFullResetting(false);
     }
   };
 
@@ -188,6 +215,25 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
           </div>
           {tutorialResetMessage && (
             <p className="mt-2 text-[10px] text-slate-600">{tutorialResetMessage}</p>
+          )}
+
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-rose-200 bg-rose-50 px-3 py-3">
+            <div className="min-w-0">
+              <strong className="block text-[11px] text-rose-900">설치부터 완전 처음으로</strong>
+              <span className="mt-0.5 block text-[10px] leading-relaxed text-rose-700">
+                Discord 인증 세션을 폐기하고 오버레이 AppX, localhost 예외, updater/state를 제거합니다. 녹화 파일과 일반 설정은 유지합니다.
+              </span>
+            </div>
+            <Button
+              variant="danger"
+              disabled={fullResetting || resettingTutorial}
+              onClick={() => void resetEverything()}
+            >
+              {fullResetting ? "완전 초기화 중…" : "완전 온보딩 초기화"}
+            </Button>
+          </div>
+          {fullResetMessage && (
+            <p className="mt-2 text-[10px] text-slate-600">{fullResetMessage}</p>
           )}
         </Card>
       )}

@@ -539,6 +539,10 @@ impl AppState {
         *self.lcu_state.read().await
     }
 
+    pub(crate) async fn release_channel(&self) -> String {
+        self.ui.lock().await.release_channel.clone()
+    }
+
     pub(crate) fn gamebar_snapshot(&self) -> GameBarSnapshot {
         self.gamebar_snapshot
             .read()

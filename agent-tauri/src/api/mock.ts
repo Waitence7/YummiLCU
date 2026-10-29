@@ -263,6 +263,22 @@ export async function mockInvoke<T>(
       log("개발용 오버레이 튜토리얼 초기화 요청");
       emit();
       return Date.now() as T;
+    case "reset_development_onboarding":
+      mockOverlayInstalled = false;
+      state = {
+        ...state,
+        relay: false,
+        lcu: false,
+        discord_id: null,
+        discord_name: null,
+        discord_avatar: null,
+        trust_level: "unauthenticated",
+        oauth_pending: false,
+        status: "완전 온보딩 초기화 완료 · 처음부터 다시 시작하세요.",
+      };
+      log("개발용 완전 온보딩 초기화 완료");
+      emit();
+      return { supported: true, installed: false, installedVersion: null, updaterReady: false } as T;
     case "request_borderless_capture_access":
       recordingStatus = {
         ...recordingStatus,

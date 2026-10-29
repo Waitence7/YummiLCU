@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{
+    commands::agent::logout_inner,
     gamebar_bridge::{self, OverlayInstallStatus},
     state::AppState,
 };
@@ -50,9 +51,7 @@ pub(crate) async fn install_overlay(
             Ok(status)
         }
         Err(error) => {
-            state
-                .record_flight("overlay_install_error", &error)
-                .await;
+            state.record_flight("overlay_install_error", &error).await;
             state
                 .report_diagnostic("updater", "overlay_install_failed", &error)
                 .await;
@@ -62,9 +61,7 @@ pub(crate) async fn install_overlay(
 }
 
 #[tauri::command]
-pub(crate) async fn reset_overlay_tutorial(
-    state: State<'_, Arc<AppState>>,
-) -> Result<u64, String> {
+pub(crate) async fn reset_overlay_tutorial(state: State<'_, Arc<AppState>>) -> Result<u64, String> {
     let generation = state.request_gamebar_tutorial_reset();
     state
         .record_flight(
@@ -73,4 +70,42 @@ pub(crate) async fn reset_overlay_tutorial(
         )
         .await;
     Ok(generation)
+}
+
+#[tauri::command]
+pub(crate) async fn reset_development_onboarding(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<OverlayInstallStatus, String> {
+    let channel = state.release_channel().await;
+    if channel != "beta" && channel != "dev" {
+        return Err("완전 온보딩 초기화는 beta/dev 채널에서만 사용할 수 있습니다.".into());
+    }
+
+    state
+        .record_flight("overlay_onboarding", "developer_full_reset_requested")
+        .await;
+    logout_inner(&app, state.inner(), "developer_full_onboarding_reset").await?;
+
+    match gamebar_bridge::reset_overlay_installation_for_development().await {
+        Ok(status) => {
+            let generation = state.request_gamebar_tutorial_reset();
+            state
+                .record_flight(
+                    "overlay_onboarding",
+                    format!("developer_full_reset_completed generation={generation}"),
+                )
+                .await;
+            Ok(status)
+        }
+        Err(error) => {
+            state
+                .record_flight("overlay_onboarding_error", &error)
+                .await;
+            state
+                .report_diagnostic("updater", "overlay_install_failed", &error)
+                .await;
+            Err(error)
+        }
+    }
 }
