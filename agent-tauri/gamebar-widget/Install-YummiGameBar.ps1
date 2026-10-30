@@ -76,8 +76,8 @@ function Restart-InstallerElevated {
   $forceArg = if ($Force) { ' -Force' } else { '' }
   $skipArg = if ($SkipAutoUpdateSetup) { ' -SkipAutoUpdateSetup' } else { '' }
   $backgroundArg = if ($BackgroundUpdate) { ' -BackgroundUpdate' } else { '' }
-  $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + $quote + $InstallerPath + $quote + $forceArg + $skipArg + $backgroundArg + ' -LogPath ' + $quote + $LogPath + $quote
-  $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
+  $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ' + $quote + $InstallerPath + $quote + $forceArg + $skipArg + $backgroundArg + ' -LogPath ' + $quote + $LogPath + $quote
+  $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $arguments -Wait -PassThru
   if ($process.ExitCode -ne 0) {
     if (Test-Path $logPath) {
       Write-Host ''

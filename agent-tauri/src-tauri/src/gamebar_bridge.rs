@@ -2225,8 +2225,8 @@ try {
   $isAdmin = $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
   if (-not $isAdmin) {
     $quote = [char]34
-    $arguments = '-NoProfile -ExecutionPolicy Bypass -File ' + $quote + $PSCommandPath + $quote + ' -ResultPath ' + $quote + $ResultPath + $quote
-    $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList $arguments -Wait -PassThru
+    $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ' + $quote + $PSCommandPath + $quote + ' -ResultPath ' + $quote + $ResultPath + $quote
+    $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $arguments -Wait -PassThru
     exit $process.ExitCode
   }
 

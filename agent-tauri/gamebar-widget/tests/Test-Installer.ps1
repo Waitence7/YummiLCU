@@ -43,6 +43,8 @@ try {
   $source = Get-Content (Join-Path $InstallerRoot 'Install-YummiGameBar.ps1') -Raw
   if ($source -notmatch [regex]::Escape('https://go.microsoft.com/fwlink/p/?LinkId=2124703')) { throw 'Official WebView2 Evergreen bootstrapper link missing' }
   if ($source -notmatch [regex]::Escape("'/silent /install'")) { throw 'WebView2 silent install arguments missing' }
+  if ($source -notmatch [regex]::Escape("Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden")) { throw 'Elevated PowerShell must stay hidden after UAC approval' }
+  if ($source -notmatch [regex]::Escape("'-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File '")) { throw 'Elevated PowerShell arguments must request hidden window style' }
   Write-Host 'PASS: installer ensures WebView2 Evergreen Runtime without bundling Chromium'
   if ($source -notmatch [regex]::Escape('-DeferRegistrationWhenPackagesAreInUse')) { throw 'Background update must defer registration while widget is in use' }
   $updaterText = Get-Content (Join-Path $InstallerRoot 'Update-YummiGameBar.ps1') -Raw -Encoding UTF8
