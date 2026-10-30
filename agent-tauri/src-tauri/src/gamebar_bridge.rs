@@ -29,6 +29,8 @@ const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 #[cfg(windows)]
 const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(windows)]
+const OVERLAY_PENDING_FORCE_AFTER: Duration = Duration::from_secs(90);
+#[cfg(windows)]
 const GAMEBAR_VERSION_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/main/agent-tauri/gamebar-widget/version.json";
 #[cfg(windows)]
 const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
@@ -1802,11 +1804,18 @@ async fn check_overlay_update() -> Result<(), String> {
                             .status()
                             .map(|status| status.success())
                             .unwrap_or(false);
-                        if widget_running {
+                        let pending_age = fs::metadata(&state_path)
+                            .and_then(|meta| meta.modified())
+                            .ok()
+                            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
+                            .unwrap_or_default();
+                        let force_finalize = pending_age >= OVERLAY_PENDING_FORCE_AFTER;
+                        if widget_running && !force_finalize {
                             append_gamebar_update_log(&format!(
-                                "오버레이 업데이트 등록 대기 중: expected={} active={} widget=running (오버레이를 닫으면 자동 적용)",
+                                "오버레이 업데이트 등록 대기 중: expected={} active={} widget=running pending={}s",
                                 expected_appx_version,
-                                actual.as_deref().unwrap_or("missing")
+                                actual.as_deref().unwrap_or("missing"),
+                                pending_age.as_secs()
                             ));
                             return Ok(());
                         }
@@ -1814,11 +1823,15 @@ async fn check_overlay_update() -> Result<(), String> {
                         let pending_zip = updater_dir.join("verified-update.zip");
                         if pending_zip.is_file() {
                             append_gamebar_update_log(&format!(
-                                "오버레이 위젯 종료 감지, 예약 업데이트 재등록 시도: expected={} active={}",
+                                "오버레이 예약 업데이트 재등록 시도: expected={} active={} widgetRunning={} forceFinalize={} pending={}s",
                                 expected_appx_version,
-                                actual.as_deref().unwrap_or("missing")
+                                actual.as_deref().unwrap_or("missing"),
+                                widget_running,
+                                force_finalize,
+                                pending_age.as_secs()
                             ));
-                            Command::new("powershell.exe")
+                            let mut command = Command::new("powershell.exe");
+                            command
                                 .args([
                                     "-NoProfile",
                                     "-WindowStyle",
@@ -1836,7 +1849,11 @@ async fn check_overlay_update() -> Result<(), String> {
                                 .arg(&target.build_id)
                                 .arg("-ReleaseTag")
                                 .arg(&target.release_tag)
-                                .arg("-Quiet")
+                                .arg("-Quiet");
+                            if force_finalize {
+                                command.arg("-ForceFinalize");
+                            }
+                            command
                                 .creation_flags(CREATE_NO_WINDOW)
                                 .spawn()
                                 .map_err(|e| format!("예약 Game Bar 재등록 실행 실패: {e}"))?;

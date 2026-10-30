@@ -3,7 +3,8 @@
   [string]$ExpectedSha256,
   [string]$BuildId,
   [string]$ReleaseTag,
-  [switch]$Quiet
+  [switch]$Quiet,
+  [switch]$ForceFinalize
 )
 
 $ErrorActionPreference = 'Stop'
@@ -65,8 +66,9 @@ try {
       # Game Bar host and prevents an endless deferred-registration loop.
       Start-Sleep -Milliseconds 200
       $widgetRunning = Get-Process -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
-      if (-not $widgetRunning) {
-        Write-UpdateLog "오버레이 위젯 종료 확인, 보류 등록 강제 마무리 시도: expected=$expectedAppxVersion active=$actualAppxVersion"
+      if ($ForceFinalize -or -not $widgetRunning) {
+        $finalizeReason = if ($ForceFinalize) { '보류 시간 초과' } else { '위젯 종료 확인' }
+        Write-UpdateLog "오버레이 $finalizeReason, 보류 등록 강제 마무리 시도: expected=$expectedAppxVersion active=$actualAppxVersion"
         $finalizeProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
           '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $installer + '"'), '-Force', '-SkipAutoUpdateSetup'
         ) -Wait -PassThru -WindowStyle Hidden

@@ -49,6 +49,7 @@ try {
   if ($updaterText -notmatch [regex]::Escape("'-BackgroundUpdate', '-SkipAutoUpdateSetup'")) { throw 'Updater must use background-update mode' }
   if ($updaterText -notmatch [regex]::Escape("Get-Process -Name 'YummiGameBarWidget'")) { throw 'Updater must verify the widget is closed before finalizing deferred registration' }
   if ($updaterText -notmatch [regex]::Escape("'-Force', '-SkipAutoUpdateSetup'")) { throw 'Updater must force-finalize a stale deferred registration after the widget closes' }
+  if ($updaterText -notmatch [regex]::Escape('[switch]$ForceFinalize')) { throw 'Updater must accept forced stale-registration finalization from the Agent' }
   if ($updaterText -match 'Stop-Process -Force') { throw 'Updater must not directly kill Xbox Game Bar processes' }
   $manifestText = Get-Content (Join-Path $InstallerRoot 'Package.appxmanifest') -Raw -Encoding UTF8
   if ($manifestText -notmatch '<ActivateAfterInstall>false</ActivateAfterInstall>') { throw 'Game Bar widget must not auto-activate after package registration' }
