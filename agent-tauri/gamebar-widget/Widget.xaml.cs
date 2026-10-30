@@ -135,6 +135,8 @@ namespace YummiGameBarWidget
         private bool pinnedGrowScheduled;
         private bool pendingPinnedFitRequest;
         private string lastDisplayModeForLog = "unknown";
+        private Windows.Foundation.Size baseMinWindowSize;
+        private bool baseMinWindowSizeCaptured;
         private long resizeRequestSequence;
         private long lastResizeRequestId;
         private long lastResizeRequestAtMs;
@@ -365,6 +367,10 @@ namespace YummiGameBarWidget
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
                 lastDisplayModeForLog = widget.GameBarDisplayMode.ToString();
+                baseMinWindowSize = widget.MinWindowSize;
+                baseMinWindowSizeCaptured = true;
+                App.LogResize("resize-limits-captured min=" + FormatSize(baseMinWindowSize) +
+                    " max=" + FormatSize(widget.MaxWindowSize));
                 StartNativeInputLoop();
                 _ = SyncExternalClickTestAsync(true);
                 UpdatePinTutorial();
@@ -382,6 +388,7 @@ namespace YummiGameBarWidget
             App.LogStage("hud-navigated-from");
             if (widget != null)
             {
+                RestorePinnedMinimumConstraint("navigated-from");
                 widget.SettingsClicked -= WidgetSettingsClicked;
                 widget.WindowBoundsChanged -= WidgetStateChanged;
                 widget.PinnedChanged -= PinnedStateChanged;
@@ -423,6 +430,7 @@ namespace YummiGameBarWidget
                 App.LogResize("pinned-changed pinned=" + (widget != null && widget.Pinned) +
                     " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
                     " current=" + FormatRect(current));
+                if (widget != null && !widget.Pinned) RestorePinnedMinimumConstraint("unpinned");
                 MaybeQueuePinnedGrow("pinned-changed");
                 UpdateDisplayState();
                 UpdateInputState();
@@ -445,8 +453,10 @@ namespace YummiGameBarWidget
 
                 if (widget == null || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
                 {
-                    // Never resize automatically while the Game Bar foreground chrome
-                    // is active. It rejects even no-op/slightly larger resize requests.
+                    // Foreground needs the normal manifest minimum so the user can
+                    // freely drag/edit the widget. Any pinned-only growth constraint
+                    // is removed as soon as Game Bar opens.
+                    RestorePinnedMinimumConstraint("foreground");
                     Interlocked.Increment(ref pinnedGrowGeneration);
                     pinnedGrowScheduled = false;
                 }
@@ -491,81 +501,172 @@ namespace YummiGameBarWidget
         {
             try
             {
-                // The first PinnedOnly callback can still inherit a provisional host
-                // size. Retry only after PinnedOnly; Foreground resize is forbidden.
+                // Try after PinnedOnly settles. TryResizeWindowAsync is rejected on
+                // this host even for a no-op request while pinned, so grow by raising
+                // MinWindowSize and observing the actual host bounds instead.
                 var delays = new[] { 80, 180, 350, 700, 1200, 2000 };
                 foreach (var delayMs in delays)
                 {
-                await Task.Delay(delayMs);
-                if (generation != Volatile.Read(ref pinnedGrowGeneration)) return;
-                if (widget == null || !hudLoaded || HudPreferences.CompactLayout ||
-                    !widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly) return;
-                if (pinnedGrowInFlight) continue;
+                    await Task.Delay(delayMs);
+                    if (generation != Volatile.Read(ref pinnedGrowGeneration)) return;
+                    if (widget == null || !hudLoaded || HudPreferences.CompactLayout ||
+                        !widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly) return;
+                    if (pinnedGrowInFlight) continue;
 
-                pinnedGrowInFlight = true;
-                try
-                {
-                    UpdateDisplayMetrics();
-                    var maximum = widget.MaxWindowSize;
-                    var current = widget.WindowBounds;
-                    var targetWidth = Math.Min(maximum.Width, displayWidth);
-                    var targetHeight = Math.Min(maximum.Height, Math.Min(displayHeight, 900.0));
-                    var knownGoodHeight = Math.Min(targetHeight, 856.0);
-
-                    // Preserve any manual size already above the known-good height.
-                    // Otherwise first try to establish 856 before probing toward 900.
-                    var baseWidth = Math.Min(targetWidth, Math.Max(current.Width, 1.0));
-                    var baseHeight = Math.Min(targetHeight, Math.Max(current.Height, 1.0));
-                    if (baseHeight < knownGoodHeight)
+                    pinnedGrowInFlight = true;
+                    try
                     {
-                        var safeAccepted = await ResizeHudAsync(baseWidth, knownGoodHeight, "pinned-grow-safe");
-                        App.LogStage("pinned-grow-safe delayMs=" + delayMs +
-                            " accepted=" + safeAccepted + " from=" + current.Width.ToString("0.#") + "x" + current.Height.ToString("0.#") +
-                            " safe=" + baseWidth.ToString("0.#") + "x" + knownGoodHeight.ToString("0.#"));
-                        if (!safeAccepted) continue;
-                        baseHeight = knownGoodHeight;
-                        current = widget.WindowBounds;
+                        UpdateDisplayMetrics();
+                        var maximum = widget.MaxWindowSize;
+                        var current = widget.WindowBounds;
+                        var targetHeight = Math.Min(maximum.Height, Math.Min(displayHeight, 900.0));
+                        fitTargetWidth = Math.Min(maximum.Width, displayWidth);
+                        fitTargetHeight = targetHeight;
+
+                        App.LogResize("pinned-grow-constraint-attempt delayMs=" + delayMs +
+                            " current=" + FormatRect(current) +
+                            " targetHeight=" + targetHeight.ToString("0.#") +
+                            " min=" + FormatSize(widget.MinWindowSize) +
+                            " baseMin=" + FormatSize(GetBaseMinWindowSize()) +
+                            " max=" + FormatSize(maximum) +
+                            " display=" + FormatSize(displayWidth, displayHeight));
+
+                        var grownHeight = await GrowPinnedHeightByMinimumConstraintAsync(targetHeight, generation);
+                        var actual = widget.WindowBounds;
+                        resizeAccepted = grownHeight > current.Height + 0.5 || actual.Height >= targetHeight - 1.0;
+                        fittedWidth = actual.Width;
+                        fittedHeight = actual.Height;
+                        UpdateDisplayState();
+                        App.LogResize("pinned-grow-constraint-result delayMs=" + delayMs +
+                            " grownHeight=" + grownHeight.ToString("0.#") +
+                            " actual=" + FormatRect(actual) +
+                            " targetHeight=" + targetHeight.ToString("0.#") +
+                            " minNow=" + FormatSize(widget.MinWindowSize));
+
+                        if (actual.Height >= targetHeight - 1.0) return;
                     }
-
-                    App.LogResize("pinned-grow-attempt delayMs=" + delayMs +
-                        " current=" + FormatRect(current) +
-                        " target=" + FormatSize(targetWidth, targetHeight) +
-                        " knownGoodHeight=" + knownGoodHeight.ToString("0.#") +
-                        " display=" + FormatSize(displayWidth, displayHeight) +
-                        " min=" + FormatSize(widget.MinWindowSize) +
-                        " max=" + FormatSize(maximum));
-                    var result = await HudGeometry.FitLargestUpwardAsync(
-                        targetWidth, targetHeight, current.Width, Math.Max(baseHeight, current.Height),
-                        (w, h) => ResizeHudAsync(w, h, "pinned-grow-probe"));
-                    resizeAccepted = result.Accepted;
-                    fittedWidth = result.Width;
-                    fittedHeight = result.Height;
-                    fitTargetWidth = targetWidth;
-                    fitTargetHeight = targetHeight;
-                    UpdateDisplayState();
-                    App.LogStage("pinned-grow-probe delayMs=" + delayMs +
-                        " result=" + result.Width.ToString("0.#") + "x" + result.Height.ToString("0.#") +
-                        " target=" + targetWidth.ToString("0.#") + "x" + targetHeight.ToString("0.#"));
-
-                    if (result.Width >= targetWidth - 1.0 && result.Height >= targetHeight - 1.0) return;
-                }
-                catch (Exception ex)
-                {
-                    App.LogStage("pinned-grow-error delayMs=" + delayMs + " error=" + ErrorCode(ex));
-                }
-                finally
-                {
-                    pinnedGrowInFlight = false;
-                }
+                    catch (Exception ex)
+                    {
+                        App.LogResize("pinned-grow-constraint-error delayMs=" + delayMs +
+                            " error=" + ErrorCode(ex));
+                    }
+                    finally
+                    {
+                        pinnedGrowInFlight = false;
+                    }
                 }
             }
             finally
             {
-                // A superseded Foreground task must not clear the scheduling flag
-                // of a newer PinnedOnly generation.
                 if (generation == Volatile.Read(ref pinnedGrowGeneration))
                     pinnedGrowScheduled = false;
             }
+        }
+
+        private Windows.Foundation.Size GetBaseMinWindowSize()
+        {
+            if (baseMinWindowSizeCaptured) return baseMinWindowSize;
+            if (widget != null)
+            {
+                baseMinWindowSize = widget.MinWindowSize;
+                baseMinWindowSizeCaptured = true;
+                return baseMinWindowSize;
+            }
+            return new Windows.Foundation.Size(640, 360);
+        }
+
+        private void RestorePinnedMinimumConstraint(string reason)
+        {
+            if (widget == null || !baseMinWindowSizeCaptured) return;
+            try
+            {
+                var before = widget.MinWindowSize;
+                if (Math.Abs(before.Width - baseMinWindowSize.Width) < 0.5 &&
+                    Math.Abs(before.Height - baseMinWindowSize.Height) < 0.5) return;
+                widget.MinWindowSize = baseMinWindowSize;
+                App.LogResize("min-constraint-restored reason=" + reason +
+                    " before=" + FormatSize(before) +
+                    " restored=" + FormatSize(baseMinWindowSize) +
+                    " actual=" + FormatRect(widget.WindowBounds));
+            }
+            catch (Exception ex)
+            {
+                App.LogResize("min-constraint-restore-error reason=" + reason +
+                    " error=" + ErrorCode(ex));
+            }
+        }
+
+        private async Task<double> GrowPinnedHeightByMinimumConstraintAsync(double targetHeight, int generation)
+        {
+            if (widget == null) return 0;
+            var baseMin = GetBaseMinWindowSize();
+            var maximum = widget.MaxWindowSize;
+            targetHeight = Math.Min(targetHeight, maximum.Height);
+            var current = widget.WindowBounds;
+            var best = Math.Max(current.Height, baseMin.Height);
+            if (best >= targetHeight - 1.0) return best;
+
+            async Task<bool> ProbeAsync(double candidate)
+            {
+                if (generation != Volatile.Read(ref pinnedGrowGeneration) || widget == null ||
+                    !widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly) return false;
+                candidate = Math.Max(baseMin.Height, Math.Min(targetHeight, candidate));
+                var beforeBounds = widget.WindowBounds;
+                var beforeMin = widget.MinWindowSize;
+                var request = new Windows.Foundation.Size(baseMin.Width, candidate);
+                try
+                {
+                    widget.MinWindowSize = request;
+                    App.LogResize("min-constraint-request candidate=" + candidate.ToString("0.#") +
+                        " beforeMin=" + FormatSize(beforeMin) +
+                        " requestedMin=" + FormatSize(request) +
+                        " before=" + FormatRect(beforeBounds));
+                }
+                catch (Exception ex)
+                {
+                    App.LogResize("min-constraint-set-error candidate=" + candidate.ToString("0.#") +
+                        " error=" + ErrorCode(ex));
+                    return false;
+                }
+
+                // Host geometry updates asynchronously after a runtime size-limit change.
+                await Task.Delay(120);
+                if (widget == null) return false;
+                var after = widget.WindowBounds;
+                var accepted = after.Height >= candidate - 1.0;
+                App.LogResize("min-constraint-result candidate=" + candidate.ToString("0.#") +
+                    " accepted=" + accepted +
+                    " actual=" + FormatRect(after) +
+                    " minNow=" + FormatSize(widget.MinWindowSize));
+                return accepted;
+            }
+
+            if (await ProbeAsync(targetHeight)) return widget.WindowBounds.Height;
+
+            // A rejected target is lowered toward the already visible height. Keep
+            // the best accepted constraint active while pinned so the host does not
+            // collapse back to the old 820/856 geometry.
+            var high = targetHeight;
+            for (int attempt = 0; attempt < 7 && high - best > 1.0; attempt++)
+            {
+                var mid = Math.Floor((best + high) / 2.0);
+                if (mid <= best) break;
+                if (await ProbeAsync(mid)) best = Math.Max(best, widget.WindowBounds.Height);
+                else
+                {
+                    high = mid;
+                    try { widget.MinWindowSize = new Windows.Foundation.Size(baseMin.Width, Math.Max(baseMin.Height, best)); }
+                    catch { }
+                    await Task.Delay(40);
+                }
+            }
+
+            try
+            {
+                widget.MinWindowSize = new Windows.Foundation.Size(baseMin.Width, Math.Max(baseMin.Height, best));
+            }
+            catch { }
+            return widget != null ? widget.WindowBounds.Height : best;
         }
 
         private async Task FitToDisplayAsync(bool centerForPinSetup = false)
