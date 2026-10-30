@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -479,19 +479,47 @@ namespace YummiGameBarWidget
 
         private bool PinnedCoverageNeedsRestore()
         {
-            if (!IsPinnedFullSizeMode() || HostChromeVisible()) return false;
+            if (!IsPinnedFullSizeMode()) return false;
             UpdateDisplayMetrics();
             var bounds = widget.WindowBounds;
             var contentWidth = ActualWidth > 0 ? ActualWidth : bounds.Width;
             var contentHeight = ActualHeight > 0 ? ActualHeight : bounds.Height;
             const double tolerance = 2.0;
 
-            // Full-size mode is intentionally screen-filling. Once Game Bar chrome
-            // has disappeared, restore both size and position. Compact mode remains
-            // the path for user-positioned/manual layouts.
+            // Do not treat stale host chrome as a reason to stop recovery. On some
+            // Game Bar builds WindowBounds keeps the old title-bar reservation even
+            // after PinnedOnly begins. The exact-size retry below is what clears it.
             return Math.Abs(contentWidth - displayWidth) > tolerance ||
                 Math.Abs(contentHeight - displayHeight) > tolerance ||
+                Math.Abs(bounds.Width - displayWidth) > tolerance ||
+                Math.Abs(bounds.Height - displayHeight) > tolerance ||
                 Math.Abs(bounds.X) > tolerance || Math.Abs(bounds.Y) > tolerance;
+        }
+
+        private async Task<bool> RestorePinnedFullscreenExactAsync(string reason, int delayMs)
+        {
+            if (!IsPinnedFullSizeMode()) return false;
+            UpdateDisplayMetrics();
+            var target = new Windows.Foundation.Size(displayWidth, displayHeight);
+            var before = widget.WindowBounds;
+
+            // Full-screen recovery must never fall back to a smaller accepted size.
+            // If the host is still holding title chrome, retry the exact display size
+            // later instead of letting FitLargestAsync permanently settle smaller.
+            var accepted = await widget.TryResizeWindowAsync(target);
+            if (accepted)
+            {
+                await Task.Delay(40);
+                if (widget != null && hudLoaded && IsPinnedFullSizeMode())
+                    await widget.CenterWindowAsync();
+            }
+
+            App.LogStage("pinned-fullscreen-exact reason=" + reason + " delayMs=" + delayMs +
+                " accepted=" + accepted + " chrome=" + HostChromeHeight().ToString("0.#") +
+                " before=" + before + " after=" + widget.WindowBounds +
+                " content=" + ActualWidth.ToString("0.#") + "x" + ActualHeight.ToString("0.#") +
+                " target=" + displayWidth.ToString("0.#") + "x" + displayHeight.ToString("0.#"));
+            return accepted && !PinnedCoverageNeedsRestore();
         }
 
         private void QueuePinnedCoverageRestore(string reason)
@@ -503,36 +531,37 @@ namespace YummiGameBarWidget
 
         private async Task RestorePinnedCoverageAfterChromeAsync(int generation, string reason)
         {
-            // Host title/pin chrome can linger briefly after hover or Win+G closes.
-            // Retry only for a short window and only while the full-size pinned mode
-            // is still active. A later bounds event starts a fresh generation.
-            var delays = new[] { 120, 320, 700 };
+            // Game Bar can keep stale title/pin chrome metrics for over a second.
+            // Keep retrying the exact display size; never binary-search downward.
+            var delays = new[] { 120, 260, 520, 900, 1400 };
             foreach (var delayMs in delays)
             {
                 await Task.Delay(delayMs);
                 if (generation != Volatile.Read(ref pinnedCoverageRestoreGeneration)) return;
                 if (!IsPinnedFullSizeMode()) return;
-                if (HostChromeVisible()) continue;
                 if (!PinnedCoverageNeedsRestore()) return;
-                if (pinnedCoverageRestoreInFlight) return;
+                if (pinnedCoverageRestoreInFlight) continue;
 
                 pinnedCoverageRestoreInFlight = true;
                 try
                 {
-                    App.LogStage("pinned-coverage-restore reason=" + reason + " delayMs=" + delayMs +
-                        " bounds=" + widget.WindowBounds + " content=" + ActualWidth.ToString("0.#") + "x" + ActualHeight.ToString("0.#"));
-                    await FitToDisplayAsync(true);
+                    if (await RestorePinnedFullscreenExactAsync(reason, delayMs))
+                    {
+                        App.LogStage("pinned-coverage-restored reason=" + reason);
+                        return;
+                    }
                 }
                 finally
                 {
                     pinnedCoverageRestoreInFlight = false;
                 }
+            }
 
-                if (!PinnedCoverageNeedsRestore())
-                {
-                    App.LogStage("pinned-coverage-restored reason=" + reason);
-                    return;
-                }
+            if (IsPinnedFullSizeMode() && PinnedCoverageNeedsRestore())
+            {
+                App.LogStage("pinned-coverage-still-stale reason=" + reason +
+                    " bounds=" + widget.WindowBounds + " chrome=" + HostChromeHeight().ToString("0.#") +
+                    " content=" + ActualWidth.ToString("0.#") + "x" + ActualHeight.ToString("0.#"));
             }
         }
 
