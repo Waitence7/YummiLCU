@@ -47,7 +47,9 @@ try {
   if ($source -notmatch [regex]::Escape('-DeferRegistrationWhenPackagesAreInUse')) { throw 'Background update must defer registration while widget is in use' }
   $updaterText = Get-Content (Join-Path $InstallerRoot 'Update-YummiGameBar.ps1') -Raw -Encoding UTF8
   if ($updaterText -notmatch [regex]::Escape("'-BackgroundUpdate', '-SkipAutoUpdateSetup'")) { throw 'Updater must use background-update mode' }
-  if ($updaterText -match 'Stop-Process -Force') { throw 'Updater must not force-close Xbox Game Bar' }
+  if ($updaterText -notmatch [regex]::Escape("Get-Process -Name 'YummiGameBarWidget'")) { throw 'Updater must verify the widget is closed before finalizing deferred registration' }
+  if ($updaterText -notmatch [regex]::Escape("'-Force', '-SkipAutoUpdateSetup'")) { throw 'Updater must force-finalize a stale deferred registration after the widget closes' }
+  if ($updaterText -match 'Stop-Process -Force') { throw 'Updater must not directly kill Xbox Game Bar processes' }
   $manifestText = Get-Content (Join-Path $InstallerRoot 'Package.appxmanifest') -Raw -Encoding UTF8
   if ($manifestText -notmatch '<ActivateAfterInstall>false</ActivateAfterInstall>') { throw 'Game Bar widget must not auto-activate after package registration' }
   Write-Host 'PASS: automatic updates defer in-use registration and never auto-activate the widget'
