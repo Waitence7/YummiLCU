@@ -37,24 +37,42 @@ namespace YummiGameBarWidget
             if (await resize(targetWidth, targetHeight))
                 return new FitResult { Width = targetWidth, Height = targetHeight, Accepted = true };
 
+            // A rejected full target does not tell us which axis was rejected.
+            // Probe width at the already-accepted current height first, then probe
+            // height at the fitted width. This lets 1440x820 succeed even when
+            // 1440x900 is temporarily rejected only because of height.
             var fittedWidth = lowWidth;
-            var highWidth = targetWidth;
-            for (int attempt = 0; attempt < 14 && highWidth - fittedWidth > 1.0; attempt++)
+            if (targetWidth > fittedWidth && await resize(targetWidth, lowHeight))
             {
-                var mid = Math.Floor((fittedWidth + highWidth) / 2.0);
-                if (mid <= fittedWidth) break;
-                if (await resize(mid, lowHeight)) fittedWidth = mid;
-                else highWidth = mid;
+                fittedWidth = targetWidth;
+            }
+            else
+            {
+                var highWidth = targetWidth;
+                for (int attempt = 0; attempt < 14 && highWidth - fittedWidth > 1.0; attempt++)
+                {
+                    var mid = Math.Floor((fittedWidth + highWidth) / 2.0);
+                    if (mid <= fittedWidth) break;
+                    if (await resize(mid, lowHeight)) fittedWidth = mid;
+                    else highWidth = mid;
+                }
             }
 
             var fittedHeight = lowHeight;
-            var highHeight = targetHeight;
-            for (int attempt = 0; attempt < 14 && highHeight - fittedHeight > 1.0; attempt++)
+            if (targetHeight > fittedHeight && await resize(fittedWidth, targetHeight))
             {
-                var mid = Math.Floor((fittedHeight + highHeight) / 2.0);
-                if (mid <= fittedHeight) break;
-                if (await resize(fittedWidth, mid)) fittedHeight = mid;
-                else highHeight = mid;
+                fittedHeight = targetHeight;
+            }
+            else
+            {
+                var highHeight = targetHeight;
+                for (int attempt = 0; attempt < 14 && highHeight - fittedHeight > 1.0; attempt++)
+                {
+                    var mid = Math.Floor((fittedHeight + highHeight) / 2.0);
+                    if (mid <= fittedHeight) break;
+                    if (await resize(fittedWidth, mid)) fittedHeight = mid;
+                    else highHeight = mid;
+                }
             }
 
             var accepted = await resize(fittedWidth, fittedHeight);
