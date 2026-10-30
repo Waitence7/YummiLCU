@@ -377,11 +377,15 @@ namespace YummiGameBarWidget
 
         private async void DisplayModeChanged(XboxGameBarWidget sender, object args)
         {
-            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () =>
             {
-                // Restore the later legacy behavior from c391a4b: Game Bar owns
-                // the saved widget size and position. Opening/closing Win+G must
-                // never overwrite a size the user adjusted through the host UI.
+                // Grow-only recovery: whenever Game Bar returns to pinned-only mode,
+                // binary-search upward from the CURRENT accepted size. This can make
+                // progress after transient title/home chrome disappears, but can never
+                // shrink a size the user already reached manually.
+                if (!HudPreferences.CompactLayout && widget.Pinned &&
+                    widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                    await FitToDisplayAsync();
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
@@ -406,10 +410,6 @@ namespace YummiGameBarWidget
                 // the content around its chrome and home bar.
                 fitTargetWidth = width;
                 fitTargetHeight = height;
-                // Do not binary-search downward in normal/full-size mode. Game Bar
-                // can transiently reject the real target while its title/home chrome
-                // is visible; treating that temporary limit as the maximum produced
-                // bogus sizes such as 1435x820 even though the user can resize larger.
                 if (HudPreferences.CompactLayout)
                 {
                     resizeAccepted = await ResizeHudAsync(width, height);
@@ -421,19 +421,15 @@ namespace YummiGameBarWidget
                 }
                 else
                 {
-                    resizeAccepted = await ResizeHudAsync(width, height);
-                    if (resizeAccepted)
-                    {
-                        fittedWidth = width;
-                        fittedHeight = height;
-                    }
-                    else
-                    {
-                        // Preserve Game Bar's current/manual size on a transient reject.
-                        var current = widget.WindowBounds;
-                        fittedWidth = current.Width;
-                        fittedHeight = current.Height;
-                    }
+                    // Search upward only. The current host size is the hard lower
+                    // bound, so a transient chrome restriction can never push the HUD
+                    // back down (for example from a manual 1435x860 to 1435x820).
+                    var current = widget.WindowBounds;
+                    var result = await HudGeometry.FitLargestUpwardAsync(
+                        width, height, current.Width, current.Height, ResizeHudAsync);
+                    resizeAccepted = result.Accepted;
+                    fittedWidth = result.Width;
+                    fittedHeight = result.Height;
                 }
                 // Compact mode deliberately brings the titlebar back on screen.
                 // Expanding must preserve the position chosen by the user.

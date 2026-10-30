@@ -21,6 +21,46 @@ namespace YummiGameBarWidget
 
         // Probe only in response to a fit request. The host can reject sizes
         // below our manifest maximum because it reserves room for its chrome.
+
+        // Grow only from the host's current accepted size toward the requested
+        // display target. A temporary Game Bar chrome limit must never make us
+        // shrink below the size the user/host already accepted.
+        internal static async Task<FitResult> FitLargestUpwardAsync(double targetWidth, double targetHeight,
+            double currentWidth, double currentHeight, Func<double, double, Task<bool>> resize)
+        {
+            var lowWidth = Math.Min(targetWidth, Math.Max(1.0, currentWidth));
+            var lowHeight = Math.Min(targetHeight, Math.Max(1.0, currentHeight));
+
+            if (currentWidth >= targetWidth && currentHeight >= targetHeight)
+                return new FitResult { Width = currentWidth, Height = currentHeight, Accepted = true };
+
+            if (await resize(targetWidth, targetHeight))
+                return new FitResult { Width = targetWidth, Height = targetHeight, Accepted = true };
+
+            var fittedWidth = lowWidth;
+            var highWidth = targetWidth;
+            for (int attempt = 0; attempt < 14 && highWidth - fittedWidth > 1.0; attempt++)
+            {
+                var mid = Math.Floor((fittedWidth + highWidth) / 2.0);
+                if (mid <= fittedWidth) break;
+                if (await resize(mid, lowHeight)) fittedWidth = mid;
+                else highWidth = mid;
+            }
+
+            var fittedHeight = lowHeight;
+            var highHeight = targetHeight;
+            for (int attempt = 0; attempt < 14 && highHeight - fittedHeight > 1.0; attempt++)
+            {
+                var mid = Math.Floor((fittedHeight + highHeight) / 2.0);
+                if (mid <= fittedHeight) break;
+                if (await resize(fittedWidth, mid)) fittedHeight = mid;
+                else highHeight = mid;
+            }
+
+            var accepted = await resize(fittedWidth, fittedHeight);
+            return new FitResult { Width = fittedWidth, Height = fittedHeight, Accepted = accepted };
+        }
+
         internal static async Task<FitResult> FitLargestAsync(double width, double height,
             double minWidth, double minHeight, Func<double, double, Task<bool>> resize)
         {
