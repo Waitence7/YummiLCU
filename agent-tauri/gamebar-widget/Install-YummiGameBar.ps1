@@ -2,19 +2,22 @@
   [switch]$Force,
   [switch]$SkipAutoUpdateSetup,
   [switch]$BackgroundUpdate,
+  [switch]$UpdateOnly,
   [string]$LogPath = (Join-Path $env:TEMP 'Yummi-GameBar-install.log')
 )
 $ErrorActionPreference = 'Stop'
 
 $script:TranscriptStarted = $false
-try {
-  $logDir = Split-Path -Parent $LogPath
-  if ($logDir) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
-  Start-Transcript -Path $LogPath -Force | Out-Null
-  $script:TranscriptStarted = $true
-}
-catch {
-  # Installation must still run even if transcript initialization itself fails.
+if (-not $UpdateOnly) {
+  try {
+    $logDir = Split-Path -Parent $LogPath
+    if ($logDir) { New-Item -ItemType Directory -Force -Path $logDir | Out-Null }
+    Start-Transcript -Path $LogPath -Force | Out-Null
+    $script:TranscriptStarted = $true
+  }
+  catch {
+    # Installation must still run even if transcript initialization itself fails.
+  }
 }
 
 trap {
@@ -27,12 +30,27 @@ trap {
 }
 
 function Test-WebView2Runtime {
+  # Microsoft recommends the Evergreen Runtime registry value for detection.
+  # This avoids enumerating version directories on every install/update.
+  $clientId = '{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}'
+  $registryPaths = @(
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\$clientId",
+    "HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\$clientId",
+    "HKCU:\Software\Microsoft\EdgeUpdate\Clients\$clientId"
+  )
+  foreach ($path in $registryPaths) {
+    try {
+      $pv = (Get-ItemProperty -LiteralPath $path -Name 'pv' -ErrorAction Stop).pv
+      if ($pv -and $pv -ne '0.0.0.0') { return $true }
+    } catch {}
+  }
+
+  # Compatibility fallback for unusual/offline installations.
   $roots = @(
     (Join-Path ([Environment]::GetFolderPath('ProgramFilesX86')) 'Microsoft\EdgeWebView\Application'),
     (Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Microsoft\EdgeWebView\Application'),
     (Join-Path $env:LOCALAPPDATA 'Microsoft\EdgeWebView\Application')
   ) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
-
   foreach ($root in $roots) {
     $runtime = Get-ChildItem $root -Directory -ErrorAction SilentlyContinue |
       Where-Object { Test-Path (Join-Path $_.FullName 'msedgewebview2.exe') } |
@@ -76,7 +94,8 @@ function Restart-InstallerElevated {
   $forceArg = if ($Force) { ' -Force' } else { '' }
   $skipArg = if ($SkipAutoUpdateSetup) { ' -SkipAutoUpdateSetup' } else { '' }
   $backgroundArg = if ($BackgroundUpdate) { ' -BackgroundUpdate' } else { '' }
-  $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ' + $quote + $InstallerPath + $quote + $forceArg + $skipArg + $backgroundArg + ' -LogPath ' + $quote + $LogPath + $quote
+  $updateOnlyArg = if ($UpdateOnly) { ' -UpdateOnly' } else { '' }
+  $arguments = '-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ' + $quote + $InstallerPath + $quote + $forceArg + $skipArg + $backgroundArg + $updateOnlyArg + ' -LogPath ' + $quote + $LogPath + $quote
   $process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -ArgumentList $arguments -Wait -PassThru
   if ($process.ExitCode -ne 0) {
     if (Test-Path $logPath) {
@@ -153,41 +172,56 @@ foreach ($dep in $deps) {
   }
 }
 
-foreach ($depPath in $missingDeps) {
-  Write-Host "의존성 설치: $([IO.Path]::GetFileName($depPath))"
-  Add-AppxPackage -Path $depPath -ForceApplicationShutdown:$Force
+if (-not $UpdateOnly) {
+  Install-WebView2RuntimeIfMissing
 }
 
-Install-WebView2RuntimeIfMissing
-
 Write-Host '유미지지 Xbox Game Bar 오버레이를 설치합니다.'
+# Install missing framework packages atomically with the main package instead of
+# issuing one AppX deployment operation per dependency.
 if ($BackgroundUpdate) {
   # Do not tear down an active Game Bar/widget during an automatic update.
   # Windows will finish registration after the package is no longer in use.
-  Add-AppxPackage -Path $package.FullName -ForceUpdateFromAnyVersion -DeferRegistrationWhenPackagesAreInUse
+  if ($missingDeps.Count -gt 0) {
+    Add-AppxPackage -Path $package.FullName -DependencyPath $missingDeps -ForceUpdateFromAnyVersion -DeferRegistrationWhenPackagesAreInUse
+  } else {
+    Add-AppxPackage -Path $package.FullName -ForceUpdateFromAnyVersion -DeferRegistrationWhenPackagesAreInUse
+  }
 } else {
-  Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceUpdateFromAnyVersion
+  if ($missingDeps.Count -gt 0) {
+    Add-AppxPackage -Path $package.FullName -DependencyPath $missingDeps -ForceApplicationShutdown:$Force -ForceUpdateFromAnyVersion
+  } else {
+    Add-AppxPackage -Path $package.FullName -ForceApplicationShutdown:$Force -ForceUpdateFromAnyVersion
+  }
 }
 
-# UWP/Game Bar widgets are AppContainer processes. Enable the documented
-# localhost exemption so the overlay can reach the full-trust Agent fallback
-# bridge when cross-package named pipes are unavailable on a Windows build.
-$installedOverlay = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($installedOverlay -and $installedOverlay.PackageFamilyName) {
-  $loopbackTool = "$env:SystemRoot\System32\CheckNetIsolation.exe"
-  $loopbackEntries = & $loopbackTool LoopbackExempt -s
-  if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption query failed: $LASTEXITCODE" }
-  $familyPattern = '(?i)(?<![A-Za-z0-9_])' + [regex]::Escape($installedOverlay.PackageFamilyName) + '(?![A-Za-z0-9_])'
-  $alreadyExempt = ($loopbackEntries -join "`n") -match $familyPattern
-  if ($alreadyExempt) {
-    Write-Host 'Game Bar loopback exemption already registered.' -ForegroundColor DarkGray
-  } else {
-    if (-not $isAdmin) {
-      Write-Host 'Game Bar loopback setup requires administrator permission.' -ForegroundColor Yellow
-      Restart-InstallerElevated -InstallerPath $PSCommandPath
+# UWP/Game Bar widgets are AppContainer processes. The exemption is keyed by
+# package family and survives version updates, so only initial/manual installs
+# need to query or create it.
+if (-not $UpdateOnly) {
+  $installedOverlay = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($installedOverlay -and $installedOverlay.PackageFamilyName) {
+    $loopbackTool = "$env:SystemRoot\System32\CheckNetIsolation.exe"
+    $loopbackEntries = & $loopbackTool LoopbackExempt -s
+    if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption query failed: $LASTEXITCODE" }
+    $familyPattern = '(?i)(?<![A-Za-z0-9_])' + [regex]::Escape($installedOverlay.PackageFamilyName) + '(?![A-Za-z0-9_])'
+    $alreadyExempt = ($loopbackEntries -join "`n") -match $familyPattern
+    if ($alreadyExempt) {
+      Write-Host 'Game Bar loopback exemption already registered.' -ForegroundColor DarkGray
+    } else {
+      $familyArg = '-n=' + $installedOverlay.PackageFamilyName
+      if ($isAdmin) {
+        & $loopbackTool LoopbackExempt -a $familyArg | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption registration failed: $LASTEXITCODE" }
+      } else {
+        Write-Host 'Game Bar loopback setup requires administrator permission.' -ForegroundColor Yellow
+        # Elevate only the one privileged operation. Do not restart the entire
+        # installer and repeat dependency/WebView/AppX deployment work.
+        $loopbackProc = Start-Process -FilePath $loopbackTool -Verb RunAs -WindowStyle Hidden `
+          -ArgumentList @('LoopbackExempt', '-a', $familyArg) -Wait -PassThru
+        if ($loopbackProc.ExitCode -ne 0) { throw "Game Bar loopback exemption registration failed: $($loopbackProc.ExitCode)" }
+      }
     }
-    & "$env:SystemRoot\System32\CheckNetIsolation.exe" LoopbackExempt -a ('-n=' + $installedOverlay.PackageFamilyName) | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Game Bar loopback exemption registration failed: $LASTEXITCODE" }
   }
 }
 

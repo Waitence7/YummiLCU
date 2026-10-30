@@ -43,9 +43,10 @@ try {
     $newUpdater = Join-Path $extractPath 'Update-YummiGameBar.ps1'
     if (Test-Path $newUpdater) { Copy-Item $newUpdater (Join-Path $stateDir 'Update-YummiGameBar.ps1.new') -Force }
 
-    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $installer + '"'), '-BackgroundUpdate', '-SkipAutoUpdateSetup'
-    ) -Wait -PassThru -WindowStyle Hidden
+    $existingOverlayBeforeInstall = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1
+    $installArgs = @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $installer + '"'), '-BackgroundUpdate', '-SkipAutoUpdateSetup')
+    if ($existingOverlayBeforeInstall) { $installArgs += '-UpdateOnly' }
+    $proc = Start-Process -FilePath 'powershell.exe' -ArgumentList $installArgs -Wait -PassThru -WindowStyle Hidden
     if ($proc.ExitCode -ne 0) { throw "오버레이 설치가 종료 코드 $($proc.ExitCode)로 실패했습니다." }
 
     $releaseVersion = $ReleaseTag -replace '^gamebar-v', ''
@@ -69,9 +70,9 @@ try {
       if ($ForceFinalize -or -not $widgetRunning) {
         $finalizeReason = if ($ForceFinalize) { '보류 시간 초과' } else { '위젯 종료 확인' }
         Write-UpdateLog "오버레이 $finalizeReason, 보류 등록 강제 마무리 시도: expected=$expectedAppxVersion active=$actualAppxVersion"
-        $finalizeProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @(
-          '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $installer + '"'), '-Force', '-SkipAutoUpdateSetup'
-        ) -Wait -PassThru -WindowStyle Hidden
+        $finalizeArgs = @('-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $installer + '"'), '-Force', '-SkipAutoUpdateSetup')
+        if ($existingOverlayBeforeInstall) { $finalizeArgs += '-UpdateOnly' }
+        $finalizeProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $finalizeArgs -Wait -PassThru -WindowStyle Hidden
         if ($finalizeProc.ExitCode -ne 0) { throw "오버레이 보류 등록 마무리가 종료 코드 $($finalizeProc.ExitCode)로 실패했습니다." }
 
         $installedOverlay = Get-AppxPackage -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue | Select-Object -First 1

@@ -43,12 +43,16 @@ try {
   $source = Get-Content (Join-Path $InstallerRoot 'Install-YummiGameBar.ps1') -Raw
   if ($source -notmatch [regex]::Escape('https://go.microsoft.com/fwlink/p/?LinkId=2124703')) { throw 'Official WebView2 Evergreen bootstrapper link missing' }
   if ($source -notmatch [regex]::Escape("'/silent /install'")) { throw 'WebView2 silent install arguments missing' }
+  if ($source -notmatch [regex]::Escape('{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}')) { throw 'WebView2 registry fast-path missing' }
+  if ($source -notmatch [regex]::Escape('-DependencyPath $missingDeps')) { throw 'Missing AppX dependencies must install atomically with the main package' }
+  if ($source -notmatch [regex]::Escape('[switch]$UpdateOnly')) { throw 'Installer update-only fast path missing' }
   if ($source -notmatch [regex]::Escape("Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden")) { throw 'Elevated PowerShell must stay hidden after UAC approval' }
   if ($source -notmatch [regex]::Escape("'-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File '")) { throw 'Elevated PowerShell arguments must request hidden window style' }
   Write-Host 'PASS: installer ensures WebView2 Evergreen Runtime without bundling Chromium'
   if ($source -notmatch [regex]::Escape('-DeferRegistrationWhenPackagesAreInUse')) { throw 'Background update must defer registration while widget is in use' }
   $updaterText = Get-Content (Join-Path $InstallerRoot 'Update-YummiGameBar.ps1') -Raw -Encoding UTF8
   if ($updaterText -notmatch [regex]::Escape("'-BackgroundUpdate', '-SkipAutoUpdateSetup'")) { throw 'Updater must use background-update mode' }
+  if ($updaterText -notmatch [regex]::Escape("$installArgs += '-UpdateOnly'")) { throw 'Existing installs must use the optimized update-only path' }
   if ($updaterText -notmatch [regex]::Escape("Get-Process -Name 'YummiGameBarWidget'")) { throw 'Updater must verify the widget is closed before finalizing deferred registration' }
   if ($updaterText -notmatch [regex]::Escape("'-Force', '-SkipAutoUpdateSetup'")) { throw 'Updater must force-finalize a stale deferred registration after the widget closes' }
   if ($updaterText -notmatch [regex]::Escape('[switch]$ForceFinalize')) { throw 'Updater must accept forced stale-registration finalization from the Agent' }
@@ -78,10 +82,19 @@ try {
     $global:LASTEXITCODE = 0
     if ($args -contains '-s') { return $script:LoopbackListing }
   }
-  function Restart-InstallerElevated {
-    param([string]$InstallerPath)
+  function Start-Process {
+    param(
+      [string]$FilePath,
+      [string]$Verb,
+      [string]$WindowStyle,
+      [object[]]$ArgumentList,
+      [switch]$Wait,
+      [switch]$PassThru
+    )
     $script:ElevationRequested = $true
-    throw 'TEST_ELEVATION_REQUEST'
+    $script:ElevatedFile = $FilePath
+    $script:ElevatedArgs = @($ArgumentList)
+    return [pscustomobject]@{ ExitCode = 0 }
   }
   $isAdmin = $false
   $script:LoopbackListing = @('Name: yummigamebarwidget_test')
@@ -93,11 +106,13 @@ try {
 
   $script:LoopbackListing = @('Name: YummiGameBarWidget_test_other')
   $script:LoopbackCalls = @()
-  try { & ([scriptblock]::Create($body)); throw 'Expected elevation request' } catch {
-    if ($_.Exception.Message -ne 'TEST_ELEVATION_REQUEST') { throw }
-  }
-  if (-not $script:ElevationRequested -or ($script:LoopbackCalls -join ',') -ne 'LoopbackExempt|-s') { throw 'Missing exemption must elevate before writes' }
-  Write-Host 'PASS: missing exemption requests elevation before registration'
+  $script:ElevationRequested = $false
+  $script:ElevatedFile = $null
+  $script:ElevatedArgs = @()
+  & ([scriptblock]::Create($body))
+  if (-not $script:ElevationRequested -or ($script:LoopbackCalls -join ',') -ne 'LoopbackExempt|-s') { throw 'Missing exemption must elevate only the loopback write' }
+  if ($script:ElevatedFile -notmatch 'CheckNetIsolation\.exe$' -or ($script:ElevatedArgs -join '|') -ne 'LoopbackExempt|-a|-n=YummiGameBarWidget_test') { throw 'Loopback elevation must target CheckNetIsolation directly' }
+  Write-Host 'PASS: missing exemption elevates only CheckNetIsolation without reinstalling AppX'
 
   $isAdmin = $true
   $script:LoopbackCalls = @()
