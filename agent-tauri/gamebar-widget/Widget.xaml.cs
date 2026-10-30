@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Gaming.XboxGameBar;
+using Microsoft.Gaming.XboxGameBar.Input;
 using Windows.Data.Json;
 using Windows.ApplicationModel;
 using Windows.Storage;
@@ -143,6 +144,8 @@ namespace YummiGameBarWidget
         private long lastSnapshotWebSocketMessageAtMs;
         private long lastSnapshotWebSocketFailureLogAtMs;
         private bool hudLoaded;
+        private XboxGameBarHotkeyWatcher runtimePanelsHotkeyWatcher;
+        private const double HiddenRuntimePanelOpacity = 0.12;
 
         public Widget()
         {
@@ -342,6 +345,7 @@ namespace YummiGameBarWidget
                 widget.PinnedChanged += WidgetStateChanged;
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
+                StartRuntimePanelsHotkey();
                 StartNativeInputLoop();
                 _ = SyncExternalClickTestAsync(true);
                 UpdatePinTutorial();
@@ -359,6 +363,7 @@ namespace YummiGameBarWidget
             App.LogStage("hud-navigated-from");
             if (widget != null)
             {
+                StopRuntimePanelsHotkey();
                 widget.SettingsClicked -= WidgetSettingsClicked;
                 widget.WindowBoundsChanged -= WidgetStateChanged;
                 widget.PinnedChanged -= WidgetStateChanged;
@@ -367,6 +372,69 @@ namespace YummiGameBarWidget
             }
             notificationManager = null;
             base.OnNavigatedFrom(e);
+        }
+
+        private void StartRuntimePanelsHotkey()
+        {
+            if (widget == null || runtimePanelsHotkeyWatcher != null) return;
+            try
+            {
+                runtimePanelsHotkeyWatcher = XboxGameBarHotkeyWatcher.CreateWatcher(
+                    widget, new List<VirtualKey> { VirtualKey.F9 });
+                runtimePanelsHotkeyWatcher.HotkeySetStateChanged += RuntimePanelsHotkeyChanged;
+                runtimePanelsHotkeyWatcher.Start();
+                App.LogResize("runtime-panels-hotkey-started key=F9");
+            }
+            catch (Exception ex)
+            {
+                App.LogResize("runtime-panels-hotkey-error stage=start error=" + ErrorCode(ex));
+            }
+        }
+
+        private void StopRuntimePanelsHotkey()
+        {
+            try
+            {
+                if (runtimePanelsHotkeyWatcher != null)
+                {
+                    runtimePanelsHotkeyWatcher.HotkeySetStateChanged -= RuntimePanelsHotkeyChanged;
+                    runtimePanelsHotkeyWatcher.Stop();
+                }
+            }
+            catch { }
+            runtimePanelsHotkeyWatcher = null;
+        }
+
+        private async void RuntimePanelsHotkeyChanged(XboxGameBarHotkeyWatcher sender, HotkeySetStateChangedArgs args)
+        {
+            if (!args.HotkeySetDown) return;
+            try
+            {
+                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () => ToggleRuntimePanelsVisibility());
+            }
+            catch (Exception ex)
+            {
+                App.LogResize("runtime-panels-hotkey-error stage=dispatch error=" + ErrorCode(ex));
+            }
+        }
+
+        private void ToggleRuntimePanelsVisibility()
+        {
+            // F9 is intentionally an actual-overlay toggle. Win+G edit mode still
+            // shows every non-Discord panel so the user can position/configure it.
+            var anyVisible = HudPreferences.LcuPanelVisible ||
+                             HudPreferences.PartyPanelVisible ||
+                             YoutubePreferences.Visible ||
+                             HudPreferences.NativeInputPanelVisible;
+            var show = !anyVisible;
+            HudPreferences.LcuPanelVisible = show;
+            HudPreferences.PartyPanelVisible = show;
+            YoutubePreferences.Visible = show;
+            HudPreferences.NativeInputPanelVisible = show;
+            UpdatePanelChrome();
+            App.LogResize("runtime-panels-toggle key=F9 visible=" + show +
+                " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
+                " pinned=" + (widget != null && widget.Pinned));
         }
 
         private async void WidgetSettingsClicked(XboxGameBarWidget sender, object args)
@@ -1688,15 +1756,22 @@ namespace YummiGameBarWidget
 
         private void ApplyClickTestPanelChrome(bool pinnedOnly)
         {
-            var visible = HudPreferences.NativeInputPanelVisible;
+            var runtimeVisible = HudPreferences.NativeInputPanelVisible;
             var expanded = HudPreferences.NativeInputPanelExpanded;
-            ClickNativePanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-            ClickNativeMoveBar.Visibility = visible && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
-            ClickNativeBody.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            var ghosted = pinnedOnly && (!runtimeVisible || !expanded);
+
+            // Edit mode always exposes the panel. In the real pinned overlay a
+            // hidden panel remains as a faint footprint instead of disappearing.
+            ClickNativePanel.Visibility = Visibility.Visible;
+            ClickNativePanel.Opacity = ghosted ? HiddenRuntimePanelOpacity : 1.0;
+            ClickNativePanel.IsHitTestVisible = !pinnedOnly || !ghosted;
+            ClickNativeMoveBar.Visibility = !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
+            ClickNativeBody.Visibility = Visibility.Visible;
             ClickNativeDetails.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
             ClickNativeEyeButton.Opacity = expanded ? 1.0 : 0.5;
-            ToolTipService.SetToolTip(ClickNativeEyeButton, expanded ? "상세 내용 가리기" : "상세 내용 표시");
-            ClickNativeResizeHandles.Visibility = visible && expanded && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
+            ToolTipService.SetToolTip(ClickNativeEyeButton, runtimeVisible ?
+                (expanded ? "상세 내용 가리기" : "상세 내용 표시") : "실제 화면에서 숨김 (F9로 전체 토글)");
+            ClickNativeResizeHandles.Visibility = expanded && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
 
             if (expanded)
             {
@@ -1740,14 +1815,22 @@ namespace YummiGameBarWidget
         private void ApplyPanelChrome(string key, FrameworkElement panel, FrameworkElement moveBar, FrameworkElement body, Control eyeButton,
             FrameworkElement resizeHandles, bool pinnedOnly)
         {
-            bool visible = GetPanelVisible(key);
+            bool runtimeVisible = GetPanelVisible(key);
             bool expanded = GetPanelExpanded(key);
-            panel.Visibility = visible && (!pinnedOnly || expanded) ? Visibility.Visible : Visibility.Collapsed;
-            moveBar.Visibility = visible && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
-            body.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-            eyeButton.Opacity = expanded ? 1.0 : 0.5;
-            ToolTipService.SetToolTip(eyeButton, expanded ? "내용 가리기" : "내용 표시");
-            resizeHandles.Visibility = visible && expanded && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
+            bool ghosted = pinnedOnly && (!runtimeVisible || !expanded);
+
+            // Win+G is edit mode: panels are always available for layout even when
+            // they are hidden in the actual overlay. PinnedOnly is the real view.
+            // Hidden real-view panels keep a faint footprint rather than collapsing.
+            panel.Visibility = Visibility.Visible;
+            panel.Opacity = ghosted ? HiddenRuntimePanelOpacity : 1.0;
+            panel.IsHitTestVisible = !pinnedOnly || !ghosted;
+            moveBar.Visibility = !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
+            body.Visibility = pinnedOnly ? Visibility.Visible : (expanded ? Visibility.Visible : Visibility.Collapsed);
+            eyeButton.Opacity = runtimeVisible && expanded ? 1.0 : 0.5;
+            ToolTipService.SetToolTip(eyeButton, runtimeVisible ?
+                (expanded ? "내용 가리기" : "내용 표시") : "실제 화면에서 숨김 (F9로 전체 토글)");
+            resizeHandles.Visibility = expanded && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void RestorePanelPosition(FrameworkElement panel, TranslateTransform transform, string xKey, string yKey)

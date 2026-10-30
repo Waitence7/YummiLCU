@@ -17,12 +17,12 @@ namespace YummiGameBarWidget
         }
         internal static bool LcuPanelVisible
         {
-            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("LcuPanelVisible", out value) || !(value is bool) || (bool)value; }
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("LcuPanelVisible", out value) && value is bool && (bool)value; }
             set { Set("LcuPanelVisible", value); }
         }
         internal static bool PartyPanelVisible
         {
-            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("PartyPanelVisible", out value) || !(value is bool) || (bool)value; }
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("PartyPanelVisible", out value) && value is bool && (bool)value; }
             set { Set("PartyPanelVisible", value); }
         }
         internal static bool LcuPanelExpanded
@@ -42,7 +42,7 @@ namespace YummiGameBarWidget
         }
         internal static bool NativeInputPanelVisible
         {
-            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeInputPanelVisible", out value) || !(value is bool) || (bool)value; }
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeInputPanelVisible", out value) && value is bool && (bool)value; }
             set { Set("NativeInputPanelVisible", value); }
         }
         internal static bool NativeInputPanelExpanded
@@ -52,7 +52,7 @@ namespace YummiGameBarWidget
         }
         internal static bool NativeCursorMarkersVisible
         {
-            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeCursorMarkersVisible", out value) || !(value is bool) || (bool)value; }
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeCursorMarkersVisible", out value) && value is bool && (bool)value; }
             set { Set("NativeCursorMarkersVisible", value); }
         }
         internal static double VoiceChatMessageLifetimeSeconds
