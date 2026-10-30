@@ -60,14 +60,6 @@ try {
   $manifestText = Get-Content (Join-Path $InstallerRoot 'Package.appxmanifest') -Raw -Encoding UTF8
   if ($manifestText -notmatch '<ActivateAfterInstall>false</ActivateAfterInstall>') { throw 'Game Bar widget must not auto-activate after package registration' }
   Write-Host 'PASS: automatic updates defer in-use registration and never auto-activate the widget'
-  $line = ($source -split "`n" | Where-Object { $_ -match 'CheckNetIsolation.exe.*LoopbackExempt' } | Select-Object -First 1).Trim()
-  if (-not $line) { throw 'Loopback invocation not found' }
-  $line = $line.Replace('"$env:SystemRoot\System32\CheckNetIsolation.exe"', '$probeExe').Replace(' | Out-Null', '')
-  $installedOverlay = [pscustomobject]@{ PackageFamilyName = 'YummiGameBarWidget_test' }
-  $argsSeen = @(& ([scriptblock]::Create($line)))
-  if (($argsSeen -join '|') -cne 'LoopbackExempt|-a|-n=YummiGameBarWidget_test') { throw "Invalid native argv: $argsSeen" }
-  Write-Host 'PASS: loopback package family is one complete native argument'
-
   # Exercise the production permission branch without changing OS settings.
   $tokens = $null
   $errors = $null
@@ -77,6 +69,7 @@ try {
   if (-not $branch) { throw 'Loopback permission branch not found' }
   $body = $branch.Clauses[0].Item2.Extent.Text
   $body = $body.Substring(1, $body.Length - 2).Replace('& $loopbackTool', 'Invoke-LoopbackTool').Replace('& "$env:SystemRoot\System32\CheckNetIsolation.exe"', 'Invoke-LoopbackTool')
+  $installedOverlay = [pscustomobject]@{ PackageFamilyName = 'YummiGameBarWidget_test' }
   function Invoke-LoopbackTool {
     $script:LoopbackCalls += ($args -join '|')
     $global:LASTEXITCODE = 0
