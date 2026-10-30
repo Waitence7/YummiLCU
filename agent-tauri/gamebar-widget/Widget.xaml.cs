@@ -145,6 +145,7 @@ namespace YummiGameBarWidget
         private long lastSnapshotWebSocketFailureLogAtMs;
         private bool hudLoaded;
         private XboxGameBarHotkeyWatcher runtimePanelsHotkeyWatcher;
+        private bool overlayUpdateRequestedForForeground;
         private const double HiddenRuntimePanelOpacity = 0.12;
 
         public Widget()
@@ -346,6 +347,7 @@ namespace YummiGameBarWidget
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
                 StartRuntimePanelsHotkey();
+                RequestImmediateOverlayUpdateIfForeground("navigated");
                 StartNativeInputLoop();
                 _ = SyncExternalClickTestAsync(true);
                 UpdatePinTutorial();
@@ -437,6 +439,43 @@ namespace YummiGameBarWidget
                 " pinned=" + (widget != null && widget.Pinned));
         }
 
+        private void RequestImmediateOverlayUpdateIfForeground(string reason)
+        {
+            if (widget == null) return;
+            if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+            {
+                overlayUpdateRequestedForForeground = false;
+                return;
+            }
+            if (overlayUpdateRequestedForForeground) return;
+            overlayUpdateRequestedForForeground = true;
+            _ = RequestImmediateOverlayUpdateAsync(reason);
+        }
+
+        private async Task RequestImmediateOverlayUpdateAsync(string reason)
+        {
+            try
+            {
+                var payload = new JsonObject
+                {
+                    ["command"] = JsonValue.CreateStringValue("check_overlay_update"),
+                    ["forceFinalize"] = JsonValue.CreateBooleanValue(true),
+                    ["reason"] = JsonValue.CreateStringValue(reason ?? "foreground")
+                }.Stringify();
+                var response = await SendAgentCommandAsync(payload);
+                App.LogResize("overlay-update-foreground-request reason=" + reason +
+                    " response=" + (response ?? ""));
+            }
+            catch (Exception ex)
+            {
+                // Allow a later display-mode callback in the same session to retry
+                // if the Agent was still starting when Win+G opened.
+                overlayUpdateRequestedForForeground = false;
+                App.LogResize("overlay-update-foreground-error reason=" + reason +
+                    " error=" + ErrorCode(ex));
+            }
+        }
+
         private async void WidgetSettingsClicked(XboxGameBarWidget sender, object args)
         {
             try
@@ -464,6 +503,7 @@ namespace YummiGameBarWidget
         {
             await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
+                RequestImmediateOverlayUpdateIfForeground("display-mode-changed");
                 // 856 DIP is a known-good pinned height. 900 DIP is the desired
                 // fullscreen target but may or may not be accepted by this Game Bar
                 // host. Retry after PinnedOnly settles, then binary-search only the

@@ -228,7 +228,7 @@ async fn watch_overlay_updates(state: Arc<AppState>) {
         // Missing updater simply means the overlay has never been installed.
         // Other failures are persisted by check_overlay_update() so update problems
         // are diagnosable instead of silently disappearing.
-        if let Err(error) = check_overlay_update().await {
+        if let Err(error) = check_overlay_update(false).await {
             append_gamebar_update_log(&format!("오버레이 업데이트 확인 실패: {error}"));
         }
 
@@ -1511,12 +1511,21 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
     }
 
     if command == "check_overlay_update" {
+        let force_finalize = parsed
+            .get("forceFinalize")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = check_overlay_update().await {
-                append_gamebar_update_log(&format!("수동 오버레이 업데이트 확인 실패: {error}"));
+            if let Err(error) = check_overlay_update(force_finalize).await {
+                let mode = if force_finalize { "Win+G 즉시 적용" } else { "수동" };
+                append_gamebar_update_log(&format!("{mode} 오버레이 업데이트 확인 실패: {error}"));
             }
         });
-        return json_response(true, "오버레이 업데이트 확인을 시작했습니다.");
+        return json_response(true, if force_finalize {
+            "Win+G 오버레이 업데이트 즉시 적용을 시작했습니다."
+        } else {
+            "오버레이 업데이트 확인을 시작했습니다."
+        });
     }
     if command == "open_url" {
         let Some(url) = parsed.get("url").and_then(Value::as_str) else {
@@ -1651,7 +1660,7 @@ fn append_gamebar_update_log(message: &str) {
 }
 
 #[cfg(windows)]
-async fn check_overlay_update() -> Result<(), String> {
+async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), String> {
     let _guard = overlay_install_lock().lock().await;
     use std::os::windows::process::CommandExt;
     use std::{env, fs, path::PathBuf, process::Command};
@@ -1666,7 +1675,11 @@ async fn check_overlay_update() -> Result<(), String> {
     if !updater.is_file() {
         return Ok(());
     }
-    append_gamebar_update_log("오버레이 업데이트 확인 시작");
+    append_gamebar_update_log(if force_finalize_requested {
+        "오버레이 업데이트 확인 시작 (Win+G 즉시 적용)"
+    } else {
+        "오버레이 업데이트 확인 시작"
+    });
 
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::limited(3))
@@ -1809,7 +1822,7 @@ async fn check_overlay_update() -> Result<(), String> {
                             .ok()
                             .and_then(|modified| SystemTime::now().duration_since(modified).ok())
                             .unwrap_or_default();
-                        let force_finalize = pending_age >= OVERLAY_PENDING_FORCE_AFTER;
+                        let force_finalize = force_finalize_requested || pending_age >= OVERLAY_PENDING_FORCE_AFTER;
                         if widget_running && !force_finalize {
                             append_gamebar_update_log(&format!(
                                 "오버레이 업데이트 등록 대기 중: expected={} active={} widget=running pending={}s",
@@ -1909,7 +1922,8 @@ async fn check_overlay_update() -> Result<(), String> {
         "오버레이 업데이트 설치 시작: {} / build {}",
         target.release_tag, target.build_id
     ));
-    Command::new("powershell.exe")
+    let mut install_command = Command::new("powershell.exe");
+    install_command
         .args([
             "-NoProfile",
             "-WindowStyle",
@@ -1927,7 +1941,11 @@ async fn check_overlay_update() -> Result<(), String> {
         .arg(&target.build_id)
         .arg("-ReleaseTag")
         .arg(&target.release_tag)
-        .arg("-Quiet")
+        .arg("-Quiet");
+    if force_finalize_requested {
+        install_command.arg("-ForceFinalize");
+    }
+    install_command
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| format!("Game Bar 설치 실행 실패: {e}"))?;
