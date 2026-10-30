@@ -74,6 +74,19 @@
           <TextBlock x:Name="UpdateStatusText" Foreground="#B9AAD2" TextWrapping="Wrap"/>
         </StackPanel>
       </Border>
+      <Border Background="#3A241F35" BorderBrush="#805A4C78" BorderThickness="1" CornerRadius="10" Padding="12">
+        <StackPanel Spacing="8">
+          <TextBlock Text="개발 도구" Foreground="White" FontWeight="SemiBold"/>
+          <TextBlock Text="오버레이가 ApplicationData.LocalSettings에 저장한 사용자 값을 초기화합니다. Game Bar 호스트가 별도로 기억하는 위젯 창 위치/크기는 Windows 쪽 상태이므로 이 버튼으로 직접 삭제되지는 않습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <Button x:Name="ResetSavedStateButton" Content="사용자 저장값 초기화" Click="ResetSavedStateButton_Click" Padding="14,7"/>
+            <Button x:Name="RefreshResizeLogButton" Content="사이즈 로그 새로고침" Click="RefreshResizeLogButton_Click" Padding="14,7"/>
+          </StackPanel>
+          <TextBlock x:Name="DeveloperStatusText" Foreground="#D4C1EC" TextWrapping="Wrap"/>
+          <TextBlock Text="사이즈 조절 로그" Foreground="White" FontWeight="SemiBold" Margin="0,4,0,0"/>
+          <TextBox x:Name="ResizeLogTextBox" IsReadOnly="True" AcceptsReturn="True" TextWrapping="NoWrap" FontFamily="Consolas" FontSize="11" Height="220" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollBarVisibility="Auto"/>
+        </StackPanel>
+      </Border>
     </StackPanel>
   </ScrollViewer>
 </Page>

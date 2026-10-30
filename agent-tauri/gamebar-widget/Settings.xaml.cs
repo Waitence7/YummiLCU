@@ -26,23 +26,50 @@ namespace YummiGameBarWidget
             InitializeComponent();
             Loaded += (_, __) =>
             {
-                HudVisibleToggle.IsOn = HudPreferences.Visible;
-                CoverageTintToggle.IsOn = HudPreferences.CoverageTint;
-                HudOpacitySlider.Value = HudPreferences.Opacity * 100;
-                LcuVisibleToggle.IsOn = HudPreferences.LcuPanelVisible;
-                PartyVisibleToggle.IsOn = HudPreferences.PartyPanelVisible;
-                NativeInputVisibleToggle.IsOn = HudPreferences.NativeInputPanelVisible;
-                VoiceChatLifetimeSlider.Value = HudPreferences.VoiceChatMessageLifetimeSeconds;
-                VoiceChatLifetimeValueText.Text = HudPreferences.VoiceChatMessageLifetimeSeconds.ToString("0") + "초";
-                VoiceChatBackgroundColorPicker.Color = ParseHexColor(HudPreferences.VoiceChatBackgroundColor);
-                VoiceChatBackgroundOpacitySlider.Value = HudPreferences.VoiceChatBackgroundOpacity * 100;
-                VoiceChatBackgroundOpacityValueText.Text = Math.Round(HudPreferences.VoiceChatBackgroundOpacity * 100).ToString("0") + "%";
-                YoutubeVisibleToggle.IsOn = YoutubePreferences.Visible;
-                YoutubeUrlBox.Text = YoutubePreferences.Video;
-                YoutubeVolumeSlider.Value = YoutubePreferences.Volume;
-                preferencesLoaded = true;
+                LoadPreferencesIntoControls();
+                RefreshResizeLog();
             };
         }
+        private void LoadPreferencesIntoControls()
+        {
+            preferencesLoaded = false;
+            HudVisibleToggle.IsOn = HudPreferences.Visible;
+            CoverageTintToggle.IsOn = HudPreferences.CoverageTint;
+            HudOpacitySlider.Value = HudPreferences.Opacity * 100;
+            LcuVisibleToggle.IsOn = HudPreferences.LcuPanelVisible;
+            PartyVisibleToggle.IsOn = HudPreferences.PartyPanelVisible;
+            NativeInputVisibleToggle.IsOn = HudPreferences.NativeInputPanelVisible;
+            VoiceChatLifetimeSlider.Value = HudPreferences.VoiceChatMessageLifetimeSeconds;
+            VoiceChatLifetimeValueText.Text = HudPreferences.VoiceChatMessageLifetimeSeconds.ToString("0") + "초";
+            VoiceChatBackgroundColorPicker.Color = ParseHexColor(HudPreferences.VoiceChatBackgroundColor);
+            VoiceChatBackgroundOpacitySlider.Value = HudPreferences.VoiceChatBackgroundOpacity * 100;
+            VoiceChatBackgroundOpacityValueText.Text = Math.Round(HudPreferences.VoiceChatBackgroundOpacity * 100).ToString("0") + "%";
+            YoutubeVisibleToggle.IsOn = YoutubePreferences.Visible;
+            YoutubeUrlBox.Text = YoutubePreferences.Video;
+            YoutubeVolumeSlider.Value = YoutubePreferences.Volume;
+            preferencesLoaded = true;
+        }
+
+        private void ResetSavedStateButton_Click(object sender, RoutedEventArgs args)
+        {
+            var removed = HudPreferences.ResetAllSavedStateForDevelopment();
+            LoadPreferencesIntoControls();
+            HudPreferences.RequestFit();
+            DeveloperStatusText.Text = "앱 LocalSettings " + removed + "개를 초기화했습니다. Game Bar 호스트가 별도로 저장하는 창 위치/크기는 삭제되지 않으며, HUD에 화면 맞춤을 다시 요청했습니다.";
+            App.LogResize("dev-reset-local-settings removed=" + removed + " fitRequest=true hostGeometry=gamebar-managed");
+            RefreshResizeLog();
+        }
+
+        private void RefreshResizeLogButton_Click(object sender, RoutedEventArgs args)
+        {
+            RefreshResizeLog();
+        }
+
+        private void RefreshResizeLog()
+        {
+            ResizeLogTextBox.Text = App.ReadResizeLogTail();
+        }
+
         private void HudVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
             if (preferencesLoaded) HudPreferences.Visible = HudVisibleToggle.IsOn;

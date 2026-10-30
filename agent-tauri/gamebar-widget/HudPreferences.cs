@@ -136,6 +136,14 @@ namespace YummiGameBarWidget
             Set("HudFitRequest", DateTimeOffset.UtcNow.Ticks);
         }
 
+        internal static int ResetAllSavedStateForDevelopment()
+        {
+            var values = ApplicationData.Current.LocalSettings.Values;
+            var count = values.Count;
+            values.Clear();
+            return count;
+        }
+
         private static void Set(string key, object value)
         {
             ApplicationData.Current.LocalSettings.Values[key] = value;

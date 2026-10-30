@@ -82,10 +82,37 @@ namespace YummiGameBarWidget
             try
             {
                 var path = Path.Combine(ApplicationData.Current.LocalFolder.Path, "widget-startup.log");
-                if (File.Exists(path) && new FileInfo(path).Length > 16384) File.WriteAllText(path, "");
+                if (File.Exists(path) && new FileInfo(path).Length > 131072) File.WriteAllText(path, "");
                 File.AppendAllText(path, $"[{DateTimeOffset.Now:O}] {stage}{Environment.NewLine}");
             }
             catch { }
+        }
+
+        internal static void LogResize(string stage)
+        {
+            try
+            {
+                var path = Path.Combine(ApplicationData.Current.LocalFolder.Path, "widget-resize.log");
+                if (File.Exists(path) && new FileInfo(path).Length > 262144) File.WriteAllText(path, "");
+                File.AppendAllText(path, $"[{DateTimeOffset.Now:O}] {stage}{Environment.NewLine}");
+            }
+            catch { }
+        }
+
+        internal static string ReadResizeLogTail(int maxChars = 24000)
+        {
+            try
+            {
+                var path = Path.Combine(ApplicationData.Current.LocalFolder.Path, "widget-resize.log");
+                if (!File.Exists(path)) return "아직 사이즈 로그가 없습니다.";
+                var text = File.ReadAllText(path);
+                if (text.Length <= maxChars) return text;
+                return "…(앞부분 생략)…" + Environment.NewLine + text.Substring(text.Length - maxChars);
+            }
+            catch (Exception ex)
+            {
+                return "사이즈 로그를 읽지 못했습니다: " + ex.GetType().Name;
+            }
         }
 
         private static void LogFailure(string stage, Exception error)

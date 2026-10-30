@@ -132,6 +132,10 @@ namespace YummiGameBarWidget
         private int tutorialRefreshGeneration;
         private int pinnedGrowGeneration;
         private bool pinnedGrowInFlight;
+        private long resizeRequestSequence;
+        private long lastResizeRequestId;
+        private long lastResizeRequestAtMs;
+        private string lastResizeRequestReason = "none";
         private CancellationTokenSource snapshotWebSocketLoopCts;
         private MessageWebSocket snapshotWebSocket;
         private volatile bool snapshotWebSocketConnected;
@@ -150,8 +154,18 @@ namespace YummiGameBarWidget
             SetVersionText();
             RestorePanelPositions();
             RestorePanelSizes();
-            SizeChanged += (_, __) =>
+            SizeChanged += (_, e) =>
             {
+                var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                var correlated = lastResizeRequestId > 0 && now - lastResizeRequestAtMs <= 2000;
+                var host = widget != null ? widget.WindowBounds : new Windows.Foundation.Rect();
+                App.LogResize("size-changed previous=" + FormatSize(e.PreviousSize) +
+                    " new=" + FormatSize(e.NewSize) +
+                    " host=" + FormatRect(host) +
+                    " requestId=" + (correlated ? lastResizeRequestId.ToString() : "manual-or-host") +
+                    " reason=" + (correlated ? lastResizeRequestReason : "manual-or-host") +
+                    " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
+                    " pinned=" + (widget != null && widget.Pinned));
                 EnsureDefaultVoiceChatPosition();
                 ClampAllPanelPositions();
                 UpdatePinTutorial();
@@ -398,6 +412,11 @@ namespace YummiGameBarWidget
         private void QueuePinnedGrowToFullscreen()
         {
             var generation = Interlocked.Increment(ref pinnedGrowGeneration);
+            var current = widget != null ? widget.WindowBounds : new Windows.Foundation.Rect();
+            App.LogResize("pinned-grow-queued generation=" + generation +
+                " current=" + FormatRect(current) +
+                " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
+                " pinned=" + (widget != null && widget.Pinned));
             _ = GrowPinnedToFullscreenAsync(generation);
         }
 
@@ -431,7 +450,7 @@ namespace YummiGameBarWidget
                     var baseHeight = Math.Min(targetHeight, Math.Max(current.Height, 1.0));
                     if (baseHeight < knownGoodHeight)
                     {
-                        var safeAccepted = await ResizeHudAsync(baseWidth, knownGoodHeight);
+                        var safeAccepted = await ResizeHudAsync(baseWidth, knownGoodHeight, "pinned-grow-safe");
                         App.LogStage("pinned-grow-safe delayMs=" + delayMs +
                             " accepted=" + safeAccepted + " from=" + current.Width.ToString("0.#") + "x" + current.Height.ToString("0.#") +
                             " safe=" + baseWidth.ToString("0.#") + "x" + knownGoodHeight.ToString("0.#"));
@@ -440,8 +459,16 @@ namespace YummiGameBarWidget
                         current = widget.WindowBounds;
                     }
 
+                    App.LogResize("pinned-grow-attempt delayMs=" + delayMs +
+                        " current=" + FormatRect(current) +
+                        " target=" + FormatSize(targetWidth, targetHeight) +
+                        " knownGoodHeight=" + knownGoodHeight.ToString("0.#") +
+                        " display=" + FormatSize(displayWidth, displayHeight) +
+                        " min=" + FormatSize(widget.MinWindowSize) +
+                        " max=" + FormatSize(maximum));
                     var result = await HudGeometry.FitLargestUpwardAsync(
-                        targetWidth, targetHeight, current.Width, Math.Max(baseHeight, current.Height), ResizeHudAsync);
+                        targetWidth, targetHeight, current.Width, Math.Max(baseHeight, current.Height),
+                        (w, h) => ResizeHudAsync(w, h, "pinned-grow-probe"));
                     resizeAccepted = result.Accepted;
                     fittedWidth = result.Width;
                     fittedHeight = result.Height;
@@ -485,7 +512,7 @@ namespace YummiGameBarWidget
                 fitTargetHeight = height;
                 if (HudPreferences.CompactLayout)
                 {
-                    resizeAccepted = await ResizeHudAsync(width, height);
+                    resizeAccepted = await ResizeHudAsync(width, height, "fit-compact");
                     if (resizeAccepted)
                     {
                         fittedWidth = width;
@@ -498,8 +525,15 @@ namespace YummiGameBarWidget
                     // bound, so a transient chrome restriction can never push the HUD
                     // back down (for example from a manual 1435x860 to 1435x820).
                     var current = widget.WindowBounds;
+                    App.LogResize("fit-upward-start current=" + FormatRect(current) +
+                        " target=" + FormatSize(width, height) +
+                        " display=" + FormatSize(displayWidth, displayHeight) +
+                        " min=" + FormatSize(minimum) +
+                        " max=" + FormatSize(maximum) +
+                        " center=" + centerForPinSetup);
                     var result = await HudGeometry.FitLargestUpwardAsync(
-                        width, height, current.Width, current.Height, ResizeHudAsync);
+                        width, height, current.Width, current.Height,
+                        (w, h) => ResizeHudAsync(w, h, "fit-upward-probe"));
                     resizeAccepted = result.Accepted;
                     fittedWidth = result.Width;
                     fittedHeight = result.Height;
@@ -516,11 +550,73 @@ namespace YummiGameBarWidget
             finally { fittingDisplay = false; }
         }
 
-        private async Task<bool> ResizeHudAsync(double width, double height)
+        private Task<bool> ResizeHudAsync(double width, double height)
         {
-            var accepted = await widget.TryResizeWindowAsync(new Windows.Foundation.Size(width, height));
+            return ResizeHudAsync(width, height, "fit");
+        }
+
+        private async Task<bool> ResizeHudAsync(double width, double height, string reason)
+        {
+            if (widget == null) return false;
+            var requestId = Interlocked.Increment(ref resizeRequestSequence);
+            var before = widget.WindowBounds;
+            var minimum = widget.MinWindowSize;
+            var maximum = widget.MaxWindowSize;
+            var requestReason = reason ?? "unknown";
+            lastResizeRequestId = requestId;
+            lastResizeRequestAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            lastResizeRequestReason = requestReason;
+            App.LogResize("resize-request id=" + requestId +
+                " reason=" + requestReason +
+                " current=" + FormatRect(before) +
+                " target=" + FormatSize(width, height) +
+                " min=" + FormatSize(minimum) +
+                " max=" + FormatSize(maximum) +
+                " display=" + FormatSize(displayWidth, displayHeight) +
+                " scale=" + displayScale.ToString("0.###") +
+                " mode=" + widget.GameBarDisplayMode +
+                " pinned=" + widget.Pinned +
+                " compact=" + HudPreferences.CompactLayout);
+            bool accepted;
+            try
+            {
+                accepted = await widget.TryResizeWindowAsync(new Windows.Foundation.Size(width, height));
+            }
+            catch (Exception ex)
+            {
+                App.LogResize("resize-error id=" + requestId +
+                    " reason=" + requestReason +
+                    " target=" + FormatSize(width, height) +
+                    " error=" + ErrorCode(ex));
+                throw;
+            }
+            var after = widget.WindowBounds;
+            App.LogResize("resize-result id=" + requestId +
+                " reason=" + requestReason +
+                " accepted=" + accepted +
+                " requested=" + FormatSize(width, height) +
+                " actual=" + FormatRect(after) +
+                " delta=" + FormatSize(after.Width - before.Width, after.Height - before.Height) +
+                " mode=" + widget.GameBarDisplayMode +
+                " pinned=" + widget.Pinned);
             App.LogStage($"fit {widget.GameBarDisplayMode} {width}x{height} accepted={accepted}");
             return accepted;
+        }
+
+        private static string FormatSize(Windows.Foundation.Size size)
+        {
+            return FormatSize(size.Width, size.Height);
+        }
+
+        private static string FormatSize(double width, double height)
+        {
+            return width.ToString("0.##") + "x" + height.ToString("0.##");
+        }
+
+        private static string FormatRect(Windows.Foundation.Rect rect)
+        {
+            return rect.Width.ToString("0.##") + "x" + rect.Height.ToString("0.##") +
+                "@" + rect.X.ToString("0.##") + "," + rect.Y.ToString("0.##");
         }
 
         private void UpdateDisplayMetrics()
