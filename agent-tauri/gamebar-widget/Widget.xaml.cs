@@ -68,6 +68,7 @@ namespace YummiGameBarWidget
         private XboxGameBarHotkeyWatcher overlayLargeHotkeyWatcher;
         private XboxGameBarHotkeyWatcher overlaySmallHotkeyWatcher;
         private double? manualOverlayHeightTarget;
+        private readonly SemaphoreSlim overlayHeightHotkeyGate = new SemaphoreSlim(1, 1);
         private string youtubePendingPlayerUrl;
         private string youtubeLoadedVideoId;
         private long youtubeLastActionRequest;
@@ -479,30 +480,45 @@ namespace YummiGameBarWidget
         private async Task ApplyOverlayHeightHotkeyAsync(double requestedHeight, string hotkey)
         {
             if (widget == null) return;
+            if (!await overlayHeightHotkeyGate.WaitAsync(0))
+            {
+                App.LogResize("overlay-hotkey-ignored key=" + hotkey + " reason=busy");
+                return;
+            }
+
             try
             {
                 UpdateDisplayMetrics();
                 var baseMin = GetBaseMinWindowSize();
-                var originalMax = widget.MaxWindowSize;
-                var targetHeight = Math.Max(baseMin.Height, Math.Min(originalMax.Height, requestedHeight));
+                // Package.appxmanifest baseline. Never derive the large target from
+                // the current MaxWindowSize: an earlier F11 may intentionally hold
+                // MaxHeight=856 while Game Bar asynchronously settles.
+                var baseMax = new Windows.Foundation.Size(7680, 4320);
+                try { widget.MaxWindowSize = baseMax; } catch { }
+
+                var availableHeight = displayHeight > 0 ? displayHeight : requestedHeight;
+                var targetHeight = Math.Max(baseMin.Height, Math.Min(baseMax.Height, Math.Min(availableHeight, requestedHeight)));
                 var current = widget.WindowBounds;
-                var targetWidth = Math.Max(baseMin.Width, Math.Min(originalMax.Width, current.Width));
+                var targetWidth = Math.Max(baseMin.Width, Math.Min(baseMax.Width, current.Width));
                 var large = targetHeight >= 899.5;
                 manualOverlayHeightTarget = targetHeight;
 
+                // Use an exact host constraint while the transition is settling.
+                // On this Game Bar host TryResizeWindowAsync can return false even
+                // though a Max/Min limit is applied a few seconds later.
                 if (large)
                 {
                     widget.MinWindowSize = new Windows.Foundation.Size(baseMin.Width, targetHeight);
+                    widget.MaxWindowSize = new Windows.Foundation.Size(baseMax.Width, targetHeight);
                     pinnedTargetMinimumArmed = true;
                     pinnedTargetMinimumHeight = targetHeight;
                 }
                 else
                 {
                     widget.MinWindowSize = baseMin;
+                    widget.MaxWindowSize = new Windows.Foundation.Size(baseMax.Width, targetHeight);
                     pinnedTargetMinimumArmed = false;
                     pinnedTargetMinimumHeight = 0;
-                    if (originalMax.Height > targetHeight + 0.25)
-                        widget.MaxWindowSize = new Windows.Foundation.Size(originalMax.Width, targetHeight);
                 }
 
                 App.LogResize("overlay-hotkey-request key=" + hotkey +
@@ -516,21 +532,21 @@ namespace YummiGameBarWidget
                 var directAccepted = await ResizeHudAsync(targetWidth, targetHeight, "hotkey-" + hotkey.ToLowerInvariant());
                 await Task.Delay(120);
                 if (widget == null) return;
-                var afterDirect = widget.WindowBounds;
-                var reached = Math.Abs(afterDirect.Height - targetHeight) <= 0.5;
+                var reached = Math.Abs(widget.WindowBounds.Height - targetHeight) <= 0.5;
+                var relayoutAttempted = false;
 
                 if (!reached)
                 {
+                    relayoutAttempted = true;
                     App.LogResize("overlay-hotkey-relayout key=" + hotkey +
                         " directAccepted=" + directAccepted +
                         " before=" + FormatRect(current) +
-                        " afterDirect=" + FormatRect(afterDirect));
+                        " afterDirect=" + FormatRect(widget.WindowBounds));
                     try
                     {
                         await widget.MinimizeAsync();
-                        await Task.Delay(100);
+                        await Task.Delay(120);
                         await widget.RestoreAsync();
-                        await Task.Delay(220);
                     }
                     catch (Exception ex)
                     {
@@ -539,13 +555,45 @@ namespace YummiGameBarWidget
                     }
                 }
 
-                if (!large && widget != null)
+                // Host-side size constraints settle slowly on some Game Bar builds.
+                // Keep the exact constraint active long enough for that asynchronous
+                // relayout instead of restoring MaxWindowSize after only ~200 ms.
+                var settleDelays = new[] { 180, 320, 500, 750, 1100, 1400 };
+                foreach (var delayMs in settleDelays)
                 {
-                    try { widget.MaxWindowSize = originalMax; } catch { }
-                    if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
+                    if (widget == null) return;
+                    if (Math.Abs(widget.WindowBounds.Height - targetHeight) <= 0.5)
                     {
-                        try { await widget.CenterWindowAsync(); await Task.Delay(80); } catch { }
+                        reached = true;
+                        break;
                     }
+                    await Task.Delay(delayMs);
+                }
+                if (widget == null) return;
+                reached = Math.Abs(widget.WindowBounds.Height - targetHeight) <= 0.5;
+
+                if (reached)
+                {
+                    // Once the host has reached the requested height, release only
+                    // the ceiling. F10 keeps minHeight=900 until F11 is pressed; F11
+                    // restores the normal 640x360 minimum so manual shrinking works.
+                    try { widget.MaxWindowSize = baseMax; } catch { }
+                    if (!large)
+                    {
+                        try { widget.MinWindowSize = baseMin; } catch { }
+                        if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
+                        {
+                            try { await widget.CenterWindowAsync(); await Task.Delay(80); } catch { }
+                        }
+                    }
+                }
+                else
+                {
+                    App.LogResize("overlay-hotkey-constraint-held key=" + hotkey +
+                        " targetHeight=" + targetHeight.ToString("0.#") +
+                        " actual=" + FormatRect(widget.WindowBounds) +
+                        " min=" + FormatSize(widget.MinWindowSize) +
+                        " max=" + FormatSize(widget.MaxWindowSize));
                 }
 
                 if (widget == null) return;
@@ -554,6 +602,7 @@ namespace YummiGameBarWidget
                 App.LogResize("overlay-hotkey-result key=" + hotkey +
                     " targetHeight=" + targetHeight.ToString("0.#") +
                     " directAccepted=" + directAccepted +
+                    " relayoutAttempted=" + relayoutAttempted +
                     " reached=" + finalReached +
                     " actual=" + FormatRect(finalBounds) +
                     " min=" + FormatSize(widget.MinWindowSize) +
@@ -565,6 +614,35 @@ namespace YummiGameBarWidget
             {
                 App.LogResize("overlay-hotkey-error key=" + hotkey + " error=" + ErrorCode(ex));
             }
+            finally
+            {
+                overlayHeightHotkeyGate.Release();
+            }
+        }
+
+        private void RestoreOrPreserveManualMinimum(string reason)
+        {
+            if (widget == null) return;
+            if (manualOverlayHeightTarget.HasValue && manualOverlayHeightTarget.Value >= 899.5)
+            {
+                try
+                {
+                    var baseMin = GetBaseMinWindowSize();
+                    var target = manualOverlayHeightTarget.Value;
+                    widget.MinWindowSize = new Windows.Foundation.Size(baseMin.Width, target);
+                    pinnedTargetMinimumArmed = true;
+                    pinnedTargetMinimumHeight = target;
+                    App.LogResize("manual-large-min-preserved reason=" + reason +
+                        " target=" + FormatSize(baseMin.Width, target) +
+                        " actual=" + FormatRect(widget.WindowBounds));
+                }
+                catch (Exception ex)
+                {
+                    App.LogResize("manual-large-min-error reason=" + reason + " error=" + ErrorCode(ex));
+                }
+                return;
+            }
+            RestorePinnedMinimumConstraint(reason);
         }
 
         private async void WidgetSettingsClicked(XboxGameBarWidget sender, object args)
@@ -600,7 +678,7 @@ namespace YummiGameBarWidget
                     " current=" + FormatRect(current));
                 if (widget != null && !widget.Pinned)
                 {
-                    RestorePinnedMinimumConstraint("unpinned");
+                    RestoreOrPreserveManualMinimum("unpinned");
                     var forceFit = pendingPinnedFitRequest;
                     if (forceFit) pendingPinnedFitRequest = false;
                     if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
@@ -613,7 +691,7 @@ namespace YummiGameBarWidget
                     // Keep Foreground in an editable geometry. The 900-DIP target is
                     // armed only after Game Bar closes into PinnedOnly so the host
                     // title/pin controls cannot be pushed above the display.
-                    RestorePinnedMinimumConstraint("pinned-foreground");
+                    RestoreOrPreserveManualMinimum("pinned-foreground");
                     App.LogResize("prepin-grow-cancelled reason=pinned current=" + FormatRect(current) +
                         " minNow=" + (widget != null ? FormatSize(widget.MinWindowSize) : "none"));
                     _ = NormalizeForegroundGeometryAsync("pinned-changed");
@@ -647,7 +725,7 @@ namespace YummiGameBarWidget
                     // Foreground is the edit state: restore the manifest minimum and
                     // ask Game Bar to place the widget where its title/pin bar remains
                     // accessible. Full-height constraints belong to PinnedOnly only.
-                    RestorePinnedMinimumConstraint("foreground");
+                    RestoreOrPreserveManualMinimum("foreground");
                     Interlocked.Increment(ref pinnedGrowGeneration);
                     pinnedGrowScheduled = false;
                     _ = NormalizeForegroundGeometryAsync("display-mode-foreground");
@@ -677,7 +755,7 @@ namespace YummiGameBarWidget
                 }
                 else
                 {
-                    RestorePinnedMinimumConstraint("non-pinned-only");
+                    RestoreOrPreserveManualMinimum("non-pinned-only");
                 }
                 UpdateDisplayState();
                 UpdateInputState();
