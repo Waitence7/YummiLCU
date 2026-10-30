@@ -209,7 +209,6 @@ namespace YummiGameBarWidget
                 UpdateInputState();
                 UpdatePinTutorial();
                 QueueTutorialStateRefresh("loaded");
-                MaybeQueuePrePinGrow("loaded", false);
                 StartSnapshotWebSocketLoop();
                 timer.Start();
                 // One immediate legacy fetch keeps compatibility with older Agents.
@@ -343,7 +342,7 @@ namespace YummiGameBarWidget
                                      widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
                             {
                                 pendingPinnedFitRequest = false;
-                                QueuePrePinGrowToFullscreen("fit-request", true);
+                                _ = NormalizeForegroundGeometryAsync("fit-request");
                             }
                             else
                             {
@@ -449,7 +448,7 @@ namespace YummiGameBarWidget
                     var forceFit = pendingPinnedFitRequest;
                     if (forceFit) pendingPinnedFitRequest = false;
                     if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
-                        QueuePrePinGrowToFullscreen("unpinned", forceFit);
+                        _ = NormalizeForegroundGeometryAsync("unpinned");
                 }
                 else
                 {
@@ -500,7 +499,7 @@ namespace YummiGameBarWidget
                     {
                         var forceFit = pendingPinnedFitRequest;
                         if (forceFit) pendingPinnedFitRequest = false;
-                        QueuePrePinGrowToFullscreen("display-mode-foreground", forceFit);
+                        _ = NormalizeForegroundGeometryAsync("display-mode-foreground-unpinned");
                     }
                 }
                 else if (widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
@@ -821,8 +820,30 @@ namespace YummiGameBarWidget
             {
                 RestorePinnedMinimumConstraint("normalize-" + reason);
                 var before = widget.WindowBounds;
+                var targetHeight = Math.Min(before.Height, 856.0);
+                var targetWidth = before.Width;
+                var resizeAttempted = false;
+                var resizeAccepted = false;
+
+                // Game Bar chrome consumes roughly 44 DIPs on this host. A 900-DIP
+                // foreground widget is therefore shifted to y=-44 and its title/pin
+                // controls become unreachable. Keep the editable Foreground geometry
+                // capped at the known-good 856-DIP height. Full height is PinnedOnly.
+                if (!widget.Pinned && before.Height > targetHeight + 0.25)
+                {
+                    resizeAttempted = true;
+                    resizeAccepted = await ResizeHudAsync(targetWidth, targetHeight, "foreground-edit-cap");
+                    await Task.Delay(80);
+                }
+
+                if (widget == null || widget.GameBarDisplayMode != XboxGameBarDisplayMode.Foreground) return;
+                var beforeCenter = widget.WindowBounds;
                 App.LogResize("foreground-center-request reason=" + reason +
                     " before=" + FormatRect(before) +
+                    " afterCap=" + FormatRect(beforeCenter) +
+                    " cap=" + FormatSize(targetWidth, targetHeight) +
+                    " resizeAttempted=" + resizeAttempted +
+                    " resizeAccepted=" + resizeAccepted +
                     " min=" + FormatSize(widget.MinWindowSize) +
                     " pinned=" + widget.Pinned);
                 await widget.CenterWindowAsync();
@@ -943,7 +964,7 @@ namespace YummiGameBarWidget
             if (!HudPreferences.CompactLayout && !widget.Pinned)
             {
                 pendingPinnedFitRequest = false;
-                QueuePrePinGrowToFullscreen("fit-request", true);
+                _ = NormalizeForegroundGeometryAsync("fit-request");
                 return;
             }
             if (!HudPreferences.CompactLayout && widget.Pinned)
