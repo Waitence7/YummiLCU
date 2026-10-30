@@ -130,11 +130,6 @@ namespace YummiGameBarWidget
         private long lastTutorialResetGeneration;
         private bool tutorialResetAwaitingUnpin;
         private int tutorialRefreshGeneration;
-        private int pinnedCoverageRestoreGeneration;
-        private bool pinnedCoverageRestoreInFlight;
-        private int foregroundChromeRefreshGeneration;
-        private bool foregroundChromeRefreshInFlight;
-        private long lastForegroundChromeRefreshAtMs;
         private CancellationTokenSource snapshotWebSocketLoopCts;
         private MessageWebSocket snapshotWebSocket;
         private volatile bool snapshotWebSocketConnected;
@@ -158,7 +153,6 @@ namespace YummiGameBarWidget
                 EnsureDefaultVoiceChatPosition();
                 ClampAllPanelPositions();
                 UpdatePinTutorial();
-                QueuePinnedCoverageRestore("size-changed");
             };
             timer.Tick += async (_, __) =>
             {
@@ -197,7 +191,6 @@ namespace YummiGameBarWidget
                 // Once WS connects the timer stops issuing snapshot requests.
                 await RefreshAsync();
                 QueueTutorialStateRefresh("ready");
-                QueueForegroundChromeRefresh("loaded");
                 App.LogStage("hud-ready");
             };
             Unloaded += (_, __) =>
@@ -214,8 +207,6 @@ namespace YummiGameBarWidget
                 // The watchdog will recover it if the host pauses or drops dispatcher work.
                 _ = SyncExternalClickTestAsync(false);
                 Interlocked.Increment(ref tutorialRefreshGeneration);
-                Interlocked.Increment(ref pinnedCoverageRestoreGeneration);
-                Interlocked.Increment(ref foregroundChromeRefreshGeneration);
                 StopSnapshotWebSocketLoop();
                 timer.Stop();
             };
@@ -384,23 +375,22 @@ namespace YummiGameBarWidget
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
-                QueuePinnedCoverageRestore("widget-state");
             });
         }
 
         private async void DisplayModeChanged(XboxGameBarWidget sender, object args)
         {
-            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () =>
             {
+                // Restored legacy Game Bar sizing behavior (c11d9bd): once the
+                // pinned widget returns to PinnedOnly, fit it to the display once.
+                // Do not run any foreground nudge or repeated coverage recovery.
+                if (!HudPreferences.CompactLayout && widget.Pinned &&
+                    widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                    await FitToDisplayAsync();
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
-                // In full-size mode Game Bar's hover/title chrome may temporarily
-                // reserve a strip of the host window. Restore coverage only after
-                // the widget returns to pinned-only mode; compact/manual setup is
-                // intentionally left untouched.
-                QueuePinnedCoverageRestore("display-mode");
-                QueueForegroundChromeRefresh("display-mode");
             });
         }
 
@@ -452,218 +442,6 @@ namespace YummiGameBarWidget
             displayScale = display.RawPixelsPerViewPixel;
             displayWidth = HudGeometry.ToLogicalPixels(display.ScreenWidthInRawPixels, displayScale);
             displayHeight = HudGeometry.ToLogicalPixels(display.ScreenHeightInRawPixels, displayScale);
-        }
-
-        private bool IsPinnedFullSizeMode()
-        {
-            return widget != null && hudLoaded && !HudPreferences.CompactLayout &&
-                widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
-        }
-
-        private double HostChromeHeight()
-        {
-            if (widget == null) return 0.0;
-            var bounds = widget.WindowBounds;
-            if (bounds.Height <= 0 || ActualHeight <= 0) return 0.0;
-            return Math.Max(0.0, bounds.Height - ActualHeight);
-        }
-
-        private bool HostChromeVisible()
-        {
-            // Game Bar temporarily reserves vertical space for its title/pin chrome
-            // while the pointer is near the top edge. Fighting that reservation with
-            // TryResizeWindowAsync makes a fullscreen widget extend off-screen by
-            // approximately the chrome height. Wait until the chrome is gone instead.
-            return HostChromeHeight() > 2.0;
-        }
-
-        private bool PinnedCoverageNeedsRestore()
-        {
-            if (!IsPinnedFullSizeMode()) return false;
-            UpdateDisplayMetrics();
-            var bounds = widget.WindowBounds;
-            var contentWidth = ActualWidth > 0 ? ActualWidth : bounds.Width;
-            var contentHeight = ActualHeight > 0 ? ActualHeight : bounds.Height;
-            const double tolerance = 2.0;
-
-            // Do not treat stale host chrome as a reason to stop recovery. On some
-            // Game Bar builds WindowBounds keeps the old title-bar reservation even
-            // after PinnedOnly begins. The exact-size retry below is what clears it.
-            return Math.Abs(contentWidth - displayWidth) > tolerance ||
-                Math.Abs(contentHeight - displayHeight) > tolerance ||
-                Math.Abs(bounds.Width - displayWidth) > tolerance ||
-                Math.Abs(bounds.Height - displayHeight) > tolerance ||
-                Math.Abs(bounds.X) > tolerance || Math.Abs(bounds.Y) > tolerance;
-        }
-
-        private async Task<bool> RestorePinnedFullscreenExactAsync(string reason, int delayMs)
-        {
-            if (!IsPinnedFullSizeMode()) return false;
-            UpdateDisplayMetrics();
-            var target = new Windows.Foundation.Size(displayWidth, displayHeight);
-            var before = widget.WindowBounds;
-
-            // Full-screen recovery must never fall back to a smaller accepted size.
-            // If the host is still holding title chrome, retry the exact display size
-            // later instead of letting FitLargestAsync permanently settle smaller.
-            var accepted = await widget.TryResizeWindowAsync(target);
-            if (accepted)
-            {
-                await Task.Delay(40);
-                if (widget != null && hudLoaded && IsPinnedFullSizeMode())
-                    await widget.CenterWindowAsync();
-            }
-
-            App.LogStage("pinned-fullscreen-exact reason=" + reason + " delayMs=" + delayMs +
-                " accepted=" + accepted + " chrome=" + HostChromeHeight().ToString("0.#") +
-                " before=" + before + " after=" + widget.WindowBounds +
-                " content=" + ActualWidth.ToString("0.#") + "x" + ActualHeight.ToString("0.#") +
-                " target=" + displayWidth.ToString("0.#") + "x" + displayHeight.ToString("0.#"));
-            return accepted && !PinnedCoverageNeedsRestore();
-        }
-
-        private void QueuePinnedCoverageRestore(string reason)
-        {
-            if (!IsPinnedFullSizeMode()) return;
-            var generation = Interlocked.Increment(ref pinnedCoverageRestoreGeneration);
-            _ = RestorePinnedCoverageAfterChromeAsync(generation, reason);
-        }
-
-        private async Task RestorePinnedCoverageAfterChromeAsync(int generation, string reason)
-        {
-            // Game Bar can keep stale title/pin chrome metrics for over a second.
-            // Keep retrying the exact display size; never binary-search downward.
-            var delays = new[] { 120, 260, 520, 900, 1400 };
-            foreach (var delayMs in delays)
-            {
-                await Task.Delay(delayMs);
-                if (generation != Volatile.Read(ref pinnedCoverageRestoreGeneration)) return;
-                if (!IsPinnedFullSizeMode()) return;
-                if (!PinnedCoverageNeedsRestore()) return;
-                if (pinnedCoverageRestoreInFlight) continue;
-
-                pinnedCoverageRestoreInFlight = true;
-                try
-                {
-                    if (await RestorePinnedFullscreenExactAsync(reason, delayMs))
-                    {
-                        App.LogStage("pinned-coverage-restored reason=" + reason);
-                        return;
-                    }
-                }
-                finally
-                {
-                    pinnedCoverageRestoreInFlight = false;
-                }
-            }
-
-            if (IsPinnedFullSizeMode() && PinnedCoverageNeedsRestore())
-            {
-                App.LogStage("pinned-coverage-still-stale reason=" + reason +
-                    " bounds=" + widget.WindowBounds + " chrome=" + HostChromeHeight().ToString("0.#") +
-                    " content=" + ActualWidth.ToString("0.#") + "x" + ActualHeight.ToString("0.#"));
-            }
-        }
-
-        private void QueueForegroundChromeRefresh(string reason)
-        {
-            // The refresh exists only to expose the host pin chrome before the
-            // widget is pinned. Never resize an already-pinned HUD when Win+G
-            // opens; that can disturb its full-screen coverage.
-            if (widget == null || !hudLoaded || widget.Pinned ||
-                widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
-
-            // Game Bar occasionally enters Foreground mode without rebuilding its
-            // hover title/pin chrome. A real manual resize reliably fixes it. Reproduce
-            // that host-layout transition automatically, then restore the saved size.
-            var now = NowMs();
-            if (now - lastForegroundChromeRefreshAtMs < 750) return;
-            lastForegroundChromeRefreshAtMs = now;
-            var generation = Interlocked.Increment(ref foregroundChromeRefreshGeneration);
-            _ = RefreshForegroundChromeAfterHostSettlesAsync(generation, reason);
-        }
-
-        private async Task RefreshForegroundChromeAfterHostSettlesAsync(int generation, string reason)
-        {
-            await Task.Delay(90);
-            if (generation != Volatile.Read(ref foregroundChromeRefreshGeneration)) return;
-            if (widget == null || !hudLoaded || widget.Pinned ||
-                widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
-            if (foregroundChromeRefreshInFlight || fittingDisplay) return;
-
-            var bounds = widget.WindowBounds;
-            if (bounds.Width <= 0 || bounds.Height <= 0) return;
-
-            var minimum = widget.MinWindowSize;
-            var maximum = widget.MaxWindowSize;
-            var original = new Windows.Foundation.Size(bounds.Width, bounds.Height);
-
-            // Tiny one-axis nudges are coalesced by the Game Bar host on some
-            // layouts, most notably the manifest's exact 1440x900 default. The old
-            // manual pin-setup flow worked because it made the widget materially
-            // smaller first. Do the same without moving the window: shrink both axes
-            // by roughly 10% (bounded to 64..144 DIPs), hold for a few frames, then
-            // restore the exact original size. If the widget is already at its minimum
-            // size, grow both axes instead.
-            var widthDelta = Math.Max(64.0, Math.Min(144.0, original.Width * 0.10));
-            var heightDelta = Math.Max(64.0, Math.Min(144.0, original.Height * 0.10));
-            var nudged = new Windows.Foundation.Size(
-                Math.Max(minimum.Width, original.Width - widthDelta),
-                Math.Max(minimum.Height, original.Height - heightDelta));
-
-            if (Math.Abs(nudged.Width - original.Width) < 2.0 &&
-                Math.Abs(nudged.Height - original.Height) < 2.0)
-            {
-                nudged = new Windows.Foundation.Size(
-                    Math.Min(maximum.Width, original.Width + widthDelta),
-                    Math.Min(maximum.Height, original.Height + heightDelta));
-            }
-            if (Math.Abs(nudged.Width - original.Width) < 2.0 &&
-                Math.Abs(nudged.Height - original.Height) < 2.0) return;
-
-            foregroundChromeRefreshInFlight = true;
-            try
-            {
-                // The manifest already enables pinning. Reasserting it is harmless
-                // and ensures the host title bar still advertises the pin control.
-                widget.PinningSupported = true;
-                var nudgedAccepted = await widget.TryResizeWindowAsync(nudged);
-                var restoredAccepted = false;
-                if (nudgedAccepted)
-                {
-                    // Keep the temporary size long enough for Game Bar to run an
-                    // actual host-layout pass instead of coalescing both requests.
-                    // Once the temporary resize succeeds, ALWAYS restore it. A pin
-                    // or Win+G mode transition during this delay must not strand the
-                    // HUD at the smaller setup size.
-                    await Task.Delay(80);
-                    if (widget != null && hudLoaded)
-                        restoredAccepted = await widget.TryResizeWindowAsync(original);
-                }
-                else if (widget != null && hudLoaded)
-                {
-                    // Even a same-size request can invalidate stale host chrome.
-                    restoredAccepted = await widget.TryResizeWindowAsync(original);
-                }
-
-                App.LogStage("foreground-chrome-refresh reason=" + reason +
-                    " nudgeAccepted=" + nudgedAccepted + " restored=" + restoredAccepted +
-                    " from=" + original.Width.ToString("0.#") + "x" + original.Height.ToString("0.#") +
-                    " via=" + nudged.Width.ToString("0.#") + "x" + nudged.Height.ToString("0.#"));
-
-                // If pinning/closing Game Bar happened during the refresh, the host
-                // may still have a stale chrome reservation. Hand off to the normal
-                // pinned full-screen recovery after the original size is back.
-                QueuePinnedCoverageRestore("foreground-chrome-restored");
-            }
-            catch (Exception ex)
-            {
-                App.LogStage("foreground-chrome-refresh-error reason=" + reason + " error=" + ErrorCode(ex));
-            }
-            finally
-            {
-                foregroundChromeRefreshInFlight = false;
-            }
         }
 
         private void QueueTutorialStateRefresh(string reason)
@@ -814,7 +592,6 @@ namespace YummiGameBarWidget
                     ["height"] = JsonValue.CreateNumberValue(bounds.Height),
                     ["displayWidth"] = JsonValue.CreateNumberValue(displayWidth),
                     ["displayHeight"] = JsonValue.CreateNumberValue(displayHeight),
-                    ["hostChromeHeight"] = JsonValue.CreateNumberValue(HostChromeHeight()),
                     ["snapshotTransport"] = JsonValue.CreateStringValue(snapshotWebSocketConnected ? "ws" : "tcp-fallback"),
                     ["snapshotWsLastMessageAgeMs"] = JsonValue.CreateNumberValue(
                         lastSnapshotWebSocketMessageAtMs > 0 ? Math.Max(0, NowMs() - lastSnapshotWebSocketMessageAtMs) : -1)
@@ -1977,8 +1754,6 @@ namespace YummiGameBarWidget
             _ = SyncExternalClickTestAsync(true);
             UpdatePinTutorial();
             QueueTutorialStateRefresh("window-activated-" + e.WindowActivationState);
-            QueuePinnedCoverageRestore("window-activated-" + e.WindowActivationState);
-            QueueForegroundChromeRefresh("window-activated-" + e.WindowActivationState);
         }
 
         private async Task SyncExternalClickTestAsync(bool active)
