@@ -132,6 +132,9 @@ namespace YummiGameBarWidget
         private int tutorialRefreshGeneration;
         private int pinnedGrowGeneration;
         private bool pinnedGrowInFlight;
+        private bool pinnedGrowScheduled;
+        private bool pendingPinnedFitRequest;
+        private string lastDisplayModeForLog = "unknown";
         private long resizeRequestSequence;
         private long lastResizeRequestId;
         private long lastResizeRequestAtMs;
@@ -198,6 +201,7 @@ namespace YummiGameBarWidget
                 UpdateInputState();
                 UpdatePinTutorial();
                 QueueTutorialStateRefresh("loaded");
+                MaybeQueuePinnedGrow("loaded-pinned-only");
                 StartSnapshotWebSocketLoop();
                 timer.Start();
                 // One immediate legacy fetch keeps compatibility with older Agents.
@@ -321,7 +325,25 @@ namespace YummiGameBarWidget
                         if (request != lastFitRequest)
                         {
                             lastFitRequest = request;
-                            _ = FitToDisplayAsync(HudPreferences.CompactLayout);
+                            if (HudPreferences.CompactLayout)
+                            {
+                                _ = FitToDisplayAsync(true);
+                            }
+                            else if (widget != null && widget.Pinned &&
+                                     widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                            {
+                                pendingPinnedFitRequest = false;
+                                QueuePinnedGrowToFullscreen("fit-request-pinned-only");
+                            }
+                            else
+                            {
+                                pendingPinnedFitRequest = true;
+                                var current = widget != null ? widget.WindowBounds : new Windows.Foundation.Rect();
+                                App.LogResize("fit-request-deferred current=" + FormatRect(current) +
+                                    " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
+                                    " pinned=" + (widget != null && widget.Pinned) +
+                                    " reason=wait-for-pinned-only");
+                            }
                         }
                     }
                     catch { }
@@ -339,9 +361,10 @@ namespace YummiGameBarWidget
                 notificationManager = new XboxGameBarWidgetNotificationManager(widget);
                 widget.SettingsClicked += WidgetSettingsClicked;
                 widget.WindowBoundsChanged += WidgetStateChanged;
-                widget.PinnedChanged += WidgetStateChanged;
+                widget.PinnedChanged += PinnedStateChanged;
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
+                lastDisplayModeForLog = widget.GameBarDisplayMode.ToString();
                 StartNativeInputLoop();
                 _ = SyncExternalClickTestAsync(true);
                 UpdatePinTutorial();
@@ -361,7 +384,7 @@ namespace YummiGameBarWidget
             {
                 widget.SettingsClicked -= WidgetSettingsClicked;
                 widget.WindowBoundsChanged -= WidgetStateChanged;
-                widget.PinnedChanged -= WidgetStateChanged;
+                widget.PinnedChanged -= PinnedStateChanged;
                 widget.ClickThroughEnabledChanged -= WidgetStateChanged;
                 widget.GameBarDisplayModeChanged -= DisplayModeChanged;
             }
@@ -392,28 +415,72 @@ namespace YummiGameBarWidget
             });
         }
 
-        private async void DisplayModeChanged(XboxGameBarWidget sender, object args)
+        private async void PinnedStateChanged(XboxGameBarWidget sender, object args)
         {
             await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                // 856 DIP is a known-good pinned height. 900 DIP is the desired
-                // fullscreen target but may or may not be accepted by this Game Bar
-                // host. Retry after PinnedOnly settles, then binary-search only the
-                // 856..900 range. Never shrink a larger manual size.
-                if (!HudPreferences.CompactLayout && widget.Pinned &&
-                    widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
-                    QueuePinnedGrowToFullscreen();
+                var current = widget != null ? widget.WindowBounds : new Windows.Foundation.Rect();
+                App.LogResize("pinned-changed pinned=" + (widget != null && widget.Pinned) +
+                    " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
+                    " current=" + FormatRect(current));
+                MaybeQueuePinnedGrow("pinned-changed");
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
             });
         }
 
-        private void QueuePinnedGrowToFullscreen()
+        private async void DisplayModeChanged(XboxGameBarWidget sender, object args)
         {
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            {
+                var nextMode = widget != null ? widget.GameBarDisplayMode.ToString() : "none";
+                var current = widget != null ? widget.WindowBounds : new Windows.Foundation.Rect();
+                App.LogResize("display-mode-changed from=" + lastDisplayModeForLog +
+                    " to=" + nextMode +
+                    " pinned=" + (widget != null && widget.Pinned) +
+                    " current=" + FormatRect(current) +
+                    " pendingFit=" + pendingPinnedFitRequest);
+                lastDisplayModeForLog = nextMode;
+
+                if (widget == null || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
+                {
+                    // Never resize automatically while the Game Bar foreground chrome
+                    // is active. It rejects even no-op/slightly larger resize requests.
+                    Interlocked.Increment(ref pinnedGrowGeneration);
+                    pinnedGrowScheduled = false;
+                }
+                else
+                {
+                    MaybeQueuePinnedGrow("display-mode-pinned-only");
+                }
+                UpdateDisplayState();
+                UpdateInputState();
+                UpdatePinTutorial();
+            });
+        }
+
+        private void MaybeQueuePinnedGrow(string reason)
+        {
+            if (widget == null || !hudLoaded || HudPreferences.CompactLayout || !widget.Pinned ||
+                widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly) return;
+            pendingPinnedFitRequest = false;
+            QueuePinnedGrowToFullscreen(reason);
+        }
+
+        private void QueuePinnedGrowToFullscreen(string reason = "pinned-only")
+        {
+            if (pinnedGrowScheduled)
+            {
+                App.LogResize("pinned-grow-already-queued reason=" + reason +
+                    " generation=" + Volatile.Read(ref pinnedGrowGeneration));
+                return;
+            }
+            pinnedGrowScheduled = true;
             var generation = Interlocked.Increment(ref pinnedGrowGeneration);
             var current = widget != null ? widget.WindowBounds : new Windows.Foundation.Rect();
             App.LogResize("pinned-grow-queued generation=" + generation +
+                " trigger=" + reason +
                 " current=" + FormatRect(current) +
                 " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
                 " pinned=" + (widget != null && widget.Pinned));
@@ -422,12 +489,13 @@ namespace YummiGameBarWidget
 
         private async Task GrowPinnedToFullscreenAsync(int generation)
         {
-            // The first PinnedOnly callback can still inherit the ~820 DIP chrome
-            // restriction. Retry after the host settles instead of accepting 820 as
-            // a permanent maximum. 856 is known to be reachable on this layout.
-            var delays = new[] { 80, 180, 350, 700, 1200, 2000 };
-            foreach (var delayMs in delays)
+            try
             {
+                // The first PinnedOnly callback can still inherit a provisional host
+                // size. Retry only after PinnedOnly; Foreground resize is forbidden.
+                var delays = new[] { 80, 180, 350, 700, 1200, 2000 };
+                foreach (var delayMs in delays)
+                {
                 await Task.Delay(delayMs);
                 if (generation != Volatile.Read(ref pinnedGrowGeneration)) return;
                 if (widget == null || !hudLoaded || HudPreferences.CompactLayout ||
@@ -489,12 +557,30 @@ namespace YummiGameBarWidget
                 {
                     pinnedGrowInFlight = false;
                 }
+                }
+            }
+            finally
+            {
+                // A superseded Foreground task must not clear the scheduling flag
+                // of a newer PinnedOnly generation.
+                if (generation == Volatile.Read(ref pinnedGrowGeneration))
+                    pinnedGrowScheduled = false;
             }
         }
 
         private async Task FitToDisplayAsync(bool centerForPinSetup = false)
         {
             if (widget == null || fittingDisplay) return;
+            if (!HudPreferences.CompactLayout &&
+                (!widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly))
+            {
+                pendingPinnedFitRequest = true;
+                App.LogResize("fit-deferred current=" + FormatRect(widget.WindowBounds) +
+                    " mode=" + widget.GameBarDisplayMode +
+                    " pinned=" + widget.Pinned +
+                    " reason=foreground-or-unpinned");
+                return;
+            }
             fittingDisplay = true;
             try
             {
