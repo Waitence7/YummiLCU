@@ -538,7 +538,11 @@ namespace YummiGameBarWidget
 
         private void QueueForegroundChromeRefresh(string reason)
         {
-            if (widget == null || !hudLoaded || widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
+            // The refresh exists only to expose the host pin chrome before the
+            // widget is pinned. Never resize an already-pinned HUD when Win+G
+            // opens; that can disturb its full-screen coverage.
+            if (widget == null || !hudLoaded || widget.Pinned ||
+                widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
 
             // Game Bar occasionally enters Foreground mode without rebuilding its
             // hover title/pin chrome. A real manual resize reliably fixes it. Reproduce
@@ -554,7 +558,8 @@ namespace YummiGameBarWidget
         {
             await Task.Delay(90);
             if (generation != Volatile.Read(ref foregroundChromeRefreshGeneration)) return;
-            if (widget == null || !hudLoaded || widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
+            if (widget == null || !hudLoaded || widget.Pinned ||
+                widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
             if (foregroundChromeRefreshInFlight || fittingDisplay) return;
 
             var bounds = widget.WindowBounds;
@@ -597,14 +602,16 @@ namespace YummiGameBarWidget
                 var restoredAccepted = false;
                 if (nudgedAccepted)
                 {
-                    // Keep the temporary size long enough for Game Bar to run
-                    // an actual host-layout pass instead of coalescing both requests.
+                    // Keep the temporary size long enough for Game Bar to run an
+                    // actual host-layout pass instead of coalescing both requests.
+                    // Once the temporary resize succeeds, ALWAYS restore it. A pin
+                    // or Win+G mode transition during this delay must not strand the
+                    // HUD at the smaller setup size.
                     await Task.Delay(80);
-                    if (generation != Volatile.Read(ref foregroundChromeRefreshGeneration)) return;
-                    if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
-                    restoredAccepted = await widget.TryResizeWindowAsync(original);
+                    if (widget != null && hudLoaded)
+                        restoredAccepted = await widget.TryResizeWindowAsync(original);
                 }
-                else
+                else if (widget != null && hudLoaded)
                 {
                     // Even a same-size request can invalidate stale host chrome.
                     restoredAccepted = await widget.TryResizeWindowAsync(original);
@@ -614,6 +621,11 @@ namespace YummiGameBarWidget
                     " nudgeAccepted=" + nudgedAccepted + " restored=" + restoredAccepted +
                     " from=" + original.Width.ToString("0.#") + "x" + original.Height.ToString("0.#") +
                     " via=" + nudged.Width.ToString("0.#") + "x" + nudged.Height.ToString("0.#"));
+
+                // If pinning/closing Game Bar happened during the refresh, the host
+                // may still have a stale chrome reservation. Hand off to the normal
+                // pinned full-screen recovery after the original size is back.
+                QueuePinnedCoverageRestore("foreground-chrome-restored");
             }
             catch (Exception ex)
             {
