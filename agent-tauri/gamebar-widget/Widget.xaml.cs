@@ -174,14 +174,11 @@ namespace YummiGameBarWidget
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
                 EnsureDefaultVoiceChatPosition();
-                // Start large, then adapt once to this display. Never overwrite
-                // a pinned, explicitly configured or previously initialized layout.
+                // Let Xbox Game Bar own the initial/restored window geometry. The
+                // manifest already starts large; probing for an accepted maximum while
+                // Game Bar chrome is visible can falsely settle around 1435x820.
                 if (!HudPreferences.InitialFitDone)
-                {
-                    bool adapt = HudPreferences.FitRequest == 0 && !widget.Pinned;
                     HudPreferences.MarkInitialFitDone();
-                    if (adapt) await FitToDisplayAsync();
-                }
                 UpdateInputState();
                 UpdatePinTutorial();
                 QueueTutorialStateRefresh("loaded");
@@ -409,11 +406,35 @@ namespace YummiGameBarWidget
                 // the content around its chrome and home bar.
                 fitTargetWidth = width;
                 fitTargetHeight = height;
-                var result = await HudGeometry.FitLargestAsync(width, height, minimum.Width, minimum.Height,
-                    ResizeHudAsync);
-                resizeAccepted = result.Accepted;
-                fittedWidth = result.Width;
-                fittedHeight = result.Height;
+                // Do not binary-search downward in normal/full-size mode. Game Bar
+                // can transiently reject the real target while its title/home chrome
+                // is visible; treating that temporary limit as the maximum produced
+                // bogus sizes such as 1435x820 even though the user can resize larger.
+                if (HudPreferences.CompactLayout)
+                {
+                    resizeAccepted = await ResizeHudAsync(width, height);
+                    if (resizeAccepted)
+                    {
+                        fittedWidth = width;
+                        fittedHeight = height;
+                    }
+                }
+                else
+                {
+                    resizeAccepted = await ResizeHudAsync(width, height);
+                    if (resizeAccepted)
+                    {
+                        fittedWidth = width;
+                        fittedHeight = height;
+                    }
+                    else
+                    {
+                        // Preserve Game Bar's current/manual size on a transient reject.
+                        var current = widget.WindowBounds;
+                        fittedWidth = current.Width;
+                        fittedHeight = current.Height;
+                    }
+                }
                 // Compact mode deliberately brings the titlebar back on screen.
                 // Expanding must preserve the position chosen by the user.
                 if (centerForPinSetup) await widget.CenterWindowAsync();
