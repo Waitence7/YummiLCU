@@ -25,7 +25,7 @@
                 <SettingsSupported AppExtensionId="YummiLCUSettings" />
                 <Window>
                   <AllowForegroundTransparency>true</AllowForegroundTransparency>
-                  <Size><Height>856</Height><Width>1440</Width><MinHeight>360</MinHeight><MinWidth>640</MinWidth><MaxHeight>4320</MaxHeight><MaxWidth>7680</MaxWidth></Size>
+                  <Size><Height>900</Height><Width>1440</Width><MinHeight>360</MinHeight><MinWidth>640</MinWidth><MaxHeight>4320</MaxHeight><MaxWidth>7680</MaxWidth></Size>
                   <ResizeSupported><Horizontal>true</Horizontal><Vertical>true</Vertical></ResizeSupported>
                 </Window>
               </GameBarWidget>
