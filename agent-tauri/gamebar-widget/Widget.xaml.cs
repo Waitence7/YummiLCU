@@ -540,10 +540,9 @@ namespace YummiGameBarWidget
         {
             if (widget == null || !hudLoaded || widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
 
-            // Game Bar occasionally enters Foreground mode without invalidating its
-            // hover title chrome. A manual resize fixes it because the host performs
-            // a fresh window-layout pass. Reproduce that pass automatically with a
-            // one-DIP nudge and immediately restore the original size.
+            // Game Bar occasionally enters Foreground mode without rebuilding its
+            // hover title/pin chrome. A real manual resize reliably fixes it. Reproduce
+            // that host-layout transition automatically, then restore the saved size.
             var now = NowMs();
             if (now - lastForegroundChromeRefreshAtMs < 750) return;
             lastForegroundChromeRefreshAtMs = now;
@@ -564,12 +563,29 @@ namespace YummiGameBarWidget
             var minimum = widget.MinWindowSize;
             var maximum = widget.MaxWindowSize;
             var original = new Windows.Foundation.Size(bounds.Width, bounds.Height);
-            var nudged = original;
-            if (original.Height - 1.0 >= minimum.Height) nudged.Height = original.Height - 1.0;
-            else if (original.Height + 1.0 <= maximum.Height) nudged.Height = original.Height + 1.0;
-            else if (original.Width - 1.0 >= minimum.Width) nudged.Width = original.Width - 1.0;
-            else if (original.Width + 1.0 <= maximum.Width) nudged.Width = original.Width + 1.0;
-            else return;
+
+            // Tiny one-axis nudges are coalesced by the Game Bar host on some
+            // layouts, most notably the manifest's exact 1440x900 default. The old
+            // manual pin-setup flow worked because it made the widget materially
+            // smaller first. Do the same without moving the window: shrink both axes
+            // by roughly 10% (bounded to 64..144 DIPs), hold for a few frames, then
+            // restore the exact original size. If the widget is already at its minimum
+            // size, grow both axes instead.
+            var widthDelta = Math.Max(64.0, Math.Min(144.0, original.Width * 0.10));
+            var heightDelta = Math.Max(64.0, Math.Min(144.0, original.Height * 0.10));
+            var nudged = new Windows.Foundation.Size(
+                Math.Max(minimum.Width, original.Width - widthDelta),
+                Math.Max(minimum.Height, original.Height - heightDelta));
+
+            if (Math.Abs(nudged.Width - original.Width) < 2.0 &&
+                Math.Abs(nudged.Height - original.Height) < 2.0)
+            {
+                nudged = new Windows.Foundation.Size(
+                    Math.Min(maximum.Width, original.Width + widthDelta),
+                    Math.Min(maximum.Height, original.Height + heightDelta));
+            }
+            if (Math.Abs(nudged.Width - original.Width) < 2.0 &&
+                Math.Abs(nudged.Height - original.Height) < 2.0) return;
 
             foregroundChromeRefreshInFlight = true;
             try
@@ -581,7 +597,9 @@ namespace YummiGameBarWidget
                 var restoredAccepted = false;
                 if (nudgedAccepted)
                 {
-                    await Task.Delay(16);
+                    // Keep the temporary size long enough for Game Bar to run
+                    // an actual host-layout pass instead of coalescing both requests.
+                    await Task.Delay(80);
                     if (generation != Volatile.Read(ref foregroundChromeRefreshGeneration)) return;
                     if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
                     restoredAccepted = await widget.TryResizeWindowAsync(original);
@@ -594,7 +612,8 @@ namespace YummiGameBarWidget
 
                 App.LogStage("foreground-chrome-refresh reason=" + reason +
                     " nudgeAccepted=" + nudgedAccepted + " restored=" + restoredAccepted +
-                    " size=" + original.Width.ToString("0.#") + "x" + original.Height.ToString("0.#"));
+                    " from=" + original.Width.ToString("0.#") + "x" + original.Height.ToString("0.#") +
+                    " via=" + nudged.Width.ToString("0.#") + "x" + nudged.Height.ToString("0.#"));
             }
             catch (Exception ex)
             {
