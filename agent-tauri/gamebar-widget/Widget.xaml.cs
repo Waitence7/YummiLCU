@@ -68,7 +68,7 @@ namespace YummiGameBarWidget
         private XboxGameBarHotkeyWatcher overlayLargeHotkeyWatcher;
         private XboxGameBarHotkeyWatcher overlaySmallHotkeyWatcher;
         private double? manualOverlayHeightTarget;
-        private readonly SemaphoreSlim overlayHeightHotkeyGate = new SemaphoreSlim(1, 1);
+        private long overlayHeightHotkeyGeneration;
         private string youtubePendingPlayerUrl;
         private string youtubeLoadedVideoId;
         private long youtubeLastActionRequest;
@@ -480,11 +480,7 @@ namespace YummiGameBarWidget
         private async Task ApplyOverlayHeightHotkeyAsync(double requestedHeight, string hotkey)
         {
             if (widget == null) return;
-            if (!await overlayHeightHotkeyGate.WaitAsync(0))
-            {
-                App.LogResize("overlay-hotkey-ignored key=" + hotkey + " reason=busy");
-                return;
-            }
+            var generation = Interlocked.Increment(ref overlayHeightHotkeyGeneration);
 
             try
             {
@@ -496,12 +492,18 @@ namespace YummiGameBarWidget
                 var baseMax = new Windows.Foundation.Size(7680, 4320);
                 try { widget.MaxWindowSize = baseMax; } catch { }
 
-                var availableHeight = displayHeight > 0 ? displayHeight : requestedHeight;
-                var targetHeight = Math.Max(baseMin.Height, Math.Min(baseMax.Height, Math.Min(availableHeight, requestedHeight)));
                 var current = widget.WindowBounds;
+                var availableHeight = displayHeight > 0 ? displayHeight : requestedHeight;
+                var requestedTarget = Math.Max(baseMin.Height, Math.Min(baseMax.Height, Math.Min(availableHeight, requestedHeight)));
+                // F11 means "smaller". If the user has already manually made the
+                // widget shorter than 856, never grow it back up just because F11
+                // was pressed. F10 remains an exact 900-DIP target.
+                var targetHeight = requestedHeight <= 856.5
+                    ? Math.Min(current.Height, requestedTarget)
+                    : requestedTarget;
                 var targetWidth = Math.Max(baseMin.Width, Math.Min(baseMax.Width, current.Width));
-                var large = targetHeight >= 899.5;
-                manualOverlayHeightTarget = targetHeight;
+                var large = requestedHeight >= 899.5;
+                manualOverlayHeightTarget = large ? requestedTarget : targetHeight;
 
                 // Use an exact host constraint while the transition is settling.
                 // On this Game Bar host TryResizeWindowAsync can return false even
@@ -522,6 +524,7 @@ namespace YummiGameBarWidget
                 }
 
                 App.LogResize("overlay-hotkey-request key=" + hotkey +
+                    " generation=" + generation +
                     " target=" + FormatSize(targetWidth, targetHeight) +
                     " current=" + FormatRect(current) +
                     " min=" + FormatSize(widget.MinWindowSize) +
@@ -562,6 +565,13 @@ namespace YummiGameBarWidget
                 foreach (var delayMs in settleDelays)
                 {
                     if (widget == null) return;
+                    if (generation != Volatile.Read(ref overlayHeightHotkeyGeneration))
+                    {
+                        App.LogResize("overlay-hotkey-superseded key=" + hotkey +
+                            " generation=" + generation +
+                            " latest=" + Volatile.Read(ref overlayHeightHotkeyGeneration));
+                        return;
+                    }
                     if (Math.Abs(widget.WindowBounds.Height - targetHeight) <= 0.5)
                     {
                         reached = true;
@@ -570,6 +580,13 @@ namespace YummiGameBarWidget
                     await Task.Delay(delayMs);
                 }
                 if (widget == null) return;
+                if (generation != Volatile.Read(ref overlayHeightHotkeyGeneration))
+                {
+                    App.LogResize("overlay-hotkey-superseded key=" + hotkey +
+                        " generation=" + generation +
+                        " latest=" + Volatile.Read(ref overlayHeightHotkeyGeneration));
+                    return;
+                }
                 reached = Math.Abs(widget.WindowBounds.Height - targetHeight) <= 0.5;
 
                 if (reached)
@@ -600,6 +617,7 @@ namespace YummiGameBarWidget
                 var finalBounds = widget.WindowBounds;
                 var finalReached = Math.Abs(finalBounds.Height - targetHeight) <= 0.5;
                 App.LogResize("overlay-hotkey-result key=" + hotkey +
+                    " generation=" + generation +
                     " targetHeight=" + targetHeight.ToString("0.#") +
                     " directAccepted=" + directAccepted +
                     " relayoutAttempted=" + relayoutAttempted +
@@ -613,10 +631,6 @@ namespace YummiGameBarWidget
             catch (Exception ex)
             {
                 App.LogResize("overlay-hotkey-error key=" + hotkey + " error=" + ErrorCode(ex));
-            }
-            finally
-            {
-                overlayHeightHotkeyGate.Release();
             }
         }
 
