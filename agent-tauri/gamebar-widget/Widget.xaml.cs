@@ -146,6 +146,8 @@ namespace YummiGameBarWidget
         private bool hudLoaded;
         private XboxGameBarHotkeyWatcher runtimePanelsHotkeyWatcher;
         private bool overlayUpdateRequestedForForeground;
+        private volatile bool nativeInputDiagnosticsWanted;
+        private bool nativeInputDeactivatedWhileIdle;
         private const double HiddenRuntimePanelOpacity = 0.12;
 
         public Widget()
@@ -154,7 +156,6 @@ namespace YummiGameBarWidget
             CursorMarkersToggle.IsOn = HudPreferences.NativeCursorMarkersVisible;
             ApplyCursorMarkersVisibility(CursorMarkersToggle.IsOn);
             ClickNativeResult.Text = "Agent native input initializing";
-            RootGrid.AddHandler(UIElement.PointerMovedEvent, new PointerEventHandler(RootGrid_PointerMoved), true);
             SetVersionText();
             RestorePanelPositions();
             RestorePanelSizes();
@@ -184,11 +185,7 @@ namespace YummiGameBarWidget
             {
                 App.LogStage("hud-loaded");
                 hudLoaded = true;
-                StartNativeInputLoop();
                 Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
-                Window.Current.CoreWindow.PointerMoved += CoreWindowPointerMoved;
-                Window.Current.CoreWindow.PointerPressed += CoreWindowPointerChanged;
-                Window.Current.CoreWindow.PointerReleased += CoreWindowPointerChanged;
                 Window.Current.Activated += WindowActivated;
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
@@ -215,9 +212,7 @@ namespace YummiGameBarWidget
                 App.LogStage("hud-unloaded");
                 hudLoaded = false;
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
-                Window.Current.CoreWindow.PointerMoved -= CoreWindowPointerMoved;
-                Window.Current.CoreWindow.PointerPressed -= CoreWindowPointerChanged;
-                Window.Current.CoreWindow.PointerReleased -= CoreWindowPointerChanged;
+                nativeInputDiagnosticsWanted = false;
                 Window.Current.Activated -= WindowActivated;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
                 // Keep the diagnostic loop alive across transient Game Bar unload/reload cycles.
@@ -293,7 +288,9 @@ namespace YummiGameBarWidget
             youtubeVolume = configuredVolume;
             if (youtubeReady) _ = SetYoutubeVolumeAsync(configuredVolume);
 
-            if (!string.IsNullOrWhiteSpace(configuredId) && !string.Equals(configuredId, youtubeLoadedVideoId, StringComparison.Ordinal))
+            if (!string.IsNullOrWhiteSpace(configuredId) &&
+                !string.Equals(configuredId, youtubeLoadedVideoId, StringComparison.Ordinal) &&
+                ShouldActivateYoutubeRuntime())
             {
                 youtubeLoadedVideoId = configuredId;
                 _ = LoadYoutubeVideoAsync(configuredId);
@@ -348,8 +345,7 @@ namespace YummiGameBarWidget
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
                 StartRuntimePanelsHotkey();
                 RequestImmediateOverlayUpdateIfForeground("navigated");
-                StartNativeInputLoop();
-                _ = SyncExternalClickTestAsync(true);
+                UpdateNativeInputDiagnosticsMode(true);
                 UpdatePinTutorial();
                 QueueTutorialStateRefresh("navigated");
             }
@@ -434,6 +430,7 @@ namespace YummiGameBarWidget
             YoutubePreferences.Visible = show;
             HudPreferences.NativeInputPanelVisible = show;
             UpdatePanelChrome();
+            ApplyYoutubePreferences();
             App.LogResize("runtime-panels-toggle key=F9 visible=" + show +
                 " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
                 " pinned=" + (widget != null && widget.Pinned));
@@ -1792,6 +1789,8 @@ namespace YummiGameBarWidget
             ApplyPanelChrome("youtube", YoutubePanel, YoutubeMoveBar, YoutubeVideoHost, YoutubeEyeButton, YoutubeResizeHandles, pinnedOnly);
             ApplyClickTestPanelChrome(pinnedOnly);
             UpdateVoiceChatPanelChrome(pinnedOnly);
+            ApplyYoutubeRuntimeVisibility(pinnedOnly);
+            UpdateNativeInputDiagnosticsMode(false);
         }
 
         private void ApplyClickTestPanelChrome(bool pinnedOnly)
@@ -1951,6 +1950,24 @@ namespace YummiGameBarWidget
 
         private long NowMs() => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
+        private void UpdateNativeInputDiagnosticsMode(bool forceRefresh)
+        {
+            var pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+            var wanted = widget != null && HudPreferences.Visible &&
+                (!pinnedOnly || HudPreferences.NativeInputPanelVisible || HudPreferences.NativeCursorMarkersVisible);
+            var changed = nativeInputDiagnosticsWanted != wanted;
+            nativeInputDiagnosticsWanted = wanted;
+            if (wanted)
+            {
+                StartNativeInputLoop();
+                if (changed || forceRefresh) _ = SyncExternalClickTestAsync(true);
+            }
+            else if (changed || forceRefresh)
+            {
+                _ = SyncExternalClickTestAsync(false);
+            }
+        }
+
         private void StartNativeInputLoop()
         {
             if (nativeInputLoopCts != null && !nativeInputLoopCts.IsCancellationRequested) return;
@@ -1961,6 +1978,25 @@ namespace YummiGameBarWidget
             {
                 while (!token.IsCancellationRequested)
                 {
+                    if (!nativeInputDiagnosticsWanted)
+                    {
+                        if (!nativeInputDeactivatedWhileIdle)
+                        {
+                            nativeInputDeactivatedWhileIdle = true;
+                            try
+                            {
+                                await Dispatcher.RunAsync(CoreDispatcherPriority.Low, async () =>
+                                {
+                                    try { await SyncExternalClickTestAsync(false); } catch { }
+                                });
+                            }
+                            catch { }
+                        }
+                        try { await Task.Delay(1000, token); }
+                        catch (TaskCanceledException) { break; }
+                        continue;
+                    }
+                    nativeInputDeactivatedWhileIdle = false;
                     var dispatchAge = nativeInputDispatchQueuedAtMs <= 0 ? 0 : NowMs() - nativeInputDispatchQueuedAtMs;
                     if (Volatile.Read(ref nativeInputDispatchInFlight) != 0 && dispatchAge >= 500)
                     {
@@ -2056,8 +2092,7 @@ namespace YummiGameBarWidget
             // Allow a fresh probe as soon as the host/window becomes active again.
             Interlocked.Exchange(ref nativeInputDispatchInFlight, 0);
             nativeInputDispatchQueuedAtMs = 0;
-            StartNativeInputLoop();
-            _ = SyncExternalClickTestAsync(true);
+            UpdateNativeInputDiagnosticsMode(true);
             UpdatePinTutorial();
             QueueTutorialStateRefresh("window-activated-" + e.WindowActivationState);
         }
@@ -2253,6 +2288,7 @@ namespace YummiGameBarWidget
         {
             if (NativeCursorOverlay != null)
                 NativeCursorOverlay.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
+            UpdateNativeInputDiagnosticsMode(visible);
         }
 
         private void UpdateCursorDiagnosticMarkers(
@@ -2355,6 +2391,21 @@ namespace YummiGameBarWidget
             {
                 App.LogStage("notification-test-error-" + ErrorCode(ex));
             }
+        }
+
+        private bool ShouldActivateYoutubeRuntime()
+        {
+            if (YoutubePreferences.Visible) return true;
+            return widget != null && widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly;
+        }
+
+        private void ApplyYoutubeRuntimeVisibility(bool pinnedOnly)
+        {
+            var renderVideo = !pinnedOnly || YoutubePreferences.Visible;
+            if (youtubeWebView2 != null)
+                youtubeWebView2.Visibility = renderVideo && !youtubeUsingFallback ? Visibility.Visible : Visibility.Collapsed;
+            if (YoutubeFallbackWebView != null)
+                YoutubeFallbackWebView.Visibility = renderVideo && youtubeUsingFallback ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private async Task OpenYoutubeBrowserAsync()

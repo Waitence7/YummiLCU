@@ -942,7 +942,6 @@ fn external_mouse_input_thread() {
     let mut was_down = false;
     let mut was_f9_down = false;
     loop {
-        let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
         let f9_down = unsafe { GetAsyncKeyState(VK_F9.0 as i32) } < 0;
         if f9_down && !was_f9_down {
             if let Ok(mut state) = external_click_test_state().lock() {
@@ -953,6 +952,21 @@ fn external_mouse_input_thread() {
                 ));
             }
         }
+
+        let diagnostics_active = external_click_test_state()
+            .lock()
+            .map(|state| state.active)
+            .unwrap_or(false);
+        if !diagnostics_active {
+            // The widget's official Game Bar hotkey watcher handles F9. Keep only
+            // a low-rate Agent fallback while native hit-testing diagnostics are idle.
+            was_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+            was_f9_down = f9_down;
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
+
+        let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
         use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
         let mut physical = POINT::default();
         let mut logical = POINT::default();
