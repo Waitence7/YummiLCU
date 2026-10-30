@@ -64,6 +64,9 @@ namespace YummiGameBarWidget
         private bool youtubeBrowseMode;
         private double youtubePlayerHeightBeforeBrowse;
         private XboxGameBarWidgetNotificationManager notificationManager;
+        private XboxGameBarHotkeyWatcher overlayLargeHotkeyWatcher;
+        private XboxGameBarHotkeyWatcher overlaySmallHotkeyWatcher;
+        private double? manualOverlayHeightTarget;
         private string youtubePendingPlayerUrl;
         private string youtubeLoadedVideoId;
         private long youtubeLastActionRequest;
@@ -373,6 +376,7 @@ namespace YummiGameBarWidget
                 widget.PinnedChanged += PinnedStateChanged;
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
+                StartOverlaySizeHotkeys();
                 lastDisplayModeForLog = widget.GameBarDisplayMode.ToString();
                 var inheritedMinimum = widget.MinWindowSize;
                 // The HUD manifest baseline is fixed at 640x360. A prior pinned
@@ -400,6 +404,7 @@ namespace YummiGameBarWidget
             App.LogStage("hud-navigated-from");
             if (widget != null)
             {
+                StopOverlaySizeHotkeys();
                 RestorePinnedMinimumConstraint("navigated-from");
                 widget.SettingsClicked -= WidgetSettingsClicked;
                 widget.WindowBoundsChanged -= WidgetStateChanged;
@@ -409,6 +414,156 @@ namespace YummiGameBarWidget
             }
             notificationManager = null;
             base.OnNavigatedFrom(e);
+        }
+
+        private void StartOverlaySizeHotkeys()
+        {
+            if (widget == null) return;
+            try
+            {
+                overlayLargeHotkeyWatcher = XboxGameBarHotkeyWatcher.CreateWatcher(
+                    widget, new List<VirtualKey> { VirtualKey.F10 });
+                overlaySmallHotkeyWatcher = XboxGameBarHotkeyWatcher.CreateWatcher(
+                    widget, new List<VirtualKey> { VirtualKey.F11 });
+                overlayLargeHotkeyWatcher.HotkeySetStateChanged += OverlayLargeHotkeyChanged;
+                overlaySmallHotkeyWatcher.HotkeySetStateChanged += OverlaySmallHotkeyChanged;
+                overlayLargeHotkeyWatcher.Start();
+                overlaySmallHotkeyWatcher.Start();
+                App.LogResize("overlay-hotkeys-started large=F10:900 small=F11:856");
+            }
+            catch (Exception ex)
+            {
+                App.LogResize("overlay-hotkeys-start-error error=" + ErrorCode(ex));
+            }
+        }
+
+        private void StopOverlaySizeHotkeys()
+        {
+            try
+            {
+                if (overlayLargeHotkeyWatcher != null)
+                {
+                    overlayLargeHotkeyWatcher.HotkeySetStateChanged -= OverlayLargeHotkeyChanged;
+                    overlayLargeHotkeyWatcher.Stop();
+                }
+                if (overlaySmallHotkeyWatcher != null)
+                {
+                    overlaySmallHotkeyWatcher.HotkeySetStateChanged -= OverlaySmallHotkeyChanged;
+                    overlaySmallHotkeyWatcher.Stop();
+                }
+            }
+            catch { }
+            overlayLargeHotkeyWatcher = null;
+            overlaySmallHotkeyWatcher = null;
+        }
+
+        private async void OverlayLargeHotkeyChanged(XboxGameBarHotkeyWatcher sender, HotkeySetStateChangedArgs args)
+        {
+            if (!args.HotkeySetDown) return;
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            {
+                _ = ApplyOverlayHeightHotkeyAsync(900.0, "F10");
+            });
+        }
+
+        private async void OverlaySmallHotkeyChanged(XboxGameBarHotkeyWatcher sender, HotkeySetStateChangedArgs args)
+        {
+            if (!args.HotkeySetDown) return;
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+            {
+                _ = ApplyOverlayHeightHotkeyAsync(856.0, "F11");
+            });
+        }
+
+        private async Task ApplyOverlayHeightHotkeyAsync(double requestedHeight, string hotkey)
+        {
+            if (widget == null) return;
+            try
+            {
+                UpdateDisplayMetrics();
+                var baseMin = GetBaseMinWindowSize();
+                var originalMax = widget.MaxWindowSize;
+                var targetHeight = Math.Max(baseMin.Height, Math.Min(originalMax.Height, requestedHeight));
+                var current = widget.WindowBounds;
+                var targetWidth = Math.Max(baseMin.Width, Math.Min(originalMax.Width, current.Width));
+                var large = targetHeight >= 899.5;
+                manualOverlayHeightTarget = targetHeight;
+
+                if (large)
+                {
+                    widget.MinWindowSize = new Windows.Foundation.Size(baseMin.Width, targetHeight);
+                    pinnedTargetMinimumArmed = true;
+                    pinnedTargetMinimumHeight = targetHeight;
+                }
+                else
+                {
+                    widget.MinWindowSize = baseMin;
+                    pinnedTargetMinimumArmed = false;
+                    pinnedTargetMinimumHeight = 0;
+                    if (originalMax.Height > targetHeight + 0.25)
+                        widget.MaxWindowSize = new Windows.Foundation.Size(originalMax.Width, targetHeight);
+                }
+
+                App.LogResize("overlay-hotkey-request key=" + hotkey +
+                    " target=" + FormatSize(targetWidth, targetHeight) +
+                    " current=" + FormatRect(current) +
+                    " min=" + FormatSize(widget.MinWindowSize) +
+                    " max=" + FormatSize(widget.MaxWindowSize) +
+                    " mode=" + widget.GameBarDisplayMode +
+                    " pinned=" + widget.Pinned);
+
+                var directAccepted = await ResizeHudAsync(targetWidth, targetHeight, "hotkey-" + hotkey.ToLowerInvariant());
+                await Task.Delay(120);
+                if (widget == null) return;
+                var afterDirect = widget.WindowBounds;
+                var reached = Math.Abs(afterDirect.Height - targetHeight) <= 0.5;
+
+                if (!reached)
+                {
+                    App.LogResize("overlay-hotkey-relayout key=" + hotkey +
+                        " directAccepted=" + directAccepted +
+                        " before=" + FormatRect(current) +
+                        " afterDirect=" + FormatRect(afterDirect));
+                    try
+                    {
+                        await widget.MinimizeAsync();
+                        await Task.Delay(100);
+                        await widget.RestoreAsync();
+                        await Task.Delay(220);
+                    }
+                    catch (Exception ex)
+                    {
+                        App.LogResize("overlay-hotkey-relayout-error key=" + hotkey +
+                            " error=" + ErrorCode(ex));
+                    }
+                }
+
+                if (!large && widget != null)
+                {
+                    try { widget.MaxWindowSize = originalMax; } catch { }
+                    if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
+                    {
+                        try { await widget.CenterWindowAsync(); await Task.Delay(80); } catch { }
+                    }
+                }
+
+                if (widget == null) return;
+                var finalBounds = widget.WindowBounds;
+                var finalReached = Math.Abs(finalBounds.Height - targetHeight) <= 0.5;
+                App.LogResize("overlay-hotkey-result key=" + hotkey +
+                    " targetHeight=" + targetHeight.ToString("0.#") +
+                    " directAccepted=" + directAccepted +
+                    " reached=" + finalReached +
+                    " actual=" + FormatRect(finalBounds) +
+                    " min=" + FormatSize(widget.MinWindowSize) +
+                    " max=" + FormatSize(widget.MaxWindowSize) +
+                    " mode=" + widget.GameBarDisplayMode +
+                    " pinned=" + widget.Pinned);
+            }
+            catch (Exception ex)
+            {
+                App.LogResize("overlay-hotkey-error key=" + hotkey + " error=" + ErrorCode(ex));
+            }
         }
 
         private async void WidgetSettingsClicked(XboxGameBarWidget sender, object args)
@@ -506,8 +661,18 @@ namespace YummiGameBarWidget
                 {
                     Interlocked.Increment(ref prePinGrowGeneration);
                     prePinGrowScheduled = false;
-                    ArmPinnedTargetMinimum("display-mode-pinned-only");
-                    QueuePinnedGrowToFullscreen("display-mode-pinned-only");
+                    if (manualOverlayHeightTarget.HasValue && manualOverlayHeightTarget.Value <= 856.5)
+                    {
+                        RestorePinnedMinimumConstraint("manual-small-pinned-only");
+                        App.LogResize("pinned-auto-grow-suppressed manualTarget=" +
+                            manualOverlayHeightTarget.Value.ToString("0.#") +
+                            " actual=" + FormatRect(widget.WindowBounds));
+                    }
+                    else
+                    {
+                        ArmPinnedTargetMinimum("display-mode-pinned-only");
+                        QueuePinnedGrowToFullscreen("display-mode-pinned-only");
+                    }
                 }
                 else
                 {
@@ -816,6 +981,13 @@ namespace YummiGameBarWidget
         private async Task NormalizeForegroundGeometryAsync(string reason)
         {
             if (widget == null || widget.GameBarDisplayMode != XboxGameBarDisplayMode.Foreground) return;
+            if (manualOverlayHeightTarget.HasValue && manualOverlayHeightTarget.Value >= 899.5)
+            {
+                App.LogResize("foreground-normalize-skipped reason=" + reason +
+                    " manualTarget=" + manualOverlayHeightTarget.Value.ToString("0.#") +
+                    " actual=" + FormatRect(widget.WindowBounds));
+                return;
+            }
             try
             {
                 RestorePinnedMinimumConstraint("normalize-" + reason);
