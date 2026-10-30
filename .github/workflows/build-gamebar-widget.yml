@@ -39,6 +39,7 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       artifact_name: ${{ steps.pack.outputs.artifact_name }}
+      update_artifact_name: ${{ steps.pack.outputs.update_artifact_name }}
     steps:
       - uses: actions/checkout@v5
 
@@ -231,7 +232,26 @@ jobs:
 
           $zipName = "Yummi-GameBar-Overlay-$env:VERSION.zip"
           Compress-Archive -Path "$stage\*" -DestinationPath $zipName -Force
+
+          # Automatic updates run only on machines that already have the overlay
+          # and its framework dependencies installed. Keep the standalone ZIP
+          # above for first install, but publish a much smaller update ZIP that
+          # contains only the signed package + updater/installer + signing cert.
+          $updateStage = Join-Path $env:RUNNER_TEMP "gamebar-overlay-update"
+          New-Item -ItemType Directory -Force -Path $updateStage | Out-Null
+          Copy-Item $package.FullName (Join-Path $updateStage $packageName) -Force
+          Copy-Item agent-tauri/gamebar-widget/Install-YummiGameBar.ps1 (Join-Path $updateStage 'Install-YummiGameBar.ps1') -Force
+          Copy-Item agent-tauri/gamebar-widget/Update-YummiGameBar.ps1 (Join-Path $updateStage 'Update-YummiGameBar.ps1') -Force
+          if ("${{ steps.signing.outputs.self_signed }}" -eq "true" -and $publicCert -and (Test-Path $publicCert)) {
+            Copy-Item $publicCert (Join-Path $updateStage 'Yummi-GameBar-Overlay.cer') -Force
+          }
+          $updateZipName = "Yummi-GameBar-Update-$env:VERSION.zip"
+          Compress-Archive -Path "$updateStage\*" -DestinationPath $updateZipName -Force
+          Write-Host "Standalone ZIP: $((Get-Item $zipName).Length) bytes"
+          Write-Host "Automatic update ZIP: $((Get-Item $updateZipName).Length) bytes"
+
           "artifact_name=$zipName" >> $env:GITHUB_OUTPUT
+          "update_artifact_name=$updateZipName" >> $env:GITHUB_OUTPUT
           "package_name=$packageName" >> $env:GITHUB_OUTPUT
 
       - name: Build signed Game Bar update manifest
@@ -239,7 +259,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
           VERSION: ${{ steps.meta.outputs.version }}
-          ZIP: ${{ steps.pack.outputs.artifact_name }}
+          ZIP: ${{ steps.pack.outputs.update_artifact_name }}
         run: |
           if (-not $env:YUMMI_AGENT_MANIFEST_SIGNING_KEY) { throw "YUMMI_AGENT_MANIFEST_SIGNING_KEY is required" }
           $tag = "gamebar-v$env:VERSION"
@@ -250,6 +270,7 @@ jobs:
           name: yummi-gamebar-overlay-${{ steps.meta.outputs.version }}
           path: |
             ${{ steps.pack.outputs.artifact_name }}
+            ${{ steps.pack.outputs.update_artifact_name }}
             gamebar-version.json
           retention-days: 14
 
@@ -259,13 +280,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.meta.outputs.version }}
           ZIP: ${{ steps.pack.outputs.artifact_name }}
+          UPDATE_ZIP: ${{ steps.pack.outputs.update_artifact_name }}
         run: |
           $tag = "gamebar-v$env:VERSION"
           if (-not (gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null)) {
             gh release create $tag --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Yummi Game Bar Overlay $env:VERSION" --notes "Yummi Game Bar Overlay $env:VERSION." --prerelease
           }
-          gh release upload $tag $env:ZIP gamebar-version.json --repo $env:GITHUB_REPOSITORY --clobber
-          Write-Host "Deployed Game Bar overlay + signed manifest to $tag"
+          gh release upload $tag $env:ZIP $env:UPDATE_ZIP gamebar-version.json --repo $env:GITHUB_REPOSITORY --clobber
+          Write-Host "Deployed Game Bar standalone + slim update + signed manifest to $tag"
 
       - name: Cleanup certificate
         if: always()
