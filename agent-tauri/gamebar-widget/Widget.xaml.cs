@@ -380,14 +380,11 @@ namespace YummiGameBarWidget
 
         private async void DisplayModeChanged(XboxGameBarWidget sender, object args)
         {
-            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () =>
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                // Restored legacy Game Bar sizing behavior (c11d9bd): once the
-                // pinned widget returns to PinnedOnly, fit it to the display once.
-                // Do not run any foreground nudge or repeated coverage recovery.
-                if (!HudPreferences.CompactLayout && widget.Pinned &&
-                    widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
-                    await FitToDisplayAsync();
+                // Restore the later legacy behavior from c391a4b: Game Bar owns
+                // the saved widget size and position. Opening/closing Win+G must
+                // never overwrite a size the user adjusted through the host UI.
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
