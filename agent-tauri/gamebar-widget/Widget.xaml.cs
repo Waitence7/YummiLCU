@@ -133,6 +133,9 @@ namespace YummiGameBarWidget
         private int pinnedGrowGeneration;
         private bool pinnedGrowInFlight;
         private bool pinnedGrowScheduled;
+        private int prePinGrowGeneration;
+        private bool prePinGrowScheduled;
+        private bool prePinGrowInFlight;
         private bool pendingPinnedFitRequest;
         private string lastDisplayModeForLog = "unknown";
         private Windows.Foundation.Size baseMinWindowSize;
@@ -195,15 +198,14 @@ namespace YummiGameBarWidget
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
                 EnsureDefaultVoiceChatPosition();
-                // Let Xbox Game Bar own the initial/restored window geometry. The
-                // manifest already starts large; probing for an accepted maximum while
-                // Game Bar chrome is visible can falsely settle around 1435x820.
-                if (!HudPreferences.InitialFitDone)
-                    HudPreferences.MarkInitialFitDone();
+                // Resize BEFORE pinning. TryResizeWindowAsync is rejected once this
+                // widget is pinned on the affected Game Bar host, while the unpinned
+                // foreground window remains user-resizable. Keep the current width and
+                // probe only height so the 1438-vs-1440 host width does not block it.
                 UpdateInputState();
                 UpdatePinTutorial();
                 QueueTutorialStateRefresh("loaded");
-                MaybeQueuePinnedGrow("loaded-pinned-only");
+                MaybeQueuePrePinGrow("loaded", false);
                 StartSnapshotWebSocketLoop();
                 timer.Start();
                 // One immediate legacy fetch keeps compatibility with older Agents.
@@ -227,6 +229,8 @@ namespace YummiGameBarWidget
                 _ = SyncExternalClickTestAsync(false);
                 Interlocked.Increment(ref tutorialRefreshGeneration);
                 Interlocked.Increment(ref pinnedGrowGeneration);
+                Interlocked.Increment(ref prePinGrowGeneration);
+                prePinGrowScheduled = false;
                 StopSnapshotWebSocketLoop();
                 timer.Stop();
             };
@@ -331,10 +335,11 @@ namespace YummiGameBarWidget
                             {
                                 _ = FitToDisplayAsync(true);
                             }
-                            else if (widget != null && widget.Pinned)
+                            else if (widget != null && !widget.Pinned &&
+                                     widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
                             {
                                 pendingPinnedFitRequest = false;
-                                QueuePinnedGrowToFullscreen("fit-request-pinned");
+                                QueuePrePinGrowToFullscreen("fit-request", true);
                             }
                             else
                             {
@@ -343,7 +348,7 @@ namespace YummiGameBarWidget
                                 App.LogResize("fit-request-deferred current=" + FormatRect(current) +
                                     " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
                                     " pinned=" + (widget != null && widget.Pinned) +
-                                    " reason=wait-for-pinned-only");
+                                    " reason=requires-unpinned-foreground");
                             }
                         }
                     }
@@ -429,8 +434,23 @@ namespace YummiGameBarWidget
                 App.LogResize("pinned-changed pinned=" + (widget != null && widget.Pinned) +
                     " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
                     " current=" + FormatRect(current));
-                if (widget != null && !widget.Pinned) RestorePinnedMinimumConstraint("unpinned");
-                MaybeQueuePinnedGrow("pinned-changed");
+                if (widget != null && !widget.Pinned)
+                {
+                    RestorePinnedMinimumConstraint("unpinned");
+                    var forceFit = pendingPinnedFitRequest;
+                    if (forceFit) pendingPinnedFitRequest = false;
+                    if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
+                        QueuePrePinGrowToFullscreen("unpinned", forceFit);
+                }
+                else
+                {
+                    // Pinning ends the only host state where programmatic resize is
+                    // accepted on the affected machines. Cancel any unfinished pre-pin
+                    // probe instead of hammering the pinned window with rejected calls.
+                    Interlocked.Increment(ref prePinGrowGeneration);
+                    prePinGrowScheduled = false;
+                    App.LogResize("prepin-grow-cancelled reason=pinned current=" + FormatRect(current));
+                }
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
@@ -452,22 +472,173 @@ namespace YummiGameBarWidget
 
                 if (widget == null || !widget.Pinned)
                 {
-                    // Only unpinned/edit state restores the normal manifest minimum.
-                    // A pinned widget may still be in Foreground while the Game Bar
-                    // chrome is open; keep the constraint active so the host can grow
-                    // immediately and preserve it when transitioning to PinnedOnly.
                     RestorePinnedMinimumConstraint("foreground-unpinned");
                     Interlocked.Increment(ref pinnedGrowGeneration);
                     pinnedGrowScheduled = false;
+                    if (widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
+                    {
+                        var forceFit = pendingPinnedFitRequest;
+                        if (forceFit) pendingPinnedFitRequest = false;
+                        QueuePrePinGrowToFullscreen("display-mode-foreground", forceFit);
+                    }
                 }
                 else
                 {
-                    MaybeQueuePinnedGrow("display-mode-" + nextMode);
+                    // Pinned TryResizeWindowAsync/MinWindowSize changes are diagnostic
+                    // only on this host; actual automatic sizing must happen pre-pin.
+                    Interlocked.Increment(ref prePinGrowGeneration);
+                    prePinGrowScheduled = false;
                 }
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
             });
+        }
+
+        private void MaybeQueuePrePinGrow(string reason, bool force)
+        {
+            if (widget == null || !hudLoaded || HudPreferences.CompactLayout || widget.Pinned ||
+                widget.GameBarDisplayMode != XboxGameBarDisplayMode.Foreground) return;
+            if (!force && !HudPreferences.PrePinFitNeeded) return;
+            QueuePrePinGrowToFullscreen(reason, force);
+        }
+
+        private void QueuePrePinGrowToFullscreen(string reason, bool force = false)
+        {
+            if (widget == null || !hudLoaded || HudPreferences.CompactLayout || widget.Pinned ||
+                widget.GameBarDisplayMode != XboxGameBarDisplayMode.Foreground) return;
+            if (!force && !HudPreferences.PrePinFitNeeded) return;
+            if (prePinGrowScheduled)
+            {
+                App.LogResize("prepin-grow-already-queued reason=" + reason +
+                    " generation=" + Volatile.Read(ref prePinGrowGeneration));
+                return;
+            }
+            prePinGrowScheduled = true;
+            var generation = Interlocked.Increment(ref prePinGrowGeneration);
+            App.LogResize("prepin-grow-queued generation=" + generation +
+                " trigger=" + reason +
+                " current=" + FormatRect(widget.WindowBounds) +
+                " mode=" + widget.GameBarDisplayMode +
+                " pinned=" + widget.Pinned);
+            _ = GrowPrePinToFullscreenAsync(generation);
+        }
+
+        private async Task GrowPrePinToFullscreenAsync(int generation)
+        {
+            var delays = new[] { 80, 180, 350, 700, 1200 };
+            try
+            {
+                foreach (var delayMs in delays)
+                {
+                    await Task.Delay(delayMs);
+                    if (generation != Volatile.Read(ref prePinGrowGeneration)) return;
+                    if (widget == null || !hudLoaded || HudPreferences.CompactLayout || widget.Pinned ||
+                        widget.GameBarDisplayMode != XboxGameBarDisplayMode.Foreground) return;
+                    if (prePinGrowInFlight) continue;
+
+                    prePinGrowInFlight = true;
+                    try
+                    {
+                        UpdateDisplayMetrics();
+                        var current = widget.WindowBounds;
+                        var maximum = widget.MaxWindowSize;
+                        var minimum = widget.MinWindowSize;
+                        var targetHeight = Math.Min(maximum.Height, Math.Min(displayHeight, 900.0));
+                        var width = Math.Max(minimum.Width, Math.Min(maximum.Width, current.Width));
+                        fitTargetWidth = width;
+                        fitTargetHeight = targetHeight;
+
+                        App.LogResize("prepin-grow-attempt delayMs=" + delayMs +
+                            " current=" + FormatRect(current) +
+                            " target=" + FormatSize(width, targetHeight) +
+                            " display=" + FormatSize(displayWidth, displayHeight) +
+                            " min=" + FormatSize(minimum) +
+                            " max=" + FormatSize(maximum));
+
+                        if (current.Height >= targetHeight - 0.25)
+                        {
+                            resizeAccepted = true;
+                            fittedWidth = current.Width;
+                            fittedHeight = current.Height;
+                            HudPreferences.MarkPrePinFitDone();
+                            return;
+                        }
+
+                        async Task<bool> ProbeHeightAsync(double candidate)
+                        {
+                            if (generation != Volatile.Read(ref prePinGrowGeneration) || widget == null ||
+                                widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.Foreground) return false;
+                            var before = widget.WindowBounds;
+                            var apiAccepted = await ResizeHudAsync(width, candidate, "prepin-grow-probe");
+                            await Task.Delay(80);
+                            if (widget == null) return false;
+                            var after = widget.WindowBounds;
+                            var actualAccepted = after.Height >= candidate - 0.25 && after.Height > before.Height + 0.25;
+                            App.LogResize("prepin-grow-probe-result candidate=" + candidate.ToString("0.#") +
+                                " apiAccepted=" + apiAccepted +
+                                " actualAccepted=" + actualAccepted +
+                                " before=" + FormatRect(before) +
+                                " actual=" + FormatRect(after));
+                            return actualAccepted;
+                        }
+
+                        if (await ProbeHeightAsync(targetHeight))
+                        {
+                            var actual = widget.WindowBounds;
+                            resizeAccepted = true;
+                            fittedWidth = actual.Width;
+                            fittedHeight = actual.Height;
+                            HudPreferences.MarkPrePinFitDone();
+                            return;
+                        }
+
+                        var low = current.Height;
+                        var high = targetHeight;
+                        for (int attempt = 0; attempt < 7 && high - low > 1.0; attempt++)
+                        {
+                            var mid = Math.Floor((low + high) / 2.0);
+                            if (mid <= low) break;
+                            if (await ProbeHeightAsync(mid))
+                                low = Math.Max(low, widget.WindowBounds.Height);
+                            else
+                                high = mid;
+                        }
+
+                        var finalBounds = widget.WindowBounds;
+                        resizeAccepted = finalBounds.Height > current.Height + 0.25;
+                        fittedWidth = finalBounds.Width;
+                        fittedHeight = finalBounds.Height;
+                        App.LogResize("prepin-grow-result delayMs=" + delayMs +
+                            " start=" + FormatRect(current) +
+                            " actual=" + FormatRect(finalBounds) +
+                            " targetHeight=" + targetHeight.ToString("0.#") +
+                            " grew=" + resizeAccepted);
+                        if (resizeAccepted)
+                        {
+                            HudPreferences.MarkPrePinFitDone();
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        App.LogResize("prepin-grow-error delayMs=" + delayMs + " error=" + ErrorCode(ex));
+                    }
+                    finally
+                    {
+                        prePinGrowInFlight = false;
+                    }
+                }
+
+                // Avoid retrying on every activation if this host rejects the entire
+                // unpinned path. Development reset or an explicit fit request can retry.
+                HudPreferences.MarkPrePinFitDone();
+            }
+            finally
+            {
+                if (generation == Volatile.Read(ref prePinGrowGeneration))
+                    prePinGrowScheduled = false;
+            }
         }
 
         private void MaybeQueuePinnedGrow(string reason)
@@ -632,7 +803,8 @@ namespace YummiGameBarWidget
                 await Task.Delay(120);
                 if (widget == null) return false;
                 var after = widget.WindowBounds;
-                var accepted = after.Height >= candidate - 1.0;
+                var accepted = after.Height >= candidate - 0.25 &&
+                    (candidate <= beforeBounds.Height + 0.25 || after.Height > beforeBounds.Height + 0.25);
                 App.LogResize("min-constraint-result candidate=" + candidate.ToString("0.#") +
                     " accepted=" + accepted +
                     " actual=" + FormatRect(after) +
@@ -673,17 +845,16 @@ namespace YummiGameBarWidget
             if (widget == null || fittingDisplay) return;
             if (!HudPreferences.CompactLayout && !widget.Pinned)
             {
-                pendingPinnedFitRequest = true;
-                App.LogResize("fit-deferred current=" + FormatRect(widget.WindowBounds) +
-                    " mode=" + widget.GameBarDisplayMode +
-                    " pinned=" + widget.Pinned +
-                    " reason=unpinned");
+                pendingPinnedFitRequest = false;
+                QueuePrePinGrowToFullscreen("fit-request", true);
                 return;
             }
             if (!HudPreferences.CompactLayout && widget.Pinned)
             {
-                pendingPinnedFitRequest = false;
-                QueuePinnedGrowToFullscreen("fit-direct-pinned");
+                pendingPinnedFitRequest = true;
+                App.LogResize("fit-deferred current=" + FormatRect(widget.WindowBounds) +
+                    " mode=" + widget.GameBarDisplayMode +
+                    " pinned=true reason=requires-unpinned-foreground");
                 return;
             }
             fittingDisplay = true;

@@ -109,6 +109,16 @@ namespace YummiGameBarWidget
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("HudInitialFitDone", out value) && value is bool && (bool)value; }
         }
         internal static void MarkInitialFitDone() { Set("HudInitialFitDone", true); }
+        internal static bool PrePinFitNeeded
+        {
+            get
+            {
+                object value;
+                return !ApplicationData.Current.LocalSettings.Values.TryGetValue("HudPrePinFitRevision", out value) ||
+                    !(value is int) || (int)value < 1;
+            }
+        }
+        internal static void MarkPrePinFitDone() { Set("HudPrePinFitRevision", 1); }
         internal static bool PinTutorialCompleted
         {
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("HudPinTutorialCompleted", out value) && value is bool && (bool)value; }
