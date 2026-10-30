@@ -199,6 +199,8 @@ namespace YummiGameBarWidget
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
+                if (widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
+                    _ = NormalizeForegroundGeometryAsync("loaded");
                 EnsureDefaultVoiceChatPosition();
                 // Resize BEFORE pinning. TryResizeWindowAsync is rejected once this
                 // widget is pinned on the affected Game Bar host, while the unpinned
@@ -373,9 +375,14 @@ namespace YummiGameBarWidget
                 widget.ClickThroughEnabledChanged += WidgetStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
                 lastDisplayModeForLog = widget.GameBarDisplayMode.ToString();
-                baseMinWindowSize = widget.MinWindowSize;
+                var inheritedMinimum = widget.MinWindowSize;
+                // The HUD manifest baseline is fixed at 640x360. A prior pinned
+                // instance may hand the next activation an inherited 640x900
+                // constraint; never mistake that transient target for the baseline.
+                baseMinWindowSize = new Windows.Foundation.Size(640, 360);
                 baseMinWindowSizeCaptured = true;
-                App.LogResize("resize-limits-captured min=" + FormatSize(baseMinWindowSize) +
+                App.LogResize("resize-limits-captured inheritedMin=" + FormatSize(inheritedMinimum) +
+                    " baseMin=" + FormatSize(baseMinWindowSize) +
                     " max=" + FormatSize(widget.MaxWindowSize));
                 StartNativeInputLoop();
                 _ = SyncExternalClickTestAsync(true);
@@ -448,10 +455,13 @@ namespace YummiGameBarWidget
                 {
                     Interlocked.Increment(ref prePinGrowGeneration);
                     prePinGrowScheduled = false;
-                    ArmPinnedTargetMinimum("pinned-changed");
+                    // Keep Foreground in an editable geometry. The 900-DIP target is
+                    // armed only after Game Bar closes into PinnedOnly so the host
+                    // title/pin controls cannot be pushed above the display.
+                    RestorePinnedMinimumConstraint("pinned-foreground");
                     App.LogResize("prepin-grow-cancelled reason=pinned current=" + FormatRect(current) +
                         " minNow=" + (widget != null ? FormatSize(widget.MinWindowSize) : "none"));
-                    QueuePinnedGrowToFullscreen("pinned-changed");
+                    _ = NormalizeForegroundGeometryAsync("pinned-changed");
                 }
                 UpdateDisplayState();
                 UpdateInputState();
@@ -472,25 +482,37 @@ namespace YummiGameBarWidget
                     " pendingFit=" + pendingPinnedFitRequest);
                 lastDisplayModeForLog = nextMode;
 
-                if (widget == null || !widget.Pinned)
+                if (widget == null)
                 {
-                    RestorePinnedMinimumConstraint("foreground-unpinned");
                     Interlocked.Increment(ref pinnedGrowGeneration);
                     pinnedGrowScheduled = false;
-                    if (widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
+                }
+                else if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.Foreground)
+                {
+                    // Foreground is the edit state: restore the manifest minimum and
+                    // ask Game Bar to place the widget where its title/pin bar remains
+                    // accessible. Full-height constraints belong to PinnedOnly only.
+                    RestorePinnedMinimumConstraint("foreground");
+                    Interlocked.Increment(ref pinnedGrowGeneration);
+                    pinnedGrowScheduled = false;
+                    _ = NormalizeForegroundGeometryAsync("display-mode-foreground");
+                    if (!widget.Pinned)
                     {
                         var forceFit = pendingPinnedFitRequest;
                         if (forceFit) pendingPinnedFitRequest = false;
                         QueuePrePinGrowToFullscreen("display-mode-foreground", forceFit);
                     }
                 }
-                else
+                else if (widget.Pinned && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
                 {
                     Interlocked.Increment(ref prePinGrowGeneration);
                     prePinGrowScheduled = false;
-                    ArmPinnedTargetMinimum("display-mode-" + nextMode);
-                    if (widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
-                        QueuePinnedGrowToFullscreen("display-mode-pinned-only");
+                    ArmPinnedTargetMinimum("display-mode-pinned-only");
+                    QueuePinnedGrowToFullscreen("display-mode-pinned-only");
+                }
+                else
+                {
+                    RestorePinnedMinimumConstraint("non-pinned-only");
                 }
                 UpdateDisplayState();
                 UpdateInputState();
@@ -621,13 +643,14 @@ namespace YummiGameBarWidget
                         {
                             if (finalBounds.Height < targetHeight - 0.25)
                             {
-                                // Foreground chrome can cap the visible height (867 on
-                                // a 900-DIP display). Keep the target minimum armed so
-                                // the host can finish growing after pin/PinnedOnly.
-                                ArmPinnedTargetMinimum("prepin-plateau", targetHeight);
+                                // Foreground chrome caps the usable height. Keep the
+                                // normal minimum here so the title/pin controls remain
+                                // reachable; PinnedOnly will arm the 900-DIP target.
+                                RestorePinnedMinimumConstraint("prepin-plateau");
                                 App.LogResize("prepin-grow-plateau actual=" + FormatRect(finalBounds) +
                                     " targetHeight=" + targetHeight.ToString("0.#") +
                                     " minNow=" + FormatSize(widget.MinWindowSize));
+                                await NormalizeForegroundGeometryAsync("prepin-plateau");
                             }
                             HudPreferences.MarkPrePinFitDone();
                             return;
@@ -783,14 +806,38 @@ namespace YummiGameBarWidget
 
         private Windows.Foundation.Size GetBaseMinWindowSize()
         {
-            if (baseMinWindowSizeCaptured) return baseMinWindowSize;
-            if (widget != null)
+            if (!baseMinWindowSizeCaptured)
             {
-                baseMinWindowSize = widget.MinWindowSize;
+                baseMinWindowSize = new Windows.Foundation.Size(640, 360);
                 baseMinWindowSizeCaptured = true;
-                return baseMinWindowSize;
             }
-            return new Windows.Foundation.Size(640, 360);
+            return baseMinWindowSize;
+        }
+
+        private async Task NormalizeForegroundGeometryAsync(string reason)
+        {
+            if (widget == null || widget.GameBarDisplayMode != XboxGameBarDisplayMode.Foreground) return;
+            try
+            {
+                RestorePinnedMinimumConstraint("normalize-" + reason);
+                var before = widget.WindowBounds;
+                App.LogResize("foreground-center-request reason=" + reason +
+                    " before=" + FormatRect(before) +
+                    " min=" + FormatSize(widget.MinWindowSize) +
+                    " pinned=" + widget.Pinned);
+                await widget.CenterWindowAsync();
+                await Task.Delay(80);
+                if (widget == null) return;
+                App.LogResize("foreground-center-result reason=" + reason +
+                    " before=" + FormatRect(before) +
+                    " actual=" + FormatRect(widget.WindowBounds) +
+                    " min=" + FormatSize(widget.MinWindowSize) +
+                    " pinned=" + widget.Pinned);
+            }
+            catch (Exception ex)
+            {
+                App.LogResize("foreground-center-error reason=" + reason + " error=" + ErrorCode(ex));
+            }
         }
 
         private void RestorePinnedMinimumConstraint(string reason)
