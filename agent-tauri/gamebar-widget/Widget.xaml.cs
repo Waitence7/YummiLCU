@@ -331,11 +331,10 @@ namespace YummiGameBarWidget
                             {
                                 _ = FitToDisplayAsync(true);
                             }
-                            else if (widget != null && widget.Pinned &&
-                                     widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                            else if (widget != null && widget.Pinned)
                             {
                                 pendingPinnedFitRequest = false;
-                                QueuePinnedGrowToFullscreen("fit-request-pinned-only");
+                                QueuePinnedGrowToFullscreen("fit-request-pinned");
                             }
                             else
                             {
@@ -451,18 +450,19 @@ namespace YummiGameBarWidget
                     " pendingFit=" + pendingPinnedFitRequest);
                 lastDisplayModeForLog = nextMode;
 
-                if (widget == null || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
+                if (widget == null || !widget.Pinned)
                 {
-                    // Foreground needs the normal manifest minimum so the user can
-                    // freely drag/edit the widget. Any pinned-only growth constraint
-                    // is removed as soon as Game Bar opens.
-                    RestorePinnedMinimumConstraint("foreground");
+                    // Only unpinned/edit state restores the normal manifest minimum.
+                    // A pinned widget may still be in Foreground while the Game Bar
+                    // chrome is open; keep the constraint active so the host can grow
+                    // immediately and preserve it when transitioning to PinnedOnly.
+                    RestorePinnedMinimumConstraint("foreground-unpinned");
                     Interlocked.Increment(ref pinnedGrowGeneration);
                     pinnedGrowScheduled = false;
                 }
                 else
                 {
-                    MaybeQueuePinnedGrow("display-mode-pinned-only");
+                    MaybeQueuePinnedGrow("display-mode-" + nextMode);
                 }
                 UpdateDisplayState();
                 UpdateInputState();
@@ -472,8 +472,7 @@ namespace YummiGameBarWidget
 
         private void MaybeQueuePinnedGrow(string reason)
         {
-            if (widget == null || !hudLoaded || HudPreferences.CompactLayout || !widget.Pinned ||
-                widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly) return;
+            if (widget == null || !hudLoaded || HudPreferences.CompactLayout || !widget.Pinned) return;
             pendingPinnedFitRequest = false;
             QueuePinnedGrowToFullscreen(reason);
         }
@@ -510,7 +509,7 @@ namespace YummiGameBarWidget
                     await Task.Delay(delayMs);
                     if (generation != Volatile.Read(ref pinnedGrowGeneration)) return;
                     if (widget == null || !hudLoaded || HudPreferences.CompactLayout ||
-                        !widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly) return;
+                        !widget.Pinned) return;
                     if (pinnedGrowInFlight) continue;
 
                     pinnedGrowInFlight = true;
@@ -609,7 +608,7 @@ namespace YummiGameBarWidget
             async Task<bool> ProbeAsync(double candidate)
             {
                 if (generation != Volatile.Read(ref pinnedGrowGeneration) || widget == null ||
-                    !widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly) return false;
+                    !widget.Pinned) return false;
                 candidate = Math.Max(baseMin.Height, Math.Min(targetHeight, candidate));
                 var beforeBounds = widget.WindowBounds;
                 var beforeMin = widget.MinWindowSize;
@@ -672,14 +671,19 @@ namespace YummiGameBarWidget
         private async Task FitToDisplayAsync(bool centerForPinSetup = false)
         {
             if (widget == null || fittingDisplay) return;
-            if (!HudPreferences.CompactLayout &&
-                (!widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly))
+            if (!HudPreferences.CompactLayout && !widget.Pinned)
             {
                 pendingPinnedFitRequest = true;
                 App.LogResize("fit-deferred current=" + FormatRect(widget.WindowBounds) +
                     " mode=" + widget.GameBarDisplayMode +
                     " pinned=" + widget.Pinned +
-                    " reason=foreground-or-unpinned");
+                    " reason=unpinned");
+                return;
+            }
+            if (!HudPreferences.CompactLayout && widget.Pinned)
+            {
+                pendingPinnedFitRequest = false;
+                QueuePinnedGrowToFullscreen("fit-direct-pinned");
                 return;
             }
             fittingDisplay = true;
