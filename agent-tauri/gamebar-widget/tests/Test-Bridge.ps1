@@ -46,7 +46,18 @@ public static class BridgeTests {
       throw new Exception("A height limit must not unnecessarily reduce width");
     var rejected = await HudGeometry.FitLargestAsync(1440, 900, 640, 360, (w, h) => Task.FromResult(false));
     if (rejected.Accepted) throw new Exception("Rejected minimum must not report fitting success");
-    Console.WriteLine("PASS: bounded maximum fit, exact-size fast path, and rejected minimum");
+
+    double minUpwardProbeHeight = double.MaxValue;
+    var upward = await HudGeometry.FitLargestUpwardAsync(1440, 900, 1435, 820, (w, h) => {
+      minUpwardProbeHeight = Math.Min(minUpwardProbeHeight, h);
+      return Task.FromResult(w <= 1440 && h <= 878);
+    });
+    if (!upward.Accepted || upward.Width != 1440 || upward.Height != 878 || minUpwardProbeHeight < 820)
+      throw new Exception("Upward fitting must grow from the current host size without shrinking below it");
+    var upwardExact = await HudGeometry.FitLargestUpwardAsync(1440, 900, 1435, 856, (w, h) => Task.FromResult(true));
+    if (!upwardExact.Accepted || upwardExact.Width != 1440 || upwardExact.Height != 900)
+      throw new Exception("Upward fitting must reach 900 when the host accepts it");
+    Console.WriteLine("PASS: bounded fit, upward-only growth, exact-size fast path, and rejected minimum");
     string name = @"LOCAL\YummiBridgeTest-" + Guid.NewGuid().ToString("N");
     using (var server = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous)) {
       var connected = server.WaitForConnectionAsync();

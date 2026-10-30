@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -130,6 +130,8 @@ namespace YummiGameBarWidget
         private long lastTutorialResetGeneration;
         private bool tutorialResetAwaitingUnpin;
         private int tutorialRefreshGeneration;
+        private int pinnedGrowGeneration;
+        private bool pinnedGrowInFlight;
         private CancellationTokenSource snapshotWebSocketLoopCts;
         private MessageWebSocket snapshotWebSocket;
         private volatile bool snapshotWebSocketConnected;
@@ -204,6 +206,7 @@ namespace YummiGameBarWidget
                 // The watchdog will recover it if the host pauses or drops dispatcher work.
                 _ = SyncExternalClickTestAsync(false);
                 Interlocked.Increment(ref tutorialRefreshGeneration);
+                Interlocked.Increment(ref pinnedGrowGeneration);
                 StopSnapshotWebSocketLoop();
                 timer.Stop();
             };
@@ -377,19 +380,89 @@ namespace YummiGameBarWidget
 
         private async void DisplayModeChanged(XboxGameBarWidget sender, object args)
         {
-            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, async () =>
+            await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                // Grow-only recovery: whenever Game Bar returns to pinned-only mode,
-                // binary-search upward from the CURRENT accepted size. This can make
-                // progress after transient title/home chrome disappears, but can never
-                // shrink a size the user already reached manually.
+                // 856 DIP is a known-good pinned height. 900 DIP is the desired
+                // fullscreen target but may or may not be accepted by this Game Bar
+                // host. Retry after PinnedOnly settles, then binary-search only the
+                // 856..900 range. Never shrink a larger manual size.
                 if (!HudPreferences.CompactLayout && widget.Pinned &&
                     widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
-                    await FitToDisplayAsync();
+                    QueuePinnedGrowToFullscreen();
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
             });
+        }
+
+        private void QueuePinnedGrowToFullscreen()
+        {
+            var generation = Interlocked.Increment(ref pinnedGrowGeneration);
+            _ = GrowPinnedToFullscreenAsync(generation);
+        }
+
+        private async Task GrowPinnedToFullscreenAsync(int generation)
+        {
+            // The first PinnedOnly callback can still inherit the ~820 DIP chrome
+            // restriction. Retry after the host settles instead of accepting 820 as
+            // a permanent maximum. 856 is known to be reachable on this layout.
+            var delays = new[] { 80, 180, 350, 700, 1200, 2000 };
+            foreach (var delayMs in delays)
+            {
+                await Task.Delay(delayMs);
+                if (generation != Volatile.Read(ref pinnedGrowGeneration)) return;
+                if (widget == null || !hudLoaded || HudPreferences.CompactLayout ||
+                    !widget.Pinned || widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly) return;
+                if (pinnedGrowInFlight) continue;
+
+                pinnedGrowInFlight = true;
+                try
+                {
+                    UpdateDisplayMetrics();
+                    var maximum = widget.MaxWindowSize;
+                    var current = widget.WindowBounds;
+                    var targetWidth = Math.Min(maximum.Width, displayWidth);
+                    var targetHeight = Math.Min(maximum.Height, Math.Min(displayHeight, 900.0));
+                    var knownGoodHeight = Math.Min(targetHeight, 856.0);
+
+                    // Preserve any manual size already above the known-good height.
+                    // Otherwise first try to establish 856 before probing toward 900.
+                    var baseWidth = Math.Min(targetWidth, Math.Max(current.Width, 1.0));
+                    var baseHeight = Math.Min(targetHeight, Math.Max(current.Height, 1.0));
+                    if (baseHeight < knownGoodHeight)
+                    {
+                        var safeAccepted = await ResizeHudAsync(baseWidth, knownGoodHeight);
+                        App.LogStage("pinned-grow-safe delayMs=" + delayMs +
+                            " accepted=" + safeAccepted + " from=" + current.Width.ToString("0.#") + "x" + current.Height.ToString("0.#") +
+                            " safe=" + baseWidth.ToString("0.#") + "x" + knownGoodHeight.ToString("0.#"));
+                        if (!safeAccepted) continue;
+                        baseHeight = knownGoodHeight;
+                        current = widget.WindowBounds;
+                    }
+
+                    var result = await HudGeometry.FitLargestUpwardAsync(
+                        targetWidth, targetHeight, current.Width, Math.Max(baseHeight, current.Height), ResizeHudAsync);
+                    resizeAccepted = result.Accepted;
+                    fittedWidth = result.Width;
+                    fittedHeight = result.Height;
+                    fitTargetWidth = targetWidth;
+                    fitTargetHeight = targetHeight;
+                    UpdateDisplayState();
+                    App.LogStage("pinned-grow-probe delayMs=" + delayMs +
+                        " result=" + result.Width.ToString("0.#") + "x" + result.Height.ToString("0.#") +
+                        " target=" + targetWidth.ToString("0.#") + "x" + targetHeight.ToString("0.#"));
+
+                    if (result.Width >= targetWidth - 1.0 && result.Height >= targetHeight - 1.0) return;
+                }
+                catch (Exception ex)
+                {
+                    App.LogStage("pinned-grow-error delayMs=" + delayMs + " error=" + ErrorCode(ex));
+                }
+                finally
+                {
+                    pinnedGrowInFlight = false;
+                }
+            }
         }
 
         private async Task FitToDisplayAsync(bool centerForPinSetup = false)
