@@ -1857,13 +1857,14 @@ namespace YummiGameBarWidget
         {
             var runtimeVisible = HudPreferences.NativeInputPanelVisible;
             var expanded = HudPreferences.NativeInputPanelExpanded;
-            var ghosted = pinnedOnly && (!runtimeVisible || !expanded);
+            var hidden = !runtimeVisible || !expanded;
 
-            // Edit mode always exposes the panel. In the real pinned overlay a
-            // hidden panel remains as a faint footprint instead of disappearing.
-            ClickNativePanel.Visibility = Visibility.Visible;
-            ClickNativePanel.Opacity = ghosted ? HiddenRuntimePanelOpacity : 1.0;
-            ClickNativePanel.IsHitTestVisible = !pinnedOnly || !ghosted;
+            // Win+G is edit mode: keep hidden panels visible as a faint footprint so
+            // they can still be found and restored. In the real pinned overlay,
+            // hidden panels must disappear completely and never intercept input.
+            ClickNativePanel.Visibility = pinnedOnly && hidden ? Visibility.Collapsed : Visibility.Visible;
+            ClickNativePanel.Opacity = !pinnedOnly && hidden ? HiddenRuntimePanelOpacity : 1.0;
+            ClickNativePanel.IsHitTestVisible = !pinnedOnly;
             ClickNativeMoveBar.Visibility = !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
             ClickNativeBody.Visibility = Visibility.Visible;
             ClickNativeDetails.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
@@ -1916,14 +1917,14 @@ namespace YummiGameBarWidget
         {
             bool runtimeVisible = GetPanelVisible(key);
             bool expanded = GetPanelExpanded(key);
-            bool ghosted = pinnedOnly && (!runtimeVisible || !expanded);
+            bool hidden = !runtimeVisible || !expanded;
 
-            // Win+G is edit mode: panels are always available for layout even when
-            // they are hidden in the actual overlay. PinnedOnly is the real view.
-            // Hidden real-view panels keep a faint footprint rather than collapsing.
-            panel.Visibility = Visibility.Visible;
-            panel.Opacity = ghosted ? HiddenRuntimePanelOpacity : 1.0;
-            panel.IsHitTestVisible = !pinnedOnly || !ghosted;
+            // Win+G is edit mode: hidden panels stay as a faint footprint for layout
+            // and recovery. PinnedOnly is the real overlay, where hidden panels must
+            // be completely invisible and non-interactive.
+            panel.Visibility = pinnedOnly && hidden ? Visibility.Collapsed : Visibility.Visible;
+            panel.Opacity = !pinnedOnly && hidden ? HiddenRuntimePanelOpacity : 1.0;
+            panel.IsHitTestVisible = !pinnedOnly;
             moveBar.Visibility = !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
             body.Visibility = pinnedOnly ? Visibility.Visible : (expanded ? Visibility.Visible : Visibility.Collapsed);
             eyeButton.Opacity = runtimeVisible && expanded ? 1.0 : 0.5;
