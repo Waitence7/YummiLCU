@@ -155,7 +155,6 @@ namespace YummiGameBarWidget
         private volatile bool nativeInputDiagnosticsWanted;
         private bool nativeInputDeactivatedWhileIdle;
         private const double HiddenRuntimePanelOpacity = 0.60;
-        private const double ForegroundGameBarChromeReserve = 44.0;
 
         public Widget()
         {
@@ -202,18 +201,17 @@ namespace YummiGameBarWidget
                 lastFitRequest = HudPreferences.FitRequest;
                 ApplyPreferences();
                 EnsureDefaultVoiceChatPosition();
-                // Let Xbox Game Bar own the initial/restored window geometry. The
-                // manifest already starts large; probing for an accepted maximum while
-                // Game Bar chrome is visible can falsely settle around 1435x820.
-                if (!HudPreferences.InitialFitDone)
-                    HudPreferences.MarkInitialFitDone();
+                // The manifest size is only a safe bootstrap. Resolve the real default
+                // from the current monitor and the host's accepted/on-screen bounds.
+                // This avoids a 1440x900 machine-specific initial size.
+                if (!HudPreferences.InitialMaxFitDone)
+                {
+                    var initialFitAccepted = await FitToLargestOnscreenAsync("initial-max");
+                    if (initialFitAccepted) HudPreferences.MarkInitialMaxFitDone();
+                }
                 UpdateInputState();
                 UpdatePinTutorial();
                 QueueTutorialStateRefresh("loaded");
-                // Correct stale Game Bar host geometry before any network/update work.
-                // This prevents a restored y=-44/-22 foreground window from lingering
-                // while the initial Agent snapshot is fetched.
-                QueueForegroundChromeRefresh("loaded-initial", true);
                 StartSnapshotWebSocketLoop();
                 timer.Start();
                 // One immediate legacy fetch keeps compatibility with older Agents.
@@ -361,7 +359,7 @@ namespace YummiGameBarWidget
                         if (request != lastFitRequest)
                         {
                             lastFitRequest = request;
-                            _ = FitToDisplayAsync(HudPreferences.CompactLayout);
+                            _ = FitToDisplayAsync();
                         }
                     }
                     catch { }
@@ -541,18 +539,6 @@ namespace YummiGameBarWidget
         {
             await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
-                if (widget != null && widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
-                {
-                    var bounds = widget.WindowBounds;
-                    if (bounds.X < -0.25 || bounds.Y < -0.25)
-                    {
-                        // Foreground/edit geometry must never be allowed to settle off-screen.
-                        // Cancel any delayed PinnedOnly growth that raced the Win+G transition
-                        // and immediately force the host back into non-negative bounds.
-                        Interlocked.Increment(ref pinnedGrowGeneration);
-                        QueueForegroundChromeRefresh("negative-bounds", true);
-                    }
-                }
                 UpdateDisplayState();
                 UpdateInputState();
                 UpdatePinTutorial();
@@ -564,13 +550,7 @@ namespace YummiGameBarWidget
             await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
                 RequestImmediateOverlayUpdateIfForeground("display-mode-changed");
-                if (widget != null && widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
-                {
-                    // Any queued full-screen growth belongs to the old PinnedOnly state.
-                    // Cancel it before Win+G foreground geometry is evaluated.
-                    Interlocked.Increment(ref pinnedGrowGeneration);
-                    QueueForegroundChromeRefresh("display-mode-changed", true);
-                }
+                QueueForegroundChromeRefresh("display-mode-changed");
                 // 856 DIP is only a conservative bootstrap height for affected Game Bar
                 // hosts. The real pinned target comes from the current display's logical
                 // dimensions, so 1080p/1440p/etc. are not capped to this machine's 900 DIP.
@@ -583,7 +563,7 @@ namespace YummiGameBarWidget
             });
         }
 
-        private void QueueForegroundChromeRefresh(string reason, bool immediate = false)
+        private void QueueForegroundChromeRefresh(string reason)
         {
             // The host-owned title/pin chrome can stay stale after a package update
             // or a fresh Win+G foreground activation. This also affects widgets that
@@ -593,15 +573,15 @@ namespace YummiGameBarWidget
                 widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
 
             var now = NowMs();
-            if (!immediate && now - lastForegroundChromeRefreshAtMs < 750) return;
+            if (now - lastForegroundChromeRefreshAtMs < 750) return;
             lastForegroundChromeRefreshAtMs = now;
             var generation = Interlocked.Increment(ref foregroundChromeRefreshGeneration);
-            _ = RefreshForegroundChromeAfterHostSettlesAsync(generation, reason, immediate);
+            _ = RefreshForegroundChromeAfterHostSettlesAsync(generation, reason);
         }
 
-        private async Task RefreshForegroundChromeAfterHostSettlesAsync(int generation, string reason, bool immediate)
+        private async Task RefreshForegroundChromeAfterHostSettlesAsync(int generation, string reason)
         {
-            if (!immediate) await Task.Delay(90);
+            await Task.Delay(90);
             if (generation != Volatile.Read(ref foregroundChromeRefreshGeneration)) return;
             if (widget == null || !hudLoaded ||
                 widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
@@ -611,121 +591,17 @@ namespace YummiGameBarWidget
             try
             {
                 widget.PinningSupported = true;
-                UpdateDisplayMetrics();
-
                 var bounds = widget.WindowBounds;
                 if (bounds.Width <= 0 || bounds.Height <= 0) return;
-                var minimum = widget.MinWindowSize;
-                var maximum = widget.MaxWindowSize;
-                var original = new Windows.Foundation.Size(bounds.Width, bounds.Height);
 
-                // Win+G owns a title/pin bar above the widget. A foreground window
-                // that consumes the full logical display height can be shifted upward
-                // (for example 900 DIP -> y=-44), putting the pin control off-screen.
-                // Reserve only the host chrome height here; PinnedOnly still grows to
-                // the complete current display size.
-                var editableWidth = Math.Max(minimum.Width, Math.Min(maximum.Width, displayWidth));
-                var editableHeight = Math.Max(
-                    minimum.Height,
-                    Math.Min(maximum.Height, Math.Max(minimum.Height, displayHeight - ForegroundGameBarChromeReserve)));
-                var target = new Windows.Foundation.Size(
-                    Math.Min(original.Width, editableWidth),
-                    Math.Min(original.Height, editableHeight));
-
-                var capped = target.Width < original.Width - 0.25 || target.Height < original.Height - 0.25;
-                var layoutAccepted = false;
-                var restoredAccepted = false;
-
-                if (capped)
-                {
-                    // Keep the smaller foreground geometry so the Game Bar title/pin
-                    // chrome remains on-screen while the user edits or pins the widget.
-                    layoutAccepted = await widget.TryResizeWindowAsync(target);
-                    if (layoutAccepted) await Task.Delay(80);
-                }
-                else
-                {
-                    // If there is already enough space for chrome, still force one real
-                    // host layout pass after an AppX update. A short nudge mirrors the
-                    // manual resize that makes a stale pin/title bar appear immediately.
-                    var probeHeight = Math.Max(minimum.Height, original.Height - 32.0);
-                    var probe = new Windows.Foundation.Size(original.Width, probeHeight);
-                    if (Math.Abs(probe.Height - original.Height) >= 2.0)
-                    {
-                        layoutAccepted = await widget.TryResizeWindowAsync(probe);
-                        if (layoutAccepted)
-                        {
-                            await Task.Delay(60);
-                            if (widget != null && hudLoaded &&
-                                widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
-                                restoredAccepted = await widget.TryResizeWindowAsync(original);
-                        }
-                    }
-                    else
-                    {
-                        restoredAccepted = await widget.TryResizeWindowAsync(original);
-                    }
-                }
-
-                if (widget == null || !hudLoaded ||
-                    widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
-
-                // Center after the cap/layout pass, then enforce a hard foreground
-                // invariant: X and Y may never remain negative. Game Bar can restore
-                // stale 900-DIP geometry at y=-44/-22 while Win+G opens; shrink by the
-                // overflow amount and re-center until both coordinates are non-negative.
-                await widget.CenterWindowAsync();
-                await Task.Delay(30);
-                for (var attempt = 0; attempt < 5; attempt++)
-                {
-                    if (widget == null || !hudLoaded ||
-                        widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
-                    var actual = widget.WindowBounds;
-                    if (actual.X >= -0.25 && actual.Y >= -0.25) break;
-
-                    var shrinkWidth = actual.X < -0.25 ? Math.Max(8.0, Math.Ceiling((-actual.X + 2.0) * 2.0)) : 0.0;
-                    var shrinkHeight = actual.Y < -0.25 ? Math.Max(8.0, Math.Ceiling((-actual.Y + 2.0) * 2.0)) : 0.0;
-                    var correctedWidth = Math.Max(minimum.Width, Math.Min(editableWidth, actual.Width - shrinkWidth));
-                    var correctedHeight = Math.Max(minimum.Height, Math.Min(editableHeight, actual.Height - shrinkHeight));
-                    var corrected = new Windows.Foundation.Size(correctedWidth, correctedHeight);
-
-                    var correctedAccepted = await widget.TryResizeWindowAsync(corrected);
-                    App.LogResize("foreground-nonnegative-correct reason=" + reason +
-                        " attempt=" + attempt + " before=" + FormatRect(actual) +
-                        " target=" + FormatSize(corrected) + " accepted=" + correctedAccepted);
-                    await Task.Delay(25);
-                    if (widget == null || widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
-                    await widget.CenterWindowAsync();
-                    await Task.Delay(25);
-                }
-
-                var finalBounds = widget != null ? widget.WindowBounds : new Windows.Foundation.Rect();
-                if ((finalBounds.X < -0.25 || finalBounds.Y < -0.25) && widget != null && hudLoaded &&
-                    widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
-                {
-                    // Last-resort safe geometry. If the host ignored every proportional
-                    // correction, the manifest minimum is small enough to fit ordinary
-                    // Game Bar displays without crossing the top/left edge.
-                    var fallback = new Windows.Foundation.Size(minimum.Width, minimum.Height);
-                    var fallbackAccepted = await widget.TryResizeWindowAsync(fallback);
-                    await Task.Delay(25);
-                    if (widget != null && widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
-                    {
-                        await widget.CenterWindowAsync();
-                        await Task.Delay(25);
-                        finalBounds = widget.WindowBounds;
-                    }
-                    App.LogResize("foreground-nonnegative-fallback reason=" + reason +
-                        " accepted=" + fallbackAccepted + " actual=" + FormatRect(finalBounds));
-                }
+                // Do not move a valid user-positioned window. Only if the host restored
+                // it partly off-screen, recompute the largest size that the current
+                // monitor can keep at non-negative coordinates.
+                if (bounds.X < -0.25 || bounds.Y < -0.25)
+                    await FitToLargestOnscreenAsync("foreground-" + reason);
 
                 App.LogResize("foreground-chrome-refresh reason=" + reason +
-                    " capped=" + capped + " layoutAccepted=" + layoutAccepted +
-                    " restored=" + restoredAccepted +
-                    " from=" + FormatSize(original) + " target=" + FormatSize(target) +
-                    " display=" + FormatSize(displayWidth, displayHeight) +
-                    " reserve=" + ForegroundGameBarChromeReserve.ToString("0.#") +
-                    " actual=" + FormatRect(finalBounds));
+                    " actual=" + (widget != null ? FormatRect(widget.WindowBounds) : "none"));
             }
             catch (Exception ex)
             {
@@ -735,6 +611,60 @@ namespace YummiGameBarWidget
             finally
             {
                 foregroundChromeRefreshInFlight = false;
+            }
+        }
+
+        private async Task<bool> FitToLargestOnscreenAsync(string reason)
+        {
+            if (widget == null || fittingDisplay) return false;
+            fittingDisplay = true;
+            try
+            {
+                UpdateDisplayMetrics();
+                var minimum = widget.MinWindowSize;
+                var maximum = widget.MaxWindowSize;
+                var targetWidth = Math.Max(minimum.Width, Math.Min(maximum.Width, displayWidth));
+                var targetHeight = Math.Max(minimum.Height, Math.Min(maximum.Height, displayHeight));
+
+                var result = await HudGeometry.FitLargestAsync(
+                    targetWidth, targetHeight, minimum.Width, minimum.Height,
+                    async (width, height) =>
+                    {
+                        if (widget == null || widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                            return false;
+                        var accepted = await ResizeHudAsync(width, height, "onscreen-max-" + reason);
+                        if (!accepted || widget == null) return false;
+                        await Task.Delay(25);
+                        var actual = widget.WindowBounds;
+                        var onScreen = actual.X >= -0.25 && actual.Y >= -0.25;
+                        App.LogResize("onscreen-max-probe reason=" + reason +
+                            " requested=" + FormatSize(width, height) +
+                            " actual=" + FormatRect(actual) +
+                            " onScreen=" + onScreen);
+                        return onScreen;
+                    });
+
+                resizeAccepted = result.Accepted;
+                fittedWidth = result.Width;
+                fittedHeight = result.Height;
+                fitTargetWidth = targetWidth;
+                fitTargetHeight = targetHeight;
+                UpdateDisplayState();
+                App.LogResize("onscreen-max-result reason=" + reason +
+                    " accepted=" + result.Accepted +
+                    " fitted=" + FormatSize(result.Width, result.Height) +
+                    " target=" + FormatSize(targetWidth, targetHeight) +
+                    " actual=" + (widget != null ? FormatRect(widget.WindowBounds) : "none"));
+                return result.Accepted;
+            }
+            catch (Exception ex)
+            {
+                App.LogResize("onscreen-max-error reason=" + reason + " error=" + ErrorCode(ex));
+                return false;
+            }
+            finally
+            {
+                fittingDisplay = false;
             }
         }
 
@@ -821,7 +751,7 @@ namespace YummiGameBarWidget
             }
         }
 
-        private async Task FitToDisplayAsync(bool centerForPinSetup = false)
+        private async Task FitToDisplayAsync()
         {
             if (widget == null || fittingDisplay) return;
             fittingDisplay = true;
@@ -858,8 +788,7 @@ namespace YummiGameBarWidget
                         " target=" + FormatSize(width, height) +
                         " display=" + FormatSize(displayWidth, displayHeight) +
                         " min=" + FormatSize(minimum) +
-                        " max=" + FormatSize(maximum) +
-                        " center=" + centerForPinSetup);
+                        " max=" + FormatSize(maximum));
                     var result = await HudGeometry.FitLargestUpwardAsync(
                         width, height, current.Width, current.Height,
                         (w, h) => ResizeHudAsync(w, h, "fit-upward-probe"));
@@ -867,9 +796,7 @@ namespace YummiGameBarWidget
                     fittedWidth = result.Width;
                     fittedHeight = result.Height;
                 }
-                // Compact mode deliberately brings the titlebar back on screen.
-                // Expanding must preserve the position chosen by the user.
-                if (centerForPinSetup) await widget.CenterWindowAsync();
+                // Never move the window automatically; preserve the user/host position.
                 UpdateDisplayState();
             }
             catch (Exception ex)

@@ -59,8 +59,13 @@ try {
   if ($updaterText -match 'Stop-Process -Force') { throw 'Updater must not directly kill Xbox Game Bar processes' }
   $manifestText = Get-Content (Join-Path $InstallerRoot 'Package.appxmanifest') -Raw -Encoding UTF8
   if ($manifestText -notmatch '<ActivateAfterInstall>false</ActivateAfterInstall>') { throw 'Game Bar widget must not auto-activate after package registration' }
-  if ($manifestText -notmatch '<Size><Height>360</Height><Width>640</Width><MinHeight>360</MinHeight><MinWidth>640</MinWidth>') { throw 'Game Bar main widget must start at safe non-negative foreground geometry' }
   Write-Host 'PASS: automatic updates defer in-use registration and never auto-activate the widget'
+
+  $widgetSource = Get-Content (Join-Path $InstallerRoot 'Widget.xaml.cs') -Raw -Encoding UTF8
+  if ($widgetSource -match 'CenterWindowAsync') { throw 'Widget must never auto-center the user window' }
+  if ($widgetSource -notmatch 'FitToLargestOnscreenAsync') { throw 'Widget must resolve its initial size from the current display/host instead of a machine-specific size' }
+  if ($manifestText -match '<Size><Height>900</Height><Width>1440</Width>') { throw 'Main Game Bar widget must not hardcode a 1440x900 initial size' }
+  Write-Host 'PASS: Game Bar initial size is display-derived and user position is preserved'
   # Exercise the production permission branch without changing OS settings.
   $tokens = $null
   $errors = $null
