@@ -3,6 +3,101 @@ use tauri::AppHandle;
 use tauri_plugin_opener::OpenerExt;
 
 #[cfg(windows)]
+const LEGACY_PRODUCT_NAME: &str = "Yummi LCU Agent";
+#[cfg(windows)]
+const CURRENT_PRODUCT_NAME: &str = "유미지지 데스크톱";
+
+#[cfg(windows)]
+pub(crate) fn migrate_windows_branding() -> AgentResult<()> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::{fs, path::Path};
+
+    fn migrate_shortcut(source: &Path, destination: &Path) -> std::io::Result<()> {
+        if !source.is_file() {
+            return Ok(());
+        }
+        if destination.is_file() {
+            fs::remove_file(source)?;
+            return Ok(());
+        }
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::rename(source, destination)
+    }
+
+    if let Some(data_dir) = dirs::data_dir() {
+        let programs = data_dir
+            .join("Microsoft")
+            .join("Windows")
+            .join("Start Menu")
+            .join("Programs");
+        let current = programs.join(format!("{CURRENT_PRODUCT_NAME}.lnk"));
+        migrate_shortcut(
+            &programs.join(format!("{LEGACY_PRODUCT_NAME}.lnk")),
+            &current,
+        )?;
+
+        let legacy_folder = programs.join(LEGACY_PRODUCT_NAME);
+        migrate_shortcut(
+            &legacy_folder.join(format!("{LEGACY_PRODUCT_NAME}.lnk")),
+            &current,
+        )?;
+        let _ = fs::remove_dir(&legacy_folder);
+    }
+
+    if let Some(desktop) = dirs::desktop_dir() {
+        migrate_shortcut(
+            &desktop.join(format!("{LEGACY_PRODUCT_NAME}.lnk")),
+            &desktop.join(format!("{CURRENT_PRODUCT_NAME}.lnk")),
+        )?;
+    }
+
+    // Zip-based auto-updates do not run NSIS, so older installs keep their
+    // original uninstall key. Update only its visible DisplayName in place;
+    // a later installer run performs the full one-way key migration.
+    let legacy_uninstall_key =
+        format!(r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{LEGACY_PRODUCT_NAME}");
+    let mut query = Command::new("reg.exe");
+    query
+        .creation_flags(0x08000000)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .args(["query", &legacy_uninstall_key]);
+    if query.status()?.success() {
+        let mut update = Command::new("reg.exe");
+        update
+            .creation_flags(0x08000000)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .args([
+                "add",
+                &legacy_uninstall_key,
+                "/v",
+                "DisplayName",
+                "/t",
+                "REG_SZ",
+                "/d",
+                CURRENT_PRODUCT_NAME,
+                "/f",
+            ]);
+        if !update.status()?.success() {
+            return Err(AgentError::Config(
+                "Windows 앱 표시 이름 마이그레이션 실패".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(not(windows))]
+pub(crate) fn migrate_windows_branding() -> AgentResult<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
 pub(crate) fn sync_windows_startup(enabled: bool) -> AgentResult<()> {
     use std::os::windows::process::CommandExt;
 

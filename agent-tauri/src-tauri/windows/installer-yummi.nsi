@@ -66,6 +66,10 @@ ${StrLoc}
 !define UNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCTNAME}"
 !define MANUKEY "Software\${MANUFACTURER}"
 !define MANUPRODUCTKEY "${MANUKEY}\${PRODUCTNAME}"
+; Pre-0.8 product name. Keep these only for one-way migration of existing installs.
+!define LEGACYPRODUCTNAME "Yummi LCU Agent"
+!define LEGACYUNINSTKEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${LEGACYPRODUCTNAME}"
+!define LEGACYMANUPRODUCTKEY "${MANUKEY}\${LEGACYPRODUCTNAME}"
 !define UNINSTALLERSIGNCOMMAND "{{uninstaller_sign_cmd}}"
 !define ESTIMATEDSIZE "{{estimated_size}}"
 !define STARTMENUFOLDER "{{start_menu_folder}}"
@@ -75,6 +79,8 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var LegacyStartMenuShortcutFound
+Var LegacyDesktopShortcutFound
 
 Name "${PRODUCTNAME}"
 BrandingText "${COPYRIGHT}"
@@ -760,6 +766,10 @@ Section Install
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoModify" "1"
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoRepair" "1"
 
+  ; Retire pre-rebrand registration after the new registration is safely written.
+  DeleteRegKey SHCTX "${LEGACYUNINSTKEY}"
+  DeleteRegKey SHCTX "${LEGACYMANUPRODUCTKEY}"
+
   ${GetSize} "$INSTDIR" "/M=uninstall.exe /S=0K /G=0" $0 $1 $2
   IntOp $0 $0 + ${ESTIMATEDSIZE}
   IntFmt $0 "0x%08X" $0
@@ -776,12 +786,9 @@ Section Install
     Call CreateOrUpdateStartMenuShortcut
   !insertmacro MUI_STARTMENU_WRITE_END
 
-  ; Create desktop shortcut for silent and passive installers
-  ; because finish page will be skipped
-  ${If} $PassiveMode = 1
-  ${OrIf} ${Silent}
-    Call CreateOrUpdateDesktopShortcut
-  ${EndIf}
+  ; Create a desktop shortcut for normal installs too. The helper keeps
+  ; /NS respected and avoids adding a shortcut on ordinary update-only runs.
+  Call CreateOrUpdateDesktopShortcut
 
   !ifmacrodef NSIS_HOOK_POSTINSTALL
     !insertmacro NSIS_HOOK_POSTINSTALL
@@ -899,6 +906,12 @@ Section Uninstall
       !insertmacro UnpinShortcut "$DESKTOP\${PRODUCTNAME}.lnk"
       Delete "$DESKTOP\${PRODUCTNAME}.lnk"
     ${EndIf}
+
+    ; Best-effort cleanup for shortcuts left by pre-rebrand installers.
+    Delete "$DESKTOP\${LEGACYPRODUCTNAME}.lnk"
+    Delete "$SMPROGRAMS\${LEGACYPRODUCTNAME}.lnk"
+    Delete "$SMPROGRAMS\${LEGACYPRODUCTNAME}\${LEGACYPRODUCTNAME}.lnk"
+    RMDir "$SMPROGRAMS\${LEGACYPRODUCTNAME}"
   ${EndIf}
 
   ; Remove registry information for add/remove programs
@@ -949,6 +962,9 @@ SectionEnd
 
 Function RestorePreviousInstallLocation
   ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
+  ${If} $4 == ""
+    ReadRegStr $4 SHCTX "${LEGACYMANUPRODUCTKEY}" ""
+  ${EndIf}
   StrCmp $4 "" +2 0
     StrCpy $INSTDIR $4
 FunctionEnd
@@ -965,6 +981,20 @@ Function un.SkipIfPassive
 FunctionEnd
 
 Function CreateOrUpdateStartMenuShortcut
+  ; Remove pre-rebrand shortcuts so Windows Search no longer keeps showing
+  ; the legacy "Yummi LCU Agent" app name. Remember whether one existed so
+  ; an updater run can replace it with the new shortcut instead of skipping.
+  StrCpy $LegacyStartMenuShortcutFound 0
+  ${If} ${FileExists} "$SMPROGRAMS\${LEGACYPRODUCTNAME}.lnk"
+    Delete "$SMPROGRAMS\${LEGACYPRODUCTNAME}.lnk"
+    StrCpy $LegacyStartMenuShortcutFound 1
+  ${EndIf}
+  ${If} ${FileExists} "$SMPROGRAMS\${LEGACYPRODUCTNAME}\${LEGACYPRODUCTNAME}.lnk"
+    Delete "$SMPROGRAMS\${LEGACYPRODUCTNAME}\${LEGACYPRODUCTNAME}.lnk"
+    RMDir "$SMPROGRAMS\${LEGACYPRODUCTNAME}"
+    StrCpy $LegacyStartMenuShortcutFound 1
+  ${EndIf}
+
   ; We used to use product name as MAINBINARYNAME
   ; migrate old shortcuts to target the new MAINBINARYNAME
   StrCpy $R0 0
@@ -987,11 +1017,14 @@ Function CreateOrUpdateStartMenuShortcut
     Return
   ${EndIf}
 
-  ; Skip creating shortcut if in update mode or no shortcut mode
-  ; but always create if migrating from wix
+  ; Respect /NS. Normal updater runs still skip shortcut creation, except
+  ; when a legacy-named shortcut was found above and needs to be replaced.
   ${If} $WixMode = 0
+    ${If} $NoShortcutMode = 1
+      Return
+    ${EndIf}
     ${If} $UpdateMode = 1
-    ${OrIf} $NoShortcutMode = 1
+    ${AndIf} $LegacyStartMenuShortcutFound != 1
       Return
     ${EndIf}
   ${EndIf}
@@ -1007,6 +1040,14 @@ Function CreateOrUpdateStartMenuShortcut
 FunctionEnd
 
 Function CreateOrUpdateDesktopShortcut
+  ; Rename the old desktop shortcut during the first post-rebrand install.
+  ; This also lets update mode recreate it under the current product name.
+  StrCpy $LegacyDesktopShortcutFound 0
+  ${If} ${FileExists} "$DESKTOP\${LEGACYPRODUCTNAME}.lnk"
+    Delete "$DESKTOP\${LEGACYPRODUCTNAME}.lnk"
+    StrCpy $LegacyDesktopShortcutFound 1
+  ${EndIf}
+
   ; We used to use product name as MAINBINARYNAME
   ; migrate old shortcuts to target the new MAINBINARYNAME
   !insertmacro IsShortcutTarget "$DESKTOP\${PRODUCTNAME}.lnk" "$INSTDIR\$OldMainBinaryName"
@@ -1016,11 +1057,14 @@ Function CreateOrUpdateDesktopShortcut
     Return
   ${EndIf}
 
-  ; Skip creating shortcut if in update mode or no shortcut mode
-  ; but always create if migrating from wix
+  ; Respect /NS. Normal updater runs still skip shortcut creation, except
+  ; when a legacy-named desktop shortcut was found and needs replacement.
   ${If} $WixMode = 0
+    ${If} $NoShortcutMode = 1
+      Return
+    ${EndIf}
     ${If} $UpdateMode = 1
-    ${OrIf} $NoShortcutMode = 1
+    ${AndIf} $LegacyDesktopShortcutFound != 1
       Return
     ${EndIf}
   ${EndIf}

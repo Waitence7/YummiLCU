@@ -9,7 +9,7 @@ use crate::{
     config::Config,
     discord_presence::watch_discord_presence,
     lcu::{discover_lockfile_nonblocking, LcuClient, LcuConnectionState},
-    platform::sync_windows_startup,
+    platform::{migrate_windows_branding, sync_windows_startup},
     relay::supervisor::RelaySupervisor,
     state::{AgentEvent, AppState},
     tray,
@@ -24,6 +24,7 @@ const RELAY_SUPERVISOR_WATCHDOG_INTERVAL: Duration = Duration::from_secs(10);
 const POST_INSTALL_PARENT_WAIT_MS: u32 = 15_000;
 
 pub(crate) fn run() -> Result<(), tauri::Error> {
+    let branding_migration_result = migrate_windows_branding();
     let config = Config::load();
     let startup_sync_result = sync_windows_startup(config.run_at_windows_startup);
     let update_policy = (
@@ -148,6 +149,28 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                         ),
                     )
                     .await;
+                match branding_migration_result {
+                    Ok(()) => {
+                        lifecycle_state
+                            .record_flight("windows_branding", "migration_ok")
+                            .await;
+                    }
+                    Err(error) => {
+                        let summary = error.to_string();
+                        lifecycle_state
+                            .record_flight(
+                                "windows_branding",
+                                format!("migration_failed: {summary}"),
+                            )
+                            .await;
+                        lifecycle_state
+                            .log(
+                                &lifecycle_handle,
+                                format!("Windows 앱 이름 마이그레이션 실패: {summary}"),
+                            )
+                            .await;
+                    }
+                }
                 match startup_sync_result {
                     Ok(()) => {
                         lifecycle_state
