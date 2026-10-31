@@ -153,7 +153,8 @@ namespace YummiGameBarWidget
         private long lastForegroundChromeRefreshAtMs;
         private volatile bool nativeInputDiagnosticsWanted;
         private bool nativeInputDeactivatedWhileIdle;
-        private const double HiddenRuntimePanelOpacity = 0.30;
+        private const double HiddenRuntimePanelOpacity = 0.60;
+        private const double ForegroundGameBarChromeReserve = 44.0;
 
         public Widget()
         {
@@ -566,57 +567,81 @@ namespace YummiGameBarWidget
                 widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
             if (foregroundChromeRefreshInFlight || fittingDisplay) return;
 
-            var bounds = widget.WindowBounds;
-            if (bounds.Width <= 0 || bounds.Height <= 0) return;
-
-            var minimum = widget.MinWindowSize;
-            var maximum = widget.MaxWindowSize;
-            var original = new Windows.Foundation.Size(bounds.Width, bounds.Height);
-            var widthDelta = Math.Max(64.0, Math.Min(144.0, original.Width * 0.10));
-            var heightDelta = Math.Max(64.0, Math.Min(144.0, original.Height * 0.10));
-            var nudged = new Windows.Foundation.Size(
-                Math.Max(minimum.Width, original.Width - widthDelta),
-                Math.Max(minimum.Height, original.Height - heightDelta));
-
-            if (Math.Abs(nudged.Width - original.Width) < 2.0 &&
-                Math.Abs(nudged.Height - original.Height) < 2.0)
-            {
-                nudged = new Windows.Foundation.Size(
-                    Math.Min(maximum.Width, original.Width + widthDelta),
-                    Math.Min(maximum.Height, original.Height + heightDelta));
-            }
-            if (Math.Abs(nudged.Width - original.Width) < 2.0 &&
-                Math.Abs(nudged.Height - original.Height) < 2.0) return;
-
             foregroundChromeRefreshInFlight = true;
             try
             {
                 widget.PinningSupported = true;
-                var nudgedAccepted = await widget.TryResizeWindowAsync(nudged);
+                UpdateDisplayMetrics();
+
+                var bounds = widget.WindowBounds;
+                if (bounds.Width <= 0 || bounds.Height <= 0) return;
+                var minimum = widget.MinWindowSize;
+                var maximum = widget.MaxWindowSize;
+                var original = new Windows.Foundation.Size(bounds.Width, bounds.Height);
+
+                // Win+G owns a title/pin bar above the widget. A foreground window
+                // that consumes the full logical display height can be shifted upward
+                // (for example 900 DIP -> y=-44), putting the pin control off-screen.
+                // Reserve only the host chrome height here; PinnedOnly still grows to
+                // the complete current display size.
+                var editableWidth = Math.Max(minimum.Width, Math.Min(maximum.Width, displayWidth));
+                var editableHeight = Math.Max(
+                    minimum.Height,
+                    Math.Min(maximum.Height, Math.Max(minimum.Height, displayHeight - ForegroundGameBarChromeReserve)));
+                var target = new Windows.Foundation.Size(
+                    Math.Min(original.Width, editableWidth),
+                    Math.Min(original.Height, editableHeight));
+
+                var capped = target.Width < original.Width - 0.25 || target.Height < original.Height - 0.25;
+                var layoutAccepted = false;
                 var restoredAccepted = false;
-                if (nudgedAccepted)
+
+                if (capped)
                 {
-                    // Give the Game Bar host enough time to actually rebuild its
-                    // title chrome instead of coalescing the two resize requests.
-                    await Task.Delay(80);
-                    if (widget != null && hudLoaded)
+                    // Keep the smaller foreground geometry so the Game Bar title/pin
+                    // chrome remains on-screen while the user edits or pins the widget.
+                    layoutAccepted = await widget.TryResizeWindowAsync(target);
+                    if (layoutAccepted) await Task.Delay(80);
+                }
+                else
+                {
+                    // If there is already enough space for chrome, still force one real
+                    // host layout pass after an AppX update. A short nudge mirrors the
+                    // manual resize that makes a stale pin/title bar appear immediately.
+                    var probeHeight = Math.Max(minimum.Height, original.Height - 32.0);
+                    var probe = new Windows.Foundation.Size(original.Width, probeHeight);
+                    if (Math.Abs(probe.Height - original.Height) >= 2.0)
+                    {
+                        layoutAccepted = await widget.TryResizeWindowAsync(probe);
+                        if (layoutAccepted)
+                        {
+                            await Task.Delay(60);
+                            if (widget != null && hudLoaded && !widget.Pinned &&
+                                widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
+                                restoredAccepted = await widget.TryResizeWindowAsync(original);
+                        }
+                    }
+                    else
+                    {
                         restoredAccepted = await widget.TryResizeWindowAsync(original);
+                    }
                 }
-                else if (widget != null && hudLoaded)
-                {
-                    restoredAccepted = await widget.TryResizeWindowAsync(original);
-                }
+
+                if (widget == null || !hudLoaded || widget.Pinned ||
+                    widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
+
+                // Center after the cap/layout pass so the host chrome is not left above
+                // the monitor edge after package replacement or a restored old geometry.
+                await widget.CenterWindowAsync();
+                await Task.Delay(60);
 
                 App.LogResize("foreground-chrome-refresh reason=" + reason +
-                    " nudgeAccepted=" + nudgedAccepted + " restored=" + restoredAccepted +
-                    " from=" + FormatSize(original) + " via=" + FormatSize(nudged) +
-                    " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
-                    " pinned=" + (widget != null && widget.Pinned));
-
-                if (widget != null && widget.Pinned &&
-                    widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly &&
-                    !HudPreferences.CompactLayout)
-                    QueuePinnedGrowToFullscreen();
+                    " capped=" + capped + " layoutAccepted=" + layoutAccepted +
+                    " restored=" + restoredAccepted +
+                    " from=" + FormatSize(original) + " target=" + FormatSize(target) +
+                    " display=" + FormatSize(displayWidth, displayHeight) +
+                    " reserve=" + ForegroundGameBarChromeReserve.ToString("0.#") +
+                    " actual=" + (widget != null ? FormatRect(widget.WindowBounds) : "none"));
             }
             catch (Exception ex)
             {
@@ -874,6 +899,7 @@ namespace YummiGameBarWidget
                 if (widget != null && widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
                 {
                     App.LogStage("tutorial-host-settled reason=" + reason + " delayMs=" + delayMs);
+                    QueueForegroundChromeRefresh("tutorial-host-settled-" + reason);
                     return;
                 }
             }
