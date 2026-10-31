@@ -57,6 +57,9 @@ public static class BridgeTests {
     var upwardExact = await HudGeometry.FitLargestUpwardAsync(1440, 900, 1435, 856, (w, h) => Task.FromResult(true));
     if (!upwardExact.Accepted || upwardExact.Width != 1440 || upwardExact.Height != 900)
       throw new Exception("Upward fitting must reach 900 when the host accepts it");
+    var upwardLargeDisplay = await HudGeometry.FitLargestUpwardAsync(2560, 1440, 1440, 900, (w, h) => Task.FromResult(true));
+    if (!upwardLargeDisplay.Accepted || upwardLargeDisplay.Width != 2560 || upwardLargeDisplay.Height != 1440)
+      throw new Exception("Upward fitting must reach the actual logical display size instead of stopping at 1440x900");
     Console.WriteLine("PASS: bounded fit, upward-only growth, exact-size fast path, and rejected minimum");
     string name = @"LOCAL\YummiBridgeTest-" + Guid.NewGuid().ToString("N");
     using (var server = new NamedPipeServerStream(name, PipeDirection.Out, 1, PipeTransmissionMode.Byte, PipeOptions.Asynchronous)) {

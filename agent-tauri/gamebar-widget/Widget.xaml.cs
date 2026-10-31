@@ -531,10 +531,9 @@ namespace YummiGameBarWidget
             {
                 RequestImmediateOverlayUpdateIfForeground("display-mode-changed");
                 QueueForegroundChromeRefresh("display-mode-changed");
-                // 856 DIP is a known-good pinned height. 900 DIP is the desired
-                // fullscreen target but may or may not be accepted by this Game Bar
-                // host. Retry after PinnedOnly settles, then binary-search only the
-                // 856..900 range. Never shrink a larger manual size.
+                // 856 DIP is only a conservative bootstrap height for affected Game Bar
+                // hosts. The real pinned target comes from the current display's logical
+                // dimensions, so 1080p/1440p/etc. are not capped to this machine's 900 DIP.
                 if (!HudPreferences.CompactLayout && widget.Pinned &&
                     widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
                     QueuePinnedGrowToFullscreen();
@@ -662,11 +661,11 @@ namespace YummiGameBarWidget
                     var maximum = widget.MaxWindowSize;
                     var current = widget.WindowBounds;
                     var targetWidth = Math.Min(maximum.Width, displayWidth);
-                    var targetHeight = Math.Min(maximum.Height, Math.Min(displayHeight, 900.0));
+                    var targetHeight = Math.Min(maximum.Height, displayHeight);
                     var knownGoodHeight = Math.Min(targetHeight, 856.0);
 
                     // Preserve any manual size already above the known-good height.
-                    // Otherwise first try to establish 856 before probing toward 900.
+                    // Otherwise first establish 856, then probe toward the actual display height.
                     var baseWidth = Math.Min(targetWidth, Math.Max(current.Width, 1.0));
                     var baseHeight = Math.Min(targetHeight, Math.Max(current.Height, 1.0));
                     if (baseHeight < knownGoodHeight)
