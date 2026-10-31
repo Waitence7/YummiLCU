@@ -1514,6 +1514,139 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
     }
 }
 
+
+#[cfg(windows)]
+fn probe_gamebar_uia() -> Result<Value, String> {
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    };
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, TreeScope_Children, TreeScope_Subtree,
+        UIA_ButtonControlTypeId,
+    };
+
+    fn text<T: ToString>(value: windows::core::Result<T>) -> String {
+        value.map(|v| v.to_string()).unwrap_or_default()
+    }
+
+    unsafe {
+        // This command runs on the Agent command thread. Initializing COM here is
+        // enough for a bounded one-shot UI Automation inspection. If the thread
+        // was already initialized by another component, CoCreateInstance remains
+        // valid and the HRESULT is intentionally only recorded for diagnostics.
+        let com_hr = CoInitializeEx(None, COINIT_MULTITHREADED);
+        append_native_input_log(&format!("uia-probe com-init={:#x}", com_hr.0 as u32));
+
+        let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+            .map_err(|e| format!("UI Automation 생성 실패: {e}"))?;
+        let root = automation
+            .GetRootElement()
+            .map_err(|e| format!("UI Automation desktop root 실패: {e}"))?;
+        let true_condition = automation
+            .CreateTrueCondition()
+            .map_err(|e| format!("UI Automation condition 생성 실패: {e}"))?;
+        let top = root
+            .FindAll(TreeScope_Children, &true_condition)
+            .map_err(|e| format!("UI Automation top-level 조회 실패: {e}"))?;
+
+        let mut top_windows = Vec::new();
+        let mut candidates = Vec::new();
+        let top_len = top.Length().unwrap_or(0).clamp(0, 96);
+        for i in 0..top_len {
+            let Ok(element) = top.GetElement(i) else { continue };
+            let name = text(element.CurrentName());
+            let automation_id = text(element.CurrentAutomationId());
+            let class_name = text(element.CurrentClassName());
+            let framework = text(element.CurrentFrameworkId());
+            let process_id = element.CurrentProcessId().unwrap_or(0);
+            let lower = format!("{name} {automation_id} {class_name} {framework}").to_ascii_lowercase();
+            let likely_gamebar = lower.contains("game bar")
+                || lower.contains("gamebar")
+                || lower.contains("xbox")
+                || lower.contains("gamingoverlay");
+
+            if !name.is_empty() || !class_name.is_empty() {
+                append_native_input_log(&format!(
+                    "uia-probe top name={:?} automationId={:?} class={:?} framework={:?} pid={} likelyGameBar={}",
+                    name, automation_id, class_name, framework, process_id, likely_gamebar
+                ));
+                top_windows.push(serde_json::json!({
+                    "name": name,
+                    "automationId": automation_id,
+                    "className": class_name,
+                    "framework": framework,
+                    "processId": process_id,
+                    "likelyGameBar": likely_gamebar,
+                }));
+            }
+            if !likely_gamebar {
+                continue;
+            }
+
+            append_native_input_log(&format!(
+                "uia-probe root name={:?} automationId={:?} class={:?} framework={:?} pid={}",
+                name, automation_id, class_name, framework, process_id
+            ));
+            let Ok(descendants) = element.FindAll(TreeScope_Subtree, &true_condition) else { continue };
+            let descendant_len = descendants.Length().unwrap_or(0).clamp(0, 800);
+            for j in 0..descendant_len {
+                let Ok(child) = descendants.GetElement(j) else { continue };
+                let child_name = text(child.CurrentName());
+                let child_id = text(child.CurrentAutomationId());
+                let child_class = text(child.CurrentClassName());
+                let localized_type = text(child.CurrentLocalizedControlType());
+                let control_type = child.CurrentControlType().unwrap_or_default();
+                let child_lower = format!("{child_name} {child_id} {child_class} {localized_type}")
+                    .to_ascii_lowercase();
+                let keyword = child_lower.contains("click")
+                    || child_lower.contains("through")
+                    || child_lower.contains("pass")
+                    || child_lower.contains("input")
+                    || child_name.contains("통과")
+                    || child_name.contains("클릭");
+                let is_button = control_type == UIA_ButtonControlTypeId;
+                if !keyword && !is_button {
+                    continue;
+                }
+                let enabled = child.CurrentIsEnabled().map(|v| v.as_bool()).unwrap_or(false);
+                let offscreen = child.CurrentIsOffscreen().map(|v| v.as_bool()).unwrap_or(false);
+                let rect = child.CurrentBoundingRectangle().ok();
+                let bounds = rect.map(|r| serde_json::json!({
+                    "left": r.left, "top": r.top, "right": r.right, "bottom": r.bottom
+                }));
+                append_native_input_log(&format!(
+                    "uia-probe candidate name={:?} automationId={:?} class={:?} type={:?} controlType={} enabled={} offscreen={}",
+                    child_name, child_id, child_class, localized_type, control_type.0, enabled, offscreen
+                ));
+                if candidates.len() < 120 {
+                    candidates.push(serde_json::json!({
+                        "name": child_name,
+                        "automationId": child_id,
+                        "className": child_class,
+                        "localizedControlType": localized_type,
+                        "controlType": control_type.0,
+                        "isButton": is_button,
+                        "keywordMatch": keyword,
+                        "enabled": enabled,
+                        "offscreen": offscreen,
+                        "bounds": bounds,
+                        "processId": child.CurrentProcessId().unwrap_or(process_id),
+                    }));
+                }
+            }
+        }
+
+        append_native_input_log(&format!(
+            "uia-probe complete topWindows={} candidates={}",
+            top_windows.len(), candidates.len()
+        ));
+        Ok(serde_json::json!({
+            "topWindows": top_windows,
+            "candidates": candidates,
+        }))
+    }
+}
+
 #[cfg(windows)]
 fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
     let parsed: Value = match serde_json::from_str(raw) {
@@ -1550,6 +1683,20 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
         } else {
             "오버레이 업데이트 확인을 시작했습니다."
         });
+    }
+    if command == "probe_gamebar_uia" {
+        return match probe_gamebar_uia() {
+            Ok(data) => serde_json::json!({
+                "ok": true,
+                "message": "Game Bar UI Automation probe를 완료했습니다.",
+                "data": data,
+            })
+            .to_string(),
+            Err(error) => {
+                append_native_input_log(&format!("uia-probe failed error={error}"));
+                json_response(false, &error)
+            }
+        };
     }
     if command == "open_url" {
         let Some(url) = parsed.get("url").and_then(Value::as_str) else {

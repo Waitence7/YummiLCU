@@ -66,6 +66,7 @@ namespace YummiGameBarWidget
         private bool browserUsingFallback;
         private bool browserReady;
         private string browserLoadedUrl = "";
+        private bool gameBarUiaProbeRequested;
         private bool youtubeUsingFallback;
         private bool youtubeBrowseMode;
         private double youtubePlayerHeightBeforeBrowse;
@@ -1001,7 +1002,32 @@ namespace YummiGameBarWidget
             else if (!widget.Pinned) InputText.Text = "HUD를 고정하면 게임 위에 표시됩니다";
             else if (!widget.ClickThroughEnabled) InputText.Text = "Game Bar 상단에서 클릭 통과를 켜 주세요";
             else InputText.Text = "Game Bar를 닫으면 게임으로 클릭이 통과합니다";
+            RequestGameBarUiaProbeIfNeeded(pinnedOnly);
             SaveStatus();
+        }
+
+        private void RequestGameBarUiaProbeIfNeeded(bool pinnedOnly)
+        {
+            if (widget == null || gameBarUiaProbeRequested) return;
+            // Probe only while Win+G is open. In PinnedOnly mode the Game Bar
+            // chrome is absent, so its click-through control is not available in
+            // the UI Automation tree yet.
+            if (pinnedOnly || widget.ClickThroughEnabled) return;
+            gameBarUiaProbeRequested = true;
+            _ = ProbeGameBarUiaAsync();
+        }
+
+        private async Task ProbeGameBarUiaAsync()
+        {
+            try
+            {
+                var response = await SendAgentCommandAsync("{\"command\":\"probe_gamebar_uia\"}");
+                App.LogStage("gamebar-uia-probe-response-" + (string.IsNullOrWhiteSpace(response) ? "empty" : "ok"));
+            }
+            catch (Exception ex)
+            {
+                App.LogStage("gamebar-uia-probe-failed-" + ErrorCode(ex));
+            }
         }
 
         private async void SaveStatus()
