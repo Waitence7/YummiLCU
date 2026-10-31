@@ -227,43 +227,43 @@
         </Grid>
       </Border>
 
-    </Grid>
-  <Border x:Name="VoiceChatPanel"
-          Width="520"
-          HorizontalAlignment="Left"
-          VerticalAlignment="Top"
-          Margin="24,24,0,0"
-          Background="Transparent"
-          Visibility="Collapsed"
-          Canvas.ZIndex="9000">
-    <Border.RenderTransform><TranslateTransform x:Name="VoiceChatPanelTransform"/></Border.RenderTransform>
-    <Grid>
-      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-      <Border x:Name="VoiceChatMoveBar" Height="24" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="voice-chat"
-              PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
-        <Grid Padding="8,0,8,0">
-          <TextBlock Text="Discord Chat" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
+      <Border x:Name="VoiceChatPanel"
+              Width="520"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Top"
+              Margin="24,24,0,0"
+              Background="Transparent"
+              Visibility="Collapsed"
+              Canvas.ZIndex="9000">
+        <Border.RenderTransform><TranslateTransform x:Name="VoiceChatPanelTransform"/></Border.RenderTransform>
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Border x:Name="VoiceChatMoveBar" Height="24" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="voice-chat"
+                  PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
+            <Grid Padding="8,0,8,0">
+              <TextBlock Text="Discord Chat" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
+            </Grid>
+          </Border>
+          <Border x:Name="VoiceChatBody" Grid.Row="1" Height="190" Padding="10" CornerRadius="8" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" IsHitTestVisible="False">
+            <Grid x:Name="VoiceChatViewport" Width="500" Height="170">
+              <Grid.Clip>
+                <RectangleGeometry Rect="0,0,500,170"/>
+              </Grid.Clip>
+              <StackPanel x:Name="VoiceChatOverlay" Width="500" Spacing="7" VerticalAlignment="Bottom" Visibility="Collapsed"/>
+              <TextBlock x:Name="VoiceChatPlaceholder"
+                         Text="Discord Chat · 이 박스 안에서만 메시지가 표시됩니다."
+                         Foreground="#B9ADC8"
+                         FontSize="11"
+                         TextWrapping="Wrap"
+                         TextAlignment="Center"
+                         HorizontalAlignment="Center"
+                         VerticalAlignment="Center"
+                         Visibility="Collapsed"/>
+            </Grid>
+          </Border>
         </Grid>
       </Border>
-      <Border x:Name="VoiceChatBody" Grid.Row="1" Height="190" Padding="10" CornerRadius="8" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" IsHitTestVisible="False">
-        <Grid x:Name="VoiceChatViewport" Width="500" Height="170">
-          <Grid.Clip>
-            <RectangleGeometry Rect="0,0,500,170"/>
-          </Grid.Clip>
-          <StackPanel x:Name="VoiceChatOverlay" Width="500" Spacing="7" VerticalAlignment="Bottom" Visibility="Collapsed"/>
-          <TextBlock x:Name="VoiceChatPlaceholder"
-                     Text="Discord Chat · 이 박스 안에서만 메시지가 표시됩니다."
-                     Foreground="#B9ADC8"
-                     FontSize="11"
-                     TextWrapping="Wrap"
-                     TextAlignment="Center"
-                     HorizontalAlignment="Center"
-                     VerticalAlignment="Center"
-                     Visibility="Collapsed"/>
-        </Grid>
-      </Border>
     </Grid>
-  </Border>
 
     <Grid x:Name="PinTutorialOverlay"
           Visibility="Collapsed"
