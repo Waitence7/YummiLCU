@@ -291,7 +291,11 @@ namespace YummiGameBarWidget
             ApplyVoiceChatPreferences();
             UpdatePanelChrome();
             ApplyYoutubePreferences();
-            if (string.IsNullOrWhiteSpace(ExtractYoutubeVideoId(YoutubePreferences.Video)))
+            // When the built-in YouTube browser is open, an empty saved URL is
+            // expected: the user may be searching/browsing for a video there.
+            // Do not cover that browser with the legacy "enter a link" prompt.
+            if (!youtubeBrowseMode &&
+                string.IsNullOrWhiteSpace(ExtractYoutubeVideoId(YoutubePreferences.Video)))
                 SetYoutubeInlineState(true, "영상 링크를 입력해 주세요");
         }
 
