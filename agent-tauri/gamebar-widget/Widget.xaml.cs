@@ -2368,6 +2368,41 @@ namespace YummiGameBarWidget
             QueueForegroundChromeRefresh("window-activated-" + e.WindowActivationState);
         }
 
+        private static bool PointInRect(double x, double y, double rx, double ry, double width, double height)
+        {
+            return width > 0 && height > 0 && x >= rx && x < rx + width && y >= ry && y < ry + height;
+        }
+
+        private void UpdateNativeHookButtonVisual(bool hovered, bool pressed)
+        {
+            if (NativeHookHitbox == null || NativeHookButtonTransform == null) return;
+
+            if (pressed)
+            {
+                NativeHookHitbox.Background = new SolidColorBrush(Color.FromArgb(255, 65, 43, 86));
+                NativeHookHitbox.BorderBrush = new SolidColorBrush(Colors.White);
+                NativeHookButtonTransform.ScaleX = 0.97;
+                NativeHookButtonTransform.ScaleY = 0.97;
+                NativeHookButtonTransform.TranslateY = 1.5;
+            }
+            else if (hovered)
+            {
+                NativeHookHitbox.Background = new SolidColorBrush(Color.FromArgb(255, 114, 81, 151));
+                NativeHookHitbox.BorderBrush = new SolidColorBrush(Color.FromArgb(220, 182, 154, 216));
+                NativeHookButtonTransform.ScaleX = 1.015;
+                NativeHookButtonTransform.ScaleY = 1.015;
+                NativeHookButtonTransform.TranslateY = -1.0;
+            }
+            else
+            {
+                NativeHookHitbox.Background = new SolidColorBrush(Color.FromArgb(255, 91, 62, 120));
+                NativeHookHitbox.BorderBrush = new SolidColorBrush(Color.FromArgb(128, 111, 85, 164));
+                NativeHookButtonTransform.ScaleX = 1.0;
+                NativeHookButtonTransform.ScaleY = 1.0;
+                NativeHookButtonTransform.TranslateY = 0.0;
+            }
+        }
+
         private async Task SyncExternalClickTestAsync(bool active)
         {
             var now = NowMs();
@@ -2384,6 +2419,7 @@ namespace YummiGameBarWidget
             }
             if (widget == null)
             {
+                UpdateNativeHookButtonVisual(false, false);
                 ClickNativeResult.Text = "Agent native input unavailable · widget=null";
                 return;
             }
@@ -2446,6 +2482,7 @@ namespace YummiGameBarWidget
                 var response = JsonObject.Parse(rawResponse);
                 if (!response.GetNamedBoolean("ok", false))
                 {
+                    UpdateNativeHookButtonVisual(false, false);
                     ClickNativeResult.Text = "Agent native · " + response.GetNamedString("message", "sync failed");
                     return;
                 }
@@ -2506,6 +2543,20 @@ namespace YummiGameBarWidget
                 var gamebarStoredX = (int)response.GetNamedNumber("gamebarStoredCursorX", 0);
                 var gamebarStoredY = (int)response.GetNamedNumber("gamebarStoredCursorY", 0);
                 var gamebarAgeMs = (ulong)Math.Max(0, response.GetNamedNumber("gamebarCursorAgeMs", 0));
+
+                var fallbackHovered =
+                    PointInRect(cursorX, cursorY, rectX, rectY, rectWidth, rectHeight) ||
+                    PointInRect(cursorX, cursorY, altRectX, altRectY, altRectWidth, altRectHeight) ||
+                    PointInRect(cursorX, cursorY, rectX + monitorX, rectY + monitorY, rectWidth, rectHeight) ||
+                    PointInRect(cursorX, cursorY, altRectX + monitorX, altRectY + monitorY, altRectWidth, altRectHeight);
+                var nativeHovered = response.ContainsKey("hovered")
+                    ? response.GetNamedBoolean("hovered", fallbackHovered)
+                    : fallbackHovered;
+                var nativeMouseDown = response.ContainsKey("mouseDown")
+                    ? response.GetNamedBoolean("mouseDown", false)
+                    : nativeHovered && eventName == "down";
+                UpdateNativeHookButtonVisual(nativeHovered, nativeMouseDown);
+
                 if (sequence != lastNativeInputSequence) lastNativeInputSequence = sequence;
 
                 UpdateCursorDiagnosticMarkers(
@@ -2535,6 +2586,7 @@ namespace YummiGameBarWidget
             }
             catch (Exception ex)
             {
+                UpdateNativeHookButtonVisual(false, false);
                 ClickNativeResult.Text = "Agent native input unavailable · " + ErrorCode(ex);
             }
             finally

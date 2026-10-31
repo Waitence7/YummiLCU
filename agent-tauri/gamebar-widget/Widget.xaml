@@ -207,7 +207,11 @@
               <Button x:Name="NativeHookHitbox"
                       Style="{StaticResource NativeInputTestButtonStyle}"
                       Padding="12,8"
+                      RenderTransformOrigin="0.5,0.5"
                       ToolTipService.ToolTip="Agent native input 실제 클릭 테스트">
+                <Button.RenderTransform>
+                  <CompositeTransform x:Name="NativeHookButtonTransform"/>
+                </Button.RenderTransform>
                 <Grid>
                   <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>

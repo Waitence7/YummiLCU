@@ -29,7 +29,6 @@ const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 #[cfg(windows)]
 const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(windows)]
-const OVERLAY_PENDING_FORCE_AFTER: Duration = Duration::from_secs(90);
 #[cfg(windows)]
 const GAMEBAR_VERSION_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/main/agent-tauri/gamebar-widget/version.json";
 #[cfg(windows)]
@@ -98,6 +97,8 @@ struct ExternalClickTestState {
     gamebar_cursor_x: i32,
     gamebar_cursor_y: i32,
     gamebar_cursor_updated_at_ms: u64,
+    hovered: bool,
+    mouse_down: bool,
 }
 
 #[cfg(windows)]
@@ -219,7 +220,7 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
 async fn watch_overlay_updates(state: Arc<AppState>) {
     let mut shutdown = state.shutdown_receiver();
 
-    // Check once immediately after Agent startup, then every five minutes.
+    // Check once immediately after Agent startup, then periodically. Background checks only stage a verified ZIP; Win+G is required to apply it.
     loop {
         if *shutdown.borrow() {
             break;
@@ -961,6 +962,10 @@ fn external_mouse_input_thread() {
             // The widget's official Game Bar hotkey watcher handles F9. Keep only
             // a low-rate Agent fallback while native hit-testing diagnostics are idle.
             was_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+            if let Ok(mut state) = external_click_test_state().lock() {
+                state.hovered = false;
+                state.mouse_down = false;
+            }
             was_f9_down = f9_down;
             std::thread::sleep(Duration::from_millis(50));
             continue;
@@ -1019,42 +1024,45 @@ fn external_mouse_input_thread() {
                 state.monitor_x = monitor_x;
                 state.monitor_y = monitor_y;
 
+                // Compute hover/pressed from the exact same native geometry used for
+                // click counting. The XAML button does not receive pointer states when
+                // the pinned overlay is click-through, so the widget mirrors these flags.
+                let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
+                let hit_x = point.x;
+                let hit_y = point.y;
+                let px = hit_x as f64;
+                let py = hit_y as f64;
+                let mx = monitor_x as f64;
+                let my = monitor_y as f64;
+                let inside = |rx: f64, ry: f64, rw: f64, rh: f64| {
+                    fresh
+                        && state.active
+                        && px >= rx
+                        && px < rx + rw
+                        && py >= ry
+                        && py < ry + rh
+                };
+                let inside_primary = inside(state.x, state.y, state.width, state.height);
+                let inside_alt =
+                    inside(state.alt_x, state.alt_y, state.alt_width, state.alt_height);
+                let inside_primary_monitor =
+                    inside(state.x + mx, state.y + my, state.width, state.height);
+                let inside_alt_monitor = inside(
+                    state.alt_x + mx,
+                    state.alt_y + my,
+                    state.alt_width,
+                    state.alt_height,
+                );
+                let hovered = inside_primary
+                    || inside_alt
+                    || inside_primary_monitor
+                    || inside_alt_monitor;
+                state.hovered = hovered;
+                state.mouse_down = hovered && down;
+
                 if down != was_down {
-                    // Expire stale geometry so a crashed/closed widget can never
-                    // leave a ghost hitbox active in the Agent.
-                    let fresh = now.saturating_sub(state.geometry_updated_at_ms) <= 2_000;
                     let gamebar_fresh =
                         now.saturating_sub(state.gamebar_cursor_updated_at_ms) <= 500;
-                    // Native Win32 cursor coordinates are authoritative for hit testing.
-                    // Game Bar coordinates remain diagnostic-only because they can drift
-                    // or stop updating across host/Alt+Tab state changes.
-                    let hit_x = point.x;
-                    let hit_y = point.y;
-                    let (hit_monitor_x, hit_monitor_y) =
-                        monitor_origin_for_point(hit_x, hit_y).unwrap_or((0, 0));
-                    let px = hit_x as f64;
-                    let py = hit_y as f64;
-                    let mx = hit_monitor_x as f64;
-                    let my = hit_monitor_y as f64;
-                    let inside = |rx: f64, ry: f64, rw: f64, rh: f64| {
-                        fresh
-                            && state.active
-                            && px >= rx
-                            && px < rx + rw
-                            && py >= ry
-                            && py < ry + rh
-                    };
-                    let inside_primary = inside(state.x, state.y, state.width, state.height);
-                    let inside_alt =
-                        inside(state.alt_x, state.alt_y, state.alt_width, state.alt_height);
-                    let inside_primary_monitor =
-                        inside(state.x + mx, state.y + my, state.width, state.height);
-                    let inside_alt_monitor = inside(
-                        state.alt_x + mx,
-                        state.alt_y + my,
-                        state.alt_width,
-                        state.alt_height,
-                    );
                     append_native_input_log(&format!(
                         "button={} native=({}, {}) hit=({}, {}) gamebarFresh={} gamebar=({}, {}) active={} fresh={} inside=[{},{},{},{}] rect=({:.1},{:.1},{:.1},{:.1}) alt=({:.1},{:.1},{:.1},{:.1})",
                         if down { "down" } else { "up" },
@@ -1348,6 +1356,8 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "active": state.active,
         "sequence": state.sequence,
         "clickCount": state.click_count,
+        "hovered": state.hovered,
+        "mouseDown": state.mouse_down,
         "hudToggleSequence": state.hud_toggle_sequence,
         "event": state.event,
         "eventX": state.event_x,
@@ -1863,28 +1873,11 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
                         return Ok(());
                     }
                     actual if state.pending_registration => {
-                        let widget_running = Command::new("powershell.exe")
-                            .args([
-                                "-NoProfile",
-                                "-Command",
-                                "if (Get-Process -Name 'YummiGameBarWidget' -ErrorAction SilentlyContinue) { exit 0 } else { exit 1 }",
-                            ])
-                            .creation_flags(CREATE_NO_WINDOW)
-                            .status()
-                            .map(|status| status.success())
-                            .unwrap_or(false);
-                        let pending_age = fs::metadata(&state_path)
-                            .and_then(|meta| meta.modified())
-                            .ok()
-                            .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-                            .unwrap_or_default();
-                        let force_finalize = force_finalize_requested || pending_age >= OVERLAY_PENDING_FORCE_AFTER;
-                        if widget_running && !force_finalize {
+                        if !force_finalize_requested {
                             append_gamebar_update_log(&format!(
-                                "오버레이 업데이트 등록 대기 중: expected={} active={} widget=running pending={}s",
+                                "오버레이 업데이트 적용 대기 중: expected={} active={} (Win+G를 열면 적용)",
                                 expected_appx_version,
-                                actual.as_deref().unwrap_or("missing"),
-                                pending_age.as_secs()
+                                actual.as_deref().unwrap_or("missing")
                             ));
                             return Ok(());
                         }
@@ -1892,12 +1885,9 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
                         let pending_zip = updater_dir.join("verified-update.zip");
                         if pending_zip.is_file() {
                             append_gamebar_update_log(&format!(
-                                "오버레이 예약 업데이트 재등록 시도: expected={} active={} widgetRunning={} forceFinalize={} pending={}s",
+                                "Win+G 오버레이 예약 업데이트 적용 시작: expected={} active={}",
                                 expected_appx_version,
-                                actual.as_deref().unwrap_or("missing"),
-                                widget_running,
-                                force_finalize,
-                                pending_age.as_secs()
+                                actual.as_deref().unwrap_or("missing")
                             ));
                             let mut command = Command::new("powershell.exe");
                             command
@@ -1918,19 +1908,17 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
                                 .arg(&target.build_id)
                                 .arg("-ReleaseTag")
                                 .arg(&target.release_tag)
-                                .arg("-Quiet");
-                            if force_finalize {
-                                command.arg("-ForceFinalize");
-                            }
+                                .arg("-Quiet")
+                                .arg("-ForceFinalize");
                             command
                                 .creation_flags(CREATE_NO_WINDOW)
                                 .spawn()
-                                .map_err(|e| format!("예약 Game Bar 재등록 실행 실패: {e}"))?;
+                                .map_err(|e| format!("Win+G Game Bar 재등록 실행 실패: {e}"))?;
                             return Ok(());
                         }
 
                         append_gamebar_update_log(&format!(
-                            "오버레이 예약 ZIP 없음, 다시 다운로드: expected={} active={}",
+                            "오버레이 예약 ZIP 없음, Win+G 요청에서 다시 다운로드: expected={} active={}",
                             expected_appx_version,
                             actual.as_deref().unwrap_or("missing")
                         ));
@@ -1947,35 +1935,50 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         }
     }
 
-    let response = client
-        .get(&target.url)
-        .send()
-        .await
-        .map_err(|e| format!("Game Bar ZIP 다운로드 실패: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Game Bar ZIP 응답 실패: {e}"))?;
-    if response.content_length().unwrap_or(target.size) != target.size {
-        return Err("Game Bar ZIP 크기가 manifest와 다릅니다.".into());
-    }
-    let archive = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Game Bar ZIP 읽기 실패: {e}"))?;
-    if archive.len() as u64 != target.size || archive.len() > MAX_GAMEBAR_ARCHIVE_BYTES {
-        return Err("Game Bar ZIP 크기 검증 실패".into());
-    }
-    let actual = format!("{:x}", Sha256::digest(&archive));
-    if !actual.eq_ignore_ascii_case(&target.sha256) {
-        return Err("Game Bar ZIP SHA256 검증 실패".into());
-    }
-
     fs::create_dir_all(&updater_dir)
         .map_err(|e| format!("Game Bar updater 폴더 생성 실패: {e}"))?;
     let zip_path = updater_dir.join("verified-update.zip");
-    fs::write(&zip_path, &archive).map_err(|e| format!("검증된 Game Bar ZIP 저장 실패: {e}"))?;
+    let staged_valid = fs::read(&zip_path)
+        .ok()
+        .filter(|bytes| bytes.len() as u64 == target.size && bytes.len() <= MAX_GAMEBAR_ARCHIVE_BYTES)
+        .map(|bytes| format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(&target.sha256))
+        .unwrap_or(false);
+
+    if !staged_valid {
+        let response = client
+            .get(&target.url)
+            .send()
+            .await
+            .map_err(|e| format!("Game Bar ZIP 다운로드 실패: {e}"))?
+            .error_for_status()
+            .map_err(|e| format!("Game Bar ZIP 응답 실패: {e}"))?;
+        if response.content_length().unwrap_or(target.size) != target.size {
+            return Err("Game Bar ZIP 크기가 manifest와 다릅니다.".into());
+        }
+        let archive = response
+            .bytes()
+            .await
+            .map_err(|e| format!("Game Bar ZIP 읽기 실패: {e}"))?;
+        if archive.len() as u64 != target.size || archive.len() > MAX_GAMEBAR_ARCHIVE_BYTES {
+            return Err("Game Bar ZIP 크기 검증 실패".into());
+        }
+        let actual = format!("{:x}", Sha256::digest(&archive));
+        if !actual.eq_ignore_ascii_case(&target.sha256) {
+            return Err("Game Bar ZIP SHA256 검증 실패".into());
+        }
+        fs::write(&zip_path, &archive).map_err(|e| format!("검증된 Game Bar ZIP 저장 실패: {e}"))?;
+    }
+
+    if !force_finalize_requested {
+        append_gamebar_update_log(&format!(
+            "오버레이 업데이트 준비 완료: {} / build {} (Win+G를 열면 적용)",
+            target.release_tag, target.build_id
+        ));
+        return Ok(());
+    }
 
     append_gamebar_update_log(&format!(
-        "오버레이 업데이트 설치 시작: {} / build {}",
+        "Win+G 오버레이 업데이트 적용 시작: {} / build {}",
         target.release_tag, target.build_id
     ));
     let mut install_command = Command::new("powershell.exe");
@@ -1998,9 +2001,7 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         .arg("-ReleaseTag")
         .arg(&target.release_tag)
         .arg("-Quiet");
-    if force_finalize_requested {
-        install_command.arg("-ForceFinalize");
-    }
+    install_command.arg("-ForceFinalize");
     install_command
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()

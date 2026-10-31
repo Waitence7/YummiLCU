@@ -75,6 +75,9 @@ try {
   if ($widgetXaml -notmatch '<Button x:Name="NativeHookHitbox"') { throw 'Native input hitbox must be a real Button control' }
   if ($widgetXaml -notmatch 'x:Name="PointerOver"' -or $widgetXaml -notmatch 'x:Name="Pressed"') { throw 'Native input button must provide hover and pressed visual states' }
   if ($widgetXaml -notmatch 'x:Name="NativeHookClickCountText"' -or $widgetSource -notmatch 'NativeHookClickCountText\.Text = clickCount\.ToString\(\)') { throw 'Native input button must show the live native click count' }
+  if ($widgetXaml -notmatch 'x:Name="NativeHookButtonTransform"') { throw 'Native input button must expose a transform for native hover/press feedback' }
+  if ($widgetSource -notmatch 'UpdateNativeHookButtonVisual') { throw 'Native input hit-test state must drive button hover/press visuals' }
+  if ($widgetSource -notmatch 'fallbackHovered') { throw 'Native input hover feedback must remain compatible with older Agents' }
   Write-Host 'PASS: eye ghost, hard close, and native input button semantics'
   # Exercise the production permission branch without changing OS settings.
   $tokens = $null
