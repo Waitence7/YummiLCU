@@ -547,9 +547,10 @@ namespace YummiGameBarWidget
         private void QueueForegroundChromeRefresh(string reason)
         {
             // The host-owned title/pin chrome can stay stale after a package update
-            // or a fresh Win+G foreground activation. A manual resize fixes it; do
-            // the same automatically only while the widget is still unpinned.
-            if (widget == null || !hudLoaded || widget.Pinned ||
+            // or a fresh Win+G foreground activation. This also affects widgets that
+            // are already pinned: while Win+G is open they are still in Foreground and
+            // need editable geometry that leaves room for the host title/pin bar.
+            if (widget == null || !hudLoaded ||
                 widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
 
             var now = NowMs();
@@ -563,7 +564,7 @@ namespace YummiGameBarWidget
         {
             await Task.Delay(90);
             if (generation != Volatile.Read(ref foregroundChromeRefreshGeneration)) return;
-            if (widget == null || !hudLoaded || widget.Pinned ||
+            if (widget == null || !hudLoaded ||
                 widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
             if (foregroundChromeRefreshInFlight || fittingDisplay) return;
 
@@ -616,7 +617,7 @@ namespace YummiGameBarWidget
                         if (layoutAccepted)
                         {
                             await Task.Delay(60);
-                            if (widget != null && hudLoaded && !widget.Pinned &&
+                            if (widget != null && hudLoaded &&
                                 widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
                                 restoredAccepted = await widget.TryResizeWindowAsync(original);
                         }
@@ -627,7 +628,7 @@ namespace YummiGameBarWidget
                     }
                 }
 
-                if (widget == null || !hudLoaded || widget.Pinned ||
+                if (widget == null || !hudLoaded ||
                     widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
 
                 // Center after the cap/layout pass so the host chrome is not left above
