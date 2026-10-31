@@ -203,6 +203,16 @@
             <Border x:Name="YoutubeInlineState" Background="#C8120F1C" Visibility="Visible">
               <TextBlock x:Name="YoutubeInlineStateText" Text="설정에서 YouTube 영상을 선택해 주세요" Foreground="#D9CFE8" FontSize="11" TextAlignment="Center" TextWrapping="Wrap" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="16"/>
             </Border>
+            <!-- 평소에는 YouTube 입력을 통과시키고 Shift를 누른 동안만 영상 전체를 이동 핸들로 사용한다. -->
+            <Border x:Name="YoutubeDragSurface"
+                    Tag="youtube"
+                    Background="#01000000"
+                    IsHitTestVisible="False"
+                    PointerPressed="YoutubeDragSurface_PointerPressed"
+                    PointerMoved="YoutubeDragSurface_PointerMoved"
+                    PointerReleased="YoutubeDragSurface_PointerReleased"
+                    PointerCanceled="YoutubeDragSurface_PointerCanceled"
+                    PointerCaptureLost="YoutubeDragSurface_PointerCaptureLost"/>
           </Grid>
           <Grid x:Name="YoutubeResizeHandles" Grid.RowSpan="2" Visibility="Collapsed">
             <Border Tag="youtube:left" Width="7" HorizontalAlignment="Left" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"><Border Width="2" HorizontalAlignment="Left" Background="#70FFFFFF"/></Border>

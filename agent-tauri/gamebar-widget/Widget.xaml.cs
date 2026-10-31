@@ -186,6 +186,7 @@ namespace YummiGameBarWidget
                 App.LogStage("hud-loaded");
                 hudLoaded = true;
                 Window.Current.CoreWindow.KeyDown += CoreWindowKeyDown;
+                Window.Current.CoreWindow.KeyUp += CoreWindowKeyUp;
                 Window.Current.Activated += WindowActivated;
                 ApplicationData.Current.DataChanged += PreferencesChanged;
                 lastFitRequest = HudPreferences.FitRequest;
@@ -212,6 +213,7 @@ namespace YummiGameBarWidget
                 App.LogStage("hud-unloaded");
                 hudLoaded = false;
                 Window.Current.CoreWindow.KeyDown -= CoreWindowKeyDown;
+                Window.Current.CoreWindow.KeyUp -= CoreWindowKeyUp;
                 nativeInputDiagnosticsWanted = false;
                 Window.Current.Activated -= WindowActivated;
                 ApplicationData.Current.DataChanged -= PreferencesChanged;
@@ -241,6 +243,11 @@ namespace YummiGameBarWidget
 
         private void CoreWindowKeyDown(CoreWindow sender, KeyEventArgs args)
         {
+            if (args.VirtualKey == VirtualKey.Shift)
+            {
+                YoutubeDragSurface.IsHitTestVisible = true;
+                return;
+            }
             if (args.KeyStatus.WasKeyDown) return;
 
             if (args.VirtualKey == VirtualKey.F8)
@@ -261,6 +268,14 @@ namespace YummiGameBarWidget
                 args.Handled = true;
                 _ = ToggleYoutubePlaybackAsync();
             }
+        }
+
+
+        private void CoreWindowKeyUp(CoreWindow sender, KeyEventArgs args)
+        {
+            if (args.VirtualKey != VirtualKey.Shift) return;
+            if (draggedPanel != YoutubePanel)
+                YoutubeDragSurface.IsHitTestVisible = false;
         }
 
 
@@ -1419,6 +1434,51 @@ namespace YummiGameBarWidget
         private void Panel_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
         {
             if (panelDragPointerId == e.Pointer.PointerId) ClearPanelDrag();
+        }
+
+        private bool IsShiftDown()
+        {
+            return (Window.Current.CoreWindow.GetKeyState(VirtualKey.Shift) & CoreVirtualKeyStates.Down) != 0;
+        }
+
+        private void RefreshYoutubeDragSurface()
+        {
+            if (draggedPanel != YoutubePanel)
+                YoutubeDragSurface.IsHitTestVisible = IsShiftDown();
+        }
+
+        private void YoutubeDragSurface_PointerPressed(object sender, PointerRoutedEventArgs e)
+        {
+            if (!IsShiftDown() || panelResizePointerId.HasValue)
+            {
+                YoutubeDragSurface.IsHitTestVisible = false;
+                return;
+            }
+            BeginPanelDrag(YoutubePanel, e, YoutubeDragSurface);
+        }
+
+        private void YoutubeDragSurface_PointerMoved(object sender, PointerRoutedEventArgs e)
+        {
+            ContinuePanelDrag(e, YoutubeDragSurface);
+            RefreshYoutubeDragSurface();
+        }
+
+        private void YoutubeDragSurface_PointerReleased(object sender, PointerRoutedEventArgs e)
+        {
+            EndPanelDrag(e, YoutubeDragSurface, true);
+            RefreshYoutubeDragSurface();
+        }
+
+        private void YoutubeDragSurface_PointerCanceled(object sender, PointerRoutedEventArgs e)
+        {
+            EndPanelDrag(e, YoutubeDragSurface, false);
+            RefreshYoutubeDragSurface();
+        }
+
+        private void YoutubeDragSurface_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
+        {
+            if (panelDragPointerId == e.Pointer.PointerId) ClearPanelDrag();
+            RefreshYoutubeDragSurface();
         }
 
         private void PanelMoveBar_PointerPressed(object sender, PointerRoutedEventArgs e)
