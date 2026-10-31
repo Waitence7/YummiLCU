@@ -121,6 +121,8 @@ namespace YummiGameBarWidget
         private string voiceChatSignature = "";
         private readonly Dictionary<string, BitmapImage> voiceChatAvatarCache = new Dictionary<string, BitmapImage>(StringComparer.Ordinal);
         private readonly Dictionary<string, long> voiceChatFirstSeenAtMs = new Dictionary<string, long>(StringComparer.Ordinal);
+        private readonly Dictionary<string, long> voiceChatExpiresAtMs = new Dictionary<string, long>(StringComparer.Ordinal);
+        private readonly Dictionary<string, FrameworkElement> voiceChatRowsByKey = new Dictionary<string, FrameworkElement>(StringComparer.Ordinal);
         private readonly HashSet<string> voiceChatRenderedKeys = new HashSet<string>(StringComparer.Ordinal);
         private bool voiceChatHasVisibleMessages;
         private bool voiceChatPositionNeedsDefault;
@@ -177,6 +179,9 @@ namespace YummiGameBarWidget
             };
             timer.Tick += async (_, __) =>
             {
+                // Voice chat expiry is a UI concern and must keep advancing even
+                // while the realtime snapshot WebSocket is healthy and idle.
+                ExpireVoiceChatMessages();
                 // The WebSocket is the primary realtime transport. The legacy
                 // snapshot TCP endpoint is polled only while WS is unavailable.
                 if (!snapshotWebSocketConnected) await RefreshAsync();
@@ -1156,6 +1161,8 @@ namespace YummiGameBarWidget
             if (messages == null || messages.Count == 0)
             {
                 voiceChatFirstSeenAtMs.Clear();
+                voiceChatExpiresAtMs.Clear();
+                voiceChatRowsByKey.Clear();
                 voiceChatSignature = "";
                 voiceChatHasVisibleMessages = false;
                 VoiceChatOverlay.Children.Clear();
@@ -1181,11 +1188,19 @@ namespace YummiGameBarWidget
                     firstSeen = now;
                     voiceChatFirstSeenAtMs[key] = firstSeen;
                 }
-                if (now - firstSeen < lifetimeMs) visible.Add(Tuple.Create(key, item));
+                var messageTimestampMs = (long)Math.Max(0, item.GetNamedNumber("timestamp_ms", 0));
+                var lifetimeOriginMs = messageTimestampMs > 0 ? messageTimestampMs : firstSeen;
+                var expiresAtMs = lifetimeOriginMs > long.MaxValue - lifetimeMs ? long.MaxValue : lifetimeOriginMs + lifetimeMs;
+                voiceChatExpiresAtMs[key] = expiresAtMs;
+                if (now < expiresAtMs) visible.Add(Tuple.Create(key, item));
             }
 
             foreach (var key in voiceChatFirstSeenAtMs.Keys.Where(key => !snapshotKeys.Contains(key)).ToList())
+            {
                 voiceChatFirstSeenAtMs.Remove(key);
+                voiceChatExpiresAtMs.Remove(key);
+                voiceChatRowsByKey.Remove(key);
+            }
 
             var signature = string.Join("|", visible.Select(item => item.Item1));
             voiceChatHasVisibleMessages = visible.Count > 0;
@@ -1197,6 +1212,7 @@ namespace YummiGameBarWidget
             voiceChatSignature = signature;
             var previouslyRendered = new HashSet<string>(voiceChatRenderedKeys, StringComparer.Ordinal);
             voiceChatRenderedKeys.Clear();
+            voiceChatRowsByKey.Clear();
             VoiceChatOverlay.Children.Clear();
             var addedNewMessage = false;
 
@@ -1263,6 +1279,7 @@ namespace YummiGameBarWidget
                 Grid.SetColumn(copy, 1);
                 row.Children.Add(copy);
                 VoiceChatOverlay.Children.Add(row);
+                voiceChatRowsByKey[key] = row;
                 voiceChatRenderedKeys.Add(key);
                 if (!previouslyRendered.Contains(key))
                 {
@@ -1272,6 +1289,38 @@ namespace YummiGameBarWidget
             }
 
             if (addedNewMessage) AnimateVoiceChatStack();
+            voiceChatHasVisibleMessages = VoiceChatOverlay.Children.Count > 0;
+            UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
+        }
+
+
+        private void ExpireVoiceChatMessages()
+        {
+            if (voiceChatExpiresAtMs.Count == 0) return;
+            var now = NowMs();
+            var expired = voiceChatExpiresAtMs
+                .Where(pair => now >= pair.Value)
+                .Select(pair => pair.Key)
+                .ToList();
+            if (expired.Count == 0) return;
+
+            foreach (var key in expired)
+            {
+                voiceChatExpiresAtMs.Remove(key);
+                voiceChatFirstSeenAtMs.Remove(key);
+                voiceChatRenderedKeys.Remove(key);
+                FrameworkElement row;
+                if (voiceChatRowsByKey.TryGetValue(key, out row))
+                {
+                    VoiceChatOverlay.Children.Remove(row);
+                    voiceChatRowsByKey.Remove(key);
+                }
+            }
+
+            // Force the next snapshot apply to rebuild from the remaining fresh
+            // messages. This also prevents an old Agent snapshot from resurrecting
+            // expired rows because ApplyVoiceChat uses each message timestamp.
+            voiceChatSignature = "expired:" + now;
             voiceChatHasVisibleMessages = VoiceChatOverlay.Children.Count > 0;
             UpdateVoiceChatPanelChrome(widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
         }
@@ -2775,6 +2824,8 @@ namespace YummiGameBarWidget
             PartyText.Text = "파티 정보 없음";
             voiceChatSignature = "";
             voiceChatFirstSeenAtMs.Clear();
+            voiceChatExpiresAtMs.Clear();
+            voiceChatRowsByKey.Clear();
             voiceChatRenderedKeys.Clear();
             voiceChatHasVisibleMessages = false;
             VoiceChatOverlay.Children.Clear();

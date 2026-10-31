@@ -157,6 +157,8 @@ fn installed_at() -> Option<u64> {
         .map(|value| value.as_secs())
 }
 
+const GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS: u64 = 60_000;
+
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct VoiceChatOverlayMessage {
     pub(crate) channel_id: u64,
@@ -179,6 +181,15 @@ pub(crate) struct GameBarSnapshot {
     pub(crate) voice_chat_messages: Vec<VoiceChatOverlayMessage>,
     pub(crate) tutorial_reset_generation: u64,
     pub(crate) updated_at_ms: u64,
+}
+
+fn prune_gamebar_voice_chat_messages(snapshot: &mut GameBarSnapshot, now_ms: u64) -> bool {
+    let before = snapshot.voice_chat_messages.len();
+    snapshot.voice_chat_messages.retain(|message| {
+        message.timestamp_ms == 0
+            || now_ms.saturating_sub(message.timestamp_ms) < GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS
+    });
+    before != snapshot.voice_chat_messages.len()
 }
 
 impl Default for GameBarSnapshot {
@@ -549,10 +560,11 @@ impl AppState {
     }
 
     pub(crate) fn gamebar_snapshot(&self) -> GameBarSnapshot {
-        self.gamebar_snapshot
-            .read()
-            .map(|snapshot| snapshot.clone())
-            .unwrap_or_default()
+        if let Ok(mut snapshot) = self.gamebar_snapshot.write() {
+            prune_gamebar_voice_chat_messages(&mut snapshot, diagnostic_now_ms());
+            return snapshot.clone();
+        }
+        GameBarSnapshot::default()
     }
 
     fn notify_gamebar_snapshot_update(&self) {
@@ -566,10 +578,11 @@ impl AppState {
     pub(crate) fn set_gamebar_snapshot(&self, mut snapshot: GameBarSnapshot) {
         let mut changed = false;
         if let Ok(mut current) = self.gamebar_snapshot.write() {
+            changed |= prune_gamebar_voice_chat_messages(&mut current, diagnostic_now_ms());
             snapshot.voice_chat_channel_id = current.voice_chat_channel_id;
             snapshot.voice_chat_messages = current.voice_chat_messages.clone();
             snapshot.tutorial_reset_generation = current.tutorial_reset_generation;
-            changed = current.connected != snapshot.connected
+            changed |= current.connected != snapshot.connected
                 || current.riot_id != snapshot.riot_id
                 || current.phase != snapshot.phase
                 || current.party_members != snapshot.party_members
@@ -584,9 +597,14 @@ impl AppState {
         }
     }
 
-    pub(crate) fn push_gamebar_voice_chat_message(&self, message: VoiceChatOverlayMessage) {
+    pub(crate) fn push_gamebar_voice_chat_message(&self, mut message: VoiceChatOverlayMessage) {
         let mut changed = false;
+        let now = diagnostic_now_ms();
+        if message.timestamp_ms == 0 {
+            message.timestamp_ms = now;
+        }
         if let Ok(mut snapshot) = self.gamebar_snapshot.write() {
+            changed |= prune_gamebar_voice_chat_messages(&mut snapshot, now);
             if snapshot.voice_chat_channel_id != Some(message.channel_id) {
                 snapshot.voice_chat_channel_id = Some(message.channel_id);
                 snapshot.voice_chat_messages.clear();
@@ -1022,8 +1040,9 @@ fn lcu_state_label(state: LcuConnectionState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_diagnostic_bundle, sanitize_diagnostic_line, sanitize_error_summary, UiState,
-        MAX_ERROR_SUMMARY_CHARS, MAX_UI_LOGS,
+        build_diagnostic_bundle, prune_gamebar_voice_chat_messages, sanitize_diagnostic_line,
+        sanitize_error_summary, GameBarSnapshot, UiState, VoiceChatOverlayMessage,
+        GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS, MAX_ERROR_SUMMARY_CHARS, MAX_UI_LOGS,
     };
     use crate::config::Config;
 
@@ -1084,6 +1103,28 @@ mod tests {
         assert!(!summary.contains('\n'));
         assert!(!summary.contains("super-secret"));
         assert!(summary.chars().count() <= MAX_ERROR_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn gamebar_voice_chat_retention_drops_only_expired_messages() {
+        let now = 100_000;
+        let mut snapshot = GameBarSnapshot::default();
+        snapshot.voice_chat_messages = vec![
+            VoiceChatOverlayMessage {
+                channel_id: 1, message_id: 1, author_id: 1, author_name: "old".into(),
+                avatar_url: None, content: "old".into(),
+                timestamp_ms: now - GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS,
+            },
+            VoiceChatOverlayMessage {
+                channel_id: 1, message_id: 2, author_id: 1, author_name: "fresh".into(),
+                avatar_url: None, content: "fresh".into(),
+                timestamp_ms: now - GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS + 1,
+            },
+        ];
+
+        assert!(prune_gamebar_voice_chat_messages(&mut snapshot, now));
+        assert_eq!(snapshot.voice_chat_messages.len(), 1);
+        assert_eq!(snapshot.voice_chat_messages[0].message_id, 2);
     }
 
     #[tokio::test]
