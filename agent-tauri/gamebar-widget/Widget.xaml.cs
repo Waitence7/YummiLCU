@@ -61,6 +61,11 @@ namespace YummiGameBarWidget
         private double youtubeVolume = 60;
         private Microsoft.UI.Xaml.Controls.WebView2 youtubeWebView2;
         private bool youtubeWebView2Unavailable;
+        private Microsoft.UI.Xaml.Controls.WebView2 browserWebView2;
+        private bool browserWebView2Unavailable;
+        private bool browserUsingFallback;
+        private bool browserReady;
+        private string browserLoadedUrl = "";
         private bool youtubeUsingFallback;
         private bool youtubeBrowseMode;
         private double youtubePlayerHeightBeforeBrowse;
@@ -98,6 +103,10 @@ namespace YummiGameBarWidget
         private const string YoutubePanelYSetting = "youtube-panel-y";
         private const string YoutubePanelWidthSetting = "youtube-panel-width";
         private const string YoutubePanelHeightSetting = "youtube-panel-height";
+        private const string BrowserPanelXSetting = "browser-panel-x";
+        private const string BrowserPanelYSetting = "browser-panel-y";
+        private const string BrowserPanelWidthSetting = "browser-panel-width";
+        private const string BrowserPanelHeightSetting = "browser-panel-height";
         private const string ClickNativePanelXSetting = "click-native-panel-x";
         private const string ClickNativePanelYSetting = "click-native-panel-y";
         private const string ClickNativePanelWidthSetting = "click-native-panel-width";
@@ -309,6 +318,7 @@ namespace YummiGameBarWidget
             ApplyVoiceChatPreferences();
             UpdatePanelChrome();
             ApplyYoutubePreferences();
+            ApplyBrowserPreferences();
             // When the built-in YouTube browser is open, an empty saved URL is
             // expected: the user may be searching/browsing for a video there.
             // Do not cover that browser with the legacy "enter a link" prompt.
@@ -472,12 +482,14 @@ namespace YummiGameBarWidget
             var anyVisible = (!HudPreferences.LcuPanelClosed && HudPreferences.LcuPanelVisible) ||
                              (!HudPreferences.PartyPanelClosed && HudPreferences.PartyPanelVisible) ||
                              (!HudPreferences.YoutubePanelClosed && YoutubePreferences.Visible) ||
+                             (!HudPreferences.BrowserPanelClosed && HudPreferences.BrowserPanelVisible) ||
                              (!HudPreferences.NativeInputPanelClosed && HudPreferences.NativeInputPanelVisible);
             var show = !anyVisible;
             if (show) HudPreferences.Visible = true;
             if (!HudPreferences.LcuPanelClosed) HudPreferences.LcuPanelVisible = show;
             if (!HudPreferences.PartyPanelClosed) HudPreferences.PartyPanelVisible = show;
             if (!HudPreferences.YoutubePanelClosed) YoutubePreferences.Visible = show;
+            if (!HudPreferences.BrowserPanelClosed) HudPreferences.BrowserPanelVisible = show;
             if (!HudPreferences.NativeInputPanelClosed) HudPreferences.NativeInputPanelVisible = show;
             ApplyPreferences();
             App.LogResize("runtime-panels-toggle source=" + source + " visible=" + show +
@@ -1910,6 +1922,7 @@ namespace YummiGameBarWidget
             RestorePanelPosition(LcuPanel, LcuPanelTransform, LcuPanelXSetting, LcuPanelYSetting);
             RestorePanelPosition(PartyPanel, PartyPanelTransform, PartyPanelXSetting, PartyPanelYSetting);
             RestorePanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelXSetting, YoutubePanelYSetting);
+            RestorePanelPosition(BrowserPanel, BrowserPanelTransform, BrowserPanelXSetting, BrowserPanelYSetting);
             RestorePanelPosition(ClickNativePanel, ClickNativePanelTransform, ClickNativePanelXSetting, ClickNativePanelYSetting);
             var values = ApplicationData.Current.LocalSettings.Values;
             if (values.ContainsKey(VoiceChatPanelXSetting) || values.ContainsKey(VoiceChatPanelYSetting))
@@ -1924,6 +1937,7 @@ namespace YummiGameBarWidget
             RestorePanelSize("lcu", values, LcuPanelWidthSetting, LcuPanelHeightSetting, 240, 145);
             RestorePanelSize("party", values, PartyPanelWidthSetting, PartyPanelHeightSetting, 240, 70);
             RestorePanelSize("youtube", values, YoutubePanelWidthSetting, YoutubePanelHeightSetting, 340, 191);
+            RestorePanelSize("browser", values, BrowserPanelWidthSetting, BrowserPanelHeightSetting, 720, 420);
             RestorePanelSize("click-native", values, ClickNativePanelWidthSetting, ClickNativePanelHeightSetting, 250, 300);
             clickNativeExpandedHeight = Math.Max(120, ClickNativeBody.Height);
         }
@@ -1947,6 +1961,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") { minWidth = 190; maxWidth = 900; minHeight = 100; maxHeight = 600; }
             else if (key == "party") { minWidth = 160; maxWidth = 800; minHeight = 48; maxHeight = 500; }
             else if (key == "youtube") { minWidth = 220; maxWidth = 1280; minHeight = 124; maxHeight = 720; }
+            else if (key == "browser") { minWidth = 360; maxWidth = 1600; minHeight = 240; maxHeight = 1000; }
             else if (key.StartsWith("click-")) { minWidth = 190; maxWidth = 700; minHeight = 70; maxHeight = 300; }
 
             panel.Width = Math.Max(minWidth, Math.Min(maxWidth, requestedWidth));
@@ -1975,6 +1990,11 @@ namespace YummiGameBarWidget
                 values[YoutubePanelWidthSetting] = panel.Width;
                 values[YoutubePanelHeightSetting] = body.Height;
             }
+            else if (key == "browser")
+            {
+                values[BrowserPanelWidthSetting] = panel.Width;
+                values[BrowserPanelHeightSetting] = body.Height;
+            }
             else if (key == "click-native") { values[ClickNativePanelWidthSetting] = panel.Width; values[ClickNativePanelHeightSetting] = GetPanelExpanded(key) ? body.Height : clickNativeExpandedHeight; }
         }
 
@@ -1983,6 +2003,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") return LcuPanel;
             if (key == "party") return PartyPanel;
             if (key == "youtube") return YoutubePanel;
+            if (key == "browser") return BrowserPanel;
             if (key == "click-native") return ClickNativePanel;
             if (key == "voice-chat") return VoiceChatPanel;
             return null;
@@ -1993,6 +2014,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") return LcuBody;
             if (key == "party") return PartyBody;
             if (key == "youtube") return YoutubeVideoHost;
+            if (key == "browser") return BrowserBody;
             if (key == "click-native") return ClickNativeBody;
             return null;
         }
@@ -2002,6 +2024,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") return HudPreferences.LcuPanelVisible;
             if (key == "party") return HudPreferences.PartyPanelVisible;
             if (key == "youtube") return YoutubePreferences.Visible;
+            if (key == "browser") return HudPreferences.BrowserPanelVisible;
             if (key == "click-native") return HudPreferences.NativeInputPanelVisible;
             return false;
         }
@@ -2011,6 +2034,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") HudPreferences.LcuPanelVisible = visible;
             else if (key == "party") HudPreferences.PartyPanelVisible = visible;
             else if (key == "youtube") YoutubePreferences.Visible = visible;
+            else if (key == "browser") HudPreferences.BrowserPanelVisible = visible;
             else if (key == "click-native") HudPreferences.NativeInputPanelVisible = visible;
         }
 
@@ -2019,6 +2043,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") return HudPreferences.LcuPanelClosed;
             if (key == "party") return HudPreferences.PartyPanelClosed;
             if (key == "youtube") return HudPreferences.YoutubePanelClosed;
+            if (key == "browser") return HudPreferences.BrowserPanelClosed;
             if (key == "click-native") return HudPreferences.NativeInputPanelClosed;
             return false;
         }
@@ -2028,6 +2053,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") HudPreferences.LcuPanelClosed = closed;
             else if (key == "party") HudPreferences.PartyPanelClosed = closed;
             else if (key == "youtube") HudPreferences.YoutubePanelClosed = closed;
+            else if (key == "browser") HudPreferences.BrowserPanelClosed = closed;
             else if (key == "click-native") HudPreferences.NativeInputPanelClosed = closed;
         }
 
@@ -2036,6 +2062,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") return HudPreferences.LcuPanelExpanded;
             if (key == "party") return HudPreferences.PartyPanelExpanded;
             if (key == "youtube") return HudPreferences.YoutubePanelExpanded;
+            if (key == "browser") return HudPreferences.BrowserPanelExpanded;
             if (key == "click-native") return HudPreferences.NativeInputPanelExpanded;
             return true;
         }
@@ -2045,6 +2072,7 @@ namespace YummiGameBarWidget
             if (key == "lcu") HudPreferences.LcuPanelExpanded = expanded;
             else if (key == "party") HudPreferences.PartyPanelExpanded = expanded;
             else if (key == "youtube") HudPreferences.YoutubePanelExpanded = expanded;
+            else if (key == "browser") HudPreferences.BrowserPanelExpanded = expanded;
             else if (key == "click-native") HudPreferences.NativeInputPanelExpanded = expanded;
         }
 
@@ -2055,6 +2083,8 @@ namespace YummiGameBarWidget
             ApplyPanelChrome("lcu", LcuPanel, LcuMoveBar, LcuBody, LcuEyeButton, LcuResizeHandles, pinnedOnly);
             ApplyPanelChrome("party", PartyPanel, PartyMoveBar, PartyBody, PartyEyeButton, PartyResizeHandles, pinnedOnly);
             ApplyPanelChrome("youtube", YoutubePanel, YoutubeMoveBar, YoutubeVideoHost, YoutubeEyeButton, YoutubeResizeHandles, pinnedOnly);
+            ApplyPanelChrome("browser", BrowserPanel, BrowserMoveBar, BrowserBody, BrowserEyeButton, BrowserResizeHandles, pinnedOnly);
+            ApplyBrowserRuntimeVisibility(pinnedOnly);
             ApplyClickTestPanelChrome(pinnedOnly);
             UpdateVoiceChatPanelChrome(pinnedOnly);
             ApplyYoutubeRuntimeVisibility(pinnedOnly);
@@ -2116,6 +2146,7 @@ namespace YummiGameBarWidget
             LcuPanelTransform.Y += delta;
             PartyPanelTransform.Y += delta;
             YoutubePanelTransform.Y += delta;
+            BrowserPanelTransform.Y += delta;
             ClickNativePanelTransform.Y += delta;
             VoiceChatPanelTransform.Y += delta;
             panelChromePinnedOffsetApplied = pinnedOnly;
@@ -2173,6 +2204,11 @@ namespace YummiGameBarWidget
                 values[YoutubePanelXSetting] = transform.X;
                 values[YoutubePanelYSetting] = transform.Y;
             }
+            else if (panel == BrowserPanel)
+            {
+                values[BrowserPanelXSetting] = transform.X;
+                values[BrowserPanelYSetting] = transform.Y;
+            }
             else if (panel == ClickNativePanel) { values[ClickNativePanelXSetting] = transform.X; values[ClickNativePanelYSetting] = transform.Y; }
             else if (panel == VoiceChatPanel) { values[VoiceChatPanelXSetting] = transform.X; values[VoiceChatPanelYSetting] = transform.Y; }
         }
@@ -2182,6 +2218,7 @@ namespace YummiGameBarWidget
             SetPanelPosition(LcuPanel, LcuPanelTransform, LcuPanelTransform.X, LcuPanelTransform.Y, false);
             SetPanelPosition(PartyPanel, PartyPanelTransform, PartyPanelTransform.X, PartyPanelTransform.Y, false);
             SetPanelPosition(YoutubePanel, YoutubePanelTransform, YoutubePanelTransform.X, YoutubePanelTransform.Y, false);
+            SetPanelPosition(BrowserPanel, BrowserPanelTransform, BrowserPanelTransform.X, BrowserPanelTransform.Y, false);
             SetPanelPosition(ClickNativePanel, ClickNativePanelTransform, ClickNativePanelTransform.X, ClickNativePanelTransform.Y, false);
             SetPanelPosition(VoiceChatPanel, VoiceChatPanelTransform, VoiceChatPanelTransform.X, VoiceChatPanelTransform.Y, false);
         }
@@ -2681,6 +2718,228 @@ namespace YummiGameBarWidget
                 lastAgentTcpError = ErrorCode(socketError);
                 lastAgentCommandTransport = "failed";
                 throw;
+            }
+        }
+
+        private void ApplyBrowserPreferences()
+        {
+            var desired = NormalizeBrowserInput(HudPreferences.BrowserUrl);
+            if (!string.Equals(BrowserAddressBox.Text, desired, StringComparison.Ordinal))
+                BrowserAddressBox.Text = desired;
+
+            if (HudPreferences.BrowserPanelClosed || !HudPreferences.BrowserPanelVisible) return;
+            if (!string.Equals(browserLoadedUrl, desired, StringComparison.OrdinalIgnoreCase))
+                _ = NavigateBrowserAsync(desired, false);
+        }
+
+        private static string NormalizeBrowserInput(string input)
+        {
+            var value = (input ?? "").Trim();
+            if (value.Length == 0) return "https://www.google.com/";
+
+            Uri absolute;
+            if (Uri.TryCreate(value, UriKind.Absolute, out absolute) &&
+                (absolute.Scheme == Uri.UriSchemeHttp || absolute.Scheme == Uri.UriSchemeHttps))
+                return absolute.AbsoluteUri;
+
+            if (value.IndexOf(' ') < 0 && value.IndexOf('.') > 0)
+            {
+                var candidate = "https://" + value;
+                if (Uri.TryCreate(candidate, UriKind.Absolute, out absolute)) return absolute.AbsoluteUri;
+            }
+
+            return "https://www.google.com/search?q=" + Uri.EscapeDataString(value);
+        }
+
+        private async void BrowserAddressBox_KeyDown(object sender, KeyRoutedEventArgs e)
+        {
+            if (e.Key != VirtualKey.Enter) return;
+            e.Handled = true;
+            await NavigateBrowserAsync(BrowserAddressBox.Text, true);
+        }
+
+        private void BrowserBackButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (!browserUsingFallback && browserWebView2?.CoreWebView2 != null && browserWebView2.CoreWebView2.CanGoBack)
+                    browserWebView2.CoreWebView2.GoBack();
+                else if (browserUsingFallback && BrowserFallbackWebView.CanGoBack)
+                    BrowserFallbackWebView.GoBack();
+            }
+            catch { }
+        }
+
+        private void BrowserForwardButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (!browserUsingFallback && browserWebView2?.CoreWebView2 != null && browserWebView2.CoreWebView2.CanGoForward)
+                    browserWebView2.CoreWebView2.GoForward();
+                else if (browserUsingFallback && BrowserFallbackWebView.CanGoForward)
+                    BrowserFallbackWebView.GoForward();
+            }
+            catch { }
+        }
+
+        private void BrowserReloadButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                if (!browserUsingFallback && browserWebView2?.CoreWebView2 != null)
+                    browserWebView2.CoreWebView2.Reload();
+                else if (browserUsingFallback)
+                    BrowserFallbackWebView.Refresh();
+            }
+            catch { }
+        }
+
+        private async Task NavigateBrowserAsync(string input, bool persist)
+        {
+            var url = NormalizeBrowserInput(input);
+            if (persist && !string.Equals(HudPreferences.BrowserUrl, url, StringComparison.Ordinal))
+                HudPreferences.BrowserUrl = url;
+            BrowserAddressBox.Text = url;
+            browserLoadedUrl = url;
+            browserReady = false;
+            BrowserStateText.Text = "페이지를 여는 중…";
+            BrowserStateOverlay.Visibility = Visibility.Visible;
+
+            if (await EnsureBrowserWebView2Async())
+            {
+                browserUsingFallback = false;
+                BrowserFallbackWebView.Visibility = Visibility.Collapsed;
+                browserWebView2.Visibility = Visibility.Visible;
+                browserWebView2.Source = new Uri(url);
+                return;
+            }
+
+            browserUsingFallback = true;
+            BrowserFallbackWebView.Visibility = Visibility.Visible;
+            try { BrowserFallbackWebView.Navigate(new Uri(url)); }
+            catch
+            {
+                BrowserStateText.Text = "주소를 열 수 없습니다.";
+                BrowserStateOverlay.Visibility = Visibility.Visible;
+            }
+        }
+
+        private async Task<bool> EnsureBrowserWebView2Async()
+        {
+            if (browserWebView2Unavailable) return false;
+            if (browserWebView2 != null && browserWebView2.CoreWebView2 != null) return true;
+            try
+            {
+                if (browserWebView2 == null)
+                {
+                    EnsureWinUiResources();
+                    browserWebView2 = new Microsoft.UI.Xaml.Controls.WebView2
+                    {
+                        HorizontalAlignment = HorizontalAlignment.Stretch,
+                        VerticalAlignment = VerticalAlignment.Stretch
+                    };
+                    browserWebView2.NavigationCompleted += BrowserWebView2_NavigationCompleted;
+                    BrowserWebHost.Children.Insert(0, browserWebView2);
+                }
+                await browserWebView2.EnsureCoreWebView2Async();
+                if (browserWebView2.CoreWebView2 == null) throw new InvalidOperationException("CoreWebView2 is unavailable");
+                browserWebView2.CoreWebView2.NavigationStarting -= BrowserCoreWebView2_NavigationStarting;
+                browserWebView2.CoreWebView2.NavigationStarting += BrowserCoreWebView2_NavigationStarting;
+                browserWebView2.CoreWebView2.Settings.AreDefaultContextMenusEnabled = true;
+                browserWebView2.CoreWebView2.Settings.AreDevToolsEnabled = false;
+                browserWebView2.CoreWebView2.Settings.IsStatusBarEnabled = false;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                browserWebView2Unavailable = true;
+                browserUsingFallback = true;
+                if (browserWebView2 != null) browserWebView2.Visibility = Visibility.Collapsed;
+                App.LogStage("browser-webview2-fallback-" + ErrorCode(ex));
+                return false;
+            }
+        }
+
+        private void BrowserCoreWebView2_NavigationStarting(
+            Microsoft.Web.WebView2.Core.CoreWebView2 sender,
+            Microsoft.Web.WebView2.Core.CoreWebView2NavigationStartingEventArgs args)
+        {
+            if (string.IsNullOrWhiteSpace(args.Uri)) return;
+            browserReady = false;
+            browserLoadedUrl = args.Uri;
+            BrowserAddressBox.Text = args.Uri;
+            BrowserStateText.Text = "페이지를 여는 중…";
+            BrowserStateOverlay.Visibility = Visibility.Visible;
+        }
+
+        private void BrowserWebView2_NavigationCompleted(
+            Microsoft.UI.Xaml.Controls.WebView2 sender,
+            Microsoft.Web.WebView2.Core.CoreWebView2NavigationCompletedEventArgs args)
+        {
+            if (!args.IsSuccess)
+            {
+                browserReady = false;
+                BrowserStateText.Text = "페이지를 열지 못했습니다.";
+                BrowserStateOverlay.Visibility = Visibility.Visible;
+                return;
+            }
+            var source = sender.Source?.AbsoluteUri;
+            if (!string.IsNullOrWhiteSpace(source))
+            {
+                browserLoadedUrl = source;
+                BrowserAddressBox.Text = source;
+                if (!string.Equals(HudPreferences.BrowserUrl, source, StringComparison.Ordinal))
+                    HudPreferences.BrowserUrl = source;
+            }
+            browserReady = true;
+            BrowserStateOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        private void BrowserFallbackWebView_NavigationStarting(WebView sender, WebViewNavigationStartingEventArgs args)
+        {
+            if (args.Uri == null) return;
+            browserReady = false;
+            browserLoadedUrl = args.Uri.AbsoluteUri;
+            BrowserAddressBox.Text = browserLoadedUrl;
+            BrowserStateText.Text = "페이지를 여는 중…";
+            BrowserStateOverlay.Visibility = Visibility.Visible;
+        }
+
+        private void BrowserFallbackWebView_NavigationCompleted(WebView sender, WebViewNavigationCompletedEventArgs args)
+        {
+            if (!args.IsSuccess)
+            {
+                browserReady = false;
+                BrowserStateText.Text = "페이지를 열지 못했습니다.";
+                BrowserStateOverlay.Visibility = Visibility.Visible;
+                return;
+            }
+            if (args.Uri != null)
+            {
+                browserLoadedUrl = args.Uri.AbsoluteUri;
+                BrowserAddressBox.Text = browserLoadedUrl;
+                if (!string.Equals(HudPreferences.BrowserUrl, browserLoadedUrl, StringComparison.Ordinal))
+                    HudPreferences.BrowserUrl = browserLoadedUrl;
+            }
+            browserReady = true;
+            BrowserStateOverlay.Visibility = Visibility.Collapsed;
+        }
+
+        private void ApplyBrowserRuntimeVisibility(bool pinnedOnly)
+        {
+            var render = !HudPreferences.BrowserPanelClosed && HudPreferences.BrowserPanelVisible;
+            if (browserWebView2 != null)
+                browserWebView2.Visibility = render && !browserUsingFallback ? Visibility.Visible : Visibility.Collapsed;
+            BrowserFallbackWebView.Visibility = render && browserUsingFallback ? Visibility.Visible : Visibility.Collapsed;
+
+            if (!render && !HudPreferences.BrowserPanelClosed)
+            {
+                BrowserStateText.Text = "게임 화면에서 숨김";
+                BrowserStateOverlay.Visibility = Visibility.Visible;
+            }
+            else if (render && browserReady)
+            {
+                BrowserStateOverlay.Visibility = Visibility.Collapsed;
             }
         }
 

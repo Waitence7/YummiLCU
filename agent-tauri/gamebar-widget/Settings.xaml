@@ -20,8 +20,9 @@
           <TextBlock Text="패널 표시" Foreground="White" FontWeight="SemiBold"/>
           <ToggleSwitch x:Name="LcuVisibleToggle" Header="LCU 패널" OnContent="표시" OffContent="숨김" Toggled="LcuVisibleToggle_Toggled" Foreground="White"/>
           <ToggleSwitch x:Name="PartyVisibleToggle" Header="파티 패널" OnContent="표시" OffContent="숨김" Toggled="PartyVisibleToggle_Toggled" Foreground="White"/>
+          <ToggleSwitch x:Name="BrowserVisibleToggle" Header="Chrome 탭" OnContent="표시" OffContent="숨김" Toggled="BrowserVisibleToggle_Toggled" Foreground="White"/>
           <ToggleSwitch x:Name="NativeInputVisibleToggle" Header="Native Input 테스트 패널" OnContent="표시" OffContent="숨김" Toggled="NativeInputVisibleToggle_Toggled" Foreground="White"/>
-          <TextBlock Text="제목줄의 눈 버튼은 내용만 접고, × 버튼은 패널을 완전히 숨깁니다. 여기서 다시 켤 수 있습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
+          <TextBlock Text="눈 버튼은 게임 화면에서 숨기고 Win+G에서는 60% 고스트로 남깁니다. × 버튼은 패널을 완전히 닫으며 여기서 다시 켤 수 있습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
         </StackPanel>
       </Border>
       <Border Background="#342A203A" CornerRadius="10" Padding="12">

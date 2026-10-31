@@ -309,6 +309,62 @@
         </Grid>
       </Border>
 
+      <!-- Single-tab Chromium browser surface. -->
+      <Border x:Name="BrowserPanel"
+              Width="720"
+              HorizontalAlignment="Left"
+              VerticalAlignment="Top"
+              Margin="640,20,0,0"
+              CornerRadius="10"
+              Background="#FF17151C"
+              BorderBrush="#507B5AA6"
+              BorderThickness="1">
+        <Border.RenderTransform><TranslateTransform x:Name="BrowserPanelTransform"/></Border.RenderTransform>
+        <Grid>
+          <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+          <Border x:Name="BrowserMoveBar" Grid.Row="0" Height="24" Background="#FF27242E" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="browser"
+                  PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
+            <Grid Padding="8,0,3,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+              <StackPanel Orientation="Horizontal" Spacing="7" VerticalAlignment="Center">
+                <Border Width="14" Height="14" CornerRadius="7" Background="#FF4285F4"/>
+                <TextBlock Text="Chrome" FontSize="11" Foreground="White" VerticalAlignment="Center"/>
+                <TextBlock Text="1 tab" FontSize="9" Foreground="#958BA2" VerticalAlignment="Center"/>
+              </StackPanel>
+              <Button x:Name="BrowserEyeButton" Grid.Column="1" Tag="browser" Width="24" Height="24" Padding="0" Background="Transparent" BorderThickness="0" Click="PanelEyeButton_Click" ToolTipService.ToolTip="브라우저 숨기기/표시">
+                <TextBlock Text="&#xE890;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="White"/>
+              </Button>
+              <Button Grid.Column="2" Tag="browser" Content="×" Width="24" Height="24" Padding="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="15" Click="PanelCloseButton_Click" ToolTipService.ToolTip="브라우저 패널 닫기"/>
+            </Grid>
+          </Border>
+          <Grid x:Name="BrowserBody" Grid.Row="1" Height="420" Background="#FFF7F7F7">
+            <Grid.RowDefinitions><RowDefinition Height="42"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+            <Grid Grid.Row="0" Background="#FF34313B" Padding="7,5" ColumnSpacing="5">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="32"/><ColumnDefinition Width="32"/><ColumnDefinition Width="32"/><ColumnDefinition Width="*"/>
+              </Grid.ColumnDefinitions>
+              <Button x:Name="BrowserBackButton" Grid.Column="0" Content="&#xE72B;" FontFamily="Segoe MDL2 Assets" Padding="0" Click="BrowserBackButton_Click" ToolTipService.ToolTip="뒤로"/>
+              <Button x:Name="BrowserForwardButton" Grid.Column="1" Content="&#xE72A;" FontFamily="Segoe MDL2 Assets" Padding="0" Click="BrowserForwardButton_Click" ToolTipService.ToolTip="앞으로"/>
+              <Button x:Name="BrowserReloadButton" Grid.Column="2" Content="&#xE72C;" FontFamily="Segoe MDL2 Assets" Padding="0" Click="BrowserReloadButton_Click" ToolTipService.ToolTip="새로고침"/>
+              <TextBox x:Name="BrowserAddressBox" Grid.Column="3" Text="https://www.google.com/" PlaceholderText="검색 또는 주소 입력" FontSize="11" Padding="10,4" KeyDown="BrowserAddressBox_KeyDown"/>
+            </Grid>
+            <Grid x:Name="BrowserWebHost" Grid.Row="1" Background="White">
+              <WebView x:Name="BrowserFallbackWebView" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Visibility="Collapsed" NavigationStarting="BrowserFallbackWebView_NavigationStarting" NavigationCompleted="BrowserFallbackWebView_NavigationCompleted"/>
+              <Border x:Name="BrowserStateOverlay" Background="#FFF7F7F7" Visibility="Visible">
+                <TextBlock x:Name="BrowserStateText" Text="브라우저를 여는 중…" Foreground="#FF4C4656" FontSize="12" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap" TextAlignment="Center" Margin="20"/>
+              </Border>
+            </Grid>
+          </Grid>
+          <Grid x:Name="BrowserResizeHandles" Grid.RowSpan="2" Visibility="Collapsed">
+            <Border Tag="browser:left" Width="7" HorizontalAlignment="Left" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="browser:right" Width="7" HorizontalAlignment="Right" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="browser:top" Height="7" VerticalAlignment="Top" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="browser:bottom" Height="7" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+            <Border Tag="browser:bottomright" Width="14" Height="14" HorizontalAlignment="Right" VerticalAlignment="Bottom" Background="#01000000" PointerEntered="ResizeBorder_PointerEntered" PointerExited="ResizeBorder_PointerExited" PointerPressed="PanelResizeBorder_PointerPressed" PointerMoved="PanelResizeBorder_PointerMoved" PointerReleased="PanelResizeBorder_PointerReleased" PointerCanceled="PanelResizeBorder_PointerCanceled" PointerCaptureLost="PanelResizeBorder_PointerCaptureLost"/>
+          </Grid>
+        </Grid>
+      </Border>
+
       <Border x:Name="VoiceChatPanel"
               Width="520"
               HorizontalAlignment="Left"

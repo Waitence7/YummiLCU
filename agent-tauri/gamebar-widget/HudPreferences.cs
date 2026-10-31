@@ -45,6 +45,32 @@ namespace YummiGameBarWidget
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeInputPanelVisible", out value) && value is bool && (bool)value; }
             set { Set("NativeInputPanelVisible", value); }
         }
+        internal static bool BrowserPanelVisible
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("BrowserPanelVisible", out value) || !(value is bool) || (bool)value; }
+            set { Set("BrowserPanelVisible", value); }
+        }
+        internal static bool BrowserPanelExpanded
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("BrowserPanelExpanded", out value) || !(value is bool) || (bool)value; }
+            set { Set("BrowserPanelExpanded", value); }
+        }
+        internal static bool BrowserPanelClosed
+        {
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("BrowserPanelClosed", out value) && value is bool && (bool)value; }
+            set { Set("BrowserPanelClosed", value); }
+        }
+        internal static string BrowserUrl
+        {
+            get
+            {
+                object value;
+                if (!ApplicationData.Current.LocalSettings.Values.TryGetValue("BrowserUrl", out value) || !(value is string) || string.IsNullOrWhiteSpace((string)value))
+                    return "https://www.google.com/";
+                return (string)value;
+            }
+            set { Set("BrowserUrl", string.IsNullOrWhiteSpace(value) ? "https://www.google.com/" : value.Trim()); }
+        }
         internal static bool LcuPanelClosed
         {
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("LcuPanelClosed", out value) && value is bool && (bool)value; }

@@ -79,6 +79,11 @@ try {
   if ($widgetSource -notmatch 'UpdateNativeHookButtonVisual') { throw 'Native input hit-test state must drive button hover/press visuals' }
   if ($widgetSource -notmatch 'fallbackHovered') { throw 'Native input hover feedback must remain compatible with older Agents' }
   Write-Host 'PASS: eye ghost, hard close, and native input button semantics'
+  if ($widgetXaml -notmatch 'x:Name="BrowserPanel"' -or $widgetXaml -notmatch 'x:Name="BrowserAddressBox"') { throw 'Single-tab browser panel must exist' }
+  if ($widgetSource -notmatch 'EnsureBrowserWebView2Async' -or $widgetSource -notmatch 'NormalizeBrowserInput') { throw 'Browser panel must use the shared WebView2 runtime and URL/search normalization' }
+  if ($widgetSource -notmatch 'BrowserPanelVisible = show') { throw 'F9 must include the browser panel' }
+  if ($widgetSource -notmatch 'ApplyPanelChrome\("browser"') { throw 'Browser panel must share eye/close panel semantics' }
+  Write-Host 'PASS: single-tab browser panel, navigation, and panel lifecycle'
   # Exercise the production permission branch without changing OS settings.
   $tokens = $null
   $errors = $null
