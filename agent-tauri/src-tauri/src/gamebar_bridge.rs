@@ -30,7 +30,7 @@ const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(windows)]
 #[cfg(windows)]
-const GAMEBAR_VERSION_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/main/agent-tauri/gamebar-widget/version.json";
+const GAMEBAR_RELEASES_URL: &str = "https://api.github.com/repos/Waitence7/YummiLCU/releases?per_page=30";
 #[cfg(windows)]
 const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
@@ -1661,10 +1661,9 @@ async fn fetch_gamebar_manifest_response(
     client: &reqwest::Client,
     manifest_url: &str,
 ) -> Result<Option<reqwest::Response>, String> {
-    // version.json on main can become visible a few seconds before the GitHub
-    // Release asset CDN has finished propagating. Treat a short-lived 404 as
-    // publication lag, not as a broken update. The normal updater loop will
-    // retry again later if the bounded retries below still see 404.
+    // A release asset can still take a moment to become downloadable after GitHub
+    // reports it in the release API. Treat a short-lived 404 as publication lag,
+    // not as a broken update; the normal updater loop will retry again later.
     const RETRY_DELAYS_MS: &[u64] = &[0, 250, 750, 1500, 3000];
     for (index, delay_ms) in RETRY_DELAYS_MS.iter().enumerate() {
         if *delay_ms > 0 {
@@ -1756,26 +1755,28 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         .user_agent("Yummi-LCU-Agent-GameBar-Updater")
         .build()
         .map_err(|e| format!("Game Bar 업데이트 클라이언트 생성 실패: {e}"))?;
-    let latest: Value = client
-        .get(GAMEBAR_VERSION_URL)
+    // The main-branch version.json can be observed through different raw GitHub
+    // CDN edges during a release, which briefly made the updater oscillate between
+    // e.g. 0.1.111 and 0.1.112. Treat GitHub Releases as the canonical publication
+    // source and only select versions whose signed manifest asset already exists.
+    let releases: Value = client
+        .get(GAMEBAR_RELEASES_URL)
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
         .await
-        .map_err(|e| format!("Game Bar 최신 버전 조회 실패: {e}"))?
+        .map_err(|e| format!("Game Bar 릴리즈 목록 조회 실패: {e}"))?
         .error_for_status()
-        .map_err(|e| format!("Game Bar 최신 버전 응답 실패: {e}"))?
+        .map_err(|e| format!("Game Bar 릴리즈 목록 응답 실패: {e}"))?
         .json()
         .await
-        .map_err(|e| format!("Game Bar 최신 버전 JSON 실패: {e}"))?;
-    let selected_version = latest
-        .get("version")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Game Bar 최신 버전 정보가 없습니다.".to_owned())?;
-    let selected_release_tag = format!("gamebar-v{selected_version}");
+        .map_err(|e| format!("Game Bar 릴리즈 목록 JSON 실패: {e}"))?;
+    let (selected_release_tag, manifest_url) = select_gamebar_manifest(&releases)
+        .ok_or_else(|| "게시 완료된 Game Bar manifest 릴리즈가 없습니다.".to_owned())?;
     let selected_semver = parse_gamebar_release_version(&selected_release_tag)
         .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
-    let manifest_url = format!(
-        "https://github.com/Waitence7/YummiLCU/releases/download/{selected_release_tag}/gamebar-version.json"
-    );
+    let selected_version = selected_release_tag
+        .strip_prefix("gamebar-v")
+        .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
     append_gamebar_update_log(&format!(
         "최신 오버레이 릴리즈 감지: {selected_release_tag}"
     ));
@@ -2069,26 +2070,22 @@ async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8
         .user_agent("Yummi-LCU-Agent-GameBar-Installer")
         .build()
         .map_err(|e| format!("Game Bar 설치 클라이언트 생성 실패: {e}"))?;
-    let latest: Value = client
-        .get(GAMEBAR_VERSION_URL)
+    let releases: Value = client
+        .get(GAMEBAR_RELEASES_URL)
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
         .send()
         .await
-        .map_err(|e| format!("Game Bar 최신 버전 조회 실패: {e}"))?
+        .map_err(|e| format!("Game Bar 릴리즈 목록 조회 실패: {e}"))?
         .error_for_status()
-        .map_err(|e| format!("Game Bar 최신 버전 응답 실패: {e}"))?
+        .map_err(|e| format!("Game Bar 릴리즈 목록 응답 실패: {e}"))?
         .json()
         .await
-        .map_err(|e| format!("Game Bar 최신 버전 JSON 실패: {e}"))?;
-    let selected_version = latest
-        .get("version")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Game Bar 최신 버전 정보가 없습니다.".to_owned())?;
-    let selected_release_tag = format!("gamebar-v{selected_version}");
-    parse_gamebar_release_version(&selected_release_tag)
+        .map_err(|e| format!("Game Bar 릴리즈 목록 JSON 실패: {e}"))?;
+    let (selected_release_tag, manifest_url) = select_gamebar_manifest(&releases)
+        .ok_or_else(|| "게시 완료된 Game Bar manifest 릴리즈가 없습니다.".to_owned())?;
+    let selected_version = selected_release_tag
+        .strip_prefix("gamebar-v")
         .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
-    let manifest_url = format!(
-        "https://github.com/Waitence7/YummiLCU/releases/download/{selected_release_tag}/gamebar-version.json"
-    );
     let response = fetch_gamebar_manifest_response(&client, &manifest_url)
         .await?
         .ok_or_else(|| "Game Bar manifest 릴리즈 자산이 아직 전파 중입니다. 잠시 후 다시 시도해 주세요.".to_owned())?;
