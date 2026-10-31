@@ -59,6 +59,7 @@ try {
   if ($updaterText -match 'Stop-Process -Force') { throw 'Updater must not directly kill Xbox Game Bar processes' }
   $manifestText = Get-Content (Join-Path $InstallerRoot 'Package.appxmanifest') -Raw -Encoding UTF8
   if ($manifestText -notmatch '<ActivateAfterInstall>false</ActivateAfterInstall>') { throw 'Game Bar widget must not auto-activate after package registration' }
+  if ($manifestText -notmatch '<Size><Height>360</Height><Width>640</Width><MinHeight>360</MinHeight><MinWidth>640</MinWidth>') { throw 'Game Bar main widget must start at safe non-negative foreground geometry' }
   Write-Host 'PASS: automatic updates defer in-use registration and never auto-activate the widget'
   # Exercise the production permission branch without changing OS settings.
   $tokens = $null
