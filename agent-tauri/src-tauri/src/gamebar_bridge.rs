@@ -1645,6 +1645,52 @@ fn select_gamebar_manifest(releases: &Value) -> Option<(String, String)> {
         .map(|(_, tag, url)| (tag, url))
 }
 
+
+#[cfg(windows)]
+async fn fetch_gamebar_manifest_response(
+    client: &reqwest::Client,
+    manifest_url: &str,
+) -> Result<Option<reqwest::Response>, String> {
+    // version.json on main can become visible a few seconds before the GitHub
+    // Release asset CDN has finished propagating. Treat a short-lived 404 as
+    // publication lag, not as a broken update. The normal updater loop will
+    // retry again later if the bounded retries below still see 404.
+    const RETRY_DELAYS_MS: &[u64] = &[0, 250, 750, 1500, 3000];
+    for (index, delay_ms) in RETRY_DELAYS_MS.iter().enumerate() {
+        if *delay_ms > 0 {
+            sleep(Duration::from_millis(*delay_ms)).await;
+        }
+        let response = client
+            .get(manifest_url)
+            .send()
+            .await
+            .map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?;
+        let status = response.status();
+        if status.is_success() {
+            return Ok(Some(response));
+        }
+        if status == reqwest::StatusCode::NOT_FOUND {
+            if index + 1 < RETRY_DELAYS_MS.len() {
+                append_gamebar_update_log(&format!(
+                    "Game Bar manifest 전파 대기: HTTP 404 retry={}/{}",
+                    index + 1,
+                    RETRY_DELAYS_MS.len() - 1
+                ));
+                continue;
+            }
+            append_gamebar_update_log(
+                "Game Bar manifest 아직 전파되지 않음: 다음 업데이트 주기에서 재시도",
+            );
+            return Ok(None);
+        }
+        return response
+            .error_for_status()
+            .map(Some)
+            .map_err(|e| format!("Game Bar manifest 응답 실패: {e}"));
+    }
+    Ok(None)
+}
+
 #[cfg(windows)]
 fn append_gamebar_update_log(message: &str) {
     use std::{
@@ -1724,13 +1770,9 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         "최신 오버레이 릴리즈 감지: {selected_release_tag}"
     ));
 
-    let response = client
-        .get(&manifest_url)
-        .send()
-        .await
-        .map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Game Bar manifest 응답 실패: {e}"))?;
+    let Some(response) = fetch_gamebar_manifest_response(&client, &manifest_url).await? else {
+        return Ok(());
+    };
     if response.content_length().unwrap_or(0) > MAX_GAMEBAR_MANIFEST_BYTES as u64 {
         return Err("Game Bar manifest가 너무 큽니다.".into());
     }
@@ -2046,13 +2088,9 @@ async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8
     let manifest_url = format!(
         "https://github.com/Waitence7/YummiLCU/releases/download/{selected_release_tag}/gamebar-version.json"
     );
-    let response = client
-        .get(&manifest_url)
-        .send()
-        .await
-        .map_err(|e| format!("Game Bar manifest 다운로드 실패: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Game Bar manifest 응답 실패: {e}"))?;
+    let response = fetch_gamebar_manifest_response(&client, &manifest_url)
+        .await?
+        .ok_or_else(|| "Game Bar manifest 릴리즈 자산이 아직 전파 중입니다. 잠시 후 다시 시도해 주세요.".to_owned())?;
     if response.content_length().unwrap_or(0) > MAX_GAMEBAR_MANIFEST_BYTES as u64 {
         return Err("Game Bar manifest가 너무 큽니다.".into());
     }
