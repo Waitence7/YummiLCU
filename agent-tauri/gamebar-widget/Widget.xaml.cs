@@ -148,6 +148,7 @@ namespace YummiGameBarWidget
         private bool hudLoaded;
         private XboxGameBarHotkeyWatcher runtimePanelsHotkeyWatcher;
         private bool overlayUpdateRequestedForForeground;
+        private long lastRuntimePanelsToggleAtMs;
         private int foregroundChromeRefreshGeneration;
         private bool foregroundChromeRefreshInFlight;
         private long lastForegroundChromeRefreshAtMs;
@@ -293,7 +294,11 @@ namespace YummiGameBarWidget
         private void ApplyPreferences()
         {
             var hudVisible = HudPreferences.Visible;
-            HudPanel.Visibility = hudVisible ? Visibility.Visible : Visibility.Collapsed;
+            var pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+            // Win+G is always an edit surface: even if an old/global HUD flag is off,
+            // keep the container available so hidden panels can appear as 60% ghosts.
+            // The global HUD switch only suppresses the real pinned overlay.
+            HudPanel.Visibility = pinnedOnly && !hudVisible ? Visibility.Collapsed : Visibility.Visible;
             HudPanel.Opacity = HudPreferences.Opacity;
             RootGrid.Background = hudVisible && HudPreferences.CoverageTint
                 ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
@@ -438,7 +443,7 @@ namespace YummiGameBarWidget
             if (!args.HotkeySetDown) return;
             try
             {
-                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () => ToggleRuntimePanelsVisibility());
+                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () => ToggleRuntimePanelsVisibility("gamebar-hotkey"));
             }
             catch (Exception ex)
             {
@@ -446,22 +451,34 @@ namespace YummiGameBarWidget
             }
         }
 
-        private void ToggleRuntimePanelsVisibility()
+        private void ToggleRuntimePanelsVisibility(string source = "gamebar")
         {
-            // F9 is intentionally an actual-overlay toggle. Win+G edit mode still
-            // shows every non-Discord panel so the user can position/configure it.
+            // F9 can arrive through both XboxGameBarHotkeyWatcher and the Agent native
+            // input sequence. Treat both as one physical key press.
+            var now = NowMs();
+            if (now - lastRuntimePanelsToggleAtMs < 350)
+            {
+                App.LogResize("runtime-panels-toggle-duplicate source=" + source +
+                    " ageMs=" + (now - lastRuntimePanelsToggleAtMs));
+                return;
+            }
+            lastRuntimePanelsToggleAtMs = now;
+
+            // Hide when anything is currently visible; when everything is hidden, the
+            // next F9 restores all runtime panels. Never use the legacy global HUD flag
+            // as the toggle state: it can trap visible panels under a collapsed parent.
             var anyVisible = HudPreferences.LcuPanelVisible ||
                              HudPreferences.PartyPanelVisible ||
                              YoutubePreferences.Visible ||
                              HudPreferences.NativeInputPanelVisible;
             var show = !anyVisible;
+            if (show) HudPreferences.Visible = true;
             HudPreferences.LcuPanelVisible = show;
             HudPreferences.PartyPanelVisible = show;
             YoutubePreferences.Visible = show;
             HudPreferences.NativeInputPanelVisible = show;
-            UpdatePanelChrome();
-            ApplyYoutubePreferences();
-            App.LogResize("runtime-panels-toggle key=F9 visible=" + show +
+            ApplyPreferences();
+            App.LogResize("runtime-panels-toggle source=" + source + " visible=" + show +
                 " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
                 " pinned=" + (widget != null && widget.Pinned));
         }
@@ -2028,7 +2045,7 @@ namespace YummiGameBarWidget
         {
             var runtimeVisible = HudPreferences.NativeInputPanelVisible;
             var expanded = HudPreferences.NativeInputPanelExpanded;
-            var hidden = !runtimeVisible || !expanded;
+            var hidden = !runtimeVisible;
 
             // Win+G is edit mode: keep hidden panels visible as a faint footprint so
             // they can still be found and restored. In the real pinned overlay,
@@ -2088,7 +2105,7 @@ namespace YummiGameBarWidget
         {
             bool runtimeVisible = GetPanelVisible(key);
             bool expanded = GetPanelExpanded(key);
-            bool hidden = !runtimeVisible || !expanded;
+            bool hidden = !runtimeVisible;
 
             // Win+G is edit mode: hidden panels stay as a faint footprint for layout
             // and recovery. PinnedOnly is the real overlay, where hidden panels must
@@ -2421,9 +2438,8 @@ namespace YummiGameBarWidget
                 else if (hudToggleSequence != lastHudToggleSequence)
                 {
                     lastHudToggleSequence = hudToggleSequence;
-                    HudPreferences.Visible = !HudPreferences.Visible;
-                    ApplyPreferences();
-                    App.LogStage("hud-toggle-f9-visible=" + HudPreferences.Visible);
+                    ToggleRuntimePanelsVisibility("agent-native");
+                    App.LogStage("hud-toggle-f9-runtime-panels");
                 }
                 var eventName = response.GetNamedString("event", "");
                 var cursorX = (int)response.GetNamedNumber("cursorX", 0);

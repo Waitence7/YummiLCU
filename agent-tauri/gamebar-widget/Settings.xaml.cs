@@ -84,15 +84,21 @@ namespace YummiGameBarWidget
         }
         private void LcuVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
-            if (preferencesLoaded) HudPreferences.LcuPanelVisible = LcuVisibleToggle.IsOn;
+            if (!preferencesLoaded) return;
+            HudPreferences.LcuPanelVisible = LcuVisibleToggle.IsOn;
+            if (LcuVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
         private void PartyVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
-            if (preferencesLoaded) HudPreferences.PartyPanelVisible = PartyVisibleToggle.IsOn;
+            if (!preferencesLoaded) return;
+            HudPreferences.PartyPanelVisible = PartyVisibleToggle.IsOn;
+            if (PartyVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
         private void NativeInputVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
-            if (preferencesLoaded) HudPreferences.NativeInputPanelVisible = NativeInputVisibleToggle.IsOn;
+            if (!preferencesLoaded) return;
+            HudPreferences.NativeInputPanelVisible = NativeInputVisibleToggle.IsOn;
+            if (NativeInputVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
         private void VoiceChatLifetimeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs args)
         {
@@ -138,7 +144,9 @@ namespace YummiGameBarWidget
 
         private void YoutubeVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
-            if (preferencesLoaded) YoutubePreferences.Visible = YoutubeVisibleToggle.IsOn;
+            if (!preferencesLoaded) return;
+            YoutubePreferences.Visible = YoutubeVisibleToggle.IsOn;
+            if (YoutubeVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
         private void YoutubeApplyButton_Click(object sender, RoutedEventArgs args) { ApplyYoutubeVideo(); }
         private void YoutubeUrlBox_KeyDown(object sender, KeyRoutedEventArgs args)
