@@ -109,8 +109,6 @@ namespace YummiGameBarWidget
         private long syncingNativeInputSinceMs;
         private int nativeInputSyncGeneration;
         private ulong lastNativeInputSequence;
-        private ulong lastHudToggleSequence;
-        private bool hudToggleSequenceInitialized;
         private string lastAgentCommandTransport = "none";
         private string lastAgentPipeError = "";
         private string lastAgentTcpError = "";
@@ -2244,19 +2242,6 @@ namespace YummiGameBarWidget
                 }
                 var sequence = (ulong)Math.Max(0, response.GetNamedNumber("sequence", 0));
                 var clickCount = (ulong)Math.Max(0, response.GetNamedNumber("clickCount", 0));
-                var hudToggleSequence = (ulong)Math.Max(0, response.GetNamedNumber("hudToggleSequence", 0));
-                if (!hudToggleSequenceInitialized)
-                {
-                    lastHudToggleSequence = hudToggleSequence;
-                    hudToggleSequenceInitialized = true;
-                }
-                else if (hudToggleSequence != lastHudToggleSequence)
-                {
-                    lastHudToggleSequence = hudToggleSequence;
-                    HudPreferences.Visible = !HudPreferences.Visible;
-                    ApplyPreferences();
-                    App.LogStage("hud-toggle-f9-visible=" + HudPreferences.Visible);
-                }
                 var eventName = response.GetNamedString("event", "");
                 var cursorX = (int)response.GetNamedNumber("cursorX", 0);
                 var cursorY = (int)response.GetNamedNumber("cursorY", 0);
