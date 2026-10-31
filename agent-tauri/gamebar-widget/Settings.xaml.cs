@@ -85,18 +85,21 @@ namespace YummiGameBarWidget
         private void LcuVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
             if (!preferencesLoaded) return;
+            if (LcuVisibleToggle.IsOn) HudPreferences.LcuPanelClosed = false;
             HudPreferences.LcuPanelVisible = LcuVisibleToggle.IsOn;
             if (LcuVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
         private void PartyVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
             if (!preferencesLoaded) return;
+            if (PartyVisibleToggle.IsOn) HudPreferences.PartyPanelClosed = false;
             HudPreferences.PartyPanelVisible = PartyVisibleToggle.IsOn;
             if (PartyVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
         private void NativeInputVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
             if (!preferencesLoaded) return;
+            if (NativeInputVisibleToggle.IsOn) HudPreferences.NativeInputPanelClosed = false;
             HudPreferences.NativeInputPanelVisible = NativeInputVisibleToggle.IsOn;
             if (NativeInputVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
@@ -145,6 +148,7 @@ namespace YummiGameBarWidget
         private void YoutubeVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {
             if (!preferencesLoaded) return;
+            if (YoutubeVisibleToggle.IsOn) HudPreferences.YoutubePanelClosed = false;
             YoutubePreferences.Visible = YoutubeVisibleToggle.IsOn;
             if (YoutubeVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
@@ -160,6 +164,7 @@ namespace YummiGameBarWidget
             var value = (YoutubeUrlBox.Text ?? "").Trim();
             if (value.Length == 0) { YoutubeSettingsStatusText.Text = "YouTube 링크 또는 영상 ID를 입력해 주세요."; return; }
             YoutubePreferences.Video = value;
+            HudPreferences.YoutubePanelClosed = false;
             YoutubePreferences.Visible = true;
             HudPreferences.YoutubePanelExpanded = true;
             YoutubeVisibleToggle.IsOn = true;

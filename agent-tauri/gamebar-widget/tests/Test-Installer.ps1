@@ -66,6 +66,16 @@ try {
   if ($widgetSource -notmatch 'FitToLargestOnscreenAsync') { throw 'Widget must resolve its initial size from the current display/host instead of a machine-specific size' }
   if ($manifestText -match '<Size><Height>900</Height><Width>1440</Width>') { throw 'Main Game Bar widget must not hardcode a 1440x900 initial size' }
   Write-Host 'PASS: Game Bar initial size is display-derived and user position is preserved'
+
+  $widgetXaml = Get-Content (Join-Path $InstallerRoot 'Widget.xaml') -Raw -Encoding UTF8
+  if ($widgetSource -notmatch 'SetPanelClosed\(key, true\)') { throw 'X close must use a dedicated closed state' }
+  if ($widgetSource -notmatch 'closed \? 0\.0') { throw 'Closed panels must render fully invisible in both Win+G and pinned modes' }
+  if ($widgetSource -notmatch 'SetPanelVisible\(key, visible\)') { throw 'Eye control must toggle runtime visibility' }
+  if ($widgetSource -notmatch 'HiddenRuntimePanelOpacity = 0\.60') { throw 'Eye-hidden Win+G ghost opacity must remain 60 percent' }
+  if ($widgetXaml -notmatch '<Button x:Name="NativeHookHitbox"') { throw 'Native input hitbox must be a real Button control' }
+  if ($widgetXaml -notmatch 'x:Name="PointerOver"' -or $widgetXaml -notmatch 'x:Name="Pressed"') { throw 'Native input button must provide hover and pressed visual states' }
+  if ($widgetXaml -notmatch 'x:Name="NativeHookClickCountText"' -or $widgetSource -notmatch 'NativeHookClickCountText\.Text = clickCount\.ToString\(\)') { throw 'Native input button must show the live native click count' }
+  Write-Host 'PASS: eye ghost, hard close, and native input button semantics'
   # Exercise the production permission branch without changing OS settings.
   $tokens = $null
   $errors = $null

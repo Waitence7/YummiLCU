@@ -466,19 +466,19 @@ namespace YummiGameBarWidget
             }
             lastRuntimePanelsToggleAtMs = now;
 
-            // Hide when anything is currently visible; when everything is hidden, the
-            // next F9 restores all runtime panels. Never use the legacy global HUD flag
-            // as the toggle state: it can trap visible panels under a collapsed parent.
-            var anyVisible = HudPreferences.LcuPanelVisible ||
-                             HudPreferences.PartyPanelVisible ||
-                             YoutubePreferences.Visible ||
-                             HudPreferences.NativeInputPanelVisible;
+            // Hide when any non-closed runtime panel is visible; the next F9 restores
+            // only those same non-closed panels. X-closed panels stay closed and keep
+            // their Settings toggle off until the user explicitly reopens them there.
+            var anyVisible = (!HudPreferences.LcuPanelClosed && HudPreferences.LcuPanelVisible) ||
+                             (!HudPreferences.PartyPanelClosed && HudPreferences.PartyPanelVisible) ||
+                             (!HudPreferences.YoutubePanelClosed && YoutubePreferences.Visible) ||
+                             (!HudPreferences.NativeInputPanelClosed && HudPreferences.NativeInputPanelVisible);
             var show = !anyVisible;
             if (show) HudPreferences.Visible = true;
-            HudPreferences.LcuPanelVisible = show;
-            HudPreferences.PartyPanelVisible = show;
-            YoutubePreferences.Visible = show;
-            HudPreferences.NativeInputPanelVisible = show;
+            if (!HudPreferences.LcuPanelClosed) HudPreferences.LcuPanelVisible = show;
+            if (!HudPreferences.PartyPanelClosed) HudPreferences.PartyPanelVisible = show;
+            if (!HudPreferences.YoutubePanelClosed) YoutubePreferences.Visible = show;
+            if (!HudPreferences.NativeInputPanelClosed) HudPreferences.NativeInputPanelVisible = show;
             ApplyPreferences();
             App.LogResize("runtime-panels-toggle source=" + source + " visible=" + show +
                 " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
@@ -1683,17 +1683,27 @@ namespace YummiGameBarWidget
         {
             var key = (sender as FrameworkElement)?.Tag as string;
             if (string.IsNullOrWhiteSpace(key)) return;
-            SetPanelExpanded(key, !GetPanelExpanded(key));
-            UpdatePanelChrome();
-            ClampAllPanelPositions();
+
+            // The eye controls runtime visibility, not layout expansion. In Win+G
+            // hidden panels stay present as a 60% ghost so the user can immediately
+            // click the eye again; only PinnedOnly/the real game overlay collapses them.
+            var visible = !GetPanelVisible(key);
+            SetPanelVisible(key, visible);
+            if (visible) HudPreferences.Visible = true;
+            ApplyPreferences();
+            App.LogResize("panel-eye-toggle key=" + key + " visible=" + visible +
+                " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none"));
         }
 
         private void PanelCloseButton_Click(object sender, RoutedEventArgs e)
         {
             var key = (sender as FrameworkElement)?.Tag as string;
             if (string.IsNullOrWhiteSpace(key)) return;
+            SetPanelClosed(key, true);
             SetPanelVisible(key, false);
             UpdatePanelChrome();
+            App.LogResize("panel-close key=" + key +
+                " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none"));
         }
 
         private void PanelMoveBar_PointerMoved(object sender, PointerRoutedEventArgs e)
@@ -2004,6 +2014,23 @@ namespace YummiGameBarWidget
             else if (key == "click-native") HudPreferences.NativeInputPanelVisible = visible;
         }
 
+        private bool GetPanelClosed(string key)
+        {
+            if (key == "lcu") return HudPreferences.LcuPanelClosed;
+            if (key == "party") return HudPreferences.PartyPanelClosed;
+            if (key == "youtube") return HudPreferences.YoutubePanelClosed;
+            if (key == "click-native") return HudPreferences.NativeInputPanelClosed;
+            return false;
+        }
+
+        private void SetPanelClosed(string key, bool closed)
+        {
+            if (key == "lcu") HudPreferences.LcuPanelClosed = closed;
+            else if (key == "party") HudPreferences.PartyPanelClosed = closed;
+            else if (key == "youtube") HudPreferences.YoutubePanelClosed = closed;
+            else if (key == "click-native") HudPreferences.NativeInputPanelClosed = closed;
+        }
+
         private bool GetPanelExpanded(string key)
         {
             if (key == "lcu") return HudPreferences.LcuPanelExpanded;
@@ -2039,19 +2066,20 @@ namespace YummiGameBarWidget
             var runtimeVisible = HudPreferences.NativeInputPanelVisible;
             var expanded = HudPreferences.NativeInputPanelExpanded;
             var hidden = !runtimeVisible;
+            var closed = HudPreferences.NativeInputPanelClosed;
 
-            // Win+G is edit mode: keep hidden panels visible as a faint footprint so
-            // they can still be found and restored. In the real pinned overlay,
-            // hidden panels must disappear completely and never intercept input.
-            ClickNativePanel.Visibility = pinnedOnly && hidden ? Visibility.Collapsed : Visibility.Visible;
-            ClickNativePanel.Opacity = !pinnedOnly && hidden ? HiddenRuntimePanelOpacity : 1.0;
-            ClickNativePanel.IsHitTestVisible = !pinnedOnly;
+            // Eye-hidden: 60% ghost in Win+G, invisible in the real overlay.
+            // X-closed: completely absent in both modes without using the old
+            // expanded/collapsed state as a close mechanism.
+            ClickNativePanel.Visibility = Visibility.Visible;
+            ClickNativePanel.Opacity = closed ? 0.0 : (!pinnedOnly && hidden ? HiddenRuntimePanelOpacity : (pinnedOnly && hidden ? 0.0 : 1.0));
+            ClickNativePanel.IsHitTestVisible = !closed && !pinnedOnly;
             ClickNativeMoveBar.Visibility = !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
             ClickNativeBody.Visibility = Visibility.Visible;
             ClickNativeDetails.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
-            ClickNativeEyeButton.Opacity = expanded ? 1.0 : 0.5;
+            ClickNativeEyeButton.Opacity = runtimeVisible ? 1.0 : 0.5;
             ToolTipService.SetToolTip(ClickNativeEyeButton, runtimeVisible ?
-                (expanded ? "상세 내용 가리기" : "상세 내용 표시") : "실제 화면에서 숨김 (F9로 전체 토글)");
+                "실제 화면에서 숨기기" : "실제 화면에 표시");
             ClickNativeResizeHandles.Visibility = expanded && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
 
             if (expanded)
@@ -2099,18 +2127,18 @@ namespace YummiGameBarWidget
             bool runtimeVisible = GetPanelVisible(key);
             bool expanded = GetPanelExpanded(key);
             bool hidden = !runtimeVisible;
+            bool closed = GetPanelClosed(key);
 
-            // Win+G is edit mode: hidden panels stay as a faint footprint for layout
-            // and recovery. PinnedOnly is the real overlay, where hidden panels must
-            // be completely invisible and non-interactive.
-            panel.Visibility = pinnedOnly && hidden ? Visibility.Collapsed : Visibility.Visible;
-            panel.Opacity = !pinnedOnly && hidden ? HiddenRuntimePanelOpacity : 1.0;
-            panel.IsHitTestVisible = !pinnedOnly;
+            // Eye-hidden: 60% ghost in Win+G, invisible in the real overlay.
+            // X-closed: fully absent from both modes, independently of expanded state.
+            panel.Visibility = Visibility.Visible;
+            panel.Opacity = closed ? 0.0 : (!pinnedOnly && hidden ? HiddenRuntimePanelOpacity : (pinnedOnly && hidden ? 0.0 : 1.0));
+            panel.IsHitTestVisible = !closed && !pinnedOnly;
             moveBar.Visibility = !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
             body.Visibility = pinnedOnly ? Visibility.Visible : (expanded ? Visibility.Visible : Visibility.Collapsed);
-            eyeButton.Opacity = runtimeVisible && expanded ? 1.0 : 0.5;
+            eyeButton.Opacity = runtimeVisible ? 1.0 : 0.5;
             ToolTipService.SetToolTip(eyeButton, runtimeVisible ?
-                (expanded ? "내용 가리기" : "내용 표시") : "실제 화면에서 숨김 (F9로 전체 토글)");
+                "실제 화면에서 숨기기" : "실제 화면에 표시");
             resizeHandles.Visibility = expanded && !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
         }
 
@@ -2365,7 +2393,8 @@ namespace YummiGameBarWidget
             try
             {
                 var requestedActive = active && HudPreferences.Visible && HudPanel.Visibility == Visibility.Visible
-                    && ClickNativePanel.Visibility == Visibility.Visible;
+                    && ClickNativePanel.Visibility == Visibility.Visible
+                    && !HudPreferences.NativeInputPanelClosed && ClickNativePanel.Opacity > 0.0;
                 var geometryReady = NativeHookHitbox.ActualWidth > 0 && NativeHookHitbox.ActualHeight > 0;
                 var effectiveActive = requestedActive && geometryReady;
                 // Do not depend on PointerMoved events staying alive after a click.
@@ -2422,6 +2451,7 @@ namespace YummiGameBarWidget
                 }
                 var sequence = (ulong)Math.Max(0, response.GetNamedNumber("sequence", 0));
                 var clickCount = (ulong)Math.Max(0, response.GetNamedNumber("clickCount", 0));
+                NativeHookClickCountText.Text = clickCount.ToString();
                 var hudToggleSequence = (ulong)Math.Max(0, response.GetNamedNumber("hudToggleSequence", 0));
                 if (!hudToggleSequenceInitialized)
                 {
@@ -2637,13 +2667,14 @@ namespace YummiGameBarWidget
 
         private bool ShouldActivateYoutubeRuntime()
         {
+            if (HudPreferences.YoutubePanelClosed) return false;
             if (YoutubePreferences.Visible) return true;
             return widget != null && widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly;
         }
 
         private void ApplyYoutubeRuntimeVisibility(bool pinnedOnly)
         {
-            var renderVideo = !pinnedOnly || YoutubePreferences.Visible;
+            var renderVideo = !HudPreferences.YoutubePanelClosed && (!pinnedOnly || YoutubePreferences.Visible);
             if (youtubeWebView2 != null)
                 youtubeWebView2.Visibility = renderVideo && !youtubeUsingFallback ? Visibility.Visible : Visibility.Collapsed;
             if (YoutubeFallbackWebView != null)

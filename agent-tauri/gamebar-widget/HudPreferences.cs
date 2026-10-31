@@ -45,6 +45,26 @@ namespace YummiGameBarWidget
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeInputPanelVisible", out value) && value is bool && (bool)value; }
             set { Set("NativeInputPanelVisible", value); }
         }
+        internal static bool LcuPanelClosed
+        {
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("LcuPanelClosed", out value) && value is bool && (bool)value; }
+            set { Set("LcuPanelClosed", value); }
+        }
+        internal static bool PartyPanelClosed
+        {
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("PartyPanelClosed", out value) && value is bool && (bool)value; }
+            set { Set("PartyPanelClosed", value); }
+        }
+        internal static bool YoutubePanelClosed
+        {
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("YoutubePanelClosed", out value) && value is bool && (bool)value; }
+            set { Set("YoutubePanelClosed", value); }
+        }
+        internal static bool NativeInputPanelClosed
+        {
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeInputPanelClosed", out value) && value is bool && (bool)value; }
+            set { Set("NativeInputPanelClosed", value); }
+        }
         internal static bool NativeInputPanelExpanded
         {
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeInputPanelExpanded", out value) && value is bool && (bool)value; }

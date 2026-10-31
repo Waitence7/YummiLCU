@@ -3,6 +3,56 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     Background="Transparent">
+  <Page.Resources>
+    <Style x:Key="NativeInputTestButtonStyle" TargetType="Button">
+      <Setter Property="Background" Value="#FF5B3E78"/>
+      <Setter Property="BorderBrush" Value="#806F55A4"/>
+      <Setter Property="BorderThickness" Value="1"/>
+      <Setter Property="Foreground" Value="White"/>
+      <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+      <Setter Property="VerticalContentAlignment" Value="Stretch"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="Button">
+            <Border x:Name="ButtonBackground"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}"
+                    BorderThickness="{TemplateBinding BorderThickness}"
+                    Padding="{TemplateBinding Padding}"
+                    CornerRadius="6">
+              <VisualStateManager.VisualStateGroups>
+                <VisualStateGroup x:Name="CommonStates">
+                  <VisualState x:Name="Normal"/>
+                  <VisualState x:Name="PointerOver">
+                    <VisualState.Setters>
+                      <Setter Target="ButtonBackground.Background" Value="#FF725197"/>
+                      <Setter Target="ButtonBackground.BorderBrush" Value="#C0B69AD8"/>
+                    </VisualState.Setters>
+                  </VisualState>
+                  <VisualState x:Name="Pressed">
+                    <VisualState.Setters>
+                      <Setter Target="ButtonBackground.Background" Value="#FF412B56"/>
+                      <Setter Target="ButtonBackground.BorderBrush" Value="#FFFFFFFF"/>
+                      <Setter Target="ButtonBackground.Opacity" Value="0.88"/>
+                    </VisualState.Setters>
+                  </VisualState>
+                  <VisualState x:Name="Disabled">
+                    <VisualState.Setters>
+                      <Setter Target="ButtonBackground.Opacity" Value="0.45"/>
+                    </VisualState.Setters>
+                  </VisualState>
+                </VisualStateGroup>
+              </VisualStateManager.VisualStateGroups>
+              <ContentPresenter Content="{TemplateBinding Content}"
+                                ContentTemplate="{TemplateBinding ContentTemplate}"
+                                HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"/>
+            </Border>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+  </Page.Resources>
   <Grid x:Name="RootGrid" Background="Transparent">
     <Canvas x:Name="NativeCursorOverlay" IsHitTestVisible="False" Canvas.ZIndex="9999">
       <Grid x:Name="CursorMarkerPhysical" Visibility="Collapsed"><Ellipse Width="14" Height="14" Fill="#CCFF3B30" Stroke="White" StrokeThickness="1"/><TextBlock Text="P" Foreground="White" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
@@ -154,7 +204,35 @@
           </Border>
           <Grid x:Name="ClickNativeBody" Grid.Row="1" Height="70" Padding="10" Background="#B8120F1C">
             <StackPanel Spacing="6">
-              <Border x:Name="NativeHookHitbox" Background="#FF5B3E78" CornerRadius="4" Padding="12,8"><TextBlock Text="NATIVE INPUT" Foreground="White" TextAlignment="Center"/></Border>
+              <Button x:Name="NativeHookHitbox"
+                      Style="{StaticResource NativeInputTestButtonStyle}"
+                      Padding="12,8"
+                      ToolTipService.ToolTip="Agent native input 실제 클릭 테스트">
+                <Grid>
+                  <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="실제 버튼"
+                             FontWeight="SemiBold"
+                             Foreground="White"
+                             VerticalAlignment="Center"/>
+                  <Border Grid.Column="1"
+                          MinWidth="32"
+                          Margin="10,0,0,0"
+                          Padding="8,2"
+                          CornerRadius="10"
+                          Background="#40000000"
+                          BorderBrush="#60FFFFFF"
+                          BorderThickness="1">
+                    <TextBlock x:Name="NativeHookClickCountText"
+                               Text="0"
+                               Foreground="White"
+                               FontWeight="SemiBold"
+                               TextAlignment="Center"/>
+                  </Border>
+                </Grid>
+              </Button>
               <StackPanel x:Name="ClickNativeDetails" Spacing="6" Visibility="Collapsed">
                 <ToggleSwitch x:Name="CursorMarkersToggle" Header="마우스 좌표 마커 표시" Toggled="CursorMarkersToggle_Toggled"/>
                 <ScrollViewer Height="220" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled"><TextBlock x:Name="ClickNativeResult" Text="Agent native input waiting" FontSize="10" FontFamily="Consolas" Foreground="#BDB1D0" TextWrapping="Wrap"/></ScrollViewer>
