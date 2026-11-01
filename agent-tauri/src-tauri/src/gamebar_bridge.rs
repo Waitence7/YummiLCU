@@ -129,7 +129,7 @@ fn native_input_diagnostic_state() -> &'static Mutex<NativeInputDiagnosticState>
 }
 
 #[cfg(windows)]
-fn append_native_input_log(message: &str) {
+fn append_bounded_agent_log(file_name: &str, message: &str, max_bytes: u64) {
     use std::{
         env,
         fs::{self, OpenOptions},
@@ -144,10 +144,25 @@ fn append_native_input_log(message: &str) {
     if fs::create_dir_all(&log_dir).is_err() {
         return;
     }
-    let path = log_dir.join("native-input.log");
+    let path = log_dir.join(file_name);
+    if fs::metadata(&path).map(|m| m.len() >= max_bytes).unwrap_or(false) {
+        let rotated = log_dir.join(format!("{file_name}.1"));
+        let _ = fs::remove_file(&rotated);
+        let _ = fs::rename(&path, &rotated);
+    }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "[{}] {}", now_ms(), message);
     }
+}
+
+#[cfg(windows)]
+fn append_native_input_log(message: &str) {
+    append_bounded_agent_log("native-input.log", message, 4 * 1024 * 1024);
+}
+
+#[cfg(windows)]
+fn append_uia_probe_log(message: &str) {
+    append_bounded_agent_log("uia-probe.log", message, 512 * 1024);
 }
 
 pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
@@ -1315,7 +1330,8 @@ fn sync_external_click_test(parsed: &Value) -> String {
         }
 
         let source_changed = diagnostic.last_cursor_source != state.cursor_source;
-        if source_changed || now.saturating_sub(diagnostic.last_periodic_log_ms) >= 1_000 {
+        let periodic_interval_ms = if active { 1_000 } else { 5_000 };
+        if source_changed || now.saturating_sub(diagnostic.last_periodic_log_ms) >= periodic_interval_ms {
             append_native_input_log(&format!(
                 "sync active={}\n  physical(GetPhysicalCursorPos)=({}, {})\n  logical(GetCursorPos)=({}, {})\n  cursorInfo(GetCursorInfo)=({}, {}) valid={} flags=0x{:X} showing={} hCursor=0x{:X}\n  gamebarPrimary=({:.1}, {:.1})\n  gamebarAlt=({:.1}, {:.1})\n  gamebarStored=({}, {}) ageMs={}\n  selected=({}, {}) source={}\n  monitorOrigin=({}, {})\n  eventHit=({}, {}) matched={}\n  pollAgeMs={}\n  rect=({:.1},{:.1},{:.1},{:.1})\n  altRect=({:.1},{:.1},{:.1},{:.1})",
                 active,
@@ -1535,7 +1551,9 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         // was already initialized by another component, CoCreateInstance remains
         // valid and the HRESULT is intentionally only recorded for diagnostics.
         let com_hr = CoInitializeEx(None, COINIT_MULTITHREADED);
-        append_native_input_log(&format!("uia-probe com-init={:#x}", com_hr.0 as u32));
+        let message = format!("uia-probe com-init={:#x}", com_hr.0 as u32);
+        append_native_input_log(&message);
+        append_uia_probe_log(&message);
 
         let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
             .map_err(|e| format!("UI Automation 생성 실패: {e}"))?;
@@ -1566,10 +1584,12 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 || lower.contains("gamingoverlay");
 
             if !name.is_empty() || !class_name.is_empty() {
-                append_native_input_log(&format!(
+                let message = format!(
                     "uia-probe top name={:?} automationId={:?} class={:?} framework={:?} pid={} likelyGameBar={}",
                     name, automation_id, class_name, framework, process_id, likely_gamebar
-                ));
+                );
+                append_native_input_log(&message);
+                append_uia_probe_log(&message);
                 top_windows.push(serde_json::json!({
                     "name": name,
                     "automationId": automation_id,
@@ -1583,10 +1603,12 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 continue;
             }
 
-            append_native_input_log(&format!(
+            let message = format!(
                 "uia-probe root name={:?} automationId={:?} class={:?} framework={:?} pid={}",
                 name, automation_id, class_name, framework, process_id
-            ));
+            );
+            append_native_input_log(&message);
+            append_uia_probe_log(&message);
             let Ok(descendants) = element.FindAll(TreeScope_Subtree, &true_condition) else { continue };
             let descendant_len = descendants.Length().unwrap_or(0).clamp(0, 800);
             for j in 0..descendant_len {
@@ -1614,10 +1636,12 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 let bounds = rect.map(|r| serde_json::json!({
                     "left": r.left, "top": r.top, "right": r.right, "bottom": r.bottom
                 }));
-                append_native_input_log(&format!(
+                let message = format!(
                     "uia-probe candidate name={:?} automationId={:?} class={:?} type={:?} controlType={} enabled={} offscreen={}",
                     child_name, child_id, child_class, localized_type, control_type.0, enabled, offscreen
-                ));
+                );
+                append_native_input_log(&message);
+                append_uia_probe_log(&message);
                 if candidates.len() < 120 {
                     candidates.push(serde_json::json!({
                         "name": child_name,
@@ -1636,10 +1660,12 @@ fn probe_gamebar_uia() -> Result<Value, String> {
             }
         }
 
-        append_native_input_log(&format!(
+        let message = format!(
             "uia-probe complete topWindows={} candidates={}",
             top_windows.len(), candidates.len()
-        ));
+        );
+        append_native_input_log(&message);
+        append_uia_probe_log(&message);
         Ok(serde_json::json!({
             "topWindows": top_windows,
             "candidates": candidates,
