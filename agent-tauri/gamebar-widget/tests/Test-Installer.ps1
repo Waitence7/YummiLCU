@@ -1,4 +1,4 @@
-﻿param([string]$InstallerRoot = (Split-Path -Parent $PSScriptRoot))
+param([string]$InstallerRoot = (Split-Path -Parent $PSScriptRoot))
 $ErrorActionPreference = 'Stop'
 $root = Join-Path ([IO.Path]::GetTempPath()) ('Yummi-installer-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $root | Out-Null
@@ -78,7 +78,15 @@ try {
   if ($widgetXaml -notmatch 'x:Name="NativeHookButtonTransform"') { throw 'Native input button must expose a transform for native hover/press feedback' }
   if ($widgetSource -notmatch 'UpdateNativeHookButtonVisual') { throw 'Native input hit-test state must drive button hover/press visuals' }
   if ($widgetSource -notmatch 'fallbackHovered') { throw 'Native input hover feedback must remain compatible with older Agents' }
-  Write-Host 'PASS: eye ghost, hard close, and native input button semantics'
+  if ($widgetXaml -notmatch 'x:Name="OverlayToastHost"') { throw 'Shared overlay toast host must exist for transient notifications' }
+  if ($widgetSource -notmatch 'ApplyOverlayToasts' -or $widgetSource -notmatch 'overlay_toasts') { throw 'Widget must render the shared overlay toast payload contract' }
+  if ($widgetSource -notmatch 'HandlePinnedNativePanelDrag') { throw 'Pinned runtime must support native panel dragging' }
+  if ($widgetSource -notmatch 'RuntimeNativeDragBandHeight = 24\.0') { throw 'Pinned runtime drag must stay limited to the panel top band' }
+  if ($widgetSource -notmatch 'leftButtonDown') { throw 'Pinned runtime drag must consume raw native left-button state' }
+  if ($widgetSource -notmatch 'HandlePinnedYoutubeNativeInputAsync') { throw 'Pinned runtime must forward native mouse input to YouTube' }
+  if ($widgetSource -notmatch 'Input\.dispatchMouseEvent') { throw 'YouTube runtime input must use WebView2 DevTools mouse dispatch' }
+  if ($widgetSource -notmatch 'local\.Y < RuntimeNativeDragBandHeight') { throw 'YouTube runtime input must preserve the top drag band' }
+  Write-Host 'PASS: eye ghost, hard close, native input button, pinned runtime drag, and YouTube native input semantics'
   if ($widgetXaml -notmatch 'x:Name="BrowserPanel"' -or $widgetXaml -notmatch 'x:Name="BrowserAddressBox"') { throw 'Single-tab browser panel must exist' }
   if ($widgetSource -notmatch 'EnsureBrowserWebView2Async' -or $widgetSource -notmatch 'NormalizeBrowserInput') { throw 'Browser panel must use the shared WebView2 runtime and URL/search normalization' }
   if ($widgetSource -notmatch 'BrowserPanelVisible = show') { throw 'F9 must include the browser panel' }

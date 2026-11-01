@@ -401,6 +401,18 @@
           </Border>
         </Grid>
       </Border>
+
+      <!-- Shared transient notification surface. Producers only publish generic
+           toast payloads; this renderer is intentionally source-agnostic. -->
+      <StackPanel x:Name="OverlayToastHost"
+                  Width="330"
+                  HorizontalAlignment="Right"
+                  VerticalAlignment="Top"
+                  Margin="0,52,24,0"
+                  Spacing="8"
+                  Visibility="Collapsed"
+                  IsHitTestVisible="False"
+                  Canvas.ZIndex="12000"/>
     </Grid>
 
     <Grid x:Name="PinTutorialOverlay"

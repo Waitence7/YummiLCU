@@ -20,7 +20,7 @@ use tokio::time::sleep;
 
 use crate::{
     lcu::{discover_lockfile_nonblocking, LcuClient},
-    state::{AppState, GameBarSnapshot},
+    state::{AppState, GameBarSnapshot, GameBarToast},
     updater::verify_manifest_payload_signature,
 };
 
@@ -99,6 +99,7 @@ struct ExternalClickTestState {
     gamebar_cursor_updated_at_ms: u64,
     hovered: bool,
     mouse_down: bool,
+    raw_mouse_down: bool,
 }
 
 #[cfg(windows)]
@@ -263,18 +264,40 @@ async fn watch_snapshot(state: Arc<AppState>) {
     let mut shutdown = state.shutdown_receiver();
     let mut friend_tick = 0u8;
     let mut cached_online_friends = Vec::new();
+    let mut friend_presence_initialized = false;
     loop {
         if *shutdown.borrow() {
             break;
         }
 
         let refresh_friends = friend_tick == 0;
+        let previous_online_friends = cached_online_friends.clone();
         let snapshot = collect_snapshot(&state, refresh_friends, &cached_online_friends).await;
-        if refresh_friends {
-            cached_online_friends = snapshot.online_friends.clone();
-        }
+        let connected = snapshot.connected;
+        let refreshed_online_friends = snapshot.online_friends.clone();
         friend_tick = (friend_tick + 1) % FRIEND_REFRESH_EVERY_TICKS;
         state.set_gamebar_snapshot(snapshot);
+
+        if refresh_friends {
+            if !connected {
+                friend_presence_initialized = false;
+                cached_online_friends.clear();
+            } else {
+                if friend_presence_initialized {
+                    for friend in newly_online_friends(
+                        &previous_online_friends,
+                        &refreshed_online_friends,
+                    ) {
+                        state.push_gamebar_toast(friend_online_toast(&friend, now_ms()));
+                    }
+                } else {
+                    // First successful friend snapshot is a baseline, not a burst of
+                    // notifications for everyone who was already online at startup.
+                    friend_presence_initialized = true;
+                }
+                cached_online_friends = refreshed_online_friends;
+            }
+        }
 
         tokio::select! {
             _ = sleep(SNAPSHOT_INTERVAL) => {},
@@ -369,6 +392,7 @@ async fn collect_snapshot(
         phase,
         party_members,
         online_friends,
+        overlay_toasts: Vec::new(),
         voice_chat_channel_id: None,
         voice_chat_messages: Vec::new(),
         tutorial_reset_generation: 0,
@@ -429,6 +453,26 @@ fn lobby_riot_ids(value: &Value) -> Vec<String> {
         })
         .take(5)
         .collect()
+}
+
+fn newly_online_friends(previous: &[String], current: &[String]) -> Vec<String> {
+    current
+        .iter()
+        .filter(|friend| !previous.contains(friend))
+        .cloned()
+        .collect()
+}
+
+fn friend_online_toast(friend: &str, timestamp_ms: u64) -> GameBarToast {
+    GameBarToast {
+        id: format!("friend-online:{friend}:{timestamp_ms}"),
+        source: "lcu.friend.online".into(),
+        title: "친구 온라인".into(),
+        body: friend.to_owned(),
+        tone: "success".into(),
+        timestamp_ms,
+        expires_at_ms: timestamp_ms.saturating_add(6_000),
+    }
 }
 
 fn online_friend_riot_ids(value: &Value) -> Vec<String> {
@@ -980,6 +1024,7 @@ fn external_mouse_input_thread() {
             if let Ok(mut state) = external_click_test_state().lock() {
                 state.hovered = false;
                 state.mouse_down = false;
+                state.raw_mouse_down = was_down;
             }
             was_f9_down = f9_down;
             std::thread::sleep(Duration::from_millis(50));
@@ -1050,12 +1095,7 @@ fn external_mouse_input_thread() {
                 let mx = monitor_x as f64;
                 let my = monitor_y as f64;
                 let inside = |rx: f64, ry: f64, rw: f64, rh: f64| {
-                    fresh
-                        && state.active
-                        && px >= rx
-                        && px < rx + rw
-                        && py >= ry
-                        && py < ry + rh
+                    fresh && state.active && px >= rx && px < rx + rw && py >= ry && py < ry + rh
                 };
                 let inside_primary = inside(state.x, state.y, state.width, state.height);
                 let inside_alt =
@@ -1068,12 +1108,11 @@ fn external_mouse_input_thread() {
                     state.alt_width,
                     state.alt_height,
                 );
-                let hovered = inside_primary
-                    || inside_alt
-                    || inside_primary_monitor
-                    || inside_alt_monitor;
+                let hovered =
+                    inside_primary || inside_alt || inside_primary_monitor || inside_alt_monitor;
                 state.hovered = hovered;
                 state.mouse_down = hovered && down;
+                state.raw_mouse_down = down;
 
                 if down != was_down {
                     let gamebar_fresh =
@@ -1374,6 +1413,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "clickCount": state.click_count,
         "hovered": state.hovered,
         "mouseDown": state.mouse_down,
+        "leftButtonDown": state.raw_mouse_down,
         "hudToggleSequence": state.hud_toggle_sequence,
         "event": state.event,
         "eventX": state.event_x,
@@ -1796,15 +1836,22 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
             .unwrap_or(false);
         tauri::async_runtime::spawn(async move {
             if let Err(error) = check_overlay_update(force_finalize).await {
-                let mode = if force_finalize { "Win+G 즉시 적용" } else { "수동" };
+                let mode = if force_finalize {
+                    "Win+G 즉시 적용"
+                } else {
+                    "수동"
+                };
                 append_gamebar_update_log(&format!("{mode} 오버레이 업데이트 확인 실패: {error}"));
             }
         });
-        return json_response(true, if force_finalize {
-            "Win+G 오버레이 업데이트 즉시 적용을 시작했습니다."
-        } else {
-            "오버레이 업데이트 확인을 시작했습니다."
-        });
+        return json_response(
+            true,
+            if force_finalize {
+                "Win+G 오버레이 업데이트 즉시 적용을 시작했습니다."
+            } else {
+                "오버레이 업데이트 확인을 시작했습니다."
+            },
+        );
     }
     if command == "probe_gamebar_uia" {
         append_uia_probe_log("uia-probe request-received");
@@ -1934,7 +1981,6 @@ fn select_gamebar_manifest(releases: &Value) -> Option<(String, String)> {
         .max_by_key(|(version, _, _)| *version)
         .map(|(_, tag, url)| (tag, url))
 }
-
 
 #[cfg(windows)]
 async fn fetch_gamebar_manifest_response(
@@ -2272,7 +2318,9 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
     let zip_path = updater_dir.join("verified-update.zip");
     let staged_valid = fs::read(&zip_path)
         .ok()
-        .filter(|bytes| bytes.len() as u64 == target.size && bytes.len() <= MAX_GAMEBAR_ARCHIVE_BYTES)
+        .filter(|bytes| {
+            bytes.len() as u64 == target.size && bytes.len() <= MAX_GAMEBAR_ARCHIVE_BYTES
+        })
         .map(|bytes| format!("{:x}", Sha256::digest(&bytes)).eq_ignore_ascii_case(&target.sha256))
         .unwrap_or(false);
 
@@ -2298,7 +2346,8 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         if !actual.eq_ignore_ascii_case(&target.sha256) {
             return Err("Game Bar ZIP SHA256 검증 실패".into());
         }
-        fs::write(&zip_path, &archive).map_err(|e| format!("검증된 Game Bar ZIP 저장 실패: {e}"))?;
+        fs::write(&zip_path, &archive)
+            .map_err(|e| format!("검증된 Game Bar ZIP 저장 실패: {e}"))?;
     }
 
     if !force_finalize_requested {
@@ -2751,8 +2800,9 @@ fn wide_null(value: &str) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::{
-        lobby_riot_ids, online_friend_riot_ids, parse_gamebar_release_version,
-        riot_id_from_summoner, select_gamebar_manifest, validate_status_message,
+        friend_online_toast, lobby_riot_ids, newly_online_friends, online_friend_riot_ids,
+        parse_gamebar_release_version, riot_id_from_summoner, select_gamebar_manifest,
+        validate_status_message,
     };
     use serde_json::json;
 
@@ -2795,6 +2845,23 @@ mod tests {
             vec!["A#KR1", "B#KR2"]
         );
     }
+    #[test]
+    fn detects_only_new_online_friend_transitions() {
+        let previous = vec!["A#KR1".to_owned(), "B#KR2".to_owned()];
+        let current = vec!["B#KR2".to_owned(), "C#KR3".to_owned()];
+        assert_eq!(newly_online_friends(&previous, &current), vec!["C#KR3"]);
+    }
+
+    #[test]
+    fn friend_online_uses_shared_toast_contract() {
+        let toast = friend_online_toast("Yummi#KR1", 1_000);
+        assert_eq!(toast.source, "lcu.friend.online");
+        assert_eq!(toast.title, "친구 온라인");
+        assert_eq!(toast.body, "Yummi#KR1");
+        assert_eq!(toast.tone, "success");
+        assert_eq!(toast.expires_at_ms, 7_000);
+    }
+
     #[test]
     fn extracts_only_online_friends() {
         assert_eq!(

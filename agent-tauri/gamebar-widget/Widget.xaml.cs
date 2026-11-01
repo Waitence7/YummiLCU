@@ -73,6 +73,13 @@ namespace YummiGameBarWidget
         private bool youtubeUsingFallback;
         private bool youtubeBrowseMode;
         private double youtubePlayerHeightBeforeBrowse;
+        private bool youtubeNativePointerCaptured;
+        private bool youtubeNativeMouseWasDown;
+        private int youtubeNativeCoordinateMode = -1;
+        private double youtubeNativeLastX = double.NaN;
+        private double youtubeNativeLastY = double.NaN;
+        private long youtubeNativeLastMoveAtMs;
+        private long youtubeNativeLastErrorLogAtMs;
         private XboxGameBarWidgetNotificationManager notificationManager;
         private string youtubePendingPlayerUrl;
         private string youtubeLoadedVideoId;
@@ -83,6 +90,14 @@ namespace YummiGameBarWidget
         private Windows.Foundation.Point panelDragStartPoint;
         private double panelDragStartX;
         private double panelDragStartY;
+        private FrameworkElement nativeDraggedPanel;
+        private TranslateTransform nativeDraggedPanelTransform;
+        private Windows.Foundation.Point nativePanelDragStartPoint;
+        private double nativePanelDragStartX;
+        private double nativePanelDragStartY;
+        private int nativePanelDragCoordinateMode = -1;
+        private bool nativePanelDragMoved;
+        private bool nativePanelMouseWasDown;
         private FrameworkElement resizedPanel;
         private FrameworkElement resizedBody;
         private uint? panelResizePointerId;
@@ -139,6 +154,9 @@ namespace YummiGameBarWidget
         private readonly HashSet<string> voiceChatRenderedKeys = new HashSet<string>(StringComparer.Ordinal);
         private bool voiceChatHasVisibleMessages;
         private bool voiceChatPositionNeedsDefault;
+        private string overlayToastSignature = "";
+        private readonly Dictionary<string, long> overlayToastExpiresAtMs = new Dictionary<string, long>(StringComparer.Ordinal);
+        private readonly Dictionary<string, FrameworkElement> overlayToastRowsById = new Dictionary<string, FrameworkElement>(StringComparer.Ordinal);
         private bool controlsTutorialShownThisSession;
         private long lastSnapshotSuccessAtMs;
         private int consecutiveSnapshotFailures;
@@ -166,8 +184,11 @@ namespace YummiGameBarWidget
         private bool foregroundChromeRefreshInFlight;
         private long lastForegroundChromeRefreshAtMs;
         private volatile bool nativeInputDiagnosticsWanted;
+        private volatile bool nativeInputRuntimeDragWanted;
         private bool nativeInputDeactivatedWhileIdle;
         private const double HiddenRuntimePanelOpacity = 0.60;
+        private const double RuntimeNativeDragBandHeight = 24.0;
+        private const double RuntimeNativeDragThreshold = 2.0;
 
         public Widget()
         {
@@ -199,6 +220,7 @@ namespace YummiGameBarWidget
                 // Voice chat expiry is a UI concern and must keep advancing even
                 // while the realtime snapshot WebSocket is healthy and idle.
                 ExpireVoiceChatMessages();
+                ExpireOverlayToasts();
                 // The WebSocket is the primary realtime transport. The legacy
                 // snapshot TCP endpoint is polled only while WS is unavailable.
                 if (!snapshotWebSocketConnected) await RefreshAsync();
@@ -1330,7 +1352,156 @@ namespace YummiGameBarWidget
             BridgeText.Text = connected ? "LCU 연결됨" : "유미 에이전트 연결됨 · League 대기 중";
             StatusDot.Fill = new SolidColorBrush(connected ? Color.FromArgb(255, 86, 221, 139) : Color.FromArgb(255, 122, 106, 134));
             ApplyVoiceChat(json);
+            ApplyOverlayToasts(json);
             SaveStatus();
+        }
+
+        private void ApplyOverlayToasts(JsonObject json)
+        {
+            JsonArray values = null;
+            if (json.ContainsKey("overlay_toasts") && json["overlay_toasts"].ValueType == JsonValueType.Array)
+                values = json.GetNamedArray("overlay_toasts");
+
+            var now = NowMs();
+            var visible = new List<Tuple<string, JsonObject, long, long>>();
+            if (values != null)
+            {
+                foreach (var value in values)
+                {
+                    if (value.ValueType != JsonValueType.Object) continue;
+                    var item = value.GetObject();
+                    var title = SnapshotJson.String(item, "title");
+                    var body = SnapshotJson.String(item, "body");
+                    if (string.IsNullOrWhiteSpace(title) && string.IsNullOrWhiteSpace(body)) continue;
+                    var timestampMs = (long)Math.Max(0, item.GetNamedNumber("timestamp_ms", 0));
+                    var expiresAtMs = (long)Math.Max(0, item.GetNamedNumber("expires_at_ms", 0));
+                    if (expiresAtMs <= 0 && timestampMs > 0) expiresAtMs = timestampMs + 6000;
+                    if (expiresAtMs > 0 && now >= expiresAtMs) continue;
+                    var id = SnapshotJson.String(item, "id");
+                    if (string.IsNullOrWhiteSpace(id))
+                        id = SnapshotJson.String(item, "source") + ":" + timestampMs + ":" + title + ":" + body;
+                    visible.Add(Tuple.Create(id, item, expiresAtMs, timestampMs));
+                }
+            }
+
+            visible = visible
+                .OrderByDescending(item => item.Item4)
+                .Take(4)
+                .ToList();
+            var signature = string.Join("|", visible.Select(item => item.Item1 + ":" + item.Item3));
+            if (signature == overlayToastSignature) return;
+            overlayToastSignature = signature;
+            overlayToastExpiresAtMs.Clear();
+            overlayToastRowsById.Clear();
+            OverlayToastHost.Children.Clear();
+
+            foreach (var item in visible)
+            {
+                var row = BuildOverlayToastRow(item.Item1, item.Item2);
+                OverlayToastHost.Children.Add(row);
+                overlayToastRowsById[item.Item1] = row;
+                overlayToastExpiresAtMs[item.Item1] = item.Item3;
+            }
+            OverlayToastHost.Visibility = OverlayToastHost.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private FrameworkElement BuildOverlayToastRow(string id, JsonObject item)
+        {
+            var tone = SnapshotJson.String(item, "tone", "info");
+            var title = SnapshotJson.String(item, "title");
+            var body = SnapshotJson.String(item, "body");
+            var accent = OverlayToastAccent(tone);
+            var panel = new Border
+            {
+                Tag = id,
+                Padding = new Thickness(12, 10, 12, 10),
+                CornerRadius = new CornerRadius(9),
+                Background = new SolidColorBrush(Color.FromArgb(238, 20, 16, 32)),
+                BorderBrush = new SolidColorBrush(accent),
+                BorderThickness = new Thickness(1)
+            };
+            var grid = new Grid { ColumnSpacing = 10 };
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+            grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            var dot = new Border
+            {
+                Width = 7,
+                Height = 7,
+                CornerRadius = new CornerRadius(4),
+                Background = new SolidColorBrush(accent),
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(0, 5, 0, 0)
+            };
+            Grid.SetColumn(dot, 0);
+            grid.Children.Add(dot);
+            var text = new StackPanel { Spacing = 2 };
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                text.Children.Add(new TextBlock
+                {
+                    Text = title,
+                    FontSize = 11,
+                    FontWeight = Windows.UI.Text.FontWeights.SemiBold,
+                    Foreground = new SolidColorBrush(Colors.White),
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+            }
+            if (!string.IsNullOrWhiteSpace(body))
+            {
+                text.Children.Add(new TextBlock
+                {
+                    Text = body,
+                    FontSize = 11,
+                    Foreground = new SolidColorBrush(Color.FromArgb(255, 214, 205, 226)),
+                    TextWrapping = TextWrapping.Wrap,
+                    MaxLines = 2
+                });
+            }
+            Grid.SetColumn(text, 1);
+            grid.Children.Add(text);
+            panel.Child = grid;
+            return panel;
+        }
+
+        private static Color OverlayToastAccent(string tone)
+        {
+            switch ((tone ?? "").Trim().ToLowerInvariant())
+            {
+                case "success": return Color.FromArgb(255, 86, 221, 139);
+                case "warning": return Color.FromArgb(255, 245, 190, 76);
+                case "error": return Color.FromArgb(255, 239, 91, 91);
+                default: return Color.FromArgb(255, 151, 112, 207);
+            }
+        }
+
+        private void ExpireOverlayToasts()
+        {
+            if (overlayToastExpiresAtMs.Count == 0) return;
+            var now = NowMs();
+            var expired = overlayToastExpiresAtMs
+                .Where(item => item.Value > 0 && now >= item.Value)
+                .Select(item => item.Key)
+                .ToList();
+            if (expired.Count == 0) return;
+            foreach (var id in expired)
+            {
+                FrameworkElement row;
+                if (overlayToastRowsById.TryGetValue(id, out row))
+                    OverlayToastHost.Children.Remove(row);
+                overlayToastRowsById.Remove(id);
+                overlayToastExpiresAtMs.Remove(id);
+            }
+            overlayToastSignature = string.Join("|", overlayToastRowsById.Keys.OrderBy(value => value));
+            OverlayToastHost.Visibility = OverlayToastHost.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        private void ClearOverlayToasts()
+        {
+            overlayToastSignature = "";
+            overlayToastExpiresAtMs.Clear();
+            overlayToastRowsById.Clear();
+            OverlayToastHost.Children.Clear();
+            OverlayToastHost.Visibility = Visibility.Collapsed;
         }
 
         private void ApplyTutorialResetRequest(JsonObject json)
@@ -2253,28 +2424,32 @@ namespace YummiGameBarWidget
         private void SavePanelPosition(FrameworkElement panel, TranslateTransform transform)
         {
             var values = ApplicationData.Current.LocalSettings.Values;
+            // PinnedOnly hides the 24-DIP edit title bar and offsets every panel by
+            // the same amount so the body stays visually fixed. Persist edit-space Y
+            // even when a native runtime drag finishes while the title bar is hidden.
+            var storedY = transform.Y - (panelChromePinnedOffsetApplied ? PanelTitleBarHeight : 0.0);
             if (panel == LcuPanel)
             {
                 values[LcuPanelXSetting] = transform.X;
-                values[LcuPanelYSetting] = transform.Y;
+                values[LcuPanelYSetting] = storedY;
             }
             else if (panel == PartyPanel)
             {
                 values[PartyPanelXSetting] = transform.X;
-                values[PartyPanelYSetting] = transform.Y;
+                values[PartyPanelYSetting] = storedY;
             }
             else if (panel == YoutubePanel)
             {
                 values[YoutubePanelXSetting] = transform.X;
-                values[YoutubePanelYSetting] = transform.Y;
+                values[YoutubePanelYSetting] = storedY;
             }
             else if (panel == BrowserPanel)
             {
                 values[BrowserPanelXSetting] = transform.X;
-                values[BrowserPanelYSetting] = transform.Y;
+                values[BrowserPanelYSetting] = storedY;
             }
-            else if (panel == ClickNativePanel) { values[ClickNativePanelXSetting] = transform.X; values[ClickNativePanelYSetting] = transform.Y; }
-            else if (panel == VoiceChatPanel) { values[VoiceChatPanelXSetting] = transform.X; values[VoiceChatPanelYSetting] = transform.Y; }
+            else if (panel == ClickNativePanel) { values[ClickNativePanelXSetting] = transform.X; values[ClickNativePanelYSetting] = storedY; }
+            else if (panel == VoiceChatPanel) { values[VoiceChatPanelXSetting] = transform.X; values[VoiceChatPanelYSetting] = storedY; }
         }
 
         private void ClampAllPanelPositions()
@@ -2324,8 +2499,10 @@ namespace YummiGameBarWidget
         private void UpdateNativeInputDiagnosticsMode(bool forceRefresh)
         {
             var pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
-            var wanted = widget != null && HudPreferences.Visible &&
-                (!pinnedOnly || HudPreferences.NativeInputPanelVisible || HudPreferences.NativeCursorMarkersVisible);
+            // Native input is also the runtime drag transport. Keep it alive while
+            // the HUD is visible even when the diagnostics panel itself is hidden.
+            var wanted = widget != null && HudPreferences.Visible;
+            nativeInputRuntimeDragWanted = wanted && pinnedOnly;
             var changed = nativeInputDiagnosticsWanted != wanted;
             nativeInputDiagnosticsWanted = wanted;
             if (wanted)
@@ -2413,7 +2590,7 @@ namespace YummiGameBarWidget
                         }
                     }
 
-                    try { await Task.Delay(100, token); }
+                    try { await Task.Delay(nativeInputRuntimeDragWanted ? 33 : 100, token); }
                     catch (TaskCanceledException) { break; }
                 }
                 App.LogStage("native-input-loop-stop");
@@ -2531,11 +2708,15 @@ namespace YummiGameBarWidget
             var syncGeneration = Interlocked.Increment(ref nativeInputSyncGeneration);
             try
             {
-                var requestedActive = active && HudPreferences.Visible && HudPanel.Visibility == Visibility.Visible
+                var requestedActive = active && HudPreferences.Visible && HudPanel.Visibility == Visibility.Visible;
+                var diagnosticRequested = requestedActive
                     && ClickNativePanel.Visibility == Visibility.Visible
                     && !HudPreferences.NativeInputPanelClosed && ClickNativePanel.Opacity > 0.0;
                 var geometryReady = NativeHookHitbox.ActualWidth > 0 && NativeHookHitbox.ActualHeight > 0;
-                var effectiveActive = requestedActive && geometryReady;
+                // The Agent must keep polling the raw cursor/button state in PinnedOnly
+                // even when the diagnostic button is hidden. Use an off-screen 1x1
+                // hitbox in that case so click counting stays disabled.
+                var effectiveActive = requestedActive;
                 // Do not depend on PointerMoved events staying alive after a click.
                 // CoreWindow.PointerPosition can be polled directly and returns the
                 // current client-space pointer position in DIPs.
@@ -2562,20 +2743,34 @@ namespace YummiGameBarWidget
                 }
                 if (effectiveActive)
                 {
-                    var local = NativeHookHitbox.TransformToVisual(RootGrid)
-                        .TransformPoint(new Windows.Foundation.Point(0, 0));
-                    var bounds = widget.WindowBounds;
-                    var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
-                    // WindowBounds does not document whether X/Y are already raw screen pixels.
-                    // Send both plausible coordinate mappings; the Agent accepts either hitbox.
-                    command["x"] = JsonValue.CreateNumberValue((bounds.X + local.X) * scale);
-                    command["y"] = JsonValue.CreateNumberValue((bounds.Y + local.Y) * scale);
-                    command["width"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualWidth * scale);
-                    command["height"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
-                    command["altX"] = JsonValue.CreateNumberValue(bounds.X + (local.X * scale));
-                    command["altY"] = JsonValue.CreateNumberValue(bounds.Y + (local.Y * scale));
-                    command["altWidth"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualWidth * scale);
-                    command["altHeight"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
+                    if (diagnosticRequested && geometryReady)
+                    {
+                        var local = NativeHookHitbox.TransformToVisual(RootGrid)
+                            .TransformPoint(new Windows.Foundation.Point(0, 0));
+                        var bounds = widget.WindowBounds;
+                        var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
+                        // WindowBounds does not document whether X/Y are already raw screen pixels.
+                        // Send both plausible coordinate mappings; the Agent accepts either hitbox.
+                        command["x"] = JsonValue.CreateNumberValue((bounds.X + local.X) * scale);
+                        command["y"] = JsonValue.CreateNumberValue((bounds.Y + local.Y) * scale);
+                        command["width"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualWidth * scale);
+                        command["height"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
+                        command["altX"] = JsonValue.CreateNumberValue(bounds.X + (local.X * scale));
+                        command["altY"] = JsonValue.CreateNumberValue(bounds.Y + (local.Y * scale));
+                        command["altWidth"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualWidth * scale);
+                        command["altHeight"] = JsonValue.CreateNumberValue(NativeHookHitbox.ActualHeight * scale);
+                    }
+                    else
+                    {
+                        command["x"] = JsonValue.CreateNumberValue(-99999);
+                        command["y"] = JsonValue.CreateNumberValue(-99999);
+                        command["width"] = JsonValue.CreateNumberValue(1);
+                        command["height"] = JsonValue.CreateNumberValue(1);
+                        command["altX"] = JsonValue.CreateNumberValue(-99999);
+                        command["altY"] = JsonValue.CreateNumberValue(-99999);
+                        command["altWidth"] = JsonValue.CreateNumberValue(1);
+                        command["altHeight"] = JsonValue.CreateNumberValue(1);
+                    }
                 }
 
                 var payload = command.Stringify();
@@ -2658,7 +2853,12 @@ namespace YummiGameBarWidget
                 var nativeMouseDown = response.ContainsKey("mouseDown")
                     ? response.GetNamedBoolean("mouseDown", false)
                     : nativeHovered && eventName == "down";
+                var leftButtonDown = response.ContainsKey("leftButtonDown")
+                    ? response.GetNamedBoolean("leftButtonDown", false)
+                    : nativeMouseDown;
                 UpdateNativeHookButtonVisual(nativeHovered, nativeMouseDown);
+                HandlePinnedNativePanelDrag(leftButtonDown, cursorX, cursorY, monitorX, monitorY);
+                await HandlePinnedYoutubeNativeInputAsync(leftButtonDown, cursorX, cursorY, monitorX, monitorY);
 
                 if (sequence != lastNativeInputSequence) lastNativeInputSequence = sequence;
 
@@ -2702,6 +2902,312 @@ namespace YummiGameBarWidget
                     syncingNativeInputSinceMs = 0;
                 }
             }
+        }
+
+        private void HandlePinnedNativePanelDrag(bool leftButtonDown, int cursorX, int cursorY, int monitorX, int monitorY)
+        {
+            var pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+            if (!pinnedOnly || !HudPreferences.Visible || HudPanel.Visibility != Visibility.Visible)
+            {
+                if (nativeDraggedPanel != null) EndPinnedNativePanelDrag(true);
+                nativePanelMouseWasDown = leftButtonDown;
+                return;
+            }
+
+            if (leftButtonDown && !nativePanelMouseWasDown)
+                TryBeginPinnedNativePanelDrag(cursorX, cursorY, monitorX, monitorY);
+
+            if (leftButtonDown && nativeDraggedPanel != null && nativeDraggedPanelTransform != null)
+            {
+                var point = NativeCursorToRoot(cursorX, cursorY, monitorX, monitorY, nativePanelDragCoordinateMode);
+                var dx = point.X - nativePanelDragStartPoint.X;
+                var dy = point.Y - nativePanelDragStartPoint.Y;
+                if (!nativePanelDragMoved && Math.Sqrt((dx * dx) + (dy * dy)) >= RuntimeNativeDragThreshold)
+                    nativePanelDragMoved = true;
+                if (nativePanelDragMoved)
+                {
+                    SetPanelPosition(
+                        nativeDraggedPanel,
+                        nativeDraggedPanelTransform,
+                        nativePanelDragStartX + dx,
+                        nativePanelDragStartY + dy,
+                        false);
+                }
+            }
+            else if (!leftButtonDown && nativePanelMouseWasDown && nativeDraggedPanel != null)
+            {
+                EndPinnedNativePanelDrag(true);
+            }
+
+            nativePanelMouseWasDown = leftButtonDown;
+        }
+
+        private void TryBeginPinnedNativePanelDrag(int cursorX, int cursorY, int monitorX, int monitorY)
+        {
+            for (var mode = 0; mode < 4; mode++)
+            {
+                var point = NativeCursorToRoot(cursorX, cursorY, monitorX, monitorY, mode);
+                var panel = FindPinnedNativeDragPanel(point);
+                if (panel == null) continue;
+                var transform = panel.RenderTransform as TranslateTransform;
+                if (transform == null) return;
+                nativeDraggedPanel = panel;
+                nativeDraggedPanelTransform = transform;
+                nativePanelDragStartPoint = point;
+                nativePanelDragStartX = transform.X;
+                nativePanelDragStartY = transform.Y;
+                nativePanelDragCoordinateMode = mode;
+                nativePanelDragMoved = false;
+                App.LogStage("runtime-native-drag-start panel=" + NativePanelName(panel) + " mode=" + mode);
+                return;
+            }
+        }
+
+        private FrameworkElement FindPinnedNativeDragPanel(Windows.Foundation.Point point)
+        {
+            // Later/high-Z panels win when their runtime drag bands overlap.
+            var panels = new[] { VoiceChatPanel, BrowserPanel, YoutubePanel, ClickNativePanel, PartyPanel, LcuPanel };
+            foreach (var panel in panels)
+            {
+                if (PinnedNativeDragHit(panel, point)) return panel;
+            }
+            return null;
+        }
+
+        private bool PinnedNativeDragHit(FrameworkElement panel, Windows.Foundation.Point point)
+        {
+            if (panel == null || panel.Visibility != Visibility.Visible || panel.Opacity <= 0.01) return false;
+            var width = panel.ActualWidth > 0 ? panel.ActualWidth : (!double.IsNaN(panel.Width) ? panel.Width : 0.0);
+            var height = panel.ActualHeight > 0 ? panel.ActualHeight : (!double.IsNaN(panel.Height) ? panel.Height : 0.0);
+            if (width <= 0 || height <= 0) return false;
+            Windows.Foundation.Point origin;
+            try { origin = panel.TransformToVisual(RootGrid).TransformPoint(new Windows.Foundation.Point(0, 0)); }
+            catch { return false; }
+            var bandHeight = Math.Min(RuntimeNativeDragBandHeight, height);
+            return point.X >= origin.X && point.X < origin.X + width
+                && point.Y >= origin.Y && point.Y < origin.Y + bandHeight;
+        }
+
+        private Windows.Foundation.Point NativeCursorToRoot(int cursorX, int cursorY, int monitorX, int monitorY, int mode)
+        {
+            if (widget == null) return new Windows.Foundation.Point(cursorX, cursorY);
+            var bounds = widget.WindowBounds;
+            var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
+            switch (mode)
+            {
+                case 1:
+                    return new Windows.Foundation.Point((cursorX - bounds.X) / scale, (cursorY - bounds.Y) / scale);
+                case 2:
+                    return new Windows.Foundation.Point(((cursorX - monitorX) / scale) - bounds.X, ((cursorY - monitorY) / scale) - bounds.Y);
+                case 3:
+                    return new Windows.Foundation.Point((cursorX - monitorX - bounds.X) / scale, (cursorY - monitorY - bounds.Y) / scale);
+                default:
+                    return new Windows.Foundation.Point((cursorX / scale) - bounds.X, (cursorY / scale) - bounds.Y);
+            }
+        }
+
+        private void EndPinnedNativePanelDrag(bool save)
+        {
+            if (save && nativePanelDragMoved && nativeDraggedPanel != null && nativeDraggedPanelTransform != null)
+                SavePanelPosition(nativeDraggedPanel, nativeDraggedPanelTransform);
+            if (nativeDraggedPanel != null)
+                App.LogStage("runtime-native-drag-stop panel=" + NativePanelName(nativeDraggedPanel) + " moved=" + nativePanelDragMoved);
+            nativeDraggedPanel = null;
+            nativeDraggedPanelTransform = null;
+            nativePanelDragCoordinateMode = -1;
+            nativePanelDragMoved = false;
+        }
+
+        private string NativePanelName(FrameworkElement panel)
+        {
+            if (panel == LcuPanel) return "lcu";
+            if (panel == PartyPanel) return "party";
+            if (panel == YoutubePanel) return "youtube";
+            if (panel == BrowserPanel) return "browser";
+            if (panel == ClickNativePanel) return "click-native";
+            if (panel == VoiceChatPanel) return "voice-chat";
+            return "unknown";
+        }
+
+        private async Task HandlePinnedYoutubeNativeInputAsync(bool leftButtonDown, int cursorX, int cursorY, int monitorX, int monitorY)
+        {
+            var pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+            var available = pinnedOnly
+                && HudPreferences.Visible
+                && HudPanel.Visibility == Visibility.Visible
+                && !HudPreferences.YoutubePanelClosed
+                && YoutubePreferences.Visible
+                && YoutubePanel.Visibility == Visibility.Visible
+                && YoutubePanel.Opacity > 0.01
+                && !youtubeUsingFallback
+                && youtubeWebView2 != null
+                && youtubeWebView2.CoreWebView2 != null
+                && youtubeWebView2.Visibility == Visibility.Visible;
+
+            if (!available)
+            {
+                if (youtubeNativePointerCaptured && youtubeNativeMouseWasDown)
+                    await DispatchYoutubeMouseEventAsync("mouseReleased", youtubeNativeLastX, youtubeNativeLastY, false);
+                ResetYoutubeNativePointerState(leftButtonDown);
+                return;
+            }
+
+            Windows.Foundation.Point local;
+            int coordinateMode;
+            var inside = TryMapNativeCursorToElement(
+                YoutubeVideoHost,
+                cursorX,
+                cursorY,
+                monitorX,
+                monitorY,
+                out local,
+                out coordinateMode);
+
+            // The top 24 DIP remains a move handle in the pinned overlay. Do not
+            // forward a click from that band into the YouTube page at the same time.
+            if (inside && local.Y < RuntimeNativeDragBandHeight)
+                inside = false;
+
+            var pressed = leftButtonDown && !youtubeNativeMouseWasDown;
+            var released = !leftButtonDown && youtubeNativeMouseWasDown;
+
+            if (pressed && inside && nativeDraggedPanel == null)
+            {
+                youtubeNativePointerCaptured = true;
+                youtubeNativeCoordinateMode = coordinateMode;
+                youtubeNativeLastX = local.X;
+                youtubeNativeLastY = local.Y;
+                await DispatchYoutubeMouseEventAsync("mouseMoved", local.X, local.Y, true);
+                await DispatchYoutubeMouseEventAsync("mousePressed", local.X, local.Y, true);
+                App.LogStage("youtube-runtime-native-input-down mode=" + coordinateMode);
+            }
+            else if (youtubeNativePointerCaptured)
+            {
+                var capturedPoint = NativeCursorToRoot(cursorX, cursorY, monitorX, monitorY, youtubeNativeCoordinateMode);
+                Windows.Foundation.Point origin;
+                try
+                {
+                    origin = YoutubeVideoHost.TransformToVisual(RootGrid)
+                        .TransformPoint(new Windows.Foundation.Point(0, 0));
+                }
+                catch
+                {
+                    origin = new Windows.Foundation.Point(capturedPoint.X, capturedPoint.Y);
+                }
+                var width = Math.Max(1.0, YoutubeVideoHost.ActualWidth);
+                var height = Math.Max(1.0, YoutubeVideoHost.ActualHeight);
+                local = new Windows.Foundation.Point(
+                    Math.Max(0.0, Math.Min(width - 1.0, capturedPoint.X - origin.X)),
+                    Math.Max(0.0, Math.Min(height - 1.0, capturedPoint.Y - origin.Y)));
+
+                if (ShouldForwardYoutubeMouseMove(local.X, local.Y))
+                    await DispatchYoutubeMouseEventAsync("mouseMoved", local.X, local.Y, leftButtonDown);
+
+                youtubeNativeLastX = local.X;
+                youtubeNativeLastY = local.Y;
+                if (released)
+                {
+                    await DispatchYoutubeMouseEventAsync("mouseReleased", local.X, local.Y, false);
+                    App.LogStage("youtube-runtime-native-input-up");
+                    youtubeNativePointerCaptured = false;
+                    youtubeNativeCoordinateMode = -1;
+                }
+            }
+            else if (inside && !leftButtonDown && ShouldForwardYoutubeMouseMove(local.X, local.Y))
+            {
+                youtubeNativeCoordinateMode = coordinateMode;
+                youtubeNativeLastX = local.X;
+                youtubeNativeLastY = local.Y;
+                await DispatchYoutubeMouseEventAsync("mouseMoved", local.X, local.Y, false);
+            }
+
+            youtubeNativeMouseWasDown = leftButtonDown;
+        }
+
+        private bool TryMapNativeCursorToElement(
+            FrameworkElement element,
+            int cursorX,
+            int cursorY,
+            int monitorX,
+            int monitorY,
+            out Windows.Foundation.Point local,
+            out int coordinateMode)
+        {
+            local = new Windows.Foundation.Point();
+            coordinateMode = -1;
+            if (element == null || element.ActualWidth <= 0 || element.ActualHeight <= 0) return false;
+
+            Windows.Foundation.Point origin;
+            try
+            {
+                origin = element.TransformToVisual(RootGrid)
+                    .TransformPoint(new Windows.Foundation.Point(0, 0));
+            }
+            catch { return false; }
+
+            for (var mode = 0; mode < 4; mode++)
+            {
+                var root = NativeCursorToRoot(cursorX, cursorY, monitorX, monitorY, mode);
+                var x = root.X - origin.X;
+                var y = root.Y - origin.Y;
+                if (x < 0 || y < 0 || x >= element.ActualWidth || y >= element.ActualHeight) continue;
+                local = new Windows.Foundation.Point(x, y);
+                coordinateMode = mode;
+                return true;
+            }
+            return false;
+        }
+
+        private bool ShouldForwardYoutubeMouseMove(double x, double y)
+        {
+            var now = NowMs();
+            var changed = double.IsNaN(youtubeNativeLastX)
+                || Math.Abs(x - youtubeNativeLastX) >= 0.5
+                || Math.Abs(y - youtubeNativeLastY) >= 0.5;
+            if (!changed && now - youtubeNativeLastMoveAtMs < 250) return false;
+            youtubeNativeLastMoveAtMs = now;
+            youtubeNativeLastX = x;
+            youtubeNativeLastY = y;
+            return true;
+        }
+
+        private async Task DispatchYoutubeMouseEventAsync(string type, double x, double y, bool leftDown)
+        {
+            if (double.IsNaN(x) || double.IsNaN(y) || youtubeWebView2?.CoreWebView2 == null) return;
+            try
+            {
+                var payload = new JsonObject
+                {
+                    ["type"] = JsonValue.CreateStringValue(type),
+                    ["x"] = JsonValue.CreateNumberValue(Math.Max(0.0, x)),
+                    ["y"] = JsonValue.CreateNumberValue(Math.Max(0.0, y)),
+                    ["button"] = JsonValue.CreateStringValue(type == "mouseMoved" ? "none" : "left"),
+                    ["buttons"] = JsonValue.CreateNumberValue(leftDown ? 1 : 0),
+                    ["clickCount"] = JsonValue.CreateNumberValue(type == "mouseMoved" ? 0 : 1),
+                    ["pointerType"] = JsonValue.CreateStringValue("mouse"),
+                };
+                await youtubeWebView2.CoreWebView2.CallDevToolsProtocolMethodAsync(
+                    "Input.dispatchMouseEvent",
+                    payload.Stringify());
+            }
+            catch (Exception ex)
+            {
+                var now = NowMs();
+                if (now - youtubeNativeLastErrorLogAtMs >= 1000)
+                {
+                    youtubeNativeLastErrorLogAtMs = now;
+                    App.LogStage("youtube-runtime-native-input-error-" + ErrorCode(ex));
+                }
+            }
+        }
+
+        private void ResetYoutubeNativePointerState(bool currentMouseDown)
+        {
+            youtubeNativePointerCaptured = false;
+            youtubeNativeCoordinateMode = -1;
+            youtubeNativeLastX = double.NaN;
+            youtubeNativeLastY = double.NaN;
+            youtubeNativeMouseWasDown = currentMouseDown;
         }
 
         private void CursorMarkersToggle_Toggled(object sender, RoutedEventArgs e)
@@ -3358,6 +3864,7 @@ namespace YummiGameBarWidget
             PhaseText.Text = "Offline";
             RiotIdText.Text = "유미지지 데스크톱 연결을 확인해 주세요";
             PartyText.Text = "파티 정보 없음";
+            ClearOverlayToasts();
             voiceChatSignature = "";
             voiceChatFirstSeenAtMs.Clear();
             voiceChatExpiresAtMs.Clear();

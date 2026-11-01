@@ -640,6 +640,7 @@ async fn apply_update(
     app: &AppHandle,
     state: &AppState,
     config: &Config,
+    reopen_window_after_update: bool,
 ) -> AgentResult<bool> {
     let Some(target_manifest) = manifest.select_tauri() else {
         return Ok(false);
@@ -801,6 +802,11 @@ async fn apply_update(
     persist_release_identity(source_dir, &target_manifest)?;
     let backup_dir = work.join("backup");
     let signature_check = windows_signature_check_cmd(&source, expected_thumbprint.as_deref());
+    let restart_args = if reopen_window_after_update {
+        ""
+    } else {
+        " --background"
+    };
     let script_text = format!(
         "@echo off\r\n\
          setlocal\r\n\
@@ -825,7 +831,7 @@ async fn apply_update(
          if errorlevel 8 goto restore\r\n\
          if not exist \"{}\" goto restore\r\n\
          del /Q \"{}\" >nul 2>&1\r\n\
-         start \"\" \"{}\" --background\r\n\
+         start \"\" \"{}\"{}\r\n\
          rmdir /S /Q \"{}\" >nul 2>&1\r\n\
          del \"%~f0\"\r\n",
         legacy_update_lock.display(),
@@ -842,6 +848,7 @@ async fn apply_update(
         target.display(),
         legacy_update_lock.display(),
         target.display(),
+        restart_args,
         backup_dir.display(),
     );
     let script_text = format!(
@@ -850,7 +857,7 @@ async fn apply_update(
          :restore\r\n\
          robocopy \"{}\" \"{}\" /E /XF agent.json .yummi-update.lock >nul\r\n\
          if exist \"{}\" del /Q \"{}\" >nul 2>&1\r\n\
-         start \"\" \"{}\" --background\r\n\
+         start \"\" \"{}\"{}\r\n\
          exit /b 1\r\n\
          :fail\r\n\
          if exist \"{}\" del /Q \"{}\" >nul 2>&1\r\n\
@@ -861,6 +868,7 @@ async fn apply_update(
         legacy_update_lock.display(),
         legacy_update_lock.display(),
         target.display(),
+        restart_args,
         legacy_update_lock.display(),
         legacy_update_lock.display(),
     );
@@ -920,7 +928,7 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
                 .report_update_diagnostic("blocked", "auto_update_enabled=false", None)
                 .await;
         } else if let Some(url) = config.update_manifest_url.clone() {
-            check_succeeded = check_and_apply_update(&url, &config, &app, &state).await;
+            check_succeeded = check_and_apply_update(&url, &config, &app, &state, false).await;
             if *shutdown.borrow() {
                 return;
             }
@@ -941,6 +949,7 @@ pub(crate) async fn check_and_apply_update(
     config: &Config,
     app: &AppHandle,
     state: &AppState,
+    reopen_window_after_update: bool,
 ) -> bool {
     state
         .report_update_diagnostic("update_check", "scheduled", None)
@@ -1091,7 +1100,7 @@ pub(crate) async fn check_and_apply_update(
                 .await;
         }
     }
-    match apply_update(manifest, app, state, config).await {
+    match apply_update(manifest, app, state, config, reopen_window_after_update).await {
         Ok(true) => {
             state.log(app, "새 버전을 설치하고 재시작합니다.").await;
             sleep(Duration::from_secs(1)).await;

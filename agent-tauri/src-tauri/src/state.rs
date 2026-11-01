@@ -158,6 +158,8 @@ fn installed_at() -> Option<u64> {
 }
 
 const GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS: u64 = 60_000;
+const GAMEBAR_TOAST_DEFAULT_RETENTION_MS: u64 = 6_000;
+const GAMEBAR_TOAST_MAX_ITEMS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct VoiceChatOverlayMessage {
@@ -170,6 +172,17 @@ pub(crate) struct VoiceChatOverlayMessage {
     pub(crate) timestamp_ms: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct GameBarToast {
+    pub(crate) id: String,
+    pub(crate) source: String,
+    pub(crate) title: String,
+    pub(crate) body: String,
+    pub(crate) tone: String,
+    pub(crate) timestamp_ms: u64,
+    pub(crate) expires_at_ms: u64,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub(crate) struct GameBarSnapshot {
     pub(crate) connected: bool,
@@ -177,10 +190,19 @@ pub(crate) struct GameBarSnapshot {
     pub(crate) phase: String,
     pub(crate) party_members: Vec<String>,
     pub(crate) online_friends: Vec<String>,
+    pub(crate) overlay_toasts: Vec<GameBarToast>,
     pub(crate) voice_chat_channel_id: Option<u64>,
     pub(crate) voice_chat_messages: Vec<VoiceChatOverlayMessage>,
     pub(crate) tutorial_reset_generation: u64,
     pub(crate) updated_at_ms: u64,
+}
+
+fn prune_gamebar_toasts(snapshot: &mut GameBarSnapshot, now_ms: u64) -> bool {
+    let before = snapshot.overlay_toasts.len();
+    snapshot
+        .overlay_toasts
+        .retain(|toast| toast.expires_at_ms == 0 || now_ms < toast.expires_at_ms);
+    before != snapshot.overlay_toasts.len()
 }
 
 fn prune_gamebar_voice_chat_messages(snapshot: &mut GameBarSnapshot, now_ms: u64) -> bool {
@@ -200,6 +222,7 @@ impl Default for GameBarSnapshot {
             phase: "Offline".into(),
             party_members: Vec::new(),
             online_friends: Vec::new(),
+            overlay_toasts: Vec::new(),
             voice_chat_channel_id: None,
             voice_chat_messages: Vec::new(),
             tutorial_reset_generation: 0,
@@ -561,7 +584,9 @@ impl AppState {
 
     pub(crate) fn gamebar_snapshot(&self) -> GameBarSnapshot {
         if let Ok(mut snapshot) = self.gamebar_snapshot.write() {
-            prune_gamebar_voice_chat_messages(&mut snapshot, diagnostic_now_ms());
+            let now = diagnostic_now_ms();
+            prune_gamebar_voice_chat_messages(&mut snapshot, now);
+            prune_gamebar_toasts(&mut snapshot, now);
             return snapshot.clone();
         }
         GameBarSnapshot::default()
@@ -578,7 +603,10 @@ impl AppState {
     pub(crate) fn set_gamebar_snapshot(&self, mut snapshot: GameBarSnapshot) {
         let mut changed = false;
         if let Ok(mut current) = self.gamebar_snapshot.write() {
-            changed |= prune_gamebar_voice_chat_messages(&mut current, diagnostic_now_ms());
+            let now = diagnostic_now_ms();
+            changed |= prune_gamebar_voice_chat_messages(&mut current, now);
+            changed |= prune_gamebar_toasts(&mut current, now);
+            snapshot.overlay_toasts = current.overlay_toasts.clone();
             snapshot.voice_chat_channel_id = current.voice_chat_channel_id;
             snapshot.voice_chat_messages = current.voice_chat_messages.clone();
             snapshot.tutorial_reset_generation = current.tutorial_reset_generation;
@@ -587,10 +615,47 @@ impl AppState {
                 || current.phase != snapshot.phase
                 || current.party_members != snapshot.party_members
                 || current.online_friends != snapshot.online_friends
+                || current.overlay_toasts != snapshot.overlay_toasts
                 || current.voice_chat_channel_id != snapshot.voice_chat_channel_id
                 || current.voice_chat_messages != snapshot.voice_chat_messages
                 || current.tutorial_reset_generation != snapshot.tutorial_reset_generation;
             *current = snapshot;
+        }
+        if changed {
+            self.notify_gamebar_snapshot_update();
+        }
+    }
+
+    pub(crate) fn push_gamebar_toast(&self, mut toast: GameBarToast) {
+        let mut changed = false;
+        let now = diagnostic_now_ms();
+        if toast.timestamp_ms == 0 {
+            toast.timestamp_ms = now;
+        }
+        if toast.expires_at_ms == 0 {
+            toast.expires_at_ms = toast
+                .timestamp_ms
+                .saturating_add(GAMEBAR_TOAST_DEFAULT_RETENTION_MS);
+        }
+        if let Ok(mut snapshot) = self.gamebar_snapshot.write() {
+            changed |= prune_gamebar_toasts(&mut snapshot, now);
+            if let Some(existing) = snapshot
+                .overlay_toasts
+                .iter_mut()
+                .find(|current| current.id == toast.id)
+            {
+                if *existing != toast {
+                    *existing = toast;
+                    changed = true;
+                }
+            } else {
+                snapshot.overlay_toasts.push(toast);
+                changed = true;
+                if snapshot.overlay_toasts.len() > GAMEBAR_TOAST_MAX_ITEMS {
+                    let remove = snapshot.overlay_toasts.len() - GAMEBAR_TOAST_MAX_ITEMS;
+                    snapshot.overlay_toasts.drain(0..remove);
+                }
+            }
         }
         if changed {
             self.notify_gamebar_snapshot_update();
@@ -1040,9 +1105,10 @@ fn lcu_state_label(state: LcuConnectionState) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_diagnostic_bundle, prune_gamebar_voice_chat_messages, sanitize_diagnostic_line,
-        sanitize_error_summary, GameBarSnapshot, UiState, VoiceChatOverlayMessage,
-        GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS, MAX_ERROR_SUMMARY_CHARS, MAX_UI_LOGS,
+        build_diagnostic_bundle, prune_gamebar_toasts, prune_gamebar_voice_chat_messages,
+        sanitize_diagnostic_line, sanitize_error_summary, GameBarSnapshot, GameBarToast, UiState,
+        VoiceChatOverlayMessage, GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS, MAX_ERROR_SUMMARY_CHARS,
+        MAX_UI_LOGS,
     };
     use crate::config::Config;
 
@@ -1103,6 +1169,25 @@ mod tests {
         assert!(!summary.contains('\n'));
         assert!(!summary.contains("super-secret"));
         assert!(summary.chars().count() <= MAX_ERROR_SUMMARY_CHARS);
+    }
+
+    #[test]
+    fn gamebar_toast_retention_drops_only_expired_items() {
+        let now = 10_000;
+        let mut snapshot = GameBarSnapshot::default();
+        snapshot.overlay_toasts = vec![
+            GameBarToast {
+                id: "old".into(), source: "test".into(), title: "old".into(), body: "".into(),
+                tone: "info".into(), timestamp_ms: 1, expires_at_ms: now,
+            },
+            GameBarToast {
+                id: "fresh".into(), source: "test".into(), title: "fresh".into(), body: "".into(),
+                tone: "info".into(), timestamp_ms: 2, expires_at_ms: now + 1,
+            },
+        ];
+        assert!(prune_gamebar_toasts(&mut snapshot, now));
+        assert_eq!(snapshot.overlay_toasts.len(), 1);
+        assert_eq!(snapshot.overlay_toasts[0].id, "fresh");
     }
 
     #[test]

@@ -1439,6 +1439,32 @@ fn is_eog_phase(phase: &str) -> bool {
     matches!(phase, "PreEndOfGame" | "EndOfGame" | "WaitingForStats")
 }
 
+fn has_recent_match_winner_hint(value: Option<&Value>) -> bool {
+    value
+        .and_then(Value::as_array)
+        .is_some_and(|rows| {
+            rows.iter().any(|row| {
+                let Some(row) = row.as_object() else {
+                    return false;
+                };
+                let has_name = row
+                    .get("gameName")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty());
+                let has_tag = row
+                    .get("tagLine")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty());
+                let team_id = row.get("teamId").and_then(Value::as_i64);
+                let won = row.get("won").and_then(Value::as_bool);
+                has_name
+                    && has_tag
+                    && matches!(team_id, Some(100) | Some(200))
+                    && won.is_some()
+            })
+        })
+}
+
 fn eog_result_evidence_source(payload: &Value) -> Option<&'static str> {
     let expected_game_id = json_scalar_id(payload.get("expectedGameId"));
     let payload_game_id = json_scalar_id(payload.get("gameId"));
@@ -1454,12 +1480,16 @@ fn eog_result_evidence_source(payload: &Value) -> Option<&'static str> {
     }
 
     let recent = payload.get("recentMatch").and_then(Value::as_object)?;
-    if !has_consistent_eog_result_participants(recent.get("participants")) {
-        return None;
-    }
     let authoritative_game_id = expected_game_id.or(payload_game_id)?;
     let recent_game_id = json_scalar_id(recent.get("gameId"))?;
-    (authoritative_game_id == recent_game_id).then_some("recent_match")
+    if authoritative_game_id != recent_game_id {
+        return None;
+    }
+    if has_consistent_eog_result_participants(recent.get("participants")) {
+        return Some("recent_match");
+    }
+    has_recent_match_winner_hint(recent.get("participants"))
+        .then_some("recent_match_game_id")
 }
 
 fn has_usable_eog_result_evidence(payload: &Value) -> bool {
@@ -2861,6 +2891,42 @@ mod tests {
         });
         assert!(has_usable_eog_result_evidence(&current));
         assert_eq!(eog_result_evidence_source(&current), Some("recent_match"));
+
+        let single_participant_same_game = json!({
+            "expectedGameId": 200,
+            "gameId": 200,
+            "participants": [],
+            "recentMatch": {
+                "gameId": 200,
+                "participants": [{
+                    "gameName": "OnlyReporter",
+                    "tagLine": "KR1",
+                    "teamId": 100,
+                    "won": true
+                }]
+            }
+        });
+        assert!(has_usable_eog_result_evidence(&single_participant_same_game));
+        assert_eq!(
+            eog_result_evidence_source(&single_participant_same_game),
+            Some("recent_match_game_id")
+        );
+
+        let single_participant_wrong_game = json!({
+            "expectedGameId": 200,
+            "gameId": 200,
+            "participants": [],
+            "recentMatch": {
+                "gameId": 199,
+                "participants": [{
+                    "gameName": "OnlyReporter",
+                    "tagLine": "KR1",
+                    "teamId": 100,
+                    "won": true
+                }]
+            }
+        });
+        assert!(!has_usable_eog_result_evidence(&single_participant_wrong_game));
 
         let unknown_game = json!({
             "participants": [],

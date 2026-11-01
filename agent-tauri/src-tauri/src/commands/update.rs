@@ -49,6 +49,7 @@ pub(crate) async fn apply_beta_update_now(
             &config,
             &app_for_update,
             state_for_update.as_ref(),
+            true,
         )
         .await;
     });
