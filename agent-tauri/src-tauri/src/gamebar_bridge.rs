@@ -27,10 +27,10 @@ use crate::{
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 #[cfg(windows)]
-const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(30);
+const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(300);
 #[cfg(windows)]
 #[cfg(windows)]
-const GAMEBAR_RELEASES_URL: &str = "https://api.github.com/repos/Waitence7/YummiLCU/releases?per_page=30";
+const GAMEBAR_PUBLISHED_INDEX_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/main/release-manifests/gamebar-latest.json";
 #[cfg(windows)]
 const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
@@ -1763,7 +1763,7 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
 }
 
 #[cfg(windows)]
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GameBarUpdateTarget {
     version: String,
@@ -1783,6 +1783,14 @@ struct GameBarUpdateState {
     release_tag: String,
     #[serde(default)]
     pending_registration: bool,
+}
+
+#[cfg(windows)]
+static GAMEBAR_TARGET_CACHE: OnceLock<Mutex<Option<(u64, GameBarUpdateTarget)>>> = OnceLock::new();
+
+#[cfg(windows)]
+fn gamebar_target_cache() -> &'static Mutex<Option<(u64, GameBarUpdateTarget)>> {
+    GAMEBAR_TARGET_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn parse_gamebar_release_version(tag: &str) -> Option<(u64, u64, u64)> {
@@ -1877,6 +1885,106 @@ async fn fetch_gamebar_manifest_response(
 }
 
 #[cfg(windows)]
+async fn fetch_published_gamebar_target(
+    client: &reqwest::Client,
+) -> Result<GameBarUpdateTarget, String> {
+    const TARGET_CACHE_MS: u64 = 15_000;
+    let now = now_ms();
+    if let Ok(cache) = gamebar_target_cache().lock() {
+        if let Some((fetched_at, target)) = cache.as_ref() {
+            if now.saturating_sub(*fetched_at) < TARGET_CACHE_MS {
+                return Ok(target.clone());
+            }
+        }
+    }
+
+    // This index is updated only after the GitHub Release assets are uploaded.
+    // It avoids the unauthenticated GitHub Releases API rate limit and prevents
+    // main/version.json from advertising an asset before that asset exists.
+    let index_response = client
+        .get(GAMEBAR_PUBLISHED_INDEX_URL)
+        .query(&[("t", now.to_string())])
+        .header(reqwest::header::CACHE_CONTROL, "no-cache")
+        .send()
+        .await
+        .map_err(|e| format!("Game Bar 게시 인덱스 조회 실패: {e}"))?
+        .error_for_status()
+        .map_err(|e| format!("Game Bar 게시 인덱스 응답 실패: {e}"))?;
+    if index_response.content_length().unwrap_or(0) > 16 * 1024 {
+        return Err("Game Bar 게시 인덱스가 너무 큽니다.".into());
+    }
+    let index: Value = index_response
+        .json()
+        .await
+        .map_err(|e| format!("Game Bar 게시 인덱스 JSON 실패: {e}"))?;
+    let version = index
+        .get("version")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Game Bar 게시 인덱스에 version이 없습니다.".to_owned())?;
+    let release_tag = index
+        .get("releaseTag")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "Game Bar 게시 인덱스에 releaseTag가 없습니다.".to_owned())?;
+    if release_tag != format!("gamebar-v{version}")
+        || parse_gamebar_release_version(release_tag).is_none()
+    {
+        return Err("Game Bar 게시 인덱스 버전 형식이 올바르지 않습니다.".into());
+    }
+
+    let manifest_url = format!(
+        "https://github.com/Waitence7/YummiLCU/releases/download/{release_tag}/gamebar-version.json"
+    );
+    let response = fetch_gamebar_manifest_response(client, &manifest_url)
+        .await?
+        .ok_or_else(|| "Game Bar manifest 릴리즈 자산이 아직 전파 중입니다.".to_owned())?;
+    if response.content_length().unwrap_or(0) > MAX_GAMEBAR_MANIFEST_BYTES as u64 {
+        return Err("Game Bar manifest가 너무 큽니다.".into());
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|e| format!("Game Bar manifest 읽기 실패: {e}"))?;
+    if bytes.len() > MAX_GAMEBAR_MANIFEST_BYTES {
+        return Err("Game Bar manifest가 너무 큽니다.".into());
+    }
+    let root: Value = serde_json::from_slice(&bytes)
+        .map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
+    let mut payload = root
+        .get("gamebar")
+        .cloned()
+        .ok_or_else(|| "Game Bar manifest에 gamebar 블록이 없습니다.".to_owned())?;
+    let signature = payload
+        .as_object_mut()
+        .and_then(|o| o.remove("signature"))
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
+    verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
+    let target: GameBarUpdateTarget = serde_json::from_value(payload)
+        .map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
+    if target.release_tag != release_tag || target.version != version {
+        return Err("Game Bar manifest 버전이 게시 인덱스와 일치하지 않습니다.".into());
+    }
+
+    if let Ok(mut cache) = gamebar_target_cache().lock() {
+        // Never replace a newer in-process target with a stale raw-CDN response.
+        let new_semver = parse_gamebar_release_version(&target.release_tag);
+        let keep_cached = cache
+            .as_ref()
+            .and_then(|(_, current)| parse_gamebar_release_version(&current.release_tag))
+            .zip(new_semver)
+            .map(|(current, new)| current > new)
+            .unwrap_or(false);
+        if keep_cached {
+            if let Some((_, current)) = cache.as_ref() {
+                return Ok(current.clone());
+            }
+        }
+        *cache = Some((now, target.clone()));
+    }
+    Ok(target)
+}
+
+#[cfg(windows)]
 fn append_gamebar_update_log(message: &str) {
     use std::{
         env,
@@ -1931,62 +2039,14 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         .user_agent("Yummi-LCU-Agent-GameBar-Updater")
         .build()
         .map_err(|e| format!("Game Bar 업데이트 클라이언트 생성 실패: {e}"))?;
-    // The main-branch version.json can be observed through different raw GitHub
-    // CDN edges during a release, which briefly made the updater oscillate between
-    // e.g. 0.1.111 and 0.1.112. Treat GitHub Releases as the canonical publication
-    // source and only select versions whose signed manifest asset already exists.
-    let releases: Value = client
-        .get(GAMEBAR_RELEASES_URL)
-        .header(reqwest::header::CACHE_CONTROL, "no-cache")
-        .send()
-        .await
-        .map_err(|e| format!("Game Bar 릴리즈 목록 조회 실패: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Game Bar 릴리즈 목록 응답 실패: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Game Bar 릴리즈 목록 JSON 실패: {e}"))?;
-    let (selected_release_tag, manifest_url) = select_gamebar_manifest(&releases)
-        .ok_or_else(|| "게시 완료된 Game Bar manifest 릴리즈가 없습니다.".to_owned())?;
+    let target = fetch_published_gamebar_target(&client).await?;
+    let selected_release_tag = target.release_tag.clone();
+    let selected_version = target.version.clone();
     let selected_semver = parse_gamebar_release_version(&selected_release_tag)
-        .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
-    let selected_version = selected_release_tag
-        .strip_prefix("gamebar-v")
         .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
     append_gamebar_update_log(&format!(
         "최신 오버레이 릴리즈 감지: {selected_release_tag}"
     ));
-
-    let Some(response) = fetch_gamebar_manifest_response(&client, &manifest_url).await? else {
-        return Ok(());
-    };
-    if response.content_length().unwrap_or(0) > MAX_GAMEBAR_MANIFEST_BYTES as u64 {
-        return Err("Game Bar manifest가 너무 큽니다.".into());
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Game Bar manifest 읽기 실패: {e}"))?;
-    if bytes.len() > MAX_GAMEBAR_MANIFEST_BYTES {
-        return Err("Game Bar manifest가 너무 큽니다.".into());
-    }
-    let root: Value =
-        serde_json::from_slice(&bytes).map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
-    let mut payload = root
-        .get("gamebar")
-        .cloned()
-        .ok_or_else(|| "Game Bar manifest에 gamebar 블록이 없습니다.".to_owned())?;
-    let signature = payload
-        .as_object_mut()
-        .and_then(|o| o.remove("signature"))
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
-    verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
-    let target: GameBarUpdateTarget =
-        serde_json::from_value(payload).map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
-    if target.release_tag != selected_release_tag || target.version != selected_version {
-        return Err("Game Bar manifest 버전이 선택된 릴리즈와 일치하지 않습니다.".into());
-    }
 
     if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
@@ -2246,52 +2306,8 @@ async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8
         .user_agent("Yummi-LCU-Agent-GameBar-Installer")
         .build()
         .map_err(|e| format!("Game Bar 설치 클라이언트 생성 실패: {e}"))?;
-    let releases: Value = client
-        .get(GAMEBAR_RELEASES_URL)
-        .header(reqwest::header::CACHE_CONTROL, "no-cache")
-        .send()
-        .await
-        .map_err(|e| format!("Game Bar 릴리즈 목록 조회 실패: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("Game Bar 릴리즈 목록 응답 실패: {e}"))?
-        .json()
-        .await
-        .map_err(|e| format!("Game Bar 릴리즈 목록 JSON 실패: {e}"))?;
-    let (selected_release_tag, manifest_url) = select_gamebar_manifest(&releases)
-        .ok_or_else(|| "게시 완료된 Game Bar manifest 릴리즈가 없습니다.".to_owned())?;
-    let selected_version = selected_release_tag
-        .strip_prefix("gamebar-v")
-        .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
-    let response = fetch_gamebar_manifest_response(&client, &manifest_url)
-        .await?
-        .ok_or_else(|| "Game Bar manifest 릴리즈 자산이 아직 전파 중입니다. 잠시 후 다시 시도해 주세요.".to_owned())?;
-    if response.content_length().unwrap_or(0) > MAX_GAMEBAR_MANIFEST_BYTES as u64 {
-        return Err("Game Bar manifest가 너무 큽니다.".into());
-    }
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| format!("Game Bar manifest 읽기 실패: {e}"))?;
-    if bytes.len() > MAX_GAMEBAR_MANIFEST_BYTES {
-        return Err("Game Bar manifest가 너무 큽니다.".into());
-    }
-    let root: Value =
-        serde_json::from_slice(&bytes).map_err(|e| format!("Game Bar manifest JSON 오류: {e}"))?;
-    let mut payload = root
-        .get("gamebar")
-        .cloned()
-        .ok_or_else(|| "Game Bar manifest에 gamebar 블록이 없습니다.".to_owned())?;
-    let signature = payload
-        .as_object_mut()
-        .and_then(|o| o.remove("signature"))
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .ok_or_else(|| "Game Bar manifest 서명이 없습니다.".to_owned())?;
-    verify_manifest_payload_signature(&payload, &signature).map_err(|e| e.to_string())?;
-    let target: GameBarUpdateTarget =
-        serde_json::from_value(payload).map_err(|e| format!("Game Bar manifest 형식 오류: {e}"))?;
-    if target.release_tag != selected_release_tag || target.version != selected_version {
-        return Err("Game Bar manifest 버전이 선택된 릴리즈와 일치하지 않습니다.".into());
-    }
+    let target = fetch_published_gamebar_target(&client).await?;
+    let selected_release_tag = target.release_tag.clone();
     if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
     }

@@ -289,6 +289,27 @@ jobs:
           gh release upload $tag $env:ZIP $env:UPDATE_ZIP gamebar-version.json --repo $env:GITHUB_REPOSITORY --clobber
           Write-Host "Deployed Game Bar standalone + slim update + signed manifest to $tag"
 
+      - name: Publish Game Bar latest index
+        if: (github.event_name == 'workflow_dispatch' && github.event.inputs.deploy == 'true') || startsWith(github.ref, 'refs/tags/gamebar-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $tag = "gamebar-v$env:VERSION"
+          $path = "release-manifests/gamebar-latest.json"
+          $index = [ordered]@{ version = $env:VERSION; releaseTag = $tag } | ConvertTo-Json -Compress
+          $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($index + "`n"))
+          $sha = gh api "repos/$env:GITHUB_REPOSITORY/contents/$path?ref=main" --jq '.sha' 2>$null
+          $payload = @{
+            message = "chore(gamebar): publish latest index $tag"
+            content = $content
+            branch = "main"
+          }
+          if ($sha) { $payload.sha = $sha }
+          $payload | ConvertTo-Json -Compress | gh api --method PUT "repos/$env:GITHUB_REPOSITORY/contents/$path" --input - | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw "Failed to publish Game Bar latest index" }
+          Write-Host "Published Game Bar latest index: $tag"
+
       - name: Cleanup certificate
         if: always()
         env:
