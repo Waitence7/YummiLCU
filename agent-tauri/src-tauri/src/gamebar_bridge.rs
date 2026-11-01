@@ -1533,23 +1533,67 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
 
 #[cfg(windows)]
 fn probe_gamebar_uia() -> Result<Value, String> {
-    use windows::Win32::System::Com::{
-        CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
-    };
-    use windows::Win32::UI::Accessibility::{
-        CUIAutomation, IUIAutomation, TreeScope_Children, TreeScope_Subtree,
-        UIA_ButtonControlTypeId,
+    use windows::{
+        core::PWSTR,
+        Win32::{
+            Foundation::CloseHandle,
+            System::{
+                Com::{
+                    CoCreateInstance, CoInitializeEx, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+                },
+                Threading::{
+                    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+                    PROCESS_QUERY_LIMITED_INFORMATION,
+                },
+            },
+            UI::Accessibility::{
+                CUIAutomation, IUIAutomation, TreeScope_Children, TreeScope_Subtree,
+                UIA_ButtonControlTypeId,
+            },
+        },
     };
 
     fn text<T: ToString>(value: windows::core::Result<T>) -> String {
         value.map(|v| v.to_string()).unwrap_or_default()
     }
 
+    fn process_image(process_id: u32) -> String {
+        if process_id == 0 {
+            return String::new();
+        }
+        let Ok(handle) = (unsafe {
+            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)
+        }) else {
+            return String::new();
+        };
+        let mut buffer = vec![0_u16; 32_768];
+        let mut length = buffer.len() as u32;
+        let query = unsafe {
+            QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buffer.as_mut_ptr()),
+                &mut length,
+            )
+        };
+        let _ = unsafe { CloseHandle(handle) };
+        if query.is_err() {
+            return String::new();
+        }
+        String::from_utf16_lossy(&buffer[..length as usize])
+    }
+
+    fn looks_like_gamebar(value: &str) -> bool {
+        let lower = value.to_ascii_lowercase();
+        lower.contains("game bar")
+            || lower.contains("gamebar")
+            || lower.contains("xbox")
+            || lower.contains("gamingoverlay")
+            || lower.contains("gamebar.exe")
+            || lower.contains("gamebarftserver")
+    }
+
     unsafe {
-        // This command runs on the Agent command thread. Initializing COM here is
-        // enough for a bounded one-shot UI Automation inspection. If the thread
-        // was already initialized by another component, CoCreateInstance remains
-        // valid and the HRESULT is intentionally only recorded for diagnostics.
         let com_hr = CoInitializeEx(None, COINIT_MULTITHREADED);
         let message = format!("uia-probe com-init={:#x}", com_hr.0 as u32);
         append_native_input_log(&message);
@@ -1563,12 +1607,34 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         let true_condition = automation
             .CreateTrueCondition()
             .map_err(|e| format!("UI Automation condition 생성 실패: {e}"))?;
+
+        let focused = automation.GetFocusedElement().ok();
+        let focused_pid = focused
+            .as_ref()
+            .and_then(|element| element.CurrentProcessId().ok())
+            .unwrap_or(0);
+        if let Some(element) = focused.as_ref() {
+            let name = text(element.CurrentName());
+            let automation_id = text(element.CurrentAutomationId());
+            let class_name = text(element.CurrentClassName());
+            let framework = text(element.CurrentFrameworkId());
+            let process_id = element.CurrentProcessId().unwrap_or(0);
+            let image = process_image(process_id);
+            let message = format!(
+                "uia-probe focused name={:?} automationId={:?} class={:?} framework={:?} pid={} image={:?}",
+                name, automation_id, class_name, framework, process_id, image
+            );
+            append_native_input_log(&message);
+            append_uia_probe_log(&message);
+        }
+
         let top = root
             .FindAll(TreeScope_Children, &true_condition)
             .map_err(|e| format!("UI Automation top-level 조회 실패: {e}"))?;
 
         let mut top_windows = Vec::new();
         let mut candidates = Vec::new();
+        let mut scanned_descendants = 0usize;
         let top_len = top.Length().unwrap_or(0).clamp(0, 96);
         for i in 0..top_len {
             let Ok(element) = top.GetElement(i) else { continue };
@@ -1577,16 +1643,18 @@ fn probe_gamebar_uia() -> Result<Value, String> {
             let class_name = text(element.CurrentClassName());
             let framework = text(element.CurrentFrameworkId());
             let process_id = element.CurrentProcessId().unwrap_or(0);
-            let lower = format!("{name} {automation_id} {class_name} {framework}").to_ascii_lowercase();
-            let likely_gamebar = lower.contains("game bar")
-                || lower.contains("gamebar")
-                || lower.contains("xbox")
-                || lower.contains("gamingoverlay");
+            let image = process_image(process_id);
+            let top_descriptor = format!("{name} {automation_id} {class_name} {framework} {image}");
+            let likely_gamebar = looks_like_gamebar(&top_descriptor);
+            let hosted_window = class_name.eq_ignore_ascii_case("ApplicationFrameWindow")
+                || class_name.to_ascii_lowercase().contains("corewindow")
+                || class_name.to_ascii_lowercase().contains("xaml")
+                || likely_gamebar;
 
             if !name.is_empty() || !class_name.is_empty() {
                 let message = format!(
-                    "uia-probe top name={:?} automationId={:?} class={:?} framework={:?} pid={} likelyGameBar={}",
-                    name, automation_id, class_name, framework, process_id, likely_gamebar
+                    "uia-probe top name={:?} automationId={:?} class={:?} framework={:?} pid={} image={:?} likelyGameBar={} hostedWindow={}",
+                    name, automation_id, class_name, framework, process_id, image, likely_gamebar, hosted_window
                 );
                 append_native_input_log(&message);
                 append_uia_probe_log(&message);
@@ -1596,21 +1664,18 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                     "className": class_name,
                     "framework": framework,
                     "processId": process_id,
+                    "processImage": image,
                     "likelyGameBar": likely_gamebar,
+                    "hostedWindow": hosted_window,
                 }));
             }
-            if !likely_gamebar {
-                continue;
-            }
 
-            let message = format!(
-                "uia-probe root name={:?} automationId={:?} class={:?} framework={:?} pid={}",
-                name, automation_id, class_name, framework, process_id
-            );
-            append_native_input_log(&message);
-            append_uia_probe_log(&message);
+            // Game Bar can be hosted under an unnamed ApplicationFrameWindow and
+            // therefore not advertise "Xbox" or "Game Bar" at the desktop root.
+            // Inspect every top-level subtree once, but only emit compact candidates.
             let Ok(descendants) = element.FindAll(TreeScope_Subtree, &true_condition) else { continue };
-            let descendant_len = descendants.Length().unwrap_or(0).clamp(0, 800);
+            let descendant_len = descendants.Length().unwrap_or(0).clamp(0, 1200);
+            scanned_descendants += descendant_len as usize;
             for j in 0..descendant_len {
                 let Ok(child) = descendants.GetElement(j) else { continue };
                 let child_name = text(child.CurrentName());
@@ -1618,18 +1683,38 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 let child_class = text(child.CurrentClassName());
                 let localized_type = text(child.CurrentLocalizedControlType());
                 let control_type = child.CurrentControlType().unwrap_or_default();
-                let child_lower = format!("{child_name} {child_id} {child_class} {localized_type}")
-                    .to_ascii_lowercase();
+                let child_pid = child.CurrentProcessId().unwrap_or(process_id);
+                let child_image = if child_pid == process_id {
+                    image.clone()
+                } else {
+                    process_image(child_pid)
+                };
+                let child_descriptor = format!(
+                    "{child_name} {child_id} {child_class} {localized_type} {child_image}"
+                );
+                let child_lower = child_descriptor.to_ascii_lowercase();
                 let keyword = child_lower.contains("click")
                     || child_lower.contains("through")
-                    || child_lower.contains("pass")
+                    || child_lower.contains("pass through")
                     || child_lower.contains("input")
                     || child_name.contains("통과")
-                    || child_name.contains("클릭");
+                    || child_name.contains("클릭")
+                    || child_name.contains("입력");
+                let child_gamebar = looks_like_gamebar(&child_descriptor);
+                let focused_process = focused_pid != 0 && child_pid == focused_pid;
                 let is_button = control_type == UIA_ButtonControlTypeId;
-                if !keyword && !is_button {
+
+                // For generic desktop apps, record only keyword/Game Bar matches.
+                // For hosted XAML windows and the currently focused process, also
+                // record buttons so the toolbar can be identified even if localized
+                // labels contain none of our keywords.
+                if !keyword
+                    && !child_gamebar
+                    && !(is_button && (hosted_window || focused_process || likely_gamebar))
+                {
                     continue;
                 }
+
                 let enabled = child.CurrentIsEnabled().map(|v| v.as_bool()).unwrap_or(false);
                 let offscreen = child.CurrentIsOffscreen().map(|v| v.as_bool()).unwrap_or(false);
                 let rect = child.CurrentBoundingRectangle().ok();
@@ -1637,13 +1722,16 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                     "left": r.left, "top": r.top, "right": r.right, "bottom": r.bottom
                 }));
                 let message = format!(
-                    "uia-probe candidate name={:?} automationId={:?} class={:?} type={:?} controlType={} enabled={} offscreen={}",
-                    child_name, child_id, child_class, localized_type, control_type.0, enabled, offscreen
+                    "uia-probe candidate topClass={:?} name={:?} automationId={:?} class={:?} type={:?} controlType={} pid={} image={:?} keyword={} gamebar={} focusedProcess={} enabled={} offscreen={}",
+                    class_name, child_name, child_id, child_class, localized_type,
+                    control_type.0, child_pid, child_image, keyword, child_gamebar,
+                    focused_process, enabled, offscreen
                 );
                 append_native_input_log(&message);
                 append_uia_probe_log(&message);
-                if candidates.len() < 120 {
+                if candidates.len() < 240 {
                     candidates.push(serde_json::json!({
+                        "topClassName": class_name,
                         "name": child_name,
                         "automationId": child_id,
                         "className": child_class,
@@ -1651,24 +1739,29 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                         "controlType": control_type.0,
                         "isButton": is_button,
                         "keywordMatch": keyword,
+                        "gameBarMatch": child_gamebar,
+                        "focusedProcess": focused_process,
                         "enabled": enabled,
                         "offscreen": offscreen,
                         "bounds": bounds,
-                        "processId": child.CurrentProcessId().unwrap_or(process_id),
+                        "processId": child_pid,
+                        "processImage": child_image,
                     }));
                 }
             }
         }
 
         let message = format!(
-            "uia-probe complete topWindows={} candidates={}",
-            top_windows.len(), candidates.len()
+            "uia-probe complete topWindows={} scannedDescendants={} candidates={} focusedPid={}",
+            top_windows.len(), scanned_descendants, candidates.len(), focused_pid
         );
         append_native_input_log(&message);
         append_uia_probe_log(&message);
         Ok(serde_json::json!({
             "topWindows": top_windows,
             "candidates": candidates,
+            "scannedDescendants": scanned_descendants,
+            "focusedProcessId": focused_pid,
         }))
     }
 }
