@@ -30,7 +30,7 @@ const FRIEND_REFRESH_EVERY_TICKS: u8 = 3;
 const OVERLAY_UPDATE_INTERVAL: Duration = Duration::from_secs(300);
 #[cfg(windows)]
 #[cfg(windows)]
-const GAMEBAR_PUBLISHED_INDEX_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/main/release-manifests/gamebar-latest.json";
+const GAMEBAR_PUBLISHED_INDEX_URL: &str = "https://raw.githubusercontent.com/Waitence7/YummiLCU/refs/heads/main/release-manifests/gamebar-latest.json";
 #[cfg(windows)]
 const MAX_GAMEBAR_MANIFEST_BYTES: usize = 64 * 1024;
 #[cfg(windows)]
