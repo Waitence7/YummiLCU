@@ -1557,7 +1557,10 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         value.map(|v| v.to_string()).unwrap_or_default()
     }
 
-    fn process_image(process_id: u32) -> String {
+    fn process_image(process_id: i32) -> String {
+        let Ok(process_id) = u32::try_from(process_id) else {
+            return String::new();
+        };
         if process_id == 0 {
             return String::new();
         }
@@ -2134,7 +2137,6 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         .map_err(|e| format!("Game Bar 업데이트 클라이언트 생성 실패: {e}"))?;
     let target = fetch_published_gamebar_target(&client).await?;
     let selected_release_tag = target.release_tag.clone();
-    let selected_version = target.version.clone();
     let selected_semver = parse_gamebar_release_version(&selected_release_tag)
         .ok_or_else(|| "Game Bar 최신 버전 형식이 올바르지 않습니다.".to_owned())?;
     append_gamebar_update_log(&format!(
