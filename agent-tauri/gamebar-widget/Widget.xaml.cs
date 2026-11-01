@@ -66,7 +66,10 @@ namespace YummiGameBarWidget
         private bool browserUsingFallback;
         private bool browserReady;
         private string browserLoadedUrl = "";
-        private bool gameBarUiaProbeRequested;
+        private bool gameBarUiaProbeInFlight;
+        private bool gameBarUiaProbeCompleted;
+        private int gameBarUiaProbeAttempts;
+        private long lastGameBarUiaProbeAttemptAtMs;
         private bool youtubeUsingFallback;
         private bool youtubeBrowseMode;
         private double youtubePlayerHeightBeforeBrowse;
@@ -1008,25 +1011,60 @@ namespace YummiGameBarWidget
 
         private void RequestGameBarUiaProbeIfNeeded(bool pinnedOnly)
         {
-            if (widget == null || gameBarUiaProbeRequested) return;
-            // Probe only while Win+G is open. In PinnedOnly mode the Game Bar
-            // chrome is absent, so its click-through control is not available in
-            // the UI Automation tree yet.
-            if (pinnedOnly || widget.ClickThroughEnabled) return;
-            gameBarUiaProbeRequested = true;
-            _ = ProbeGameBarUiaAsync();
+            if (widget == null || gameBarUiaProbeCompleted || gameBarUiaProbeInFlight) return;
+            // Probe whenever Win+G is foreground. Do not gate on the current
+            // click-through value: the diagnostic also needs to identify the
+            // toolbar button when click-through is already enabled.
+            if (pinnedOnly) return;
+            var now = NowMs();
+            if (now - lastGameBarUiaProbeAttemptAtMs < 750) return;
+            lastGameBarUiaProbeAttemptAtMs = now;
+            gameBarUiaProbeInFlight = true;
+            gameBarUiaProbeAttempts++;
+            _ = ProbeGameBarUiaAsync(gameBarUiaProbeAttempts);
         }
 
-        private async Task ProbeGameBarUiaAsync()
+        private async Task ProbeGameBarUiaAsync(int attempt)
         {
+            bool success = false;
             try
             {
+                // Let the Game Bar toolbar finish entering the automation tree.
+                await Task.Delay(attempt == 1 ? 250 : 500);
+                if (widget == null || widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
                 var response = await SendAgentCommandAsync("{\"command\":\"probe_gamebar_uia\"}");
-                App.LogStage("gamebar-uia-probe-response-" + (string.IsNullOrWhiteSpace(response) ? "empty" : "ok"));
+                try
+                {
+                    var parsed = JsonObject.Parse(response ?? "{}");
+                    success = parsed.GetNamedBoolean("ok", false);
+                }
+                catch { success = false; }
+                App.LogStage("gamebar-uia-probe-response-attempt-" + attempt + "-" + (success ? "ok" : "failed"));
+                if (success) gameBarUiaProbeCompleted = true;
             }
             catch (Exception ex)
             {
-                App.LogStage("gamebar-uia-probe-failed-" + ErrorCode(ex));
+                App.LogStage("gamebar-uia-probe-failed-attempt-" + attempt + "-" + ErrorCode(ex));
+            }
+            finally
+            {
+                gameBarUiaProbeInFlight = false;
+            }
+
+            // Agent startup/update can race Win+G. Retry a few times in the same
+            // foreground session instead of permanently suppressing the probe.
+            if (!success && !gameBarUiaProbeCompleted && attempt < 6)
+            {
+                await Task.Delay(900);
+                try
+                {
+                    await Dispatcher.RunAsync(CoreDispatcherPriority.Low, () =>
+                    {
+                        if (widget != null)
+                            RequestGameBarUiaProbeIfNeeded(widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
+                    });
+                }
+                catch { }
             }
         }
 
@@ -2427,6 +2465,8 @@ namespace YummiGameBarWidget
             nativeInputDispatchQueuedAtMs = 0;
             UpdateNativeInputDiagnosticsMode(true);
             UpdatePinTutorial();
+            if (widget != null)
+                RequestGameBarUiaProbeIfNeeded(widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly);
             QueueTutorialStateRefresh("window-activated-" + e.WindowActivationState);
             QueueForegroundChromeRefresh("window-activated-" + e.WindowActivationState);
         }

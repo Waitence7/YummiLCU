@@ -1711,6 +1711,7 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
         });
     }
     if command == "probe_gamebar_uia" {
+        append_uia_probe_log("uia-probe request-received");
         return match probe_gamebar_uia() {
             Ok(data) => serde_json::json!({
                 "ok": true,
@@ -1719,7 +1720,9 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
             })
             .to_string(),
             Err(error) => {
-                append_native_input_log(&format!("uia-probe failed error={error}"));
+                let message = format!("uia-probe failed error={error}");
+                append_native_input_log(&message);
+                append_uia_probe_log(&message);
                 json_response(false, &error)
             }
         };
