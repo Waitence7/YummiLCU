@@ -1,78 +1,67 @@
 name: Deploy Agent Beta 48 Once
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/deploy-agent-beta-48-once.yml"
+  workflow_run:
+    workflows: ["Deploy LCU Tauri Agent (manual Actions button)"]
+    types: [completed]
 
 permissions:
-  contents: write
   actions: read
+  contents: write
 
 jobs:
   deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == 'b40faa37e81747f32e76cd6366cb360b021e581f' }}
     runs-on: ubuntu-slim
-    env:
-      SOURCE_SHA: fc6fadf25aaaf0af7818cc8e26c98bf2678f18ae
-      SOURCE_SHORT: fc6fadf
-      SOURCE_RUN_ID: "41409150888"
-      VERSION: "0.8.0"
-      RELEASE_LABEL: "0.8.0-beta.48"
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
-
-      - name: Download verified Windows candidate
+      - name: Download verified agent candidate
         env:
           GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
         run: |
           set -euo pipefail
           rm -rf release
           mkdir -p release
           gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name agent-candidate --dir release
           test -s release/agent-version.json
-          test -s "release/Yummi-LCU-Agent-${VERSION}-setup.exe"
-          test -s "release/tauri-${VERSION}.zip"
-          jq -e --arg version "$VERSION" --arg commit "$SOURCE_SHORT" \
-            '.version == $version and .tauri.version == $version and .tauri.commit == $commit' \
-            release/agent-version.json >/dev/null
-
-      - name: Prepare beta.48 signed release manifest
+          jq -e '.version == "0.8.0" and .tauri.version == "0.8.0" and .tauri.commit == "b40faa3"' release/agent-version.json >/dev/null
+          test -s release/Yummi-LCU-Agent-0.8.0-setup.exe
+          test -s release/tauri-0.8.0.zip
+      - name: Prepare beta.48 signed manifest
         env:
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+        shell: bash
         run: |
           set -euo pipefail
           build_id="$(jq -r '.tauri.buildId // .buildId' release/agent-version.json)"
-          test -n "$build_id" && test "$build_id" != null
           stage="${RUNNER_TEMP}/tauri-portable"
           rm -rf "$stage"
           mkdir -p "$stage"
-          unzip -q "release/tauri-${VERSION}.zip" -d "$stage"
+          unzip -q release/tauri-0.8.0.zip -d "$stage"
           exe="$(find "$stage" -maxdepth 2 -type f -iname 'yummi-lcu-tauri.exe' -print -quit)"
           test -n "$exe" && test -s "$exe"
           node scripts/sync-tauri-agent-version.mjs \
-            --zip "release/tauri-${VERSION}.zip" \
+            --zip release/tauri-0.8.0.zip \
             --exe "$exe" \
             --out release/agent-version.json \
-            --notes "LiveKit H.264 SFU multi-viewer streaming and real-time web pointer mirroring." \
+            --notes "Order beta releases by release label before CI build ID so manual beta apply works across isolated/promoted builds." \
             --channel beta \
-            --release-label "$RELEASE_LABEL" \
+            --release-label 0.8.0-beta.48 \
             --build-id "$build_id" \
-            --commit "$SOURCE_SHORT" \
+            --commit b40faa3 \
             --rollout-percent 100
-          jq -e --arg version "$VERSION" --arg label "$RELEASE_LABEL" --arg commit "$SOURCE_SHORT" \
-            '.version == $version and .tauri.version == $version and .tauri.channel == "beta" and .tauri.releaseLabel == $label and .tauri.commit == $commit' \
-            release/agent-version.json >/dev/null
-
+          jq -e '.version == "0.8.0" and .tauri.channel == "beta" and .tauri.releaseLabel == "0.8.0-beta.48" and .tauri.commit == "b40faa3" and .tauri.rolloutPercent == 100' release/agent-version.json >/dev/null
       - name: Publish beta.48
         env:
           GH_TOKEN: ${{ github.token }}
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
           RELEASE_CHANNEL: beta
           RELEASE_LABEL: 0.8.0-beta.48
-          TARGET_SHA: fc6fadf25aaaf0af7818cc8e26c98bf2678f18ae
+          TARGET_SHA: b40faa37e81747f32e76cd6366cb360b021e581f
+        shell: bash
         run: scripts/publish-agent-release.sh release
