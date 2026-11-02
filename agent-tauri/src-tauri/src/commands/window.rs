@@ -189,6 +189,14 @@ pub(crate) async fn start_main_window_drag(
 
     #[cfg(windows)]
     {
+        // The main window is initially configured as skipTaskbar=true because it
+        // starts hidden. Reassert the visible-window shell state before custom
+        // movement so Windows never drops its taskbar entry while SetWindowPos
+        // drives the drag/glide sequence.
+        if let Err(error) = window.set_skip_taskbar(false) {
+            report_window_failure(&window, "drag_taskbar_restore", error);
+        }
+
         let config = state.config.read().await.clone();
         let generation = WINDOW_MOTION_GENERATION
             .fetch_add(1, Ordering::SeqCst)
@@ -386,6 +394,11 @@ struct MotionVisualGuard {
 impl Drop for MotionVisualGuard {
     fn drop(&mut self) {
         if motion_is_current(self.generation) {
+            // Keep the visible desktop window represented in the Windows
+            // taskbar after custom drag/inertia has finished.
+            if let Err(error) = self.window.set_skip_taskbar(false) {
+                report_window_failure(&self.window, "motion_taskbar_restore", error);
+            }
             emit_motion_visual(
                 &self.window,
                 0.0,
@@ -1123,12 +1136,38 @@ fn set_rotation_host_expanded(window: &tauri::WebviewWindow, expanded: bool) -> 
         base_window_logical_size()
     };
 
-    let target_physical_width = (target_width_logical * scale).round().max(1.0) as i32;
-    let target_physical_height = (target_height_logical * scale).round().max(1.0) as i32;
     let center_x = old_position.x as f64 + old_size.width as f64 * 0.5;
     let center_y = old_position.y as f64 + old_size.height as f64 * 0.5;
-    let x = (center_x - target_physical_width as f64 * 0.5).round() as i32;
-    let y = (center_y - target_physical_height as f64 * 0.5).round() as i32;
+    let mut target_physical_width = (target_width_logical * scale).round().max(1.0) as i32;
+    let mut target_physical_height = (target_height_logical * scale).round().max(1.0) as i32;
+
+    // A diagonal-sized transparent rotation host can be taller than the monitor
+    // work area on 16:10 / high-DPI displays. Keeping such a host across the
+    // taskbar can make Explorer treat the foreground window like a fullscreen
+    // surface and hide the taskbar. Cap only the transparent host; the normal
+    // window size is restored unchanged when rotation settles.
+    let work_area = monitor_work_area(center_x.round() as i32, center_y.round() as i32);
+    if expanded {
+        if let Some(area) = work_area {
+            target_physical_width = target_physical_width
+                .min((area.right - area.left).floor().max(1.0) as i32);
+            target_physical_height = target_physical_height
+                .min((area.bottom - area.top).floor().max(1.0) as i32);
+        }
+    }
+
+    let mut x = (center_x - target_physical_width as f64 * 0.5).round() as i32;
+    let mut y = (center_y - target_physical_height as f64 * 0.5).round() as i32;
+    if expanded {
+        if let Some(area) = work_area {
+            let min_x = area.left.round() as i32;
+            let min_y = area.top.round() as i32;
+            let max_x = area.right.round() as i32 - target_physical_width;
+            let max_y = area.bottom.round() as i32 - target_physical_height;
+            x = x.clamp(min_x.min(max_x), min_x.max(max_x));
+            y = y.clamp(min_y.min(max_y), min_y.max(max_y));
+        }
+    }
     let native = window.hwnd().map_err(|error| error.to_string())?;
 
     if let Err(error) = unsafe {
