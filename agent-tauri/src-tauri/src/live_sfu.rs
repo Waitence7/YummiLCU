@@ -291,11 +291,10 @@ async fn wait_first_frame(
 }
 
 async fn run_session(config: SfuConfig, generation: u64) -> Result<(), String> {
-    let (room, mut events) = Room::connect(
-        &config.url,
-        &config.token,
-        RoomOptions { auto_subscribe: false, dynacast: true, ..Default::default() },
-    )
+    let mut room_options = RoomOptions::default();
+    room_options.auto_subscribe = false;
+    room_options.dynacast = true;
+    let (room, mut events) = Room::connect(&config.url, &config.token, room_options)
         .await
         .map_err(|error| format!("LiveKit room 연결 실패: {error}"))?;
     let mut frames = crate::recording::subscribe_live_stream();
