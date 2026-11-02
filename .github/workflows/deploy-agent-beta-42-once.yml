@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   deploy:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == 'fd98993a7d4e12db5e85d2d05a653aab702fbd97' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == 'fd98993d1bba36f57e1bc040022ef5b707ffa170' }}
     runs-on: ubuntu-slim
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +57,6 @@ jobs:
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
           RELEASE_CHANNEL: beta
           RELEASE_LABEL: 0.8.0-beta.42
-          TARGET_SHA: fd98993a7d4e12db5e85d2d05a653aab702fbd97
+          TARGET_SHA: fd98993d1bba36f57e1bc040022ef5b707ffa170
         shell: bash
         run: scripts/publish-agent-release.sh release
