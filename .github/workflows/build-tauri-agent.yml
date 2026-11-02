@@ -72,6 +72,10 @@ jobs:
     name: Rust tests
     if: ${{ github.event_name == 'push' }}
     runs-on: windows-latest
+    env:
+      # LiveKit's prebuilt libwebrtc for MSVC uses the static release CRT (/MT).
+      # Keep Rust and cc/cxx native wrappers on the same runtime to avoid LNK2038.
+      RUSTFLAGS: -C target-feature=+crt-static
     defaults:
       run:
         working-directory: agent-tauri/src-tauri
@@ -127,6 +131,8 @@ jobs:
       CARGO_BUILD_JOBS: 4
       CARGO_INCREMENTAL: 0
       CARGO_TARGET_DIR: ${{ github.workspace }}/agent-tauri/src-tauri/target
+      # Match LiveKit/libwebrtc's /MT runtime for the Windows release too.
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
 
