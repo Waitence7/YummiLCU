@@ -305,43 +305,13 @@ fn gamebar_input_shield_thread() {
 }
 
 #[cfg(windows)]
-fn gamebar_input_shield_work_area() -> Option<(i32, i32, i32, i32)> {
-    use std::mem::size_of;
-    use windows::Win32::{
-        Foundation::POINT,
-        Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST},
-        UI::WindowsAndMessaging::GetCursorPos,
-    };
-
-    let mut point = POINT::default();
-    // Falling back to (0, 0) still gives us a real monitor work area and is
-    // safer than ever showing a virtual-desktop-sized topmost popup.
-    let _ = unsafe { GetCursorPos(&mut point) };
-    let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
-    if monitor.0.is_null() {
-        return None;
-    }
-
-    let mut info = MONITORINFO {
-        cbSize: size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-        return None;
-    }
-
-    let width = (info.rcWork.right - info.rcWork.left).max(1);
-    let height = (info.rcWork.bottom - info.rcWork.top).max(1);
-    Some((info.rcWork.left, info.rcWork.top, width, height))
-}
-
-#[cfg(windows)]
 fn set_gamebar_input_shield_visible(visible: bool) {
     use windows::Win32::{
         Foundation::HWND,
         UI::WindowsAndMessaging::{
-            SetWindowPos, ShowWindow, HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-            SWP_NOSENDCHANGING, SWP_SHOWWINDOW,
+            GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXVIRTUALSCREEN,
+            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE,
+            SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_SHOWWINDOW,
         },
     };
 
@@ -352,12 +322,11 @@ fn set_gamebar_input_shield_visible(visible: bool) {
     let hwnd = HWND(raw as *mut core::ffi::c_void);
     unsafe {
         if visible {
-            let Some((x, y, width, height)) = gamebar_input_shield_work_area() else {
-                append_native_input_log("input-shield show-skipped reason=no-monitor-work-area");
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                return;
-            };
-            let result = SetWindowPos(
+            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+            let _ = SetWindowPos(
                 hwnd,
                 Some(HWND_TOPMOST),
                 x,
@@ -366,16 +335,6 @@ fn set_gamebar_input_shield_visible(visible: bool) {
                 height,
                 SWP_NOACTIVATE | SWP_NOSENDCHANGING | SWP_SHOWWINDOW,
             );
-            if let Err(error) = result {
-                append_native_input_log(&format!(
-                    "input-shield show-failed work={x},{y},{width},{height} error={error}"
-                ));
-                let _ = ShowWindow(hwnd, SW_HIDE);
-                return;
-            }
-            append_native_input_log(&format!(
-                "input-shield show work={x},{y},{width},{height}"
-            ));
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         } else {
             let _ = ShowWindow(hwnd, SW_HIDE);
