@@ -42,6 +42,45 @@ class LivePreviewContractTests(unittest.TestCase):
         self.assertEqual(row["width"], 960)
         self.assertEqual(row["height"], 540)
 
+    def test_live_stream_keeps_only_latest_frame_and_tracks_viewers(self) -> None:
+        manager = ConnectionManager()
+        manager.set_live_stream(
+            123,
+            sequence=10,
+            captured_at_ms=2000,
+            width=1280,
+            height=720,
+            jpeg=b"\xff\xd8first\xff\xd9",
+        )
+        manager.set_live_stream(
+            123,
+            sequence=11,
+            captured_at_ms=2066,
+            width=1280,
+            height=720,
+            jpeg=b"\xff\xd8latest\xff\xd9",
+        )
+        row = manager.get_live_stream(123)
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["sequence"], 11)
+        self.assertEqual(row["jpeg"], b"\xff\xd8latest\xff\xd9")
+        self.assertEqual(manager.live_stream_viewer_count(123), 0)
+        self.assertTrue(manager.try_register_live_stream_viewer(123))
+        self.assertTrue(manager.try_register_live_stream_viewer(123))
+        self.assertEqual(manager.live_stream_viewer_count(123), 2)
+        manager.unregister_live_stream_viewer(123)
+        self.assertEqual(manager.live_stream_viewer_count(123), 1)
+        manager.unregister_live_stream_viewer(123)
+        self.assertEqual(manager.live_stream_viewer_count(123), 0)
+
+    def test_live_stream_viewer_limit_is_bounded(self) -> None:
+        manager = ConnectionManager()
+        for _ in range(32):
+            self.assertTrue(manager.try_register_live_stream_viewer(123))
+        self.assertFalse(manager.try_register_live_stream_viewer(123))
+        self.assertEqual(manager.live_stream_viewer_count(123), 32)
+
 
 if __name__ == "__main__":
     unittest.main()

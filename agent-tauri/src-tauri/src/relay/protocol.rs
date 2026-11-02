@@ -45,6 +45,12 @@ pub(crate) enum IncomingMessage {
         #[serde(default)]
         ttl_ms: Option<u64>,
     },
+    #[serde(rename = "live_stream_control")]
+    LiveStreamControl {
+        enabled: bool,
+        #[serde(default)]
+        ttl_ms: Option<u64>,
+    },
     #[serde(rename = "server_hello")]
     ServerHello {
         protocol_version: u32,
@@ -189,6 +195,11 @@ impl IncomingMessage {
                 if ttl_ms.is_some_and(|value| !(500..=10_000).contains(&value)) =>
             {
                 Err("invalid live preview control")
+            }
+            Self::LiveStreamControl { ttl_ms, .. }
+                if ttl_ms.is_some_and(|value| !(1_000..=15_000).contains(&value)) =>
+            {
+                Err("invalid live stream control")
             }
             Self::ServerHello { capabilities, .. }
                 if capabilities.len() > 64
@@ -918,6 +929,24 @@ mod tests {
             .unwrap(),
             IncomingMessage::LiveDeltaResync { stream_id }
         );
+    }
+
+    #[test]
+    fn live_stream_control_deserializes_and_bounds_lease() {
+        assert_eq!(
+            IncomingMessage::parse(
+                r#"{"type":"live_stream_control","enabled":true,"ttl_ms":5000}"#
+            )
+            .unwrap(),
+            IncomingMessage::LiveStreamControl {
+                enabled: true,
+                ttl_ms: Some(5000),
+            }
+        );
+        assert!(IncomingMessage::parse(
+            r#"{"type":"live_stream_control","enabled":true,"ttl_ms":999}"#
+        )
+        .is_err());
     }
 
     #[test]

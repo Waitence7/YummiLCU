@@ -89,6 +89,8 @@ TOURNAMENT_BROADCAST_WORKERS = 4
 TOURNAMENT_BROADCAST_TIMEOUT_SEC = 3.0
 MAX_REPLAY_UPLOAD_BYTES = 128 * 1024 * 1024
 MAX_LIVE_PREVIEW_BYTES = 512 * 1024
+MAX_LIVE_STREAM_BYTES = 2 * 1024 * 1024
+LIVE_STREAM_BOUNDARY = "yummi-live-frame"
 BOT_EOG_PERSIST_ACK_TIMEOUT_SEC = 8.0
 LIVE_DELTA_STATE_TTL_SEC = 2 * 60 * 60
 LIVE_DELTA_API_BLOCK_TTL_SEC = 30
@@ -1467,6 +1469,56 @@ async def agent_live_preview(
     height = parse_header("x-yummi-preview-height", minimum=1, maximum=4096)
     conn: ConnectionManager = request.app.state.connections
     conn.set_live_preview(
+        discord_id,
+        sequence=sequence,
+        captured_at_ms=captured_at_ms,
+        width=width,
+        height=height,
+        jpeg=body,
+    )
+    return JSONResponse({"ok": True, "sequence": sequence})
+
+
+@app.post("/agent/live-stream")
+@app.post("/lcu/live-stream")
+async def agent_live_stream(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+) -> JSONResponse:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type != "image/jpeg":
+        raise HTTPException(415, "image/jpeg required")
+    raw_length = request.headers.get("content-length")
+    if raw_length:
+        try:
+            content_length = int(raw_length)
+        except ValueError as exc:
+            raise HTTPException(400, "invalid content-length") from exc
+        if content_length <= 0 or content_length > MAX_LIVE_STREAM_BYTES:
+            raise HTTPException(413, "live stream frame too large")
+    body = await request.body()
+    if not body or len(body) > MAX_LIVE_STREAM_BYTES:
+        raise HTTPException(413, "live stream frame too large")
+    if not body.startswith(b"\xff\xd8") or not body.endswith(b"\xff\xd9"):
+        raise HTTPException(400, "invalid jpeg")
+
+    def parse_header(name: str, *, minimum: int, maximum: int) -> int:
+        raw = request.headers.get(name, "")
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid {name}") from exc
+        if value < minimum or value > maximum:
+            raise HTTPException(400, f"invalid {name}")
+        return value
+
+    sequence = parse_header("x-yummi-stream-sequence", minimum=1, maximum=2**63 - 1)
+    captured_at_ms = parse_header("x-yummi-stream-captured-at", minimum=1, maximum=2**63 - 1)
+    width = parse_header("x-yummi-stream-width", minimum=1, maximum=4096)
+    height = parse_header("x-yummi-stream-height", minimum=1, maximum=4096)
+    conn: ConnectionManager = request.app.state.connections
+    conn.set_live_stream(
         discord_id,
         sequence=sequence,
         captured_at_ms=captured_at_ms,
@@ -4968,6 +5020,84 @@ async def internal_live_preview(
             "X-Yummi-Preview-Age-Ms": str(preview["age_ms"]),
         },
     )
+
+
+@app.get("/internal/live-stream/{discord_id}")
+async def internal_live_stream(
+    request: Request,
+    discord_id: int,
+    x_relay_internal_secret: str | None = Header(None),
+) -> StreamingResponse:
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    if discord_id <= 0:
+        raise HTTPException(400, "invalid discord_id")
+    conn: ConnectionManager = request.app.state.connections
+    if not conn.try_register_live_stream_viewer(discord_id):
+        raise HTTPException(429, "too many live stream viewers")
+
+    async def frames():
+        last_sequence = 0
+        last_control_at = 0.0
+        try:
+            while True:
+                now = time.monotonic()
+                if now - last_control_at >= 1.0:
+                    await conn.request_live_stream(discord_id)
+                    last_control_at = now
+                frame = conn.get_live_stream(discord_id)
+                if frame is not None and frame["sequence"] != last_sequence:
+                    last_sequence = frame["sequence"]
+                    jpeg = frame["jpeg"]
+                    header = (
+                        f"--{LIVE_STREAM_BOUNDARY}\r\n"
+                        "Content-Type: image/jpeg\r\n"
+                        f"Content-Length: {len(jpeg)}\r\n"
+                        f"X-Yummi-Sequence: {frame['sequence']}\r\n"
+                        f"X-Yummi-Captured-At: {frame['captured_at_ms']}\r\n"
+                        f"X-Yummi-Width: {frame['width']}\r\n"
+                        f"X-Yummi-Height: {frame['height']}\r\n\r\n"
+                    ).encode("ascii")
+                    yield header
+                    yield jpeg
+                    yield b"\r\n"
+                    continue
+                await asyncio.sleep(0.025 if frame is not None else 0.1)
+        finally:
+            conn.unregister_live_stream_viewer(discord_id)
+
+    return StreamingResponse(
+        frames(),
+        media_type=f"multipart/x-mixed-replace; boundary={LIVE_STREAM_BOUNDARY}",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+@app.get("/internal/live-stream-status/{discord_id}")
+async def internal_live_stream_status(
+    request: Request,
+    discord_id: int,
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    if discord_id <= 0:
+        raise HTTPException(400, "invalid discord_id")
+    conn: ConnectionManager = request.app.state.connections
+    await conn.request_live_stream(discord_id)
+    frame = conn.get_live_stream(discord_id)
+    return JSONResponse({
+        "live": frame is not None,
+        "viewer_count": conn.live_stream_viewer_count(discord_id),
+        "sequence": frame["sequence"] if frame else 0,
+        "captured_at_ms": frame["captured_at_ms"] if frame else 0,
+        "age_ms": frame["age_ms"] if frame else None,
+        "width": frame["width"] if frame else 0,
+        "height": frame["height"] if frame else 0,
+        "agent_online": conn.is_online(discord_id),
+    })
 
 
 class InternalCommandBody(BaseModel):
