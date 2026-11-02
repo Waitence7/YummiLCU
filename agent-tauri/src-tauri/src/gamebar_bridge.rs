@@ -2,7 +2,7 @@
 use std::{
     io::Write,
     net::TcpListener,
-    sync::{Mutex, OnceLock},
+    sync::{atomic::{AtomicUsize, Ordering}, Mutex, OnceLock},
 };
 use std::{
     sync::Arc,
@@ -41,6 +41,11 @@ const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:19514";
 const GAMEBAR_COMMAND_LOOPBACK_ADDR: &str = "127.0.0.1:19515";
 #[cfg(windows)]
 const GAMEBAR_WS_LOOPBACK_ADDR: &str = "127.0.0.1:19517";
+
+#[cfg(windows)]
+const GAMEBAR_INPUT_SHIELD_LABEL: &str = "gamebar-input-shield";
+#[cfg(windows)]
+static GAMEBAR_INPUT_SHIELD_HWND: AtomicUsize = AtomicUsize::new(0);
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -198,6 +203,80 @@ fn append_uia_probe_log(message: &str) {
     append_bounded_agent_log("uia-probe.log", message, 512 * 1024);
 }
 
+#[cfg(windows)]
+fn ensure_gamebar_input_shield(app: &AppHandle) -> Result<(), String> {
+    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+
+    let window = if let Some(existing) = app.get_webview_window(GAMEBAR_INPUT_SHIELD_LABEL) {
+        existing
+    } else {
+        WebviewWindowBuilder::new(
+            app,
+            GAMEBAR_INPUT_SHIELD_LABEL,
+            WebviewUrl::App("index.html".into()),
+        )
+        .title("")
+        .inner_size(16.0, 16.0)
+        .resizable(false)
+        .decorations(false)
+        .transparent(true)
+        .shadow(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focusable(false)
+        .focused(false)
+        .visible(false)
+        .build()
+        .map_err(|error| format!("Game Bar 입력 실드 생성 실패: {error}"))?
+    };
+
+    let native = window
+        .hwnd()
+        .map_err(|error| format!("Game Bar 입력 실드 HWND 조회 실패: {error}"))?;
+    let raw = native.0 as usize;
+    GAMEBAR_INPUT_SHIELD_HWND.store(raw, Ordering::SeqCst);
+    append_native_input_log(&format!("input-shield ready hwnd=0x{raw:X}"));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn set_gamebar_input_shield_visible(visible: bool) {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{
+            GetSystemMetrics, SetWindowPos, ShowWindow, HWND_TOPMOST, SM_CXVIRTUALSCREEN,
+            SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_HIDE, SW_SHOWNOACTIVATE,
+            SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_SHOWWINDOW,
+        },
+    };
+
+    let raw = GAMEBAR_INPUT_SHIELD_HWND.load(Ordering::SeqCst);
+    if raw == 0 {
+        return;
+    }
+    let hwnd = HWND(raw as *mut core::ffi::c_void);
+    unsafe {
+        if visible {
+            let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let width = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
+            let height = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                x,
+                y,
+                width,
+                height,
+                SWP_NOACTIVATE | SWP_NOSENDCHANGING | SWP_SHOWWINDOW,
+            );
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        } else {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+}
+
 pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
     let watcher_state = state.clone();
     tauri::async_runtime::spawn(async move {
@@ -216,6 +295,9 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
             GAMEBAR_COMMAND_LOOPBACK_ADDR,
             GAMEBAR_WS_LOOPBACK_ADDR,
         ));
+        if let Err(error) = ensure_gamebar_input_shield(&app) {
+            append_native_input_log(&format!("input-shield init-failed error={error}"));
+        }
         let snapshot_state = state.clone();
         std::thread::Builder::new()
             .name("yummi-gamebar-pipe".into())
@@ -1068,6 +1150,7 @@ unsafe extern "system" fn native_input_block_hook(
                     state.blocked_left_down = false;
                     state.left_captured = false;
                     state.blocked_up_count = state.blocked_up_count.wrapping_add(1);
+                    set_gamebar_input_shield_visible(false);
                     return LRESULT(1);
                 }
 
@@ -1080,6 +1163,13 @@ unsafe extern "system" fn native_input_block_hook(
                         // the press while the underlying game remains protected.
                         state.blocked_left_down = true;
                         state.blocked_down_count = state.blocked_down_count.wrapping_add(1);
+                        // The down event is swallowed so the app behind the Game Bar
+                        // never owns the gesture. While the physical button remains
+                        // held, a transparent no-focus shield receives normal mouse
+                        // motion instead of the underlying text/image surface. This
+                        // preserves the real cursor position without consuming
+                        // WM_MOUSEMOVE in the low-level hook.
+                        set_gamebar_input_shield_visible(true);
                         return LRESULT(1);
                     }
                 }
@@ -1114,6 +1204,7 @@ fn native_input_block_hook_thread() {
         }
     }
 
+    set_gamebar_input_shield_visible(false);
     let _ = unsafe { UnhookWindowsHookEx(hook) };
     append_native_input_log("input-block hook-stopped");
 }
@@ -1576,15 +1667,29 @@ fn sync_external_click_test(parsed: &Value) -> String {
         state.alt_height = alt_height;
     }
     state.geometry_updated_at_ms = now;
-    let (input_block_active, input_block_captured, blocked_down_count, blocked_up_count) =
+    let (input_block_active, input_block_captured, blocked_down_count, blocked_up_count, hide_input_shield) =
         match native_input_block_state().lock() {
             Ok(mut block) => {
                 block.active = active && block_input && !block_rects.is_empty();
                 block.rects = if block.active { block_rects } else { Vec::new() };
-                (block.active, block.left_captured, block.blocked_down_count, block.blocked_up_count)
+                let hide_shield = !block.active && (block.left_captured || block.blocked_left_down);
+                if hide_shield {
+                    block.left_captured = false;
+                    block.blocked_left_down = false;
+                }
+                (
+                    block.active,
+                    block.left_captured,
+                    block.blocked_down_count,
+                    block.blocked_up_count,
+                    hide_shield,
+                )
             }
-            Err(_) => (false, false, 0, 0),
+            Err(_) => (false, false, 0, 0, true),
         };
+    if hide_input_shield {
+        set_gamebar_input_shield_visible(false);
+    }
     serde_json::json!({
         "ok": true,
         "active": state.active,
