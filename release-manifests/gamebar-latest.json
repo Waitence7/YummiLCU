@@ -1,1 +1,9 @@
-{"version":"0.1.115","releaseTag":"gamebar-v0.1.115"}
+{
+  "schemaVersion": 1,
+  "gamebar": {
+    "version": "0.1.116",
+    "releaseTag": "gamebar-v0.1.116",
+    "manifestUrl": "https://github.com/Waitence7/YummiLCU/releases/download/gamebar-v0.1.116/gamebar-release-manifest.json",
+    "publishedAt": "2026-11-02T01:28:28Z"
+  }
+}
