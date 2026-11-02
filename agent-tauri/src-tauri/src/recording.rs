@@ -338,32 +338,6 @@ mod imp {
         value.clamp(0, 255) as u8
     }
 
-    fn sample_bgra(
-        raw: &[u8],
-        row_pitch: usize,
-        source_width: u32,
-        source_height: u32,
-        target_x: u32,
-        target_y: u32,
-        width: u32,
-        height: u32,
-    ) -> Result<(i32, i32, i32), CaptureError> {
-        let source_x = (u64::from(target_x) * u64::from(source_width) / u64::from(width)) as usize;
-        let source_y =
-            (u64::from(target_y) * u64::from(source_height) / u64::from(height)) as usize;
-        let index = source_y
-            .saturating_mul(row_pitch)
-            .saturating_add(source_x.saturating_mul(4));
-        if index + 2 >= raw.len() {
-            return Err("실시간 중계 픽셀 범위가 올바르지 않습니다.".into());
-        }
-        Ok((
-            raw[index + 2] as i32,
-            raw[index + 1] as i32,
-            raw[index] as i32,
-        ))
-    }
-
     fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
         clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16)
     }
@@ -374,6 +348,15 @@ mod imp {
 
     fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
         clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128)
+    }
+
+    #[inline]
+    fn bgra_rgb(raw: &[u8], index: usize) -> (i32, i32, i32) {
+        (
+            raw[index + 2] as i32,
+            raw[index + 1] as i32,
+            raw[index] as i32,
+        )
     }
 
     fn encode_live_stream(
@@ -398,55 +381,64 @@ mod imp {
             return Err("실시간 중계 프레임 크기가 올바르지 않습니다.".into());
         }
         let raw = buffer.as_raw_buffer();
-        let mut y = vec![0u8; width as usize * height as usize];
-        let chroma_width = width / 2;
-        let chroma_height = height / 2;
-        let mut u = vec![0u8; chroma_width as usize * chroma_height as usize];
-        let mut v = vec![0u8; chroma_width as usize * chroma_height as usize];
-
-        for target_y in 0..height {
-            for target_x in 0..width {
-                let (r, g, b) = sample_bgra(
-                    raw,
-                    row_pitch,
-                    source_width,
-                    source_height,
-                    target_x,
-                    target_y,
-                    width,
-                    height,
-                )?;
-                y[target_y as usize * width as usize + target_x as usize] = rgb_to_y(r, g, b);
-            }
+        let min_row_bytes = source_width as usize * 4;
+        let required_len = row_pitch
+            .saturating_mul(source_height.saturating_sub(1) as usize)
+            .saturating_add(min_row_bytes);
+        if row_pitch < min_row_bytes || raw.len() < required_len {
+            return Err("실시간 중계 픽셀 범위가 올바르지 않습니다.".into());
         }
+
+        // Precompute nearest-neighbour coordinates once per frame. The old path
+        // performed two integer divisions for every pixel sample and then sampled
+        // every pixel a second time for chroma, which made 720p/30 CPU-bound.
+        let source_x: Vec<usize> = (0..width)
+            .map(|x| (u64::from(x) * u64::from(source_width) / u64::from(width)) as usize)
+            .collect();
+        let source_y: Vec<usize> = (0..height)
+            .map(|y| (u64::from(y) * u64::from(source_height) / u64::from(height)) as usize)
+            .collect();
+
+        let width_usize = width as usize;
+        let height_usize = height as usize;
+        let chroma_width = width_usize / 2;
+        let chroma_height = height_usize / 2;
+        let mut y = vec![0u8; width_usize * height_usize];
+        let mut u = vec![0u8; chroma_width * chroma_height];
+        let mut v = vec![0u8; chroma_width * chroma_height];
+
+        // Convert one 2x2 block at a time. Each BGRA source pixel is sampled only
+        // once; its RGB value contributes to both luma and the shared chroma pair.
         for cy in 0..chroma_height {
+            let ty0 = cy * 2;
+            let ty1 = ty0 + 1;
+            let row0 = source_y[ty0] * row_pitch;
+            let row1 = source_y[ty1] * row_pitch;
+            let y_row0 = ty0 * width_usize;
+            let y_row1 = ty1 * width_usize;
+            let uv_row = cy * chroma_width;
+
             for cx in 0..chroma_width {
-                let mut sum_r = 0i32;
-                let mut sum_g = 0i32;
-                let mut sum_b = 0i32;
-                for dy in 0..2 {
-                    for dx in 0..2 {
-                        let (r, g, b) = sample_bgra(
-                            raw,
-                            row_pitch,
-                            source_width,
-                            source_height,
-                            cx * 2 + dx,
-                            cy * 2 + dy,
-                            width,
-                            height,
-                        )?;
-                        sum_r += r;
-                        sum_g += g;
-                        sum_b += b;
-                    }
-                }
-                let r = (sum_r + 2) / 4;
-                let g = (sum_g + 2) / 4;
-                let b = (sum_b + 2) / 4;
-                let index = cy as usize * chroma_width as usize + cx as usize;
-                u[index] = rgb_to_u(r, g, b);
-                v[index] = rgb_to_v(r, g, b);
+                let tx0 = cx * 2;
+                let tx1 = tx0 + 1;
+                let sx0 = source_x[tx0] * 4;
+                let sx1 = source_x[tx1] * 4;
+                let (r00, g00, b00) = bgra_rgb(raw, row0 + sx0);
+                let (r01, g01, b01) = bgra_rgb(raw, row0 + sx1);
+                let (r10, g10, b10) = bgra_rgb(raw, row1 + sx0);
+                let (r11, g11, b11) = bgra_rgb(raw, row1 + sx1);
+
+                y[y_row0 + tx0] = rgb_to_y(r00, g00, b00);
+                y[y_row0 + tx1] = rgb_to_y(r01, g01, b01);
+                y[y_row1 + tx0] = rgb_to_y(r10, g10, b10);
+                y[y_row1 + tx1] = rgb_to_y(r11, g11, b11);
+
+                let r = (r00 + r01 + r10 + r11 + 2) / 4;
+                let g = (g00 + g01 + g10 + g11 + 2) / 4;
+                let b = (b00 + b01 + b10 + b11 + 2) / 4;
+                let uv_index = uv_row + cx;
+                u[uv_index] = rgb_to_u(r, g, b);
+                v[uv_index] = rgb_to_v(r, g, b);
             }
         }
 
