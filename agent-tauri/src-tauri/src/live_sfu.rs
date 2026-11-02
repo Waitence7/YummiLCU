@@ -18,8 +18,6 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 use tokio::{sync::Mutex, task::JoinHandle, time::interval};
 
-const STREAM_BITRATE: u64 = 3_000_000;
-const STREAM_FPS: f64 = 15.0;
 const MAX_URL_BYTES: usize = 2_048;
 const MAX_ROOM_BYTES: usize = 128;
 const MAX_TOKEN_BYTES: usize = 8_192;
@@ -33,6 +31,7 @@ struct SfuConfig {
     url: String,
     token: String,
     codec: VideoCodec,
+    stream: crate::recording::LiveStreamConfig,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -68,6 +67,7 @@ struct WirePointer {
 static REMOTE_POINTER: OnceLock<RwLock<RemotePointerSnapshot>> = OnceLock::new();
 
 static DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
+static STREAM_GENERATION: AtomicU64 = AtomicU64::new(1);
 static CONFIG: OnceLock<Mutex<Option<SfuConfig>>> = OnceLock::new();
 static TASK: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
 
@@ -88,7 +88,8 @@ pub(crate) fn remote_pointer_snapshot() -> RemotePointerSnapshot {
         .read()
         .map(|value| value.clone())
         .unwrap_or_default();
-    if snapshot.visible && now_ms().saturating_sub(snapshot.updated_at_ms) > POINTER_VISIBLE_TTL_MS {
+    if snapshot.visible && now_ms().saturating_sub(snapshot.updated_at_ms) > POINTER_VISIBLE_TTL_MS
+    {
         snapshot.visible = false;
     }
     snapshot
@@ -174,10 +175,16 @@ pub(crate) async fn control(
     room: Option<String>,
     token: Option<String>,
     codec: Option<String>,
+    width: Option<u32>,
+    height: Option<u32>,
+    fps: Option<u32>,
+    bitrate: Option<u64>,
 ) -> Result<(), String> {
     if !enabled {
         DEADLINE_MS.store(0, Ordering::Release);
+        STREAM_GENERATION.fetch_add(1, Ordering::AcqRel);
         crate::recording::set_live_stream_enabled(false, 1_000);
+        let _ = crate::recording::stop_live_stream_capture();
         return Ok(());
     }
 
@@ -195,10 +202,33 @@ pub(crate) async fn control(
         return Err("LiveKit SFU 설정이 올바르지 않습니다.".into());
     }
     let codec = parse_codec(codec.as_deref())?;
+    let defaults = crate::recording::LiveStreamConfig::default();
+    let stream = crate::recording::LiveStreamConfig::new(
+        width.unwrap_or(defaults.max_width),
+        height.unwrap_or(defaults.max_height),
+        fps.unwrap_or(defaults.fps),
+        bitrate.unwrap_or(defaults.bitrate),
+    )?;
     let ttl_ms = ttl_ms.clamp(1_000, 30_000);
     DEADLINE_MS.store(now_ms().saturating_add(ttl_ms), Ordering::Release);
     crate::recording::set_live_stream_enabled(true, ttl_ms);
-    *config_slot().lock().await = Some(SfuConfig { app, url, token, codec });
+    crate::recording::start_live_stream_capture(stream)?;
+
+    let mut config = config_slot().lock().await;
+    let stream_changed = config
+        .as_ref()
+        .is_some_and(|current| current.stream != stream);
+    *config = Some(SfuConfig {
+        app,
+        url,
+        token,
+        codec,
+        stream,
+    });
+    drop(config);
+    if stream_changed {
+        STREAM_GENERATION.fetch_add(1, Ordering::AcqRel);
+    }
 
     let mut task = task_slot().lock().await;
     let needs_start = task.as_ref().is_none_or(JoinHandle::is_finished);
@@ -213,7 +243,8 @@ async fn publisher_loop() {
         let Some(config) = config_slot().lock().await.clone() else {
             break;
         };
-        if let Err(error) = run_session(config).await {
+        let generation = STREAM_GENERATION.load(Ordering::Acquire);
+        if let Err(error) = run_session(config, generation).await {
             eprintln!("LiveKit SFU publish session failed: {error}");
         }
         if lease_alive() {
@@ -221,6 +252,7 @@ async fn publisher_loop() {
         }
     }
     crate::recording::set_live_stream_enabled(false, 1_000);
+    let _ = crate::recording::stop_live_stream_capture();
 }
 
 fn copy_frame_to_i420(frame: &crate::recording::LiveStreamFrame) -> Result<I420Buffer, String> {
@@ -258,18 +290,20 @@ async fn wait_first_frame(
     }
 }
 
-async fn run_session(config: SfuConfig) -> Result<(), String> {
+async fn run_session(config: SfuConfig, generation: u64) -> Result<(), String> {
     let (room, mut events) = Room::connect(&config.url, &config.token, RoomOptions::default())
         .await
         .map_err(|error| format!("LiveKit room 연결 실패: {error}"))?;
     let mut frames = crate::recording::subscribe_live_stream();
     crate::recording::set_live_stream_enabled(true, 15_000);
     let first = wait_first_frame(&mut frames).await?;
+    let first_width = first.width;
+    let first_height = first.height;
 
     let source = NativeVideoSource::new(
         VideoResolution {
-            width: first.width,
-            height: first.height,
+            width: first_width,
+            height: first_height,
         },
         false,
     );
@@ -280,8 +314,8 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
             LocalTrack::Video(track.clone()),
             TrackPublishOptions {
                 video_encoding: Some(VideoEncoding {
-                    max_bitrate: STREAM_BITRATE,
-                    max_framerate: STREAM_FPS,
+                    max_bitrate: config.stream.bitrate,
+                    max_framerate: f64::from(config.stream.fps),
                 }),
                 video_codec: config.codec,
                 simulcast: false,
@@ -311,7 +345,7 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
     loop {
         tokio::select! {
             _ = tick.tick() => {
-                if !lease_alive() {
+                if !lease_alive() || STREAM_GENERATION.load(Ordering::Acquire) != generation {
                     break;
                 }
                 crate::recording::set_live_stream_enabled(true, 15_000);
@@ -331,6 +365,9 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
                 }
             }
             received = frames.recv() => {
+                if STREAM_GENERATION.load(Ordering::Acquire) != generation {
+                    break;
+                }
                 let mut frame = match received {
                     Ok(frame) => frame,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -338,6 +375,12 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
                 };
                 while let Ok(newer) = frames.try_recv() {
                     frame = newer;
+                }
+                if STREAM_GENERATION.load(Ordering::Acquire) != generation
+                    || frame.width != first_width
+                    || frame.height != first_height
+                {
+                    break;
                 }
                 let _ = publish_frame(frame)?;
             }
@@ -352,6 +395,13 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_quality_bounds_allow_1440p_and_reject_oversized_values() {
+        assert!(crate::recording::LiveStreamConfig::new(2560, 1440, 30, 10_000_000).is_ok());
+        assert!(crate::recording::LiveStreamConfig::new(3840, 2160, 60, 20_000_000).is_err());
+        assert!(crate::recording::LiveStreamConfig::new(1920, 1080, 120, 10_000_000).is_err());
+    }
 
     #[test]
     fn dropped_capture_frame_is_not_a_session_error_contract() {
@@ -378,16 +428,20 @@ mod tests {
     #[test]
     fn pointer_packets_are_bounded_and_viewer_scoped() {
         let payload = br#"{"v":1,"x":0.25,"y":0.75,"visible":true}"#;
-        let pointer = parse_live_pointer(payload, Some(POINTER_TOPIC), Some("viewer-42-abc".into())).unwrap();
+        let pointer =
+            parse_live_pointer(payload, Some(POINTER_TOPIC), Some("viewer-42-abc".into())).unwrap();
         assert_eq!(pointer.x, 0.25);
         assert_eq!(pointer.y, 0.75);
         assert!(pointer.visible);
         assert!(parse_live_pointer(payload, Some("other"), Some("viewer-42-abc".into())).is_none());
-        assert!(parse_live_pointer(payload, Some(POINTER_TOPIC), Some("agent-42".into())).is_none());
+        assert!(
+            parse_live_pointer(payload, Some(POINTER_TOPIC), Some("agent-42".into())).is_none()
+        );
         assert!(parse_live_pointer(
             br#"{"v":1,"x":1.1,"y":0.5,"visible":true}"#,
             Some(POINTER_TOPIC),
             Some("viewer-42-abc".into())
-        ).is_none());
+        )
+        .is_none());
     }
 }

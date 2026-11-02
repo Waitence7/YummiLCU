@@ -59,6 +59,50 @@ pub(crate) struct LiveStreamFrame {
     pub(crate) v: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LiveStreamConfig {
+    pub(crate) max_width: u32,
+    pub(crate) max_height: u32,
+    pub(crate) fps: u32,
+    pub(crate) bitrate: u64,
+}
+
+impl Default for LiveStreamConfig {
+    fn default() -> Self {
+        Self {
+            max_width: 1280,
+            max_height: 720,
+            fps: 15,
+            bitrate: 3_000_000,
+        }
+    }
+}
+
+impl LiveStreamConfig {
+    pub(crate) fn new(
+        max_width: u32,
+        max_height: u32,
+        fps: u32,
+        bitrate: u64,
+    ) -> Result<Self, String> {
+        if !(640..=2560).contains(&max_width)
+            || !(360..=1440).contains(&max_height)
+            || max_width % 2 != 0
+            || max_height % 2 != 0
+            || !(10..=60).contains(&fps)
+            || !(500_000..=20_000_000).contains(&bitrate)
+        {
+            return Err("실시간 중계 화질 설정이 올바르지 않습니다.".into());
+        }
+        Ok(Self {
+            max_width,
+            max_height,
+            fps,
+            bitrate,
+        })
+    }
+}
+
 static LIVE_STREAM_BUS: OnceLock<broadcast::Sender<LiveStreamFrame>> = OnceLock::new();
 static LIVE_STREAM_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
 
@@ -164,7 +208,8 @@ mod imp {
 
     use super::{
         live_preview_bus, live_preview_requested, live_stream_bus, live_stream_requested,
-        LivePreviewFrame, LiveStreamFrame, RecordingSessionMetadata, RecordingStatus,
+        LivePreviewFrame, LiveStreamConfig, LiveStreamFrame, RecordingSessionMetadata,
+        RecordingStatus,
     };
 
     const VIDEO_BITRATE: u32 = 15_000_000;
@@ -173,9 +218,6 @@ mod imp {
     const LIVE_PREVIEW_MAX_WIDTH: u32 = 960;
     const LIVE_PREVIEW_MAX_HEIGHT: u32 = 540;
     const LIVE_PREVIEW_JPEG_QUALITY: u8 = 52;
-    const LIVE_STREAM_INTERVAL: Duration = Duration::from_millis(66);
-    const LIVE_STREAM_MAX_WIDTH: u32 = 1280;
-    const LIVE_STREAM_MAX_HEIGHT: u32 = 720;
     const SEGMENT_DURATION: Duration = Duration::from_secs(10);
     const MAX_BUFFER_DURATION: Duration = Duration::from_secs(75);
     const MIN_SEGMENT_DURATION: Duration = Duration::from_millis(300);
@@ -207,7 +249,6 @@ mod imp {
         encoder: Option<VideoEncoder>,
         last_preview_at: Instant,
         preview_sequence: u64,
-        last_stream_at: Instant,
     }
 
     fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
@@ -237,7 +278,8 @@ mod imp {
         let source_width = buffer.width();
         let source_height = buffer.height();
         let row_pitch = buffer.row_pitch() as usize;
-        let (width, height) = bounded_dimensions(source_width, source_height, max_width, max_height);
+        let (width, height) =
+            bounded_dimensions(source_width, source_height, max_width, max_height);
         if width == 0 || height == 0 {
             return Err("실시간 프리뷰 프레임 크기가 올바르지 않습니다.".into());
         }
@@ -273,31 +315,53 @@ mod imp {
         Ok((timestamp_ms() as u64, width, height, jpeg))
     }
 
-    fn encode_live_preview(frame: &mut Frame, sequence: u64) -> Result<LivePreviewFrame, CaptureError> {
+    fn encode_live_preview(
+        frame: &mut Frame,
+        sequence: u64,
+    ) -> Result<LivePreviewFrame, CaptureError> {
         let (captured_at_ms, width, height, jpeg) = encode_jpeg_frame(
             frame,
             LIVE_PREVIEW_MAX_WIDTH,
             LIVE_PREVIEW_MAX_HEIGHT,
             LIVE_PREVIEW_JPEG_QUALITY,
         )?;
-        Ok(LivePreviewFrame { sequence, captured_at_ms, width, height, jpeg })
+        Ok(LivePreviewFrame {
+            sequence,
+            captured_at_ms,
+            width,
+            height,
+            jpeg,
+        })
     }
 
     fn clamp_u8(value: i32) -> u8 {
         value.clamp(0, 255) as u8
     }
 
-    fn sample_bgra(raw: &[u8], row_pitch: usize, source_width: u32, source_height: u32,
-        target_x: u32, target_y: u32, width: u32, height: u32) -> Result<(i32, i32, i32), CaptureError> {
+    fn sample_bgra(
+        raw: &[u8],
+        row_pitch: usize,
+        source_width: u32,
+        source_height: u32,
+        target_x: u32,
+        target_y: u32,
+        width: u32,
+        height: u32,
+    ) -> Result<(i32, i32, i32), CaptureError> {
         let source_x = (u64::from(target_x) * u64::from(source_width) / u64::from(width)) as usize;
-        let source_y = (u64::from(target_y) * u64::from(source_height) / u64::from(height)) as usize;
+        let source_y =
+            (u64::from(target_y) * u64::from(source_height) / u64::from(height)) as usize;
         let index = source_y
             .saturating_mul(row_pitch)
             .saturating_add(source_x.saturating_mul(4));
         if index + 2 >= raw.len() {
             return Err("실시간 중계 픽셀 범위가 올바르지 않습니다.".into());
         }
-        Ok((raw[index + 2] as i32, raw[index + 1] as i32, raw[index] as i32))
+        Ok((
+            raw[index + 2] as i32,
+            raw[index + 1] as i32,
+            raw[index] as i32,
+        ))
     }
 
     fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
@@ -312,7 +376,10 @@ mod imp {
         clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128)
     }
 
-    fn encode_live_stream(frame: &mut Frame) -> Result<LiveStreamFrame, CaptureError> {
+    fn encode_live_stream(
+        frame: &mut Frame,
+        config: LiveStreamConfig,
+    ) -> Result<LiveStreamFrame, CaptureError> {
         let mut buffer = frame
             .buffer()
             .map_err(|error| format!("실시간 중계 프레임 읽기 실패: {error}"))?;
@@ -322,8 +389,8 @@ mod imp {
         let (mut width, mut height) = bounded_dimensions(
             source_width,
             source_height,
-            LIVE_STREAM_MAX_WIDTH,
-            LIVE_STREAM_MAX_HEIGHT,
+            config.max_width,
+            config.max_height,
         );
         width &= !1;
         height &= !1;
@@ -340,7 +407,14 @@ mod imp {
         for target_y in 0..height {
             for target_x in 0..width {
                 let (r, g, b) = sample_bgra(
-                    raw, row_pitch, source_width, source_height, target_x, target_y, width, height,
+                    raw,
+                    row_pitch,
+                    source_width,
+                    source_height,
+                    target_x,
+                    target_y,
+                    width,
+                    height,
                 )?;
                 y[target_y as usize * width as usize + target_x as usize] = rgb_to_y(r, g, b);
             }
@@ -353,7 +427,14 @@ mod imp {
                 for dy in 0..2 {
                     for dx in 0..2 {
                         let (r, g, b) = sample_bgra(
-                            raw, row_pitch, source_width, source_height, cx * 2 + dx, cy * 2 + dy, width, height,
+                            raw,
+                            row_pitch,
+                            source_width,
+                            source_height,
+                            cx * 2 + dx,
+                            cy * 2 + dy,
+                            width,
+                            height,
                         )?;
                         sum_r += r;
                         sum_g += g;
@@ -392,7 +473,6 @@ mod imp {
                 )?),
                 last_preview_at: Instant::now() - LIVE_PREVIEW_INTERVAL,
                 preview_sequence: 0,
-                last_stream_at: Instant::now() - LIVE_STREAM_INTERVAL,
             })
         }
 
@@ -406,17 +486,6 @@ mod imp {
                     .send_frame(frame)
                     .map_err(|error| format!("녹화 프레임 인코딩 실패: {error}"))?;
             }
-            let stream_bus = live_stream_bus();
-            if live_stream_requested()
-                && stream_bus.receiver_count() > 0
-                && self.last_stream_at.elapsed() >= LIVE_STREAM_INTERVAL
-            {
-                self.last_stream_at = Instant::now();
-                if let Ok(stream_frame) = encode_live_stream(frame) {
-                    let _ = stream_bus.send(stream_frame);
-                }
-            }
-
             let preview_bus = live_preview_bus();
             if live_preview_requested()
                 && preview_bus.receiver_count() > 0
@@ -437,6 +506,65 @@ mod imp {
                     .finish()
                     .map_err(|error| format!("녹화 파일 마무리 실패: {error}"))?;
             }
+            Ok(())
+        }
+    }
+
+    struct LiveCapture {
+        config: LiveStreamConfig,
+        last_stream_at: Instant,
+        last_preview_at: Instant,
+        preview_sequence: u64,
+    }
+
+    impl GraphicsCaptureApiHandler for LiveCapture {
+        type Flags = LiveStreamConfig;
+        type Error = CaptureError;
+
+        fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+            let interval = Duration::from_secs_f64(1.0 / f64::from(ctx.flags.fps));
+            Ok(Self {
+                config: ctx.flags,
+                last_stream_at: Instant::now() - interval,
+                last_preview_at: Instant::now() - LIVE_PREVIEW_INTERVAL,
+                preview_sequence: 0,
+            })
+        }
+
+        fn on_frame_arrived(
+            &mut self,
+            frame: &mut Frame,
+            _capture_control: InternalCaptureControl,
+        ) -> Result<(), Self::Error> {
+            let stream_interval = Duration::from_secs_f64(1.0 / f64::from(self.config.fps));
+            let stream_bus = live_stream_bus();
+            if live_stream_requested()
+                && stream_bus.receiver_count() > 0
+                && self.last_stream_at.elapsed() >= stream_interval
+            {
+                self.last_stream_at = Instant::now();
+                if let Ok(stream_frame) = encode_live_stream(frame, self.config) {
+                    let _ = stream_bus.send(stream_frame);
+                }
+            }
+
+            // Keep the low-bandwidth JPEG path available as a fallback even when
+            // no MP4 recording is running. This capture never opens a file encoder.
+            let preview_bus = live_preview_bus();
+            if live_preview_requested()
+                && preview_bus.receiver_count() > 0
+                && self.last_preview_at.elapsed() >= LIVE_PREVIEW_INTERVAL
+            {
+                self.last_preview_at = Instant::now();
+                self.preview_sequence = self.preview_sequence.saturating_add(1);
+                if let Ok(preview) = encode_live_preview(frame, self.preview_sequence) {
+                    let _ = preview_bus.send(preview);
+                }
+            }
+            Ok(())
+        }
+
+        fn on_closed(&mut self) -> Result<(), Self::Error> {
             Ok(())
         }
     }
@@ -628,6 +756,8 @@ mod imp {
     struct RecordingManager {
         general: Option<CaptureControl<GeneralCapture, CaptureError>>,
         rolling: Option<CaptureControl<RollingCapture, CaptureError>>,
+        live: Option<CaptureControl<LiveCapture, CaptureError>>,
+        live_config: Option<LiveStreamConfig>,
         recording_path: Option<PathBuf>,
         rolling_directory: Option<PathBuf>,
         last_clip_path: Option<PathBuf>,
@@ -649,6 +779,8 @@ mod imp {
             Self {
                 general: None,
                 rolling: None,
+                live: None,
+                live_config: None,
                 recording_path: None,
                 rolling_directory: None,
                 last_clip_path: None,
@@ -688,6 +820,14 @@ mod imp {
                         self.last_error = Some(format!("클립 버퍼 종료 오류: {error}"));
                     }
                 }
+            }
+            if self.live.as_ref().is_some_and(CaptureControl::is_finished) {
+                if let Some(control) = self.live.take() {
+                    if let Err(error) = control.wait() {
+                        self.last_error = Some(format!("실시간 중계 캡처 종료 오류: {error}"));
+                    }
+                }
+                self.live_config = None;
             }
         }
 
@@ -1024,6 +1164,40 @@ mod imp {
         ))
     }
 
+    fn live_window_settings(
+        window: Window,
+        config: LiveStreamConfig,
+        draw_border: DrawBorderSettings,
+    ) -> Settings<LiveStreamConfig, Window> {
+        Settings::new(
+            window,
+            CursorCaptureSettings::Default,
+            draw_border,
+            SecondaryWindowSettings::Default,
+            MinimumUpdateIntervalSettings::Default,
+            DirtyRegionSettings::Default,
+            ColorFormat::Bgra8,
+            config,
+        )
+    }
+
+    fn live_monitor_settings(
+        monitor: Monitor,
+        config: LiveStreamConfig,
+        draw_border: DrawBorderSettings,
+    ) -> Settings<LiveStreamConfig, Monitor> {
+        Settings::new(
+            monitor,
+            CursorCaptureSettings::Default,
+            draw_border,
+            SecondaryWindowSettings::Default,
+            MinimumUpdateIntervalSettings::Default,
+            DirtyRegionSettings::Default,
+            ColorFormat::Bgra8,
+            config,
+        )
+    }
+
     fn normalized_source(source: Option<&str>, default: &str) -> Result<&'static str, String> {
         match source.unwrap_or(default) {
             "monitor" => Ok("monitor"),
@@ -1034,6 +1208,57 @@ mod imp {
 
     pub(super) fn status() -> Result<RecordingStatus, String> {
         Ok(lock_manager()?.status())
+    }
+
+    pub(super) fn start_live_stream_capture(config: LiveStreamConfig) -> Result<(), String> {
+        ensure_capture_supported()?;
+        let existing = {
+            let mut manager = lock_manager()?;
+            manager.cleanup_finished();
+            if manager.live.is_some() && manager.live_config == Some(config) {
+                return Ok(());
+            }
+            manager.live.take()
+        };
+        if let Some(control) = existing {
+            control
+                .stop()
+                .map_err(|error| format!("기존 실시간 중계 캡처 중지 실패: {error}"))?;
+        }
+
+        let draw_border = draw_border_setting(&lock_manager()?);
+        let control = if let Ok(window) = league_window() {
+            LiveCapture::start_free_threaded(live_window_settings(window, config, draw_border))
+                .map_err(|error| format!("실시간 게임 창 캡처 시작 실패: {error}"))?
+        } else {
+            LiveCapture::start_free_threaded(live_monitor_settings(
+                monitor_for_general_recording()?,
+                config,
+                draw_border,
+            ))
+            .map_err(|error| format!("실시간 모니터 캡처 시작 실패: {error}"))?
+        };
+
+        let mut manager = lock_manager()?;
+        manager.live = Some(control);
+        manager.live_config = Some(config);
+        manager.last_error = None;
+        Ok(())
+    }
+
+    pub(super) fn stop_live_stream_capture() -> Result<(), String> {
+        let control = {
+            let mut manager = lock_manager()?;
+            manager.cleanup_finished();
+            manager.live_config = None;
+            manager.live.take()
+        };
+        if let Some(control) = control {
+            control
+                .stop()
+                .map_err(|error| format!("실시간 중계 캡처 중지 실패: {error}"))?;
+        }
+        Ok(())
     }
 
     fn start_recording_inner(
@@ -1440,7 +1665,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{RecordingSessionMetadata, RecordingStatus};
+    use super::{LiveStreamConfig, RecordingSessionMetadata, RecordingStatus};
 
     fn unsupported() -> String {
         "녹화 기능은 Windows 10 1903 이상에서 지원됩니다.".into()
@@ -1456,6 +1681,12 @@ mod imp {
         })
     }
 
+    pub(super) fn start_live_stream_capture(_config: LiveStreamConfig) -> Result<(), String> {
+        Err(unsupported())
+    }
+    pub(super) fn stop_live_stream_capture() -> Result<(), String> {
+        Ok(())
+    }
     pub(super) fn start_recording(_source: Option<&str>) -> Result<RecordingStatus, String> {
         Err(unsupported())
     }
@@ -1500,6 +1731,12 @@ mod imp {
     }
 }
 
+pub(crate) fn start_live_stream_capture(config: LiveStreamConfig) -> Result<(), String> {
+    imp::start_live_stream_capture(config)
+}
+pub(crate) fn stop_live_stream_capture() -> Result<(), String> {
+    imp::stop_live_stream_capture()
+}
 pub(crate) fn status() -> Result<RecordingStatus, String> {
     imp::status()
 }

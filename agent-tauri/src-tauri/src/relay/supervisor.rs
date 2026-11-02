@@ -3335,23 +3335,53 @@ where
                     .await;
             }
         }
-        IncomingMessage::LiveSfuControl { enabled, ttl_ms, url, room, token, codec } => {
+        IncomingMessage::LiveSfuControl {
+            enabled,
+            ttl_ms,
+            url,
+            room,
+            token,
+            codec,
+            width,
+            height,
+            fps,
+            bitrate,
+        } => {
             if session_bound {
                 let ttl = ttl_ms.unwrap_or(15_000);
-                let result = crate::live_sfu::control(app.clone(), enabled, ttl, url, room.clone(), token, codec.clone()).await;
+                let result = crate::live_sfu::control(
+                    app.clone(),
+                    enabled,
+                    ttl,
+                    url,
+                    room.clone(),
+                    token,
+                    codec.clone(),
+                    width,
+                    height,
+                    fps,
+                    bitrate,
+                )
+                .await;
                 state
                     .record_flight(
                         "recording_live_sfu",
                         format!(
-                            "enabled={enabled} ttl_ms={ttl} room={} codec={} result={}",
+                            "enabled={enabled} ttl_ms={ttl} room={} codec={} quality={}x{}@{} bitrate={} result={}",
                             room.as_deref().unwrap_or("-"),
                             codec.as_deref().unwrap_or("h264"),
+                            width.unwrap_or(1280),
+                            height.unwrap_or(720),
+                            fps.unwrap_or(15),
+                            bitrate.unwrap_or(3_000_000),
                             if result.is_ok() { "ok" } else { "error" }
                         ),
                     )
                     .await;
                 if let Err(error) = result {
-                    state.log(app, format!("LiveKit SFU 제어 실패: {error}")).await;
+                    state
+                        .log(app, format!("LiveKit SFU 제어 실패: {error}"))
+                        .await;
                 }
             }
         }

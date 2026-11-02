@@ -6,6 +6,17 @@ from relay import livekit_sfu
 
 
 class LiveKitSfuTests(unittest.TestCase):
+    def test_stream_profiles_include_higher_resolutions_and_are_bounded(self) -> None:
+        balanced = livekit_sfu.stream_profile("balanced")
+        high = livekit_sfu.stream_profile("high")
+        ultra = livekit_sfu.stream_profile("ultra")
+        self.assertEqual((balanced.width, balanced.height, balanced.fps), (1280, 720, 30))
+        self.assertEqual((high.width, high.height), (1920, 1080))
+        self.assertEqual((ultra.width, ultra.height), (2560, 1440))
+        self.assertLessEqual(ultra.bitrate, 20_000_000)
+        with self.assertRaises(ValueError):
+            livekit_sfu.stream_profile("4k")
+
     def test_publisher_token_is_room_scoped_and_publish_only(self) -> None:
         with patch.dict(os.environ, {
             "LIVEKIT_PUBLIC_URL": "wss://live.example.test",

@@ -4948,6 +4948,7 @@ async def ws_bot(websocket: WebSocket) -> None:
 async def internal_livekit_session(
     request: Request,
     discord_id: int,
+    profile: str = Query("balanced", min_length=1, max_length=16),
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     await _verify_internal_secret(request, x_relay_internal_secret)
@@ -4960,6 +4961,10 @@ async def internal_livekit_session(
         raise HTTPException(404, "agent not connected")
     if conn.trust_level_for_discord(discord_id) == "new_device":
         raise HTTPException(403, "live stream unavailable for new device")
+    try:
+        quality = livekit_sfu.stream_profile(profile)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     publisher = livekit_sfu.publisher_session(discord_id)
     viewer = livekit_sfu.viewer_session(discord_id)
     ok = await conn.send_command(discord_id, {
@@ -4970,6 +4975,10 @@ async def internal_livekit_session(
         "room": publisher.room,
         "token": publisher.token,
         "codec": "h264",
+        "width": quality.width,
+        "height": quality.height,
+        "fps": quality.fps,
+        "bitrate": quality.bitrate,
     })
     if not ok:
         raise HTTPException(502, "failed to start live publisher")
@@ -4981,9 +4990,11 @@ async def internal_livekit_session(
         "token": viewer.token,
         "expires_at": viewer.expires_at,
         "codec": "h264",
-        "width": 1280,
-        "height": 720,
-        "fps": 15,
+        "profile": quality.name,
+        "width": quality.width,
+        "height": quality.height,
+        "fps": quality.fps,
+        "bitrate": quality.bitrate,
     }, headers={"Cache-Control": "no-store"})
 
 
@@ -4991,6 +5002,7 @@ async def internal_livekit_session(
 async def internal_livekit_lease(
     request: Request,
     discord_id: int,
+    profile: str = Query("balanced", min_length=1, max_length=16),
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     await _verify_internal_secret(request, x_relay_internal_secret)
@@ -5003,6 +5015,10 @@ async def internal_livekit_lease(
         raise HTTPException(404, "agent not connected")
     if conn.trust_level_for_discord(discord_id) == "new_device":
         raise HTTPException(403, "live stream unavailable for new device")
+    try:
+        quality = livekit_sfu.stream_profile(profile)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
     publisher = livekit_sfu.publisher_session(discord_id)
     ok = await conn.send_command(discord_id, {
         "type": "live_sfu_control",
@@ -5012,6 +5028,10 @@ async def internal_livekit_lease(
         "room": publisher.room,
         "token": publisher.token,
         "codec": "h264",
+        "width": quality.width,
+        "height": quality.height,
+        "fps": quality.fps,
+        "bitrate": quality.bitrate,
     })
     if not ok:
         raise HTTPException(502, "failed to refresh live publisher")

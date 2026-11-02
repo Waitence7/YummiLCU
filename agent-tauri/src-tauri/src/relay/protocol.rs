@@ -58,6 +58,14 @@ pub(crate) enum IncomingMessage {
         token: Option<String>,
         #[serde(default)]
         codec: Option<String>,
+        #[serde(default)]
+        width: Option<u32>,
+        #[serde(default)]
+        height: Option<u32>,
+        #[serde(default)]
+        fps: Option<u32>,
+        #[serde(default)]
+        bitrate: Option<u64>,
     },
     #[serde(rename = "server_hello")]
     ServerHello {
@@ -204,14 +212,35 @@ impl IncomingMessage {
             {
                 Err("invalid live preview control")
             }
-            Self::LiveSfuControl { enabled, ttl_ms, url, room, token, codec }
-                if ttl_ms.is_some_and(|value| !(1_000..=30_000).contains(&value))
-                    || (*enabled && (
-                        url.as_deref().is_none_or(|value| value.is_empty() || value.len() > 2_048)
-                        || room.as_deref().is_none_or(|value| value.is_empty() || value.len() > 128)
-                        || token.as_deref().is_none_or(|value| value.len() < 32 || value.len() > 8_192 || !value.is_ascii())
-                        || codec.as_deref().is_some_and(|value| !matches!(value, "h264" | "av1"))
-                    )) =>
+            Self::LiveSfuControl {
+                enabled,
+                ttl_ms,
+                url,
+                room,
+                token,
+                codec,
+                width,
+                height,
+                fps,
+                bitrate,
+            } if ttl_ms.is_some_and(|value| !(1_000..=30_000).contains(&value))
+                || width.is_some_and(|value| !(640..=2560).contains(&value) || value % 2 != 0)
+                || height.is_some_and(|value| !(360..=1440).contains(&value) || value % 2 != 0)
+                || fps.is_some_and(|value| !(10..=60).contains(&value))
+                || bitrate.is_some_and(|value| !(500_000..=20_000_000).contains(&value))
+                || (*enabled
+                    && (url
+                        .as_deref()
+                        .is_none_or(|value| value.is_empty() || value.len() > 2_048)
+                        || room
+                            .as_deref()
+                            .is_none_or(|value| value.is_empty() || value.len() > 128)
+                        || token.as_deref().is_none_or(|value| {
+                            value.len() < 32 || value.len() > 8_192 || !value.is_ascii()
+                        })
+                        || codec
+                            .as_deref()
+                            .is_some_and(|value| !matches!(value, "h264" | "av1")))) =>
             {
                 Err("invalid live SFU control")
             }
@@ -946,7 +975,7 @@ mod tests {
     fn live_sfu_control_deserializes_and_bounds_lease() {
         assert_eq!(
             IncomingMessage::parse(
-                r#"{"type":"live_sfu_control","enabled":true,"ttl_ms":15000,"url":"wss://live.example","room":"yummi-live-42","token":"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789","codec":"h264"}"#
+                r#"{"type":"live_sfu_control","enabled":true,"ttl_ms":15000,"url":"wss://live.example","room":"yummi-live-42","token":"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789","codec":"h264","width":1920,"height":1080,"fps":30,"bitrate":7000000}"#
             )
             .unwrap(),
             IncomingMessage::LiveSfuControl {
@@ -956,6 +985,10 @@ mod tests {
                 room: Some("yummi-live-42".into()),
                 token: Some("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".into()),
                 codec: Some("h264".into()),
+                width: Some(1920),
+                height: Some(1080),
+                fps: Some(30),
+                bitrate: Some(7_000_000),
             }
         );
         assert!(IncomingMessage::parse(

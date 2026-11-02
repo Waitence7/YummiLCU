@@ -45,6 +45,31 @@ class LiveKitSession:
     expires_at: int
 
 
+@dataclass(frozen=True)
+class LiveStreamProfile:
+    name: str
+    width: int
+    height: int
+    fps: int
+    bitrate: int
+
+
+_STREAM_PROFILES = {
+    "data": LiveStreamProfile("data", 960, 540, 15, 1_500_000),
+    "balanced": LiveStreamProfile("balanced", 1280, 720, 30, 4_000_000),
+    "high": LiveStreamProfile("high", 1920, 1080, 30, 7_000_000),
+    "ultra": LiveStreamProfile("ultra", 2560, 1440, 30, 10_000_000),
+}
+
+
+def stream_profile(value: str | None) -> LiveStreamProfile:
+    key = (value or "balanced").strip().lower()
+    profile = _STREAM_PROFILES.get(key)
+    if profile is None:
+        raise ValueError("unsupported live stream profile")
+    return profile
+
+
 def _token(*, identity: str, room: str, can_publish: bool, can_subscribe: bool, can_publish_data: bool, name: str) -> tuple[str, int]:
     api_key = config.livekit_api_key()
     api_secret = config.livekit_api_secret()
