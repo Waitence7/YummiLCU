@@ -105,6 +105,7 @@ struct ExternalClickTestState {
     hovered: bool,
     mouse_down: bool,
     raw_mouse_down: bool,
+    click_gesture_owned: bool,
 }
 
 #[cfg(windows)]
@@ -1313,6 +1314,7 @@ fn external_mouse_input_thread() {
                 state.hovered = false;
                 state.mouse_down = false;
                 state.raw_mouse_down = was_down;
+                state.click_gesture_owned = false;
             }
             was_f9_down = f9_down;
             std::thread::sleep(Duration::from_millis(50));
@@ -1407,8 +1409,14 @@ fn external_mouse_input_thread() {
                 );
                 let hovered =
                     inside_primary || inside_alt || inside_primary_monitor || inside_alt_monitor;
+                if down && !was_down {
+                    // Gesture ownership is fixed at the physical DOWN edge. Entering
+                    // this hitbox while a button that started elsewhere is still held
+                    // must never turn the background drag into an overlay press/click.
+                    state.click_gesture_owned = hovered;
+                }
                 state.hovered = hovered;
-                state.mouse_down = hovered && down;
+                state.mouse_down = hovered && down && state.click_gesture_owned;
                 state.raw_mouse_down = down;
 
                 if down != was_down {
@@ -1423,10 +1431,13 @@ fn external_mouse_input_thread() {
                         state.x, state.y, state.width, state.height,
                         state.alt_x, state.alt_y, state.alt_width, state.alt_height,
                     ));
-                    if inside_primary || inside_alt || inside_primary_monitor || inside_alt_monitor
+                    let inside_now =
+                        inside_primary || inside_alt || inside_primary_monitor || inside_alt_monitor;
+                    let owned_event = if down { inside_now } else { state.click_gesture_owned };
+                    if owned_event
                     {
                         state.sequence = state.sequence.wrapping_add(1);
-                        if !down {
+                        if !down && inside_now {
                             state.click_count = state.click_count.wrapping_add(1);
                         }
                         state.event = if down { "down" } else { "up" }.into();
@@ -1443,6 +1454,9 @@ fn external_mouse_input_thread() {
                         }
                         .into();
                         state.event_at_ms = now;
+                    }
+                    if !down {
+                        state.click_gesture_owned = false;
                     }
                 }
             }
@@ -1762,7 +1776,10 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "clickCount": state.click_count,
         "hovered": state.hovered,
         "mouseDown": state.mouse_down,
-        "leftButtonDown": state.raw_mouse_down,
+        // Keep the legacy field overlay-owned so existing Game Bar builds cannot
+        // acquire a gesture merely by being entered while the button is held.
+        "leftButtonDown": state.raw_mouse_down && input_block_captured,
+        "physicalLeftButtonDown": state.raw_mouse_down,
         "inputBlockActive": input_block_active,
         "inputBlockCaptured": input_block_captured,
         "inputBlockedDownCount": blocked_down_count,
