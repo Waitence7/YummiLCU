@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - ".github/workflows/deploy-agent-beta-47-release.yml"
+      - ".github/workflows/deploy-agent-beta-49-release.yml"
 
 permissions:
   contents: write
