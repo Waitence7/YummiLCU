@@ -1226,7 +1226,10 @@ mod imp {
                 .map_err(|error| format!("기존 실시간 중계 캡처 중지 실패: {error}"))?;
         }
 
-        let draw_border = draw_border_setting(&lock_manager()?);
+        let draw_border = {
+            let manager = lock_manager()?;
+            draw_border_setting(&manager)
+        };
         let control = if let Ok(window) = league_window() {
             LiveCapture::start_free_threaded(live_window_settings(window, config, draw_border))
                 .map_err(|error| format!("실시간 게임 창 캡처 시작 실패: {error}"))?
