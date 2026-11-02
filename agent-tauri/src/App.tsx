@@ -5,7 +5,6 @@ import {
   completeTrayHide,
   freezeMainWindowMotion,
   reportWindowFailure,
-  startMainWindowDrag,
   stabilizeMainWindowRotation,
   syncMainWindowRotationMode,
   useMockBridge,
@@ -64,34 +63,6 @@ type TabId =
   | "voice"
   | "logs"
   | "patchNotes";
-
-const WINDOW_INTERACTIVE_SELECTOR = [
-  "button",
-  "input",
-  "textarea",
-  "select",
-  "option",
-  "a[href]",
-  "label",
-  "summary",
-  "video",
-  "audio",
-  "[contenteditable]",
-  "[tabindex]",
-  "[role=button]",
-  "[role=link]",
-  "[role=tab]",
-  "[role=checkbox]",
-  "[role=switch]",
-  "[role=slider]",
-  "[role=textbox]",
-  "[data-yummi-no-drag]",
-  ".yummi-resize-handle",
-].join(",");
-
-function isWindowInteractiveTarget(target: EventTarget | null) {
-  return target instanceof HTMLElement && target.closest(WINDOW_INTERACTIVE_SELECTOR) !== null;
-}
 
 const RESIZE_HANDLES: { direction: ResizeDirection; className: string }[] = [
   { direction: "North", className: "yummi-resize-north" },
@@ -287,29 +258,16 @@ export function App() {
     <div
       className="yummi-window-host"
       onPointerDownCapture={(event) => {
-        if (useMockBridge || event.button !== 0) return;
-        const target = event.target as HTMLElement;
-
-        // Keep the title bar's existing drag path (it also owns the first-use
-        // glide hint), but make every other non-interactive pixel in the window
-        // a drag hitbox as well. Controls keep only their own DOM bounds as
-        // no-drag hitboxes, so clicking a nearby gap still moves the window.
+        if (useMockBridge) return;
+        // Title-bar presses start a new drag, and start_main_window_drag already
+        // invalidates any previous inertia. Everything else freezes immediately.
         if (
-          target.closest("[data-yummi-drag-handle]") &&
-          !target.closest("[data-yummi-no-drag]")
+          (event.target as HTMLElement).closest("[data-yummi-drag-handle]") &&
+          !(event.target as HTMLElement).closest("[data-yummi-no-drag]")
         )
           return;
-
-        if (isWindowInteractiveTarget(target)) {
-          void freezeMainWindowMotion().catch((error) =>
-            reportWindowFailure("freeze_motion", error),
-          );
-          return;
-        }
-
-        event.preventDefault();
-        void startMainWindowDrag().catch((error) =>
-          reportWindowFailure("start_drag_surface", error),
+        void freezeMainWindowMotion().catch((error) =>
+          reportWindowFailure("freeze_motion", error),
         );
       }}
       onContextMenu={(event) => {
