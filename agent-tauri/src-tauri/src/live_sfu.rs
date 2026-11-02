@@ -292,19 +292,20 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
         .await
         .map_err(|error| format!("LiveKit H.264 track publish 실패: {error}"))?;
 
-    let publish_frame = |frame: crate::recording::LiveStreamFrame| -> Result<(), String> {
+    let publish_frame = |frame: crate::recording::LiveStreamFrame| -> Result<bool, String> {
         let buffer = copy_frame_to_i420(&frame)?;
         let mut video = VideoFrame::new(VideoRotation::VideoRotation0, buffer);
         video.timestamp_us = frame
             .captured_at_ms
             .saturating_mul(1_000)
             .min(i64::MAX as u64) as i64;
-        if !source.capture_frame(&video) {
-            return Err("LiveKit video source가 프레임을 거부했습니다.".into());
-        }
-        Ok(())
+        // NativeVideoSource may reject/drop an individual frame while its encoder or
+        // pacing queue is busy. That is a normal real-time backpressure signal, not
+        // a room/session failure. Reconnecting here causes overlapping LiveKit
+        // participants with the same identity and a DUPLICATE_IDENTITY loop.
+        Ok(source.capture_frame(&video))
     };
-    publish_frame(first)?;
+    let _ = publish_frame(first)?;
 
     let mut tick = interval(Duration::from_secs(1));
     loop {
@@ -338,7 +339,7 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
                 while let Ok(newer) = frames.try_recv() {
                     frame = newer;
                 }
-                publish_frame(frame)?;
+                let _ = publish_frame(frame)?;
             }
         }
     }
@@ -351,6 +352,15 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropped_capture_frame_is_not_a_session_error_contract() {
+        // capture_frame() returns bool because a native source may drop a frame under
+        // backpressure. The publisher must keep the room alive in that case.
+        let source = include_str!("live_sfu.rs");
+        assert!(source.contains("Ok(source.capture_frame(&video))"));
+        assert!(!source.contains("LiveKit video source가 프레임을 거부했습니다."));
+    }
 
     #[test]
     fn validates_only_secure_livekit_origins_in_release_shape() {
