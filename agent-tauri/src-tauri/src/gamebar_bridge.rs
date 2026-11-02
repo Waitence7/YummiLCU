@@ -1033,12 +1033,17 @@ unsafe extern "system" fn native_input_block_hook(
         Foundation::LRESULT,
         UI::WindowsAndMessaging::{
             CallNextHookEx, MSLLHOOKSTRUCT, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+            WM_MOUSEMOVE,
         },
     };
 
     if code >= 0 {
         let message = wparam.0 as u32;
-        if message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK || message == WM_LBUTTONUP {
+        if message == WM_LBUTTONDOWN
+            || message == WM_LBUTTONDBLCLK
+            || message == WM_LBUTTONUP
+            || message == WM_MOUSEMOVE
+        {
             let hook = &*(lparam.0 as *const MSLLHOOKSTRUCT);
             if let Ok(mut state) = native_input_block_state().lock() {
                 let inside = |rect: &NativeInputBlockRect| {
@@ -1063,6 +1068,14 @@ unsafe extern "system" fn native_input_block_hook(
                         || hit(rect.x + mx, rect.y + my, rect.width, rect.height)
                         || hit(rect.alt_x + mx, rect.alt_y + my, rect.alt_width, rect.alt_height)
                 };
+
+                // Once an overlay press owns the left button, suppress pointer motion
+                // as well as down/up. Otherwise the app behind the click-through overlay
+                // can receive WM_MOUSEMOVE while the physical button is held and start
+                // its own text/image/OLE drag, stealing the gesture from the overlay.
+                if message == WM_MOUSEMOVE && state.left_captured {
+                    return LRESULT(1);
+                }
 
                 if message == WM_LBUTTONUP && state.left_captured {
                     state.blocked_left_down = false;
