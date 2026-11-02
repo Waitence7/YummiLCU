@@ -191,7 +191,6 @@ namespace YummiGameBarWidget
         private volatile bool nativeInputRuntimeDragWanted;
         private bool nativeInputDeactivatedWhileIdle;
         private const double HiddenRuntimePanelOpacity = 0.60;
-        private const double RuntimeNativeDragBandHeight = 24.0;
         private const double RuntimeNativeDragThreshold = 2.0;
 
         public Widget()
@@ -1950,8 +1949,22 @@ namespace YummiGameBarWidget
         {
             for (var current = source; current != null; current = VisualTreeHelper.GetParent(current))
             {
-                if (current is Button) return true;
-                if (current == RootGrid) break;
+                // Panels are the default drag surface. Only actual controls keep
+                // their own hitbox so padding/background around them still drags.
+                if (current is Button || current is TextBox || current is ToggleSwitch ||
+                    current is Slider || current is ComboBox || current is WebView)
+                    return true;
+                if (current == YoutubeVideoHost || current == BrowserWebHost || current == RootGrid) break;
+            }
+            return source != null && (IsDescendantOf(source, YoutubeVideoHost) || IsDescendantOf(source, BrowserWebHost));
+        }
+
+        private static bool IsDescendantOf(DependencyObject source, DependencyObject ancestor)
+        {
+            if (source == null || ancestor == null) return false;
+            for (var current = source; current != null; current = VisualTreeHelper.GetParent(current))
+            {
+                if (current == ancestor) return true;
             }
             return false;
         }
@@ -2558,7 +2571,7 @@ namespace YummiGameBarWidget
             voiceChatPositionNeedsDefault = false;
         }
 
-        private void AddNativeInputBlockBand(JsonArray rects, FrameworkElement panel)
+        private void AddNativeInputBlockPanel(JsonArray rects, FrameworkElement panel)
         {
             if (panel == null || panel.Visibility != Visibility.Visible || panel.Opacity <= 0.01) return;
             var width = panel.ActualWidth > 0 ? panel.ActualWidth : (!double.IsNaN(panel.Width) ? panel.Width : 0.0);
@@ -2567,7 +2580,7 @@ namespace YummiGameBarWidget
             Windows.Foundation.Point local;
             try { local = panel.TransformToVisual(RootGrid).TransformPoint(new Windows.Foundation.Point(0, 0)); }
             catch { return; }
-            AddNativeInputBlockRect(rects, local, width, Math.Min(RuntimeNativeDragBandHeight, height));
+            AddNativeInputBlockRect(rects, local, width, height);
         }
 
         private void AddNativeInputBlockElement(JsonArray rects, FrameworkElement element)
@@ -2865,12 +2878,12 @@ namespace YummiGameBarWidget
                 var inputBlockRects = new JsonArray();
                 if (effectiveActive && pinnedOnly)
                 {
-                    AddNativeInputBlockBand(inputBlockRects, LcuPanel);
-                    AddNativeInputBlockBand(inputBlockRects, PartyPanel);
-                    AddNativeInputBlockBand(inputBlockRects, YoutubePanel);
-                    AddNativeInputBlockBand(inputBlockRects, BrowserPanel);
-                    AddNativeInputBlockBand(inputBlockRects, ClickNativePanel);
-                    AddNativeInputBlockBand(inputBlockRects, VoiceChatPanel);
+                    AddNativeInputBlockPanel(inputBlockRects, LcuPanel);
+                    AddNativeInputBlockPanel(inputBlockRects, PartyPanel);
+                    AddNativeInputBlockPanel(inputBlockRects, YoutubePanel);
+                    AddNativeInputBlockPanel(inputBlockRects, BrowserPanel);
+                    AddNativeInputBlockPanel(inputBlockRects, ClickNativePanel);
+                    AddNativeInputBlockPanel(inputBlockRects, VoiceChatPanel);
                     // These runtime controls receive their clicks through the Agent while
                     // Game Bar itself remains click-through. Swallow the original game
                     // click and forward only the overlay action.
@@ -3142,9 +3155,28 @@ namespace YummiGameBarWidget
             Windows.Foundation.Point origin;
             try { origin = panel.TransformToVisual(RootGrid).TransformPoint(new Windows.Foundation.Point(0, 0)); }
             catch { return false; }
-            var bandHeight = Math.Min(RuntimeNativeDragBandHeight, height);
+            var inside = point.X >= origin.X && point.X < origin.X + width
+                && point.Y >= origin.Y && point.Y < origin.Y + height;
+            if (!inside) return false;
+
+            // The full outer card is draggable. Native interactive surfaces keep
+            // only their own exact rectangle as a non-drag hitbox.
+            if (panel == ClickNativePanel && PointInsideRootElement(NativeHookHitbox, point)) return false;
+            if (panel == YoutubePanel && PointInsideRootElement(YoutubeVideoHost, point)) return false;
+            return true;
+        }
+
+        private bool PointInsideRootElement(FrameworkElement element, Windows.Foundation.Point point)
+        {
+            if (element == null || element.Visibility != Visibility.Visible || element.Opacity <= 0.01) return false;
+            var width = element.ActualWidth > 0 ? element.ActualWidth : (!double.IsNaN(element.Width) ? element.Width : 0.0);
+            var height = element.ActualHeight > 0 ? element.ActualHeight : (!double.IsNaN(element.Height) ? element.Height : 0.0);
+            if (width <= 0 || height <= 0) return false;
+            Windows.Foundation.Point origin;
+            try { origin = element.TransformToVisual(RootGrid).TransformPoint(new Windows.Foundation.Point(0, 0)); }
+            catch { return false; }
             return point.X >= origin.X && point.X < origin.X + width
-                && point.Y >= origin.Y && point.Y < origin.Y + bandHeight;
+                && point.Y >= origin.Y && point.Y < origin.Y + height;
         }
 
         private Windows.Foundation.Point NativeCursorToRoot(int cursorX, int cursorY, int monitorX, int monitorY, int mode)
@@ -3221,11 +3253,6 @@ namespace YummiGameBarWidget
                 monitorY,
                 out local,
                 out coordinateMode);
-
-            // The top 24 DIP remains a move handle in the pinned overlay. Do not
-            // forward a click from that band into the YouTube page at the same time.
-            if (inside && local.Y < RuntimeNativeDragBandHeight)
-                inside = false;
 
             var pressed = leftButtonDown && !youtubeNativeMouseWasDown;
             var released = !leftButtonDown && youtubeNativeMouseWasDown;

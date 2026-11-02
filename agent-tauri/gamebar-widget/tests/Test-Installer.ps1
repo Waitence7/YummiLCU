@@ -81,11 +81,13 @@ try {
   if ($widgetXaml -notmatch 'x:Name="OverlayToastHost"') { throw 'Shared overlay toast host must exist for transient notifications' }
   if ($widgetSource -notmatch 'ApplyOverlayToasts' -or $widgetSource -notmatch 'overlay_toasts') { throw 'Widget must render the shared overlay toast payload contract' }
   if ($widgetSource -notmatch 'HandlePinnedNativePanelDrag') { throw 'Pinned runtime must support native panel dragging' }
-  if ($widgetSource -notmatch 'RuntimeNativeDragBandHeight = 24\.0') { throw 'Pinned runtime drag must stay limited to the panel top band' }
+  if ($widgetSource -match 'RuntimeNativeDragBandHeight') { throw 'Pinned runtime drag must not use a fixed top-band height' }
+  if ($widgetSource -notmatch 'AddNativeInputBlockPanel') { throw 'Pinned runtime drag must block the full panel rectangle' }
+  if ($widgetSource -notmatch 'PointInsideRootElement\(NativeHookHitbox, point\)') { throw 'Native input button must retain its own non-drag hitbox' }
   if ($widgetSource -notmatch 'leftButtonDown') { throw 'Pinned runtime drag must consume raw native left-button state' }
   if ($widgetSource -notmatch 'HandlePinnedYoutubeNativeInputAsync') { throw 'Pinned runtime must forward native mouse input to YouTube' }
   if ($widgetSource -notmatch 'Input\.dispatchMouseEvent') { throw 'YouTube runtime input must use WebView2 DevTools mouse dispatch' }
-  if ($widgetSource -notmatch 'local\.Y < RuntimeNativeDragBandHeight') { throw 'YouTube runtime input must preserve the top drag band' }
+  if ($widgetSource -match 'local\.Y < RuntimeNativeDragBandHeight') { throw 'YouTube runtime input must not reserve a fixed top drag band' }
   Write-Host 'PASS: eye ghost, hard close, native input button, pinned runtime drag, and YouTube native input semantics'
   if ($widgetXaml -notmatch 'x:Name="BrowserPanel"' -or $widgetXaml -notmatch 'x:Name="BrowserAddressBox"') { throw 'Single-tab browser panel must exist' }
   if ($widgetSource -notmatch 'EnsureBrowserWebView2Async' -or $widgetSource -notmatch 'NormalizeBrowserInput') { throw 'Browser panel must use the shared WebView2 runtime and URL/search normalization' }
