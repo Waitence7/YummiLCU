@@ -872,6 +872,7 @@ async def _lifespan(app: FastAPI):
     app.state.http = aiohttp.ClientSession(timeout=timeout)
     app.state.redis = redis.from_url(config.redis_url(), decode_responses=True)
     app.state.connections = ConnectionManager()
+    app.state.livekit_profiles: dict[int, str] = {}
     app.state.tournament_broadcast_queue = asyncio.Queue(maxsize=TOURNAMENT_BROADCAST_QUEUE_MAX)
     app.state.tournament_broadcast_workers = [
         asyncio.create_task(
@@ -4949,6 +4950,7 @@ async def internal_livekit_session(
     request: Request,
     discord_id: int,
     profile: str = Query("balanced", min_length=1, max_length=16),
+    interactive: bool = Query(True),
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     await _verify_internal_secret(request, x_relay_internal_secret)
@@ -4962,11 +4964,23 @@ async def internal_livekit_session(
     if conn.trust_level_for_discord(discord_id) == "new_device":
         raise HTTPException(403, "live stream unavailable for new device")
     try:
-        quality = livekit_sfu.stream_profile(profile)
+        requested_quality = livekit_sfu.stream_profile(profile)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    profiles: dict[int, str] = request.app.state.livekit_profiles
+    if interactive:
+        quality = requested_quality
+        profiles[discord_id] = quality.name
+    else:
+        current_profile = profiles.get(discord_id)
+        quality = livekit_sfu.stream_profile(current_profile) if current_profile else requested_quality
+        profiles.setdefault(discord_id, quality.name)
     publisher = livekit_sfu.publisher_session(discord_id)
-    viewer = livekit_sfu.viewer_session(discord_id)
+    viewer = livekit_sfu.viewer_session(
+        discord_id,
+        can_publish_data=interactive,
+        name="Yummi Web Viewer" if interactive else "Yummi Shared Viewer",
+    )
     ok = await conn.send_command(discord_id, {
         "type": "live_sfu_control",
         "enabled": True,
@@ -5003,6 +5017,7 @@ async def internal_livekit_lease(
     request: Request,
     discord_id: int,
     profile: str = Query("balanced", min_length=1, max_length=16),
+    follow_current: bool = Query(False),
     x_relay_internal_secret: str | None = Header(None),
 ) -> JSONResponse:
     await _verify_internal_secret(request, x_relay_internal_secret)
@@ -5016,9 +5031,16 @@ async def internal_livekit_lease(
     if conn.trust_level_for_discord(discord_id) == "new_device":
         raise HTTPException(403, "live stream unavailable for new device")
     try:
-        quality = livekit_sfu.stream_profile(profile)
+        requested_quality = livekit_sfu.stream_profile(profile)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
+    profiles: dict[int, str] = request.app.state.livekit_profiles
+    current_profile = profiles.get(discord_id)
+    if follow_current and current_profile:
+        quality = livekit_sfu.stream_profile(current_profile)
+    else:
+        quality = requested_quality
+        profiles[discord_id] = quality.name
     publisher = livekit_sfu.publisher_session(discord_id)
     ok = await conn.send_command(discord_id, {
         "type": "live_sfu_control",

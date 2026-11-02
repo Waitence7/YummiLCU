@@ -49,6 +49,19 @@ class LiveKitSfuTests(unittest.TestCase):
         self.assertTrue(claims["video"]["canPublishData"])
         self.assertNotIn("canPublishSources", claims["video"])
 
+    def test_shared_viewer_token_cannot_publish_data(self) -> None:
+        with patch.dict(os.environ, {
+            "LIVEKIT_PUBLIC_URL": "wss://live.example.test",
+            "LIVEKIT_API_KEY": "test-key",
+            "LIVEKIT_API_SECRET": "0123456789abcdef0123456789abcdef",
+        }, clear=False):
+            session = livekit_sfu.viewer_session(42, can_publish_data=False, name="Yummi Shared Viewer")
+            claims = livekit_sfu.decode_unverified(session.token)
+        self.assertTrue(claims["video"]["canSubscribe"])
+        self.assertFalse(claims["video"]["canPublish"])
+        self.assertFalse(claims["video"]["canPublishData"])
+        self.assertEqual(claims["name"], "Yummi Shared Viewer")
+
 
 if __name__ == "__main__":
     unittest.main()

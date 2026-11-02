@@ -1,6 +1,10 @@
 port: 7880
 log_level: info
 
+# One publisher + up to 100 simultaneous viewers.
+room:
+  max_participants: 101
+
 rtc:
   tcp_port: 7881
   port_range_start: 50000

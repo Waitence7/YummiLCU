@@ -110,7 +110,12 @@ def publisher_session(discord_id: int) -> LiveKitSession:
     return LiveKitSession(config.livekit_public_url(), room, identity, token, exp)
 
 
-def viewer_session(discord_id: int) -> LiveKitSession:
+def viewer_session(
+    discord_id: int,
+    *,
+    can_publish_data: bool = True,
+    name: str = "Yummi Web Viewer",
+) -> LiveKitSession:
     room = room_name(discord_id)
     identity = f"viewer-{int(discord_id)}-{secrets.token_hex(8)}"
     token, exp = _token(
@@ -118,8 +123,8 @@ def viewer_session(discord_id: int) -> LiveKitSession:
         room=room,
         can_publish=False,
         can_subscribe=True,
-        can_publish_data=True,
-        name="Yummi Web Viewer",
+        can_publish_data=can_publish_data,
+        name=name,
     )
     return LiveKitSession(config.livekit_public_url(), room, identity, token, exp)
 

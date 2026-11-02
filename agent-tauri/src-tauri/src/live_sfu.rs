@@ -291,7 +291,11 @@ async fn wait_first_frame(
 }
 
 async fn run_session(config: SfuConfig, generation: u64) -> Result<(), String> {
-    let (room, mut events) = Room::connect(&config.url, &config.token, RoomOptions::default())
+    let (room, mut events) = Room::connect(
+        &config.url,
+        &config.token,
+        RoomOptions { auto_subscribe: false, dynacast: true, ..Default::default() },
+    )
         .await
         .map_err(|error| format!("LiveKit room 연결 실패: {error}"))?;
     let mut frames = crate::recording::subscribe_live_stream();
@@ -318,7 +322,7 @@ async fn run_session(config: SfuConfig, generation: u64) -> Result<(), String> {
                     max_framerate: f64::from(config.stream.fps),
                 }),
                 video_codec: config.codec,
-                simulcast: false,
+                simulcast: true,
                 source: TrackSource::Screenshare,
                 ..Default::default()
             },
@@ -409,6 +413,8 @@ mod tests {
         // backpressure. The publisher must keep the room alive in that case.
         let source = include_str!("live_sfu.rs");
         assert!(source.contains("Ok(source.capture_frame(&video))"));
+        assert!(source.contains("simulcast: true"));
+        assert!(source.contains("dynacast: true"));
     }
 
     #[test]
