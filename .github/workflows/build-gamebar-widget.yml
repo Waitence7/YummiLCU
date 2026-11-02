@@ -297,7 +297,14 @@ jobs:
         run: |
           $tag = "gamebar-v$env:VERSION"
           $path = "release-manifests/gamebar-latest.json"
-          $gamebar = [ordered]@{ version = $env:VERSION; releaseTag = $tag }
+          $publishedAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+          $manifestUrl = "https://github.com/$env:GITHUB_REPOSITORY/releases/download/$tag/gamebar-version.json"
+          $gamebar = [ordered]@{
+            version = $env:VERSION
+            releaseTag = $tag
+            manifestUrl = $manifestUrl
+            publishedAt = $publishedAt
+          }
           # Keep top-level fields for legacy Agents while newer Agents prefer gamebar.*.
           $index = [ordered]@{
             schemaVersion = 1
@@ -306,13 +313,23 @@ jobs:
             gamebar = $gamebar
           } | ConvertTo-Json -Depth 3 -Compress
           $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($index + "`n"))
-          $sha = gh api "repos/$env:GITHUB_REPOSITORY/contents/$path?ref=main" --jq '.sha' 2>$null
+
+          # Tag-triggered runs have intermittently failed to resolve ?ref=main even
+          # though main exists. The contents API already defaults to the repository's
+          # default branch, so avoid an explicit ref/branch and update that file directly.
+          $sha = ""
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            $sha = gh api "repos/$env:GITHUB_REPOSITORY/contents/$path" --jq '.sha' 2>$null
+            if ($LASTEXITCODE -eq 0 -and $sha) { break }
+            Start-Sleep -Seconds $attempt
+          }
+          if (-not $sha) { throw "Failed to resolve existing Game Bar latest index" }
+
           $payload = @{
             message = "chore(gamebar): publish latest index $tag"
             content = $content
-            branch = "main"
+            sha = $sha
           }
-          if ($sha) { $payload['sha'] = $sha }
           $payload | ConvertTo-Json -Compress | gh api --method PUT "repos/$env:GITHUB_REPOSITORY/contents/$path" --input - | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Failed to publish Game Bar latest index" }
           Write-Host "Published Game Bar latest index: $tag"

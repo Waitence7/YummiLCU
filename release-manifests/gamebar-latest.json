@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "version": "0.1.118",
-  "releaseTag": "gamebar-v0.1.118",
+  "version": "0.1.119",
+  "releaseTag": "gamebar-v0.1.119",
   "gamebar": {
-    "version": "0.1.118",
-    "releaseTag": "gamebar-v0.1.118",
-    "manifestUrl": "https://github.com/Waitence7/YummiLCU/releases/download/gamebar-v0.1.118/gamebar-version.json",
-    "publishedAt": "2026-11-02T08:58:55Z"
+    "version": "0.1.119",
+    "releaseTag": "gamebar-v0.1.119",
+    "manifestUrl": "https://github.com/Waitence7/YummiLCU/releases/download/gamebar-v0.1.119/gamebar-version.json",
+    "publishedAt": "2026-11-02T13:29:42Z"
   }
 }
