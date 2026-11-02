@@ -1,0 +1,13 @@
+port: 7880
+log_level: info
+
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 60000
+  use_external_ip: true
+
+# Copy this file to livekit.yaml and replace both values.
+# Keep the same key/secret in Relay's LIVEKIT_API_KEY/LIVEKIT_API_SECRET.
+keys:
+  replace-with-api-key: replace-with-at-least-32-byte-secret

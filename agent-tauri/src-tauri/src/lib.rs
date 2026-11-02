@@ -9,7 +9,7 @@ mod error;
 mod gamebar_bridge;
 mod http_diagnostics;
 mod lcu;
-mod live_webrtc;
+mod live_sfu;
 mod platform;
 mod recording;
 mod recording_http;

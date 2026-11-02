@@ -93,6 +93,20 @@ def relay_session_ttl_sec() -> int:
     return int(_env("RELAY_SESSION_TTL_SEC", "600"))
 
 
+def livekit_public_url() -> str:
+    return _env("LIVEKIT_PUBLIC_URL").rstrip("/")
+
+
+def livekit_api_key() -> str:
+    return _env("LIVEKIT_API_KEY")
+
+
+def livekit_api_secret() -> str:
+    value = _env("LIVEKIT_API_SECRET")
+    if value and len(value.encode("utf-8")) < 16:
+        raise RuntimeError("LIVEKIT_API_SECRET must be at least 16 bytes")
+    return value
+
 def redis_url() -> str:
     return _env("REDIS_URL", "redis://127.0.0.1:6379/0")
 

@@ -1871,45 +1871,6 @@ async fn connect_once(
         }
     }));
 
-    // Multi-viewer live stream: one 720p/15fps upload per Agent. Relay fans the
-    // newest frame out to every web viewer, so Agent upload bandwidth does not
-    // grow with the viewer count. The Relay-issued lease controls capture work.
-    let stream_url = config.live_stream_upload_url(&session.session_id)?;
-    let stream_token = session.ws_token.clone();
-    let mut stream_rx = crate::recording::subscribe_live_stream();
-    let _live_stream_upload_task = AbortTaskOnDrop(tokio::spawn(async move {
-        let client = match reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(4))
-            .pool_max_idle_per_host(2)
-            .build()
-        {
-            Ok(client) => client,
-            Err(_) => return,
-        };
-        loop {
-            let mut frame = match stream_rx.recv().await {
-                Ok(frame) => frame,
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => return,
-            };
-            while let Ok(newer) = stream_rx.try_recv() {
-                frame = newer;
-            }
-            let _ = client
-                .post(&stream_url)
-                .header("x-yummi-ws-token", &stream_token)
-                .header(reqwest::header::CONTENT_TYPE, "image/jpeg")
-                .header("x-yummi-stream-sequence", frame.sequence.to_string())
-                .header("x-yummi-stream-captured-at", frame.captured_at_ms.to_string())
-                .header("x-yummi-stream-width", frame.width.to_string())
-                .header("x-yummi-stream-height", frame.height.to_string())
-                .body(frame.jpeg)
-                .send()
-                .await;
-        }
-    }));
-
     let (heartbeat_failure_tx, mut heartbeat_failure_rx) = mpsc::channel::<String>(1);
     let heartbeat_awaiting = Arc::new(Mutex::new(None::<Instant>));
     let heartbeat_writer = Arc::clone(&writer);
@@ -3139,14 +3100,6 @@ where
             let action_label = parsed_action.map(Action::as_str).unwrap_or("unknown");
             let result = match parsed_action {
                 None => CommandResult::failure(request_id, "unknown action"),
-                Some(Action::LiveWebrtcOffer) => match crate::live_webrtc::answer_offer(&payload).await {
-                    Ok(answer) => CommandResult::success(
-                        request_id,
-                        "WebRTC 실시간 중계 연결 준비 완료",
-                        answer,
-                    ),
-                    Err(error) => CommandResult::failure(request_id, error),
-                },
                 Some(Action::WebInput) => match sanitize_web_input_payload(&payload) {
                     Some(event) => {
                         let _ = app.emit("yummi://web-input", event.clone());
@@ -3382,15 +3335,24 @@ where
                     .await;
             }
         }
-        IncomingMessage::LiveStreamControl { enabled, ttl_ms } => {
+        IncomingMessage::LiveSfuControl { enabled, ttl_ms, url, room, token, codec } => {
             if session_bound {
-                crate::recording::set_live_stream_enabled(enabled, ttl_ms.unwrap_or(5_000));
+                let ttl = ttl_ms.unwrap_or(15_000);
+                let result = crate::live_sfu::control(enabled, ttl, url, room.clone(), token, codec.clone()).await;
                 state
                     .record_flight(
-                        "recording_live_stream",
-                        format!("enabled={enabled} ttl_ms={}", ttl_ms.unwrap_or(5_000)),
+                        "recording_live_sfu",
+                        format!(
+                            "enabled={enabled} ttl_ms={ttl} room={} codec={} result={}",
+                            room.as_deref().unwrap_or("-"),
+                            codec.as_deref().unwrap_or("h264"),
+                            if result.is_ok() { "ok" } else { "error" }
+                        ),
                     )
                     .await;
+                if let Err(error) = result {
+                    state.log(app, format!("LiveKit SFU 제어 실패: {error}")).await;
+                }
             }
         }
         IncomingMessage::LiveGamePolling { enabled } => {

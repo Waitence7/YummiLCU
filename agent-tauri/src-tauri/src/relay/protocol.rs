@@ -45,11 +45,19 @@ pub(crate) enum IncomingMessage {
         #[serde(default)]
         ttl_ms: Option<u64>,
     },
-    #[serde(rename = "live_stream_control")]
-    LiveStreamControl {
+    #[serde(rename = "live_sfu_control")]
+    LiveSfuControl {
         enabled: bool,
         #[serde(default)]
         ttl_ms: Option<u64>,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        room: Option<String>,
+        #[serde(default)]
+        token: Option<String>,
+        #[serde(default)]
+        codec: Option<String>,
     },
     #[serde(rename = "server_hello")]
     ServerHello {
@@ -196,10 +204,16 @@ impl IncomingMessage {
             {
                 Err("invalid live preview control")
             }
-            Self::LiveStreamControl { ttl_ms, .. }
-                if ttl_ms.is_some_and(|value| !(1_000..=15_000).contains(&value)) =>
+            Self::LiveSfuControl { enabled, ttl_ms, url, room, token, codec }
+                if ttl_ms.is_some_and(|value| !(1_000..=30_000).contains(&value))
+                    || (*enabled && (
+                        url.as_deref().is_none_or(|value| value.is_empty() || value.len() > 2_048)
+                        || room.as_deref().is_none_or(|value| value.is_empty() || value.len() > 128)
+                        || token.as_deref().is_none_or(|value| value.len() < 32 || value.len() > 8_192 || !value.is_ascii())
+                        || codec.as_deref().is_some_and(|value| !matches!(value, "h264" | "av1"))
+                    )) =>
             {
-                Err("invalid live stream control")
+                Err("invalid live SFU control")
             }
             Self::ServerHello { capabilities, .. }
                 if capabilities.len() > 64
@@ -282,7 +296,6 @@ pub(crate) enum Action {
     CheckPartyMembers,
     KickPartyMember,
     WebInput,
-    LiveWebrtcOffer,
 }
 
 impl Action {
@@ -317,7 +330,6 @@ impl Action {
             "check_party_members" => Self::CheckPartyMembers,
             "kick_party_member" => Self::KickPartyMember,
             "web_input" => Self::WebInput,
-            "live_webrtc_offer" => Self::LiveWebrtcOffer,
             _ => return None,
         })
     }
@@ -353,7 +365,6 @@ impl Action {
             Self::CheckPartyMembers => "check_party_members",
             Self::KickPartyMember => "kick_party_member",
             Self::WebInput => "web_input",
-            Self::LiveWebrtcOffer => "live_webrtc_offer",
         }
     }
 
@@ -506,7 +517,7 @@ pub(crate) struct AgentCapabilities {
     update_diagnostics: bool,
     diagnostic_reports: bool,
     diagnostic_log_chunks: bool,
-    live_webrtc_v1: bool,
+    live_sfu_h264_v1: bool,
 }
 
 impl AgentCapabilities {
@@ -537,7 +548,7 @@ impl AgentCapabilities {
             update_diagnostics: true,
             diagnostic_reports: true,
             diagnostic_log_chunks: true,
-            live_webrtc_v1: true,
+            live_sfu_h264_v1: true,
         }
     }
 }
@@ -932,19 +943,23 @@ mod tests {
     }
 
     #[test]
-    fn live_stream_control_deserializes_and_bounds_lease() {
+    fn live_sfu_control_deserializes_and_bounds_lease() {
         assert_eq!(
             IncomingMessage::parse(
-                r#"{"type":"live_stream_control","enabled":true,"ttl_ms":5000}"#
+                r#"{"type":"live_sfu_control","enabled":true,"ttl_ms":15000,"url":"wss://live.example","room":"yummi-live-42","token":"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789","codec":"h264"}"#
             )
             .unwrap(),
-            IncomingMessage::LiveStreamControl {
+            IncomingMessage::LiveSfuControl {
                 enabled: true,
-                ttl_ms: Some(5000),
+                ttl_ms: Some(15_000),
+                url: Some("wss://live.example".into()),
+                room: Some("yummi-live-42".into()),
+                token: Some("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".into()),
+                codec: Some("h264".into()),
             }
         );
         assert!(IncomingMessage::parse(
-            r#"{"type":"live_stream_control","enabled":true,"ttl_ms":999}"#
+            r#"{"type":"live_sfu_control","enabled":true,"ttl_ms":999,"url":"wss://live.example","room":"r","token":"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"}"#
         )
         .is_err());
     }
@@ -1034,7 +1049,7 @@ mod tests {
         assert_eq!(value["capabilities"]["update_diagnostics"], true);
         assert_eq!(value["capabilities"]["diagnostic_reports"], true);
         assert_eq!(value["capabilities"]["diagnostic_log_chunks"], true);
-        assert_eq!(value["capabilities"]["live_webrtc_v1"], true);
+        assert_eq!(value["capabilities"]["live_sfu_h264_v1"], true);
     }
 
     #[test]
@@ -1118,7 +1133,6 @@ mod tests {
             "check_party_members",
             "kick_party_member",
             "web_input",
-            "live_webrtc_offer",
         ];
         for action_name in relay_actions {
             let action = Action::parse(action_name).expect("Relay action must remain supported");

@@ -51,11 +51,12 @@ pub(crate) fn subscribe_live_preview() -> broadcast::Receiver<LivePreviewFrame> 
 
 #[derive(Clone, Debug)]
 pub(crate) struct LiveStreamFrame {
-    pub(crate) sequence: u64,
     pub(crate) captured_at_ms: u64,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) jpeg: Vec<u8>,
+    pub(crate) y: Vec<u8>,
+    pub(crate) u: Vec<u8>,
+    pub(crate) v: Vec<u8>,
 }
 
 static LIVE_STREAM_BUS: OnceLock<broadcast::Sender<LiveStreamFrame>> = OnceLock::new();
@@ -175,7 +176,6 @@ mod imp {
     const LIVE_STREAM_INTERVAL: Duration = Duration::from_millis(66);
     const LIVE_STREAM_MAX_WIDTH: u32 = 1280;
     const LIVE_STREAM_MAX_HEIGHT: u32 = 720;
-    const LIVE_STREAM_JPEG_QUALITY: u8 = 58;
     const SEGMENT_DURATION: Duration = Duration::from_secs(10);
     const MAX_BUFFER_DURATION: Duration = Duration::from_secs(75);
     const MIN_SEGMENT_DURATION: Duration = Duration::from_millis(300);
@@ -208,7 +208,6 @@ mod imp {
         last_preview_at: Instant,
         preview_sequence: u64,
         last_stream_at: Instant,
-        stream_sequence: u64,
     }
 
     fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
@@ -284,14 +283,100 @@ mod imp {
         Ok(LivePreviewFrame { sequence, captured_at_ms, width, height, jpeg })
     }
 
-    fn encode_live_stream(frame: &mut Frame, sequence: u64) -> Result<LiveStreamFrame, CaptureError> {
-        let (captured_at_ms, width, height, jpeg) = encode_jpeg_frame(
-            frame,
+    fn clamp_u8(value: i32) -> u8 {
+        value.clamp(0, 255) as u8
+    }
+
+    fn sample_bgra(raw: &[u8], row_pitch: usize, source_width: u32, source_height: u32,
+        target_x: u32, target_y: u32, width: u32, height: u32) -> Result<(i32, i32, i32), CaptureError> {
+        let source_x = (u64::from(target_x) * u64::from(source_width) / u64::from(width)) as usize;
+        let source_y = (u64::from(target_y) * u64::from(source_height) / u64::from(height)) as usize;
+        let index = source_y
+            .saturating_mul(row_pitch)
+            .saturating_add(source_x.saturating_mul(4));
+        if index + 2 >= raw.len() {
+            return Err("실시간 중계 픽셀 범위가 올바르지 않습니다.".into());
+        }
+        Ok((raw[index + 2] as i32, raw[index + 1] as i32, raw[index] as i32))
+    }
+
+    fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
+        clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16)
+    }
+
+    fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
+        clamp_u8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128)
+    }
+
+    fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
+        clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128)
+    }
+
+    fn encode_live_stream(frame: &mut Frame) -> Result<LiveStreamFrame, CaptureError> {
+        let mut buffer = frame
+            .buffer()
+            .map_err(|error| format!("실시간 중계 프레임 읽기 실패: {error}"))?;
+        let source_width = buffer.width();
+        let source_height = buffer.height();
+        let row_pitch = buffer.row_pitch() as usize;
+        let (mut width, mut height) = bounded_dimensions(
+            source_width,
+            source_height,
             LIVE_STREAM_MAX_WIDTH,
             LIVE_STREAM_MAX_HEIGHT,
-            LIVE_STREAM_JPEG_QUALITY,
-        )?;
-        Ok(LiveStreamFrame { sequence, captured_at_ms, width, height, jpeg })
+        );
+        width &= !1;
+        height &= !1;
+        if width < 2 || height < 2 {
+            return Err("실시간 중계 프레임 크기가 올바르지 않습니다.".into());
+        }
+        let raw = buffer.as_raw_buffer();
+        let mut y = vec![0u8; width as usize * height as usize];
+        let chroma_width = width / 2;
+        let chroma_height = height / 2;
+        let mut u = vec![0u8; chroma_width as usize * chroma_height as usize];
+        let mut v = vec![0u8; chroma_width as usize * chroma_height as usize];
+
+        for target_y in 0..height {
+            for target_x in 0..width {
+                let (r, g, b) = sample_bgra(
+                    raw, row_pitch, source_width, source_height, target_x, target_y, width, height,
+                )?;
+                y[target_y as usize * width as usize + target_x as usize] = rgb_to_y(r, g, b);
+            }
+        }
+        for cy in 0..chroma_height {
+            for cx in 0..chroma_width {
+                let mut sum_r = 0i32;
+                let mut sum_g = 0i32;
+                let mut sum_b = 0i32;
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let (r, g, b) = sample_bgra(
+                            raw, row_pitch, source_width, source_height, cx * 2 + dx, cy * 2 + dy, width, height,
+                        )?;
+                        sum_r += r;
+                        sum_g += g;
+                        sum_b += b;
+                    }
+                }
+                let r = (sum_r + 2) / 4;
+                let g = (sum_g + 2) / 4;
+                let b = (sum_b + 2) / 4;
+                let index = cy as usize * chroma_width as usize + cx as usize;
+                u[index] = rgb_to_u(r, g, b);
+                v[index] = rgb_to_v(r, g, b);
+            }
+        }
+
+        Ok(LiveStreamFrame {
+            captured_at_ms: timestamp_ms() as u64,
+            width,
+            height,
+            y,
+            u,
+            v,
+        })
     }
 
     impl GraphicsCaptureApiHandler for GeneralCapture {
@@ -308,7 +393,6 @@ mod imp {
                 last_preview_at: Instant::now() - LIVE_PREVIEW_INTERVAL,
                 preview_sequence: 0,
                 last_stream_at: Instant::now() - LIVE_STREAM_INTERVAL,
-                stream_sequence: 0,
             })
         }
 
@@ -328,8 +412,7 @@ mod imp {
                 && self.last_stream_at.elapsed() >= LIVE_STREAM_INTERVAL
             {
                 self.last_stream_at = Instant::now();
-                self.stream_sequence = self.stream_sequence.saturating_add(1);
-                if let Ok(stream_frame) = encode_live_stream(frame, self.stream_sequence) {
+                if let Ok(stream_frame) = encode_live_stream(frame) {
                     let _ = stream_bus.send(stream_frame);
                 }
             }

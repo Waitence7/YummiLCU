@@ -417,14 +417,6 @@ impl Config {
         Ok(url.into())
     }
 
-    pub(crate) fn live_stream_upload_url(&self, session_id: &str) -> AgentResult<String> {
-        let mut url = validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
-        url.set_path("/lcu/live-stream");
-        url.set_query(None);
-        url.query_pairs_mut().append_pair("session_id", session_id);
-        Ok(url.into())
-    }
-
     pub(crate) fn recording_context_url(
         &self,
         session_id: &str,
@@ -613,18 +605,6 @@ mod tests {
                 .replay_upload_target_url("session", "KR-123")
                 .unwrap(),
             "https://relay.example/lcu/replay-upload-target?session_id=session&game_id=KR-123"
-        );
-    }
-
-    #[test]
-    fn live_stream_upload_url_is_session_scoped() {
-        let config = Config {
-            relay_public_base_url: "https://relay.example".into(),
-            ..Config::default()
-        };
-        assert_eq!(
-            config.live_stream_upload_url("session").unwrap(),
-            "https://relay.example/lcu/live-stream?session_id=session"
         );
     }
 
