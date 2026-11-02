@@ -35,6 +35,7 @@ class LiveKitSfuTests(unittest.TestCase):
         self.assertEqual(claims["video"]["room"], "yummi-live-42")
         self.assertFalse(claims["video"]["canPublish"])
         self.assertTrue(claims["video"]["canSubscribe"])
+        self.assertTrue(claims["video"]["canPublishData"])
         self.assertNotIn("canPublishSources", claims["video"])
 
 

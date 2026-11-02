@@ -45,7 +45,7 @@ class LiveKitSession:
     expires_at: int
 
 
-def _token(*, identity: str, room: str, can_publish: bool, can_subscribe: bool, name: str) -> tuple[str, int]:
+def _token(*, identity: str, room: str, can_publish: bool, can_subscribe: bool, can_publish_data: bool, name: str) -> tuple[str, int]:
     api_key = config.livekit_api_key()
     api_secret = config.livekit_api_secret()
     if not api_key or not api_secret:
@@ -63,7 +63,7 @@ def _token(*, identity: str, room: str, can_publish: bool, can_subscribe: bool, 
             "room": room,
             "canPublish": can_publish,
             "canSubscribe": can_subscribe,
-            "canPublishData": False,
+            "canPublishData": can_publish_data,
             **({"canPublishSources": ["screen_share"]} if can_publish else {}),
             "canUpdateOwnMetadata": False,
         },
@@ -79,6 +79,7 @@ def publisher_session(discord_id: int) -> LiveKitSession:
         room=room,
         can_publish=True,
         can_subscribe=False,
+        can_publish_data=False,
         name="Yummi Agent",
     )
     return LiveKitSession(config.livekit_public_url(), room, identity, token, exp)
@@ -92,6 +93,7 @@ def viewer_session(discord_id: int) -> LiveKitSession:
         room=room,
         can_publish=False,
         can_subscribe=True,
+        can_publish_data=True,
         name="Yummi Web Viewer",
     )
     return LiveKitSession(config.livekit_public_url(), room, identity, token, exp)

@@ -2999,6 +2999,9 @@ namespace YummiGameBarWidget
                 var gamebarStoredX = (int)response.GetNamedNumber("gamebarStoredCursorX", 0);
                 var gamebarStoredY = (int)response.GetNamedNumber("gamebarStoredCursorY", 0);
                 var gamebarAgeMs = (ulong)Math.Max(0, response.GetNamedNumber("gamebarCursorAgeMs", 0));
+                var remotePointerVisible = response.GetNamedBoolean("remotePointerVisible", false);
+                var remotePointerX = Math.Max(0.0, Math.Min(1.0, response.GetNamedNumber("remotePointerX", 0.5)));
+                var remotePointerY = Math.Max(0.0, Math.Min(1.0, response.GetNamedNumber("remotePointerY", 0.5)));
 
                 var fallbackHovered =
                     PointInRect(cursorX, cursorY, rectX, rectY, rectWidth, rectHeight) ||
@@ -3023,6 +3026,7 @@ namespace YummiGameBarWidget
                 UpdateCursorDiagnosticMarkers(
                     physicalX, physicalY, logicalX, logicalY, cursorInfoX, cursorInfoY, cursorInfoValid,
                     gamebarPrimaryX, gamebarPrimaryY, gamebarAltX, gamebarAltY, cursorX, cursorY);
+                UpdateRemotePointerMarker(remotePointerVisible, remotePointerX, remotePointerY);
 
                 ClickNativeResult.Text =
                     "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError +
@@ -3418,6 +3422,22 @@ namespace YummiGameBarWidget
             Place(CursorMarkerGameBarPrimary, gamebarPrimaryX, gamebarPrimaryY);
             Place(CursorMarkerGameBarAlt, gamebarAltX, gamebarAltY);
             Place(CursorMarkerSelected, selectedX, selectedY);
+        }
+
+        private void UpdateRemotePointerMarker(bool visible, double normalizedX, double normalizedY)
+        {
+            if (RemotePointerOverlay == null || RemotePointerMarker == null || RootGrid == null) return;
+            if (!visible || !HudPreferences.Visible || RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0)
+            {
+                RemotePointerMarker.Visibility = Visibility.Collapsed;
+                return;
+            }
+            RemotePointerOverlay.Visibility = Visibility.Visible;
+            var x = Math.Max(0.0, Math.Min(1.0, normalizedX)) * RootGrid.ActualWidth;
+            var y = Math.Max(0.0, Math.Min(1.0, normalizedY)) * RootGrid.ActualHeight;
+            Canvas.SetLeft(RemotePointerMarker, x - 11.0);
+            Canvas.SetTop(RemotePointerMarker, y - 11.0);
+            RemotePointerMarker.Visibility = Visibility.Visible;
         }
 
         private async Task<string> SendAgentCommandAsync(string payload)

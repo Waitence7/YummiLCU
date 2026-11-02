@@ -46,6 +46,14 @@ type WebInputPayload = {
   value?: string | number | boolean | null;
 };
 
+type LivePointerPayload = {
+  x: number;
+  y: number;
+  visible: boolean;
+  updatedAtMs: number;
+  viewer: string;
+};
+
 type TabId =
   | "guild"
   | "history"
@@ -104,6 +112,7 @@ export function App() {
   const { state, recent, actionError, actions } = useAgentState();
   const [tab, setTab] = useState<TabId>("guild");
   const [webInput, setWebInput] = useState<WebInputPayload | null>(null);
+  const [livePointer, setLivePointer] = useState<LivePointerPayload | null>(null);
 
   useEffect(() => {
     if (useMockBridge) return;
@@ -210,6 +219,36 @@ export function App() {
 
   useEffect(() => {
     if (useMockBridge) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let staleTimer: number | undefined;
+
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<LivePointerPayload>("yummi://live-pointer", ({ payload }) => {
+          if (!Number.isFinite(payload.x) || !Number.isFinite(payload.y)) return;
+          setLivePointer(payload.visible ? payload : null);
+          if (staleTimer !== undefined) window.clearTimeout(staleTimer);
+          if (payload.visible) {
+            staleTimer = window.setTimeout(() => setLivePointer(null), 1_000);
+          }
+        }),
+      )
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      })
+      .catch((error) => void reportWindowFailure("live_pointer_listener", error));
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      if (staleTimer !== undefined) window.clearTimeout(staleTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (useMockBridge) return;
     void syncMainWindowRotationMode().catch((error) =>
       reportWindowFailure("sync_rotation", error),
     );
@@ -242,6 +281,21 @@ export function App() {
       }}
     >
       <WindowResizeHandles />
+      {livePointer && (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute z-[120] -translate-x-1/2 -translate-y-1/2"
+          style={{
+            left: `${Math.max(0, Math.min(1, livePointer.x)) * 100}%`,
+            top: `${Math.max(0, Math.min(1, livePointer.y)) * 100}%`,
+          }}
+        >
+          <div className="relative h-6 w-6 rounded-full border-2 border-white bg-violet-600/85 shadow-lg shadow-violet-500/40">
+            <div className="absolute left-1/2 top-1/2 h-1.5 w-1.5 -translate-x-1/2 -translate-y-1/2 rounded-full bg-white" />
+            <div className="absolute left-5 top-[-10px] whitespace-nowrap rounded bg-slate-950/90 px-1.5 py-0.5 text-[9px] font-bold text-white">WEB</div>
+          </div>
+        </div>
+      )}
       {webInput && (
         <div className="pointer-events-none absolute right-4 top-12 z-[100] max-w-xs rounded-xl border border-indigo-200 bg-white/95 px-4 py-3 text-xs shadow-xl backdrop-blur">
           <div className="font-semibold text-indigo-700">웹 입력 수신</div>

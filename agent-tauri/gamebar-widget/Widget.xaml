@@ -63,6 +63,15 @@
       <Grid x:Name="CursorMarkerGameBarStored" Visibility="Collapsed"><Ellipse Width="10" Height="10" Fill="#CCAF52DE" Stroke="White" StrokeThickness="1"/><TextBlock Text="GS" Foreground="White" FontSize="5" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
       <Grid x:Name="CursorMarkerSelected" Visibility="Collapsed"><Ellipse Width="18" Height="18" Fill="#663A86FF" Stroke="#FF3A86FF" StrokeThickness="2"/><TextBlock Text="S" Foreground="White" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
     </Canvas>
+    <Canvas x:Name="RemotePointerOverlay" IsHitTestVisible="False" Canvas.ZIndex="10000">
+      <Grid x:Name="RemotePointerMarker" Visibility="Collapsed">
+        <Ellipse Width="22" Height="22" Fill="#CC6C5CE7" Stroke="White" StrokeThickness="2"/>
+        <Ellipse Width="6" Height="6" Fill="White" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        <Border Background="#E6111522" CornerRadius="5" Padding="5,2" Margin="18,-12,0,0" HorizontalAlignment="Left" VerticalAlignment="Top">
+          <TextBlock Text="WEB" Foreground="White" FontSize="9" FontWeight="SemiBold"/>
+        </Border>
+      </Grid>
+    </Canvas>
     <Grid x:Name="HudPanel" Background="Transparent">
       <Border x:Name="LcuPanel"
               Width="240"

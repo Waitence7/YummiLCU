@@ -1,7 +1,7 @@
 use std::{
     sync::{
         atomic::{AtomicU64, Ordering},
-        OnceLock,
+        OnceLock, RwLock,
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -14,6 +14,8 @@ use livekit::{
     options::{TrackPublishOptions, VideoCodec, VideoEncoding},
     prelude::{LocalTrack, LocalVideoTrack, Room, RoomEvent, RoomOptions, TrackSource},
 };
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter};
 use tokio::{sync::Mutex, task::JoinHandle, time::interval};
 
 const STREAM_BITRATE: u64 = 3_000_000;
@@ -21,13 +23,49 @@ const STREAM_FPS: f64 = 15.0;
 const MAX_URL_BYTES: usize = 2_048;
 const MAX_ROOM_BYTES: usize = 128;
 const MAX_TOKEN_BYTES: usize = 8_192;
+const POINTER_TOPIC: &str = "yummi.live.pointer.v1";
+const POINTER_MAX_BYTES: usize = 256;
+const POINTER_VISIBLE_TTL_MS: u64 = 900;
 
 #[derive(Clone, Debug)]
 struct SfuConfig {
+    app: AppHandle,
     url: String,
     token: String,
     codec: VideoCodec,
 }
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemotePointerSnapshot {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) visible: bool,
+    pub(crate) updated_at_ms: u64,
+    pub(crate) viewer: String,
+}
+
+impl Default for RemotePointerSnapshot {
+    fn default() -> Self {
+        Self {
+            x: 0.5,
+            y: 0.5,
+            visible: false,
+            updated_at_ms: 0,
+            viewer: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct WirePointer {
+    v: u8,
+    x: f64,
+    y: f64,
+    visible: bool,
+}
+
+static REMOTE_POINTER: OnceLock<RwLock<RemotePointerSnapshot>> = OnceLock::new();
 
 static DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
 static CONFIG: OnceLock<Mutex<Option<SfuConfig>>> = OnceLock::new();
@@ -39,6 +77,63 @@ fn config_slot() -> &'static Mutex<Option<SfuConfig>> {
 
 fn task_slot() -> &'static Mutex<Option<JoinHandle<()>>> {
     TASK.get_or_init(|| Mutex::new(None))
+}
+
+fn pointer_slot() -> &'static RwLock<RemotePointerSnapshot> {
+    REMOTE_POINTER.get_or_init(|| RwLock::new(RemotePointerSnapshot::default()))
+}
+
+pub(crate) fn remote_pointer_snapshot() -> RemotePointerSnapshot {
+    let mut snapshot = pointer_slot()
+        .read()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    if snapshot.visible && now_ms().saturating_sub(snapshot.updated_at_ms) > POINTER_VISIBLE_TTL_MS {
+        snapshot.visible = false;
+    }
+    snapshot
+}
+
+fn parse_live_pointer(
+    payload: &[u8],
+    topic: Option<&str>,
+    participant_identity: Option<String>,
+) -> Option<RemotePointerSnapshot> {
+    if topic != Some(POINTER_TOPIC) || payload.is_empty() || payload.len() > POINTER_MAX_BYTES {
+        return None;
+    }
+    let viewer = participant_identity.filter(|value| value.starts_with("viewer-"))?;
+    let pointer = serde_json::from_slice::<WirePointer>(payload).ok()?;
+    if pointer.v != 1
+        || !pointer.x.is_finite()
+        || !pointer.y.is_finite()
+        || !(0.0..=1.0).contains(&pointer.x)
+        || !(0.0..=1.0).contains(&pointer.y)
+    {
+        return None;
+    }
+    Some(RemotePointerSnapshot {
+        x: pointer.x,
+        y: pointer.y,
+        visible: pointer.visible,
+        updated_at_ms: now_ms(),
+        viewer,
+    })
+}
+
+fn handle_live_pointer(
+    app: &AppHandle,
+    payload: &[u8],
+    topic: Option<&str>,
+    participant_identity: Option<String>,
+) {
+    let Some(snapshot) = parse_live_pointer(payload, topic, participant_identity) else {
+        return;
+    };
+    if let Ok(mut current) = pointer_slot().write() {
+        *current = snapshot.clone();
+    }
+    let _ = app.emit("yummi://live-pointer", snapshot);
 }
 
 fn now_ms() -> u64 {
@@ -72,6 +167,7 @@ fn validate_url(value: &str) -> bool {
 }
 
 pub(crate) async fn control(
+    app: AppHandle,
     enabled: bool,
     ttl_ms: u64,
     url: Option<String>,
@@ -102,7 +198,7 @@ pub(crate) async fn control(
     let ttl_ms = ttl_ms.clamp(1_000, 30_000);
     DEADLINE_MS.store(now_ms().saturating_add(ttl_ms), Ordering::Release);
     crate::recording::set_live_stream_enabled(true, ttl_ms);
-    *config_slot().lock().await = Some(SfuConfig { url, token, codec });
+    *config_slot().lock().await = Some(SfuConfig { app, url, token, codec });
 
     let mut task = task_slot().lock().await;
     let needs_start = task.as_ref().is_none_or(JoinHandle::is_finished);
@@ -222,6 +318,14 @@ async fn run_session(config: SfuConfig) -> Result<(), String> {
             event = events.recv() => {
                 match event {
                     Some(RoomEvent::Disconnected { .. }) | None => break,
+                    Some(RoomEvent::DataReceived { payload, topic, participant, .. }) => {
+                        handle_live_pointer(
+                            &config.app,
+                            payload.as_slice(),
+                            topic.as_deref(),
+                            participant.map(|value| value.identity().to_string()),
+                        );
+                    }
                     _ => {}
                 }
             }
@@ -260,5 +364,21 @@ mod tests {
         assert_eq!(parse_codec(None).unwrap(), VideoCodec::H264);
         assert_eq!(parse_codec(Some("av1")).unwrap(), VideoCodec::AV1);
         assert!(parse_codec(Some("vp8")).is_err());
+    }
+
+    #[test]
+    fn pointer_packets_are_bounded_and_viewer_scoped() {
+        let payload = br#"{"v":1,"x":0.25,"y":0.75,"visible":true}"#;
+        let pointer = parse_live_pointer(payload, Some(POINTER_TOPIC), Some("viewer-42-abc".into())).unwrap();
+        assert_eq!(pointer.x, 0.25);
+        assert_eq!(pointer.y, 0.75);
+        assert!(pointer.visible);
+        assert!(parse_live_pointer(payload, Some("other"), Some("viewer-42-abc".into())).is_none());
+        assert!(parse_live_pointer(payload, Some(POINTER_TOPIC), Some("agent-42".into())).is_none());
+        assert!(parse_live_pointer(
+            br#"{"v":1,"x":1.1,"y":0.5,"visible":true}"#,
+            Some(POINTER_TOPIC),
+            Some("viewer-42-abc".into())
+        ).is_none());
     }
 }

@@ -1769,6 +1769,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
     if hide_input_shield {
         set_gamebar_input_shield_visible(false);
     }
+    let remote_pointer = crate::live_sfu::remote_pointer_snapshot();
     serde_json::json!({
         "ok": true,
         "active": state.active,
@@ -1823,6 +1824,11 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "gamebarAltY": gamebar_alt_cursor_y,
         "gamebarStoredCursorX": state.gamebar_cursor_x,
         "gamebarStoredCursorY": state.gamebar_cursor_y,
+        "remotePointerVisible": remote_pointer.visible,
+        "remotePointerX": remote_pointer.x,
+        "remotePointerY": remote_pointer.y,
+        "remotePointerAgeMs": now.saturating_sub(remote_pointer.updated_at_ms),
+        "remotePointerViewer": remote_pointer.viewer,
         "pollAgeMs": now.saturating_sub(state.poll_updated_at_ms),
         "agentPid": std::process::id(),
         "agentReleaseLabel": option_env!("YUMMI_AGENT_RELEASE_LABEL")

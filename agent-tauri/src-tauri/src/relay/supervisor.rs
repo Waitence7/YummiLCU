@@ -3338,7 +3338,7 @@ where
         IncomingMessage::LiveSfuControl { enabled, ttl_ms, url, room, token, codec } => {
             if session_bound {
                 let ttl = ttl_ms.unwrap_or(15_000);
-                let result = crate::live_sfu::control(enabled, ttl, url, room.clone(), token, codec.clone()).await;
+                let result = crate::live_sfu::control(app.clone(), enabled, ttl, url, room.clone(), token, codec.clone()).await;
                 state
                     .record_flight(
                         "recording_live_sfu",

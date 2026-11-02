@@ -4977,6 +4977,7 @@ async def internal_livekit_session(
         "url": viewer.url,
         "room": viewer.room,
         "identity": viewer.identity,
+        "agent_identity": publisher.identity,
         "token": viewer.token,
         "expires_at": viewer.expires_at,
         "codec": "h264",
