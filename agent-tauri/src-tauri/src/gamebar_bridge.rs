@@ -204,39 +204,103 @@ fn append_uia_probe_log(message: &str) {
 }
 
 #[cfg(windows)]
-fn ensure_gamebar_input_shield(app: &AppHandle) -> Result<(), String> {
-    use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
+unsafe extern "system" fn gamebar_input_shield_wndproc(
+    hwnd: windows::Win32::Foundation::HWND,
+    message: u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
+    unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
+}
 
-    let window = if let Some(existing) = app.get_webview_window(GAMEBAR_INPUT_SHIELD_LABEL) {
-        existing
-    } else {
-        WebviewWindowBuilder::new(
-            app,
-            GAMEBAR_INPUT_SHIELD_LABEL,
-            WebviewUrl::App("index.html".into()),
-        )
-        .title("")
-        .inner_size(16.0, 16.0)
-        .resizable(false)
-        .decorations(false)
-        .transparent(true)
-        .shadow(false)
-        .always_on_top(true)
-        .skip_taskbar(true)
-        .focusable(false)
-        .focused(false)
-        .visible(false)
-        .build()
-        .map_err(|error| format!("Game Bar 입력 실드 생성 실패: {error}"))?
+#[cfg(windows)]
+fn gamebar_input_shield_thread() {
+    use windows::{
+        core::w,
+        Win32::{
+            Foundation::{HINSTANCE, HWND},
+            Graphics::Gdi::HBRUSH,
+            UI::WindowsAndMessaging::{
+                CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
+                CS_HREDRAW, CS_VREDRAW, CW_USEDEFAULT, MSG, SW_HIDE, WNDCLASSW, WS_EX_LAYERED,
+                WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            },
+        },
     };
 
-    let native = window
-        .hwnd()
-        .map_err(|error| format!("Game Bar 입력 실드 HWND 조회 실패: {error}"))?;
-    let raw = native.0 as usize;
-    GAMEBAR_INPUT_SHIELD_HWND.store(raw, Ordering::SeqCst);
-    append_native_input_log(&format!("input-shield ready hwnd=0x{raw:X}"));
-    Ok(())
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetModuleHandleW(lp_module_name: *const u16) -> *mut core::ffi::c_void;
+    }
+    let module = unsafe { GetModuleHandleW(core::ptr::null()) };
+    if module.is_null() {
+        append_native_input_log("input-shield module-handle-failed");
+        return;
+    }
+    let instance = HINSTANCE(module);
+    let class_name = w!("YummiGameBarInputShield");
+    let class = WNDCLASSW {
+        style: CS_HREDRAW | CS_VREDRAW,
+        lpfnWndProc: Some(gamebar_input_shield_wndproc),
+        hInstance: instance,
+        hbrBackground: HBRUSH(core::ptr::null_mut()),
+        lpszClassName: class_name,
+        ..Default::default()
+    };
+    let atom = unsafe { RegisterClassW(&class) };
+    if atom == 0 {
+        append_native_input_log("input-shield register-class-failed");
+        return;
+    }
+
+    let hwnd = match unsafe {
+        CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            class_name,
+            w!(""),
+            WS_POPUP,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
+            16,
+            16,
+            None,
+            None,
+            Some(instance),
+            None,
+        )
+    } {
+        Ok(hwnd) => hwnd,
+        Err(error) => {
+            append_native_input_log(&format!("input-shield create-window-failed error={error}"));
+            return;
+        }
+    };
+
+    // Alpha 1/255 is visually imperceptible while remaining hit-testable. Fully
+    // transparent layered pixels may be treated as click-through by Windows.
+    if let Err(error) = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SetLayeredWindowAttributes(
+            hwnd,
+            windows::Win32::Foundation::COLORREF(0),
+            1,
+            windows::Win32::UI::WindowsAndMessaging::LWA_ALPHA,
+        )
+    } {
+        append_native_input_log(&format!("input-shield alpha-failed error={error}"));
+    }
+    let _ = unsafe { windows::Win32::UI::WindowsAndMessaging::ShowWindow(hwnd, SW_HIDE) };
+    GAMEBAR_INPUT_SHIELD_HWND.store(hwnd.0 as usize, Ordering::SeqCst);
+    append_native_input_log(&format!("input-shield ready hwnd=0x{:X}", hwnd.0 as usize));
+
+    let mut message = MSG::default();
+    while unsafe { GetMessageW(&mut message, Some(HWND(core::ptr::null_mut())), 0, 0) }.as_bool() {
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+    GAMEBAR_INPUT_SHIELD_HWND.store(0, Ordering::SeqCst);
 }
 
 #[cfg(windows)]
@@ -295,9 +359,10 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
             GAMEBAR_COMMAND_LOOPBACK_ADDR,
             GAMEBAR_WS_LOOPBACK_ADDR,
         ));
-        if let Err(error) = ensure_gamebar_input_shield(&app) {
-            append_native_input_log(&format!("input-shield init-failed error={error}"));
-        }
+        std::thread::Builder::new()
+            .name("yummi-gamebar-input-shield".into())
+            .spawn(gamebar_input_shield_thread)
+            .ok();
         let snapshot_state = state.clone();
         std::thread::Builder::new()
             .name("yummi-gamebar-pipe".into())
