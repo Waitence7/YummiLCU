@@ -1047,8 +1047,21 @@ unsafe extern "system" fn native_input_block_hook(
                     let hit = |rx: f64, ry: f64, rw: f64, rh: f64| {
                         rw > 0.0 && rh > 0.0 && x >= rx && x < rx + rw && y >= ry && y < ry + rh
                     };
+                    let (monitor_x, monitor_y) =
+                        monitor_origin_for_point(hook.pt.x, hook.pt.y).unwrap_or((0, 0));
+                    let mx = monitor_x as f64;
+                    let my = monitor_y as f64;
+
+                    // WindowBounds can be reported in either monitor-local DIPs or
+                    // desktop-space coordinates depending on the Game Bar host/scaling
+                    // path. Runtime drag already accepts all four mappings. The blocker
+                    // must use the same mappings; otherwise a press can leak to the app
+                    // behind the overlay and Windows starts a text/image drag before the
+                    // overlay poller sees it.
                     hit(rect.x, rect.y, rect.width, rect.height)
                         || hit(rect.alt_x, rect.alt_y, rect.alt_width, rect.alt_height)
+                        || hit(rect.x + mx, rect.y + my, rect.width, rect.height)
+                        || hit(rect.alt_x + mx, rect.alt_y + my, rect.alt_width, rect.alt_height)
                 };
 
                 if message == WM_LBUTTONUP && state.left_captured {
