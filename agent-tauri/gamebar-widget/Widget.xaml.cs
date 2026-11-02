@@ -97,6 +97,7 @@ namespace YummiGameBarWidget
         private double nativePanelDragStartY;
         private int nativePanelDragCoordinateMode = -1;
         private bool nativePanelDragMoved;
+        private int nativePanelDragActive;
         private bool nativePanelMouseWasDown;
         private FrameworkElement resizedPanel;
         private FrameworkElement resizedBody;
@@ -2700,10 +2701,13 @@ namespace YummiGameBarWidget
                         nativeInputDispatchQueuedAtMs = NowMs();
                         try
                         {
-                            // Keep at most one UI probe queued. If Game Bar starves or
-                            // invalidates its dispatcher during a host state transition,
-                            // piling up callbacks makes recovery worse when it resumes.
-                            _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, async () =>
+                            // Keep at most one UI probe queued. While a pinned panel is
+                            // actively being dragged, prioritize cursor sampling so a busy
+                            // Game Bar UI thread does not introduce visible drag stalls.
+                            var dispatchPriority = Volatile.Read(ref nativePanelDragActive) != 0
+                                ? CoreDispatcherPriority.High
+                                : CoreDispatcherPriority.Low;
+                            _ = Dispatcher.RunAsync(dispatchPriority, async () =>
                             {
                                 try { await SyncExternalClickTestAsync(true); }
                                 catch (Exception ex) { App.LogStage("native-input-loop-sync-error:" + ErrorCode(ex)); }
@@ -2733,7 +2737,8 @@ namespace YummiGameBarWidget
                         }
                     }
 
-                    try { await Task.Delay(nativeInputRuntimeDragWanted ? 33 : 100, token); }
+                    var dragActive = Volatile.Read(ref nativePanelDragActive) != 0;
+                    try { await Task.Delay(dragActive ? 16 : (nativeInputRuntimeDragWanted ? 33 : 100), token); }
                     catch (TaskCanceledException) { break; }
                 }
                 App.LogStage("native-input-loop-stop");
@@ -2948,7 +2953,7 @@ namespace YummiGameBarWidget
                 }
                 var sequence = (ulong)Math.Max(0, response.GetNamedNumber("sequence", 0));
                 var clickCount = (ulong)Math.Max(0, response.GetNamedNumber("clickCount", 0));
-                NativeHookClickCountText.Text = clickCount.ToString();
+                if (diagnosticRequested) NativeHookClickCountText.Text = clickCount.ToString();
                 var hudToggleSequence = (ulong)Math.Max(0, response.GetNamedNumber("hudToggleSequence", 0));
                 if (!hudToggleSequenceInitialized)
                 {
@@ -3025,18 +3030,21 @@ namespace YummiGameBarWidget
                 var leftButtonDown = response.ContainsKey("leftButtonDown")
                     ? response.GetNamedBoolean("leftButtonDown", false)
                     : nativeMouseDown;
-                UpdateNativeHookButtonVisual(nativeHovered, nativeMouseDown);
+                if (diagnosticRequested) UpdateNativeHookButtonVisual(nativeHovered, nativeMouseDown);
                 HandlePinnedNativePanelDrag(leftButtonDown, cursorX, cursorY, monitorX, monitorY);
                 await HandlePinnedYoutubeNativeInputAsync(leftButtonDown, cursorX, cursorY, monitorX, monitorY);
 
                 if (sequence != lastNativeInputSequence) lastNativeInputSequence = sequence;
 
-                UpdateCursorDiagnosticMarkers(
-                    physicalX, physicalY, logicalX, logicalY, cursorInfoX, cursorInfoY, cursorInfoValid,
-                    gamebarPrimaryX, gamebarPrimaryY, gamebarAltX, gamebarAltY, cursorX, cursorY);
+                if (diagnosticRequested)
+                {
+                    UpdateCursorDiagnosticMarkers(
+                        physicalX, physicalY, logicalX, logicalY, cursorInfoX, cursorInfoY, cursorInfoValid,
+                        gamebarPrimaryX, gamebarPrimaryY, gamebarAltX, gamebarAltY, cursorX, cursorY);
+                }
                 UpdateRemotePointerMarker(remotePointerVisible, remotePointerX, remotePointerY);
 
-                ClickNativeResult.Text =
+                if (diagnosticRequested) ClickNativeResult.Text =
                     "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError +
                     " requestedActive=" + requestedActive + " geometryReady=" + geometryReady +
                     " hitbox=" + NativeHookHitbox.ActualWidth.ToString("0.##") + "x" + NativeHookHitbox.ActualHeight.ToString("0.##") + "\n" +
@@ -3130,6 +3138,7 @@ namespace YummiGameBarWidget
                 nativePanelDragStartY = transform.Y;
                 nativePanelDragCoordinateMode = mode;
                 nativePanelDragMoved = false;
+                Interlocked.Exchange(ref nativePanelDragActive, 1);
                 App.LogStage("runtime-native-drag-start panel=" + NativePanelName(panel) + " mode=" + mode);
                 return;
             }
@@ -3207,6 +3216,7 @@ namespace YummiGameBarWidget
             nativeDraggedPanelTransform = null;
             nativePanelDragCoordinateMode = -1;
             nativePanelDragMoved = false;
+            Interlocked.Exchange(ref nativePanelDragActive, 0);
         }
 
         private string NativePanelName(FrameworkElement panel)
