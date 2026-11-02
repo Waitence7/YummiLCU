@@ -2869,10 +2869,36 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
                                 .arg(&target.release_tag)
                                 .arg("-Quiet")
                                 .arg("-ForceFinalize");
-                            command
-                                .creation_flags(CREATE_NO_WINDOW)
-                                .spawn()
-                                .map_err(|e| format!("Win+G Game Bar 재등록 실행 실패: {e}"))?;
+                            command.creation_flags(CREATE_NO_WINDOW);
+                            let expected_version = expected_appx_version.clone();
+                            let release_tag = target.release_tag.clone();
+                            let build_id = target.build_id.clone();
+                            let status = tokio::task::spawn_blocking(move || {
+                                command
+                                    .status()
+                                    .map_err(|e| format!("Win+G Game Bar 재등록 실행 실패: {e}"))
+                            })
+                            .await
+                            .map_err(|e| format!("Win+G Game Bar 재등록 worker 실패: {e}"))??;
+                            if !status.success() {
+                                return Err(format!(
+                                    "Win+G Game Bar 재등록이 종료 코드 {}로 실패했습니다.",
+                                    status.code().map_or_else(
+                                        || "unknown".to_owned(),
+                                        |code| code.to_string()
+                                    )
+                                ));
+                            }
+                            let current = installed_appx_version();
+                            if current.as_deref() != Some(expected_version.as_str()) {
+                                return Err(format!(
+                                    "Win+G Game Bar 재등록 후 버전 검증 실패: expected={expected_version} actual={}",
+                                    current.as_deref().unwrap_or("missing")
+                                ));
+                            }
+                            append_gamebar_update_log(&format!(
+                                "Win+G 오버레이 예약 업데이트 적용 완료: {release_tag} / build {build_id} / appx {expected_version}"
+                            ));
                             return Ok(());
                         }
 
@@ -2964,10 +2990,36 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         .arg(&target.release_tag)
         .arg("-Quiet");
     install_command.arg("-ForceFinalize");
-    install_command
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map_err(|e| format!("Game Bar 설치 실행 실패: {e}"))?;
+    install_command.creation_flags(CREATE_NO_WINDOW);
+    let expected_version = expected_appx_version.clone();
+    let release_tag = target.release_tag.clone();
+    let build_id = target.build_id.clone();
+    let status = tokio::task::spawn_blocking(move || {
+        install_command
+            .status()
+            .map_err(|e| format!("Game Bar 설치 실행 실패: {e}"))
+    })
+    .await
+    .map_err(|e| format!("Game Bar 설치 worker 실패: {e}"))??;
+    if !status.success() {
+        return Err(format!(
+            "Game Bar 설치가 종료 코드 {}로 실패했습니다.",
+            status
+                .code()
+                .map_or_else(|| "unknown".to_owned(), |code| code.to_string())
+        ));
+    }
+
+    let actual = installed_appx_version();
+    if actual.as_deref() != Some(expected_version.as_str()) {
+        return Err(format!(
+            "Game Bar 설치 후 버전 검증 실패: expected={expected_version} actual={}",
+            actual.as_deref().unwrap_or("missing")
+        ));
+    }
+    append_gamebar_update_log(&format!(
+        "Win+G 오버레이 업데이트 적용 완료: {release_tag} / build {build_id} / appx {expected_version}"
+    ));
     Ok(())
 }
 
