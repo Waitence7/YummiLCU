@@ -1,0 +1,71 @@
+name: Deploy Agent Beta 46 Once
+
+on:
+  workflow_run:
+    workflows: ["Deploy LCU Tauri Agent (manual Actions button)"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == '2728fc2c3de9a78ed926e925ee4eb14aefac2a2a' }}
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download verified agent candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release
+          mkdir -p release
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name agent-candidate --dir release
+          test -s release/agent-version.json
+          jq -e '.version == "0.8.0" and .tauri.version == "0.8.0" and .tauri.commit == "2728fc2"' release/agent-version.json >/dev/null
+          test -s release/Yummi-LCU-Agent-0.8.0-setup.exe
+          test -s release/tauri-0.8.0.zip
+
+      - name: Prepare beta.46 signed manifest
+        env:
+          YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_id="$(jq -r '.tauri.buildId // .buildId' release/agent-version.json)"
+          stage="${RUNNER_TEMP}/tauri-portable"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          unzip -q release/tauri-0.8.0.zip -d "$stage"
+          exe="$(find "$stage" -maxdepth 2 -type f -iname 'yummi-lcu-tauri.exe' -print -quit)"
+          test -n "$exe" && test -s "$exe"
+          node scripts/sync-tauri-agent-version.mjs \
+            --zip release/tauri-0.8.0.zip \
+            --exe "$exe" \
+            --out release/agent-version.json \
+            --notes "Keep the desktop window visible across auto-updates and reject stale tray-hide completions after reopening." \
+            --channel beta \
+            --release-label 0.8.0-beta.46 \
+            --build-id "$build_id" \
+            --commit 2728fc2 \
+            --rollout-percent 100
+          jq -e '.version == "0.8.0" and .tauri.channel == "beta" and .tauri.releaseLabel == "0.8.0-beta.46" and .tauri.commit == "2728fc2" and .tauri.rolloutPercent == 100' release/agent-version.json >/dev/null
+
+      - name: Publish beta.46
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_CHANNEL: beta
+          RELEASE_LABEL: 0.8.0-beta.46
+          TARGET_SHA: 2728fc2c3de9a78ed926e925ee4eb14aefac2a2a
+        shell: bash
+        run: scripts/publish-agent-release.sh release
