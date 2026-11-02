@@ -228,6 +228,10 @@ def _agent_failure_events_redis_key(discord_id: int) -> str:
     return f"relay:agent_failure_events:{discord_id}"
 
 
+def _party_lobby_redis_key(discord_id: int) -> str:
+    return f"relay:party_lobby:{discord_id}"
+
+
 async def _increment_agent_failure(r: redis.Redis, discord_id: int, kind: str) -> None:
     safe = re.sub(r"[^a-z0-9_]+", "_", str(kind).lower())[:64].strip("_") or "unknown"
     key = _agent_failure_counter_redis_key(discord_id)
@@ -4021,6 +4025,15 @@ async def _handle_agent_message(
         if discord_id is None or not isinstance(payload, dict):
             return
         party_at_ms = int(time.time() * 1000)
+        conn.set_party_lobby(discord_id, payload)
+        try:
+            await websocket.app.state.redis.setex(
+                _party_lobby_redis_key(discord_id),
+                60 * 60,
+                json.dumps({"captured_at_ms": party_at_ms, "data": payload}),
+            )
+        except Exception:
+            logger.exception("party lobby cache 저장 실패 discord_id=%s", discord_id)
         party_members = payload.get("riot_ids_in_party")
         party_member_count = len(party_members) if isinstance(party_members, list) else 0
         await remember_agent_state(
@@ -5425,6 +5438,41 @@ async def internal_agent_logs(
         if len(logs) >= limit:
             break
     return JSONResponse({"discord_id": discord_id, "logs": logs})
+
+
+@app.get("/internal/party-lobby/{discord_id}")
+async def internal_party_lobby(
+    request: Request,
+    discord_id: int,
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    """Agent push로 받은 마지막 파티/로비 상태. 조회 자체는 LCU를 다시 호출하지 않습니다."""
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    conn: ConnectionManager = request.app.state.connections
+    online = conn.is_online(discord_id)
+    cached = conn.get_party_lobby(discord_id)
+    if online and cached is None:
+        try:
+            raw = await request.app.state.redis.get(_party_lobby_redis_key(discord_id))
+            restored = json.loads(raw) if raw else None
+            if isinstance(restored, dict) and isinstance(restored.get("data"), dict):
+                data = restored["data"]
+                conn.set_party_lobby(discord_id, data)
+                captured_at_ms = int(restored.get("captured_at_ms") or 0)
+                cached = {
+                    "data": data,
+                    "age_ms": max(0, int(time.time() * 1000) - captured_at_ms) if captured_at_ms else 0,
+                }
+        except Exception:
+            logger.exception("party lobby cache 복구 실패 discord_id=%s", discord_id)
+    return JSONResponse(
+        {
+            "online": online,
+            "available": online and cached is not None,
+            "data": cached["data"] if online and cached else None,
+            "age_ms": cached["age_ms"] if online and cached else None,
+        }
+    )
 
 
 @app.get("/internal/live-game/{discord_id}")

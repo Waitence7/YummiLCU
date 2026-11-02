@@ -56,6 +56,7 @@ class ConnectionManager:
         self._pending_bot_eog: dict[str, asyncio.Future[bool]] = {}
         self._bot_ws: WebSocket | None = None
         self._party_subscribers: set[int] = set()  # creator discord_id
+        self._party_lobby: dict[int, tuple[float, dict[str, Any]]] = {}
         self._gameflow_subscribers: set[int] = set()
         self._gameflow_eog_grace_until: dict[int, float] = {}
         self._gameflow: dict[int, dict[str, Any]] = {}
@@ -241,6 +242,7 @@ class ConnectionManager:
                 del self._by_discord[did]
             self._agent_info.pop(did, None)
             self._gameflow.pop(did, None)
+            self._party_lobby.pop(did, None)
             self._live_game.pop(did, None)
             self._live_preview.pop(did, None)
             self._live_preview_control_last_at.pop(did, None)
@@ -575,6 +577,19 @@ class ConnectionManager:
 
     def party_subscribers_snapshot(self) -> set[int]:
         return set(self._party_subscribers)
+
+    def set_party_lobby(self, discord_id: int, data: dict[str, Any]) -> None:
+        self._party_lobby[int(discord_id)] = (time.monotonic(), dict(data))
+
+    def get_party_lobby(self, discord_id: int) -> dict[str, Any] | None:
+        cached = self._party_lobby.get(int(discord_id))
+        if cached is None:
+            return None
+        received_at, data = cached
+        return {
+            "data": dict(data),
+            "age_ms": max(0, int((time.monotonic() - received_at) * 1000)),
+        }
 
     def bot_ws_connected(self) -> bool:
         return self._bot_ws is not None
