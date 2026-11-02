@@ -22,13 +22,14 @@
           <ToggleSwitch x:Name="PartyVisibleToggle" Header="파티 패널" OnContent="표시" OffContent="숨김" Toggled="PartyVisibleToggle_Toggled" Foreground="White"/>
           <ToggleSwitch x:Name="BrowserVisibleToggle" Header="Chrome 탭" OnContent="표시" OffContent="숨김" Toggled="BrowserVisibleToggle_Toggled" Foreground="White"/>
           <ToggleSwitch x:Name="NativeInputVisibleToggle" Header="Native Input 테스트 패널" OnContent="표시" OffContent="숨김" Toggled="NativeInputVisibleToggle_Toggled" Foreground="White"/>
+          <ToggleSwitch x:Name="VoiceChatVisibleToggle" Header="Discord Chat" OnContent="표시" OffContent="숨김" Toggled="VoiceChatVisibleToggle_Toggled" Foreground="White"/>
           <TextBlock Text="눈 버튼은 게임 화면에서 숨기고 Win+G에서는 60% 고스트로 남깁니다. × 버튼은 패널을 완전히 닫으며 여기서 다시 켤 수 있습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
         </StackPanel>
       </Border>
       <Border Background="#342A203A" CornerRadius="10" Padding="12">
         <StackPanel Spacing="10">
           <TextBlock Text="Discord 채팅" Foreground="White" FontWeight="SemiBold"/>
-          <TextBlock Text="Win+G 편집 화면에서는 Discord Chat 위치 박스가 보입니다. 실제 고정 오버레이에서는 편집 박스가 숨겨지고 새 메시지가 아래에서 위로 쌓입니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
+          <TextBlock Text="Discord Chat도 다른 패널처럼 눈 버튼/설정 토글로 실제 화면 표시를 제어하고, ×로 닫을 수 있습니다. 실제 고정 오버레이에서는 켜진 상태에서 새 메시지가 있을 때만 나타납니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
           <StackPanel Spacing="4">
             <Grid>
               <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>

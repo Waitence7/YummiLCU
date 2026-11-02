@@ -183,6 +183,7 @@ namespace YummiGameBarWidget
         private int foregroundChromeRefreshGeneration;
         private bool foregroundChromeRefreshInFlight;
         private long lastForegroundChromeRefreshAtMs;
+        private bool winGPanelSettingsLoading;
         private volatile bool nativeInputDiagnosticsWanted;
         private volatile bool nativeInputRuntimeDragWanted;
         private bool nativeInputDeactivatedWhileIdle;
@@ -343,6 +344,7 @@ namespace YummiGameBarWidget
             ApplyCursorMarkersVisibility(hudVisible && HudPreferences.NativeCursorMarkersVisible);
             ApplyVoiceChatPreferences();
             UpdatePanelChrome();
+            RefreshWinGPanelSettings();
             ApplyYoutubePreferences();
             ApplyBrowserPreferences();
             // When the built-in YouTube browser is open, an empty saved URL is
@@ -509,7 +511,8 @@ namespace YummiGameBarWidget
                              (!HudPreferences.PartyPanelClosed && HudPreferences.PartyPanelVisible) ||
                              (!HudPreferences.YoutubePanelClosed && YoutubePreferences.Visible) ||
                              (!HudPreferences.BrowserPanelClosed && HudPreferences.BrowserPanelVisible) ||
-                             (!HudPreferences.NativeInputPanelClosed && HudPreferences.NativeInputPanelVisible);
+                             (!HudPreferences.NativeInputPanelClosed && HudPreferences.NativeInputPanelVisible) ||
+                             (!HudPreferences.VoiceChatPanelClosed && HudPreferences.VoiceChatPanelVisible);
             var show = !anyVisible;
             if (show) HudPreferences.Visible = true;
             if (!HudPreferences.LcuPanelClosed) HudPreferences.LcuPanelVisible = show;
@@ -517,6 +520,7 @@ namespace YummiGameBarWidget
             if (!HudPreferences.YoutubePanelClosed) YoutubePreferences.Visible = show;
             if (!HudPreferences.BrowserPanelClosed) HudPreferences.BrowserPanelVisible = show;
             if (!HudPreferences.NativeInputPanelClosed) HudPreferences.NativeInputPanelVisible = show;
+            if (!HudPreferences.VoiceChatPanelClosed) HudPreferences.VoiceChatPanelVisible = show;
             ApplyPreferences();
             App.LogResize("runtime-panels-toggle source=" + source + " visible=" + show +
                 " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
@@ -587,6 +591,15 @@ namespace YummiGameBarWidget
         {
             await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
             {
+                if (widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                {
+                    // A completed auto-setup is valid only for the current Win+G foreground
+                    // session. Closing Game Bar rearms selection/pin/click-through setup for
+                    // the next Win+G open.
+                    gameBarUiaProbeCompleted = false;
+                    gameBarUiaProbeAttempts = 0;
+                    lastGameBarUiaProbeAttemptAtMs = 0;
+                }
                 RequestImmediateOverlayUpdateIfForeground("display-mode-changed");
                 QueueForegroundChromeRefresh("display-mode-changed");
                 // 856 DIP is only a conservative bootstrap height for affected Game Bar
@@ -597,6 +610,7 @@ namespace YummiGameBarWidget
                     QueuePinnedGrowToFullscreen();
                 UpdateDisplayState();
                 UpdateInputState();
+                RefreshWinGPanelSettings();
                 UpdatePinTutorial();
             });
         }
@@ -1055,13 +1069,34 @@ namespace YummiGameBarWidget
                 await Task.Delay(attempt == 1 ? 250 : 500);
                 if (widget == null || widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly) return;
                 var response = await SendAgentCommandAsync("{\"command\":\"probe_gamebar_uia\"}");
+                bool commandOk = false;
+                bool gameBarFound = false;
+                bool yummiSelected = false;
+                bool selectionInvoked = false;
+                bool pinEnabled = false;
+                bool clickThroughEnabled = false;
                 try
                 {
                     var parsed = JsonObject.Parse(response ?? "{}");
-                    success = parsed.GetNamedBoolean("ok", false);
+                    commandOk = parsed.GetNamedBoolean("ok", false);
+                    var data = parsed.GetNamedObject("data", new JsonObject());
+                    gameBarFound = data.GetNamedBoolean("gameBarFound", false);
+                    yummiSelected = data.GetNamedBoolean("yummiSelected", false);
+                    selectionInvoked = data.GetNamedBoolean("selectionInvoked", false);
+                    pinEnabled = data.GetNamedObject("pin", new JsonObject()).GetNamedBoolean("enabled", false);
+                    clickThroughEnabled = data.GetNamedObject("clickThrough", new JsonObject()).GetNamedBoolean("enabled", false);
+                    success = commandOk && data.GetNamedBoolean("ready", false);
                 }
                 catch { success = false; }
-                App.LogStage("gamebar-uia-probe-response-attempt-" + attempt + "-" + (success ? "ok" : "failed"));
+                App.LogStage(
+                    "gamebar-uia-auto-attempt-" + attempt +
+                    " command=" + commandOk +
+                    " gamebar=" + gameBarFound +
+                    " selected=" + yummiSelected +
+                    " selectionInvoked=" + selectionInvoked +
+                    " pin=" + pinEnabled +
+                    " clickThrough=" + clickThroughEnabled +
+                    " ready=" + success);
                 if (success) gameBarUiaProbeCompleted = true;
             }
             catch (Exception ex)
@@ -1926,6 +1961,46 @@ namespace YummiGameBarWidget
             return false;
         }
 
+        private void RefreshWinGPanelSettings()
+        {
+            var editing = widget != null && widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly;
+            WinGPanelSettings.Visibility = editing ? Visibility.Visible : Visibility.Collapsed;
+            if (!editing) return;
+
+            winGPanelSettingsLoading = true;
+            try
+            {
+                WinGLcuToggle.IsOn = HudPreferences.LcuPanelVisible && !HudPreferences.LcuPanelClosed;
+                WinGPartyToggle.IsOn = HudPreferences.PartyPanelVisible && !HudPreferences.PartyPanelClosed;
+                WinGYoutubeToggle.IsOn = YoutubePreferences.Visible && !HudPreferences.YoutubePanelClosed;
+                WinGBrowserToggle.IsOn = HudPreferences.BrowserPanelVisible && !HudPreferences.BrowserPanelClosed;
+                WinGNativeInputToggle.IsOn = HudPreferences.NativeInputPanelVisible && !HudPreferences.NativeInputPanelClosed;
+                WinGVoiceChatToggle.IsOn = HudPreferences.VoiceChatPanelVisible && !HudPreferences.VoiceChatPanelClosed;
+            }
+            finally
+            {
+                winGPanelSettingsLoading = false;
+            }
+        }
+
+        private void WinGPanelToggle_Toggled(object sender, RoutedEventArgs e)
+        {
+            if (winGPanelSettingsLoading) return;
+            var toggle = sender as ToggleSwitch;
+            var key = toggle?.Tag as string;
+            if (string.IsNullOrWhiteSpace(key)) return;
+
+            var visible = toggle.IsOn;
+            if (visible)
+            {
+                SetPanelClosed(key, false);
+                HudPreferences.Visible = true;
+            }
+            SetPanelVisible(key, visible);
+            ApplyPreferences();
+            App.LogResize("wing-panel-toggle key=" + key + " visible=" + visible);
+        }
+
         private void PanelEyeButton_Click(object sender, RoutedEventArgs e)
         {
             var key = (sender as FrameworkElement)?.Tag as string;
@@ -1949,6 +2024,7 @@ namespace YummiGameBarWidget
             SetPanelClosed(key, true);
             SetPanelVisible(key, false);
             UpdatePanelChrome();
+            RefreshWinGPanelSettings();
             App.LogResize("panel-close key=" + key +
                 " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none"));
         }
@@ -2261,6 +2337,7 @@ namespace YummiGameBarWidget
             if (key == "youtube") return YoutubePreferences.Visible;
             if (key == "browser") return HudPreferences.BrowserPanelVisible;
             if (key == "click-native") return HudPreferences.NativeInputPanelVisible;
+            if (key == "voice-chat") return HudPreferences.VoiceChatPanelVisible;
             return false;
         }
 
@@ -2271,6 +2348,7 @@ namespace YummiGameBarWidget
             else if (key == "youtube") YoutubePreferences.Visible = visible;
             else if (key == "browser") HudPreferences.BrowserPanelVisible = visible;
             else if (key == "click-native") HudPreferences.NativeInputPanelVisible = visible;
+            else if (key == "voice-chat") HudPreferences.VoiceChatPanelVisible = visible;
         }
 
         private bool GetPanelClosed(string key)
@@ -2280,6 +2358,7 @@ namespace YummiGameBarWidget
             if (key == "youtube") return HudPreferences.YoutubePanelClosed;
             if (key == "browser") return HudPreferences.BrowserPanelClosed;
             if (key == "click-native") return HudPreferences.NativeInputPanelClosed;
+            if (key == "voice-chat") return HudPreferences.VoiceChatPanelClosed;
             return false;
         }
 
@@ -2290,6 +2369,7 @@ namespace YummiGameBarWidget
             else if (key == "youtube") HudPreferences.YoutubePanelClosed = closed;
             else if (key == "browser") HudPreferences.BrowserPanelClosed = closed;
             else if (key == "click-native") HudPreferences.NativeInputPanelClosed = closed;
+            else if (key == "voice-chat") HudPreferences.VoiceChatPanelClosed = closed;
         }
 
         private bool GetPanelExpanded(string key)
@@ -2361,11 +2441,23 @@ namespace YummiGameBarWidget
         private void UpdateVoiceChatPanelChrome(bool pinnedOnly)
         {
             var editing = !pinnedOnly;
-            VoiceChatPanel.Visibility = editing || voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
+            var runtimeVisible = HudPreferences.VoiceChatPanelVisible;
+            var hidden = !runtimeVisible;
+            var closed = HudPreferences.VoiceChatPanelClosed;
+            var showRuntimeContent = runtimeVisible && voiceChatHasVisibleMessages;
+
+            // Match the other panels: eye-hidden stays as a 60% Win+G ghost but
+            // disappears from the real overlay; X-closed is absent from both modes.
+            VoiceChatPanel.Visibility = editing || showRuntimeContent ? Visibility.Visible : Visibility.Collapsed;
+            VoiceChatPanel.Opacity = closed ? 0.0 : (!pinnedOnly && hidden ? HiddenRuntimePanelOpacity : 1.0);
+            VoiceChatPanel.IsHitTestVisible = !closed && !pinnedOnly;
             VoiceChatMoveBar.Visibility = editing ? Visibility.Visible : Visibility.Collapsed;
-            VoiceChatBody.Visibility = editing || voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
+            VoiceChatBody.Visibility = editing || showRuntimeContent ? Visibility.Visible : Visibility.Collapsed;
             VoiceChatOverlay.Visibility = voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
             VoiceChatPlaceholder.Visibility = editing && !voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
+            VoiceChatEyeButton.Opacity = runtimeVisible ? 1.0 : 0.5;
+            ToolTipService.SetToolTip(VoiceChatEyeButton, runtimeVisible ?
+                "실제 화면에서 숨기기" : "실제 화면에 표시");
             ApplyVoiceChatBodyChrome(pinnedOnly);
         }
 
@@ -2469,6 +2561,49 @@ namespace YummiGameBarWidget
             var y = Math.Max(0.0, RootGrid.ActualHeight - VoiceChatPanel.Margin.Top - panelHeight - 72.0);
             SetPanelPosition(VoiceChatPanel, VoiceChatPanelTransform, 0.0, y, false);
             voiceChatPositionNeedsDefault = false;
+        }
+
+        private void AddNativeInputBlockBand(JsonArray rects, FrameworkElement panel)
+        {
+            if (panel == null || panel.Visibility != Visibility.Visible || panel.Opacity <= 0.01) return;
+            var width = panel.ActualWidth > 0 ? panel.ActualWidth : (!double.IsNaN(panel.Width) ? panel.Width : 0.0);
+            var height = panel.ActualHeight > 0 ? panel.ActualHeight : (!double.IsNaN(panel.Height) ? panel.Height : 0.0);
+            if (width <= 0 || height <= 0) return;
+            Windows.Foundation.Point local;
+            try { local = panel.TransformToVisual(RootGrid).TransformPoint(new Windows.Foundation.Point(0, 0)); }
+            catch { return; }
+            AddNativeInputBlockRect(rects, local, width, Math.Min(RuntimeNativeDragBandHeight, height));
+        }
+
+        private void AddNativeInputBlockElement(JsonArray rects, FrameworkElement element)
+        {
+            if (element == null || element.Visibility != Visibility.Visible || element.Opacity <= 0.01 || !element.IsHitTestVisible) return;
+            var width = element.ActualWidth > 0 ? element.ActualWidth : (!double.IsNaN(element.Width) ? element.Width : 0.0);
+            var height = element.ActualHeight > 0 ? element.ActualHeight : (!double.IsNaN(element.Height) ? element.Height : 0.0);
+            if (width <= 0 || height <= 0) return;
+            Windows.Foundation.Point local;
+            try { local = element.TransformToVisual(RootGrid).TransformPoint(new Windows.Foundation.Point(0, 0)); }
+            catch { return; }
+            AddNativeInputBlockRect(rects, local, width, height);
+        }
+
+        private void AddNativeInputBlockRect(JsonArray rects, Windows.Foundation.Point local, double width, double height)
+        {
+            if (widget == null || rects == null || width <= 0 || height <= 0) return;
+            var bounds = widget.WindowBounds;
+            var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
+            var rect = new JsonArray
+            {
+                JsonValue.CreateNumberValue((bounds.X + local.X) * scale),
+                JsonValue.CreateNumberValue((bounds.Y + local.Y) * scale),
+                JsonValue.CreateNumberValue(width * scale),
+                JsonValue.CreateNumberValue(height * scale),
+                JsonValue.CreateNumberValue(bounds.X + (local.X * scale)),
+                JsonValue.CreateNumberValue(bounds.Y + (local.Y * scale)),
+                JsonValue.CreateNumberValue(width * scale),
+                JsonValue.CreateNumberValue(height * scale),
+            };
+            rects.Add(rect);
         }
 
         private void SetPanelPosition(FrameworkElement panel, TranslateTransform transform, double x, double y, bool save)
@@ -2731,6 +2866,25 @@ namespace YummiGameBarWidget
                     ["command"] = JsonValue.CreateStringValue("sync_external_click_test"),
                     ["active"] = JsonValue.CreateBooleanValue(effectiveActive),
                 };
+                var pinnedOnly = widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
+                var inputBlockRects = new JsonArray();
+                if (effectiveActive && pinnedOnly)
+                {
+                    AddNativeInputBlockBand(inputBlockRects, LcuPanel);
+                    AddNativeInputBlockBand(inputBlockRects, PartyPanel);
+                    AddNativeInputBlockBand(inputBlockRects, YoutubePanel);
+                    AddNativeInputBlockBand(inputBlockRects, BrowserPanel);
+                    AddNativeInputBlockBand(inputBlockRects, ClickNativePanel);
+                    AddNativeInputBlockBand(inputBlockRects, VoiceChatPanel);
+                    // These runtime controls receive their clicks through the Agent while
+                    // Game Bar itself remains click-through. Swallow the original game
+                    // click and forward only the overlay action.
+                    AddNativeInputBlockElement(inputBlockRects, NativeHookHitbox);
+                    if (!youtubeUsingFallback && youtubeWebView2 != null && youtubeWebView2.Visibility == Visibility.Visible)
+                        AddNativeInputBlockElement(inputBlockRects, YoutubeVideoHost);
+                }
+                command["blockInput"] = JsonValue.CreateBooleanValue(inputBlockRects.Count > 0);
+                command["blockRects"] = inputBlockRects;
                 if (lastGameBarPointerAtMs > 0)
                 {
                     var bounds = widget.WindowBounds;
@@ -2817,6 +2971,10 @@ namespace YummiGameBarWidget
                 var eventY = (int)response.GetNamedNumber("eventY", 0);
                 var matched = response.GetNamedString("matchedGeometry", "?");
                 var responseActive = response.GetNamedBoolean("active", false);
+                var inputBlockActive = response.GetNamedBoolean("inputBlockActive", false);
+                var inputBlockCaptured = response.GetNamedBoolean("inputBlockCaptured", false);
+                var inputBlockedDownCount = (ulong)Math.Max(0, response.GetNamedNumber("inputBlockedDownCount", 0));
+                var inputBlockedUpCount = (ulong)Math.Max(0, response.GetNamedNumber("inputBlockedUpCount", 0));
                 var rectWidth = response.GetNamedNumber("rectWidth", 0);
                 var rectHeight = response.GetNamedNumber("rectHeight", 0);
                 var altRectWidth = response.GetNamedNumber("altRectWidth", 0);
@@ -2873,6 +3031,8 @@ namespace YummiGameBarWidget
                     "agent pid=" + agentPid + " build=" + agentBuild + " release=" + releaseLabel + " commit=" + agentCommit + "\n" +
                     "active=" + responseActive + " seq=" + sequence + " clicks=" + clickCount + " event=" + eventName +
                     " eventXY=" + eventX + "," + eventY + " eventAt=" + eventAtMs + " matched=" + matched + "\n" +
+                    "inputBlock active=" + inputBlockActive + " captured=" + inputBlockCaptured +
+                    " down=" + inputBlockedDownCount + " up=" + inputBlockedUpCount + " rects=" + inputBlockRects.Count + "\n" +
                     "physical(GetPhysicalCursorPos) = " + physicalX + "," + physicalY + "\n" +
                     "logical(GetCursorPos)        = " + logicalX + "," + logicalY + "\n" +
                     "cursorInfo(GetCursorInfo)    = " + cursorInfoX + "," + cursorInfoY + " valid=" + cursorInfoValid +

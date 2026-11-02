@@ -40,6 +40,7 @@ namespace YummiGameBarWidget
             PartyVisibleToggle.IsOn = HudPreferences.PartyPanelVisible;
             BrowserVisibleToggle.IsOn = HudPreferences.BrowserPanelVisible && !HudPreferences.BrowserPanelClosed;
             NativeInputVisibleToggle.IsOn = HudPreferences.NativeInputPanelVisible;
+            VoiceChatVisibleToggle.IsOn = HudPreferences.VoiceChatPanelVisible && !HudPreferences.VoiceChatPanelClosed;
             VoiceChatLifetimeSlider.Value = HudPreferences.VoiceChatMessageLifetimeSeconds;
             VoiceChatLifetimeValueText.Text = HudPreferences.VoiceChatMessageLifetimeSeconds.ToString("0") + "초";
             VoiceChatBackgroundColorPicker.Color = ParseHexColor(HudPreferences.VoiceChatBackgroundColor);
@@ -110,6 +111,13 @@ namespace YummiGameBarWidget
             if (NativeInputVisibleToggle.IsOn) HudPreferences.NativeInputPanelClosed = false;
             HudPreferences.NativeInputPanelVisible = NativeInputVisibleToggle.IsOn;
             if (NativeInputVisibleToggle.IsOn) HudPreferences.Visible = true;
+        }
+        private void VoiceChatVisibleToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (!preferencesLoaded) return;
+            if (VoiceChatVisibleToggle.IsOn) HudPreferences.VoiceChatPanelClosed = false;
+            HudPreferences.VoiceChatPanelVisible = VoiceChatVisibleToggle.IsOn;
+            if (VoiceChatVisibleToggle.IsOn) HudPreferences.Visible = true;
         }
         private void VoiceChatLifetimeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs args)
         {

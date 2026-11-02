@@ -111,6 +111,37 @@ fn external_click_test_state() -> &'static Mutex<ExternalClickTestState> {
 }
 
 #[cfg(windows)]
+#[derive(Clone, Copy, Debug, Default)]
+struct NativeInputBlockRect {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    alt_x: f64,
+    alt_y: f64,
+    alt_width: f64,
+    alt_height: f64,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Default)]
+struct NativeInputBlockState {
+    active: bool,
+    left_captured: bool,
+    rects: Vec<NativeInputBlockRect>,
+    blocked_down_count: u64,
+    blocked_up_count: u64,
+}
+
+#[cfg(windows)]
+static NATIVE_INPUT_BLOCK: OnceLock<Mutex<NativeInputBlockState>> = OnceLock::new();
+
+#[cfg(windows)]
+fn native_input_block_state() -> &'static Mutex<NativeInputBlockState> {
+    NATIVE_INPUT_BLOCK.get_or_init(|| Mutex::new(NativeInputBlockState::default()))
+}
+
+#[cfg(windows)]
 #[derive(Debug, Default)]
 struct NativeInputDiagnosticState {
     last_periodic_log_ms: u64,
@@ -217,6 +248,11 @@ pub(crate) fn start(app: AppHandle, state: Arc<AppState>) {
         std::thread::Builder::new()
             .name("yummi-gamebar-mouse-input".into())
             .spawn(external_mouse_input_thread)
+            .ok();
+
+        std::thread::Builder::new()
+            .name("yummi-gamebar-input-block".into())
+            .spawn(native_input_block_hook_thread)
             .ok();
 
         std::thread::Builder::new()
@@ -607,7 +643,7 @@ fn loopback_server(app: AppHandle, state: Arc<AppState>) {
             if read == 0 {
                 return;
             }
-            let response = if raw.len() > 1024 {
+            let response = if raw.len() > 4096 {
                 json_response(false, "명령을 읽지 못했습니다.")
             } else {
                 handle_command(&app, state, raw.trim_end_matches(['\r', '\n']))
@@ -840,7 +876,7 @@ fn command_loopback_server(app: AppHandle, state: Arc<AppState>) {
                     "command-tcp request command={command_name} bytes={read}"
                 ));
             }
-            let response = if raw.len() > 1024 {
+            let response = if raw.len() > 4096 {
                 json_response(false, "명령을 읽지 못했습니다.")
             } else {
                 handle_command(&app, state, raw.trim_end_matches(['\r', '\n']))
@@ -984,6 +1020,82 @@ fn monitor_origin_for_point(x: i32, y: i32) -> Option<(i32, i32)> {
         return None;
     }
     Some((info.rcMonitor.left, info.rcMonitor.top))
+}
+
+#[cfg(windows)]
+unsafe extern "system" fn native_input_block_hook(
+    code: i32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::{
+        Foundation::LRESULT,
+        UI::WindowsAndMessaging::{
+            CallNextHookEx, MSLLHOOKSTRUCT, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        },
+    };
+
+    if code >= 0 {
+        let message = wparam.0 as u32;
+        if message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK || message == WM_LBUTTONUP {
+            let hook = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+            if let Ok(mut state) = native_input_block_state().lock() {
+                let inside = |rect: &NativeInputBlockRect| {
+                    let x = hook.pt.x as f64;
+                    let y = hook.pt.y as f64;
+                    let hit = |rx: f64, ry: f64, rw: f64, rh: f64| {
+                        rw > 0.0 && rh > 0.0 && x >= rx && x < rx + rw && y >= ry && y < ry + rh
+                    };
+                    hit(rect.x, rect.y, rect.width, rect.height)
+                        || hit(rect.alt_x, rect.alt_y, rect.alt_width, rect.alt_height)
+                };
+
+                if message == WM_LBUTTONUP && state.left_captured {
+                    state.left_captured = false;
+                    state.blocked_up_count = state.blocked_up_count.wrapping_add(1);
+                    return LRESULT(1);
+                }
+
+                if message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK {
+                    if state.left_captured || (state.active && state.rects.iter().any(inside)) {
+                        state.left_captured = true;
+                        state.blocked_down_count = state.blocked_down_count.wrapping_add(1);
+                        return LRESULT(1);
+                    }
+                }
+            }
+        }
+    }
+
+    CallNextHookEx(None, code, wparam, lparam)
+}
+
+#[cfg(windows)]
+fn native_input_block_hook_thread() {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, UnhookWindowsHookEx,
+        MSG, WH_MOUSE_LL,
+    };
+
+    let hook = match unsafe { SetWindowsHookExW(WH_MOUSE_LL, Some(native_input_block_hook), None, 0) } {
+        Ok(hook) => hook,
+        Err(error) => {
+            append_native_input_log(&format!("input-block hook-install-failed error={error}"));
+            return;
+        }
+    };
+    append_native_input_log("input-block hook-installed");
+
+    let mut message = MSG::default();
+    while unsafe { GetMessageW(&mut message, None, 0, 0) }.as_bool() {
+        unsafe {
+            let _ = TranslateMessage(&message);
+            DispatchMessageW(&message);
+        }
+    }
+
+    let _ = unsafe { UnhookWindowsHookEx(hook) };
+    append_native_input_log("input-block hook-stopped");
 }
 
 #[cfg(windows)]
@@ -1163,6 +1275,35 @@ fn sync_external_click_test(parsed: &Value) -> String {
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let number = |key: &str| parsed.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    let block_input = parsed
+        .get("blockInput")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut block_rects = Vec::new();
+    if let Some(rects) = parsed.get("blockRects").and_then(Value::as_array) {
+        for value in rects.iter().take(16) {
+            let Some(parts) = value.as_array() else { continue };
+            if parts.len() != 8 { continue; }
+            let mut numbers = [0.0_f64; 8];
+            let mut valid = true;
+            for (index, slot) in numbers.iter_mut().enumerate() {
+                let Some(number) = parts[index].as_f64() else { valid = false; break };
+                if !number.is_finite() { valid = false; break; }
+                *slot = number;
+            }
+            if !valid { continue; }
+            let rect = NativeInputBlockRect {
+                x: numbers[0], y: numbers[1], width: numbers[2], height: numbers[3],
+                alt_x: numbers[4], alt_y: numbers[5], alt_width: numbers[6], alt_height: numbers[7],
+            };
+            if rect.width > 0.0 && rect.height > 0.0 && rect.alt_width > 0.0 && rect.alt_height > 0.0
+                && rect.width <= 4_000.0 && rect.height <= 4_000.0
+                && rect.alt_width <= 4_000.0 && rect.alt_height <= 4_000.0
+            {
+                block_rects.push(rect);
+            }
+        }
+    }
     let x = number("x");
     let y = number("y");
     let width = number("width");
@@ -1406,6 +1547,15 @@ fn sync_external_click_test(parsed: &Value) -> String {
         state.alt_height = alt_height;
     }
     state.geometry_updated_at_ms = now;
+    let (input_block_active, input_block_captured, blocked_down_count, blocked_up_count) =
+        match native_input_block_state().lock() {
+            Ok(mut block) => {
+                block.active = active && block_input && !block_rects.is_empty();
+                block.rects = if block.active { block_rects } else { Vec::new() };
+                (block.active, block.left_captured, block.blocked_down_count, block.blocked_up_count)
+            }
+            Err(_) => (false, false, 0, 0),
+        };
     serde_json::json!({
         "ok": true,
         "active": state.active,
@@ -1414,6 +1564,10 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "hovered": state.hovered,
         "mouseDown": state.mouse_down,
         "leftButtonDown": state.raw_mouse_down,
+        "inputBlockActive": input_block_active,
+        "inputBlockCaptured": input_block_captured,
+        "inputBlockedDownCount": blocked_down_count,
+        "inputBlockedUpCount": blocked_up_count,
         "hudToggleSequence": state.hud_toggle_sequence,
         "event": state.event,
         "eventX": state.event_x,
@@ -1484,7 +1638,7 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
     const PIPE_NAME: &str = r"\\.\pipe\LOCAL\YummiLcuGameBarCommandV1";
     const SDDL: &str = "D:(A;;GA;;;WD)(A;;GA;;;AC)";
     const SDDL_REVISION_1: u32 = 1;
-    const MAX_REQUEST_BYTES: usize = 1024;
+    const MAX_REQUEST_BYTES: usize = 4096;
 
     let pipe_name = wide_null(PIPE_NAME);
     let sddl = wide_null(SDDL);
@@ -1587,8 +1741,9 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 },
             },
             UI::Accessibility::{
-                CUIAutomation, IUIAutomation, TreeScope_Children, TreeScope_Subtree,
-                UIA_ButtonControlTypeId,
+                CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
+                IUIAutomationTogglePattern, TreeScope_Children, TreeScope_Subtree,
+                ToggleState_On, UIA_ButtonControlTypeId, UIA_InvokePatternId, UIA_TogglePatternId,
             },
         },
     };
@@ -1626,14 +1781,15 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         String::from_utf16_lossy(&buffer[..length as usize])
     }
 
-    fn looks_like_gamebar(value: &str) -> bool {
-        let lower = value.to_ascii_lowercase();
-        lower.contains("game bar")
-            || lower.contains("gamebar")
-            || lower.contains("xbox")
-            || lower.contains("gamingoverlay")
-            || lower.contains("gamebar.exe")
-            || lower.contains("gamebarftserver")
+    fn is_gamebar_process(image: &str) -> bool {
+        let normalized = image.replace('/', "\\").to_ascii_lowercase();
+        normalized.ends_with("\\gamebar.exe")
+    }
+
+    fn is_yummi_widget_process(image: &str) -> bool {
+        let normalized = image.replace('/', "\\").to_ascii_lowercase();
+        normalized.contains("\\yummigamebarwidget_")
+            && normalized.ends_with("\\yummigamebarwidget.exe")
     }
 
     unsafe {
@@ -1678,6 +1834,13 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         let mut top_windows = Vec::new();
         let mut candidates = Vec::new();
         let mut scanned_descendants = 0usize;
+        let mut gamebar_process_seen = false;
+        let mut yummi_widget_seen = false;
+        let mut yummi_selected = false;
+        let mut yummi_home_button: Option<IUIAutomationElement> = None;
+        let mut yummi_title_element: Option<IUIAutomationElement> = None;
+        let mut pin_toggles: Vec<IUIAutomationElement> = Vec::new();
+        let mut clickthrough_toggles: Vec<IUIAutomationElement> = Vec::new();
         let top_len = top.Length().unwrap_or(0).clamp(0, 96);
         for i in 0..top_len {
             let Ok(element) = top.GetElement(i) else { continue };
@@ -1687,8 +1850,8 @@ fn probe_gamebar_uia() -> Result<Value, String> {
             let framework = text(element.CurrentFrameworkId());
             let process_id = element.CurrentProcessId().unwrap_or(0);
             let image = process_image(process_id);
-            let top_descriptor = format!("{name} {automation_id} {class_name} {framework} {image}");
-            let likely_gamebar = looks_like_gamebar(&top_descriptor);
+            let likely_gamebar = is_gamebar_process(&image);
+            gamebar_process_seen |= likely_gamebar;
             let hosted_window = class_name.eq_ignore_ascii_case("ApplicationFrameWindow")
                 || class_name.to_ascii_lowercase().contains("corewindow")
                 || class_name.to_ascii_lowercase().contains("xaml")
@@ -1743,23 +1906,47 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                     || child_name.contains("통과")
                     || child_name.contains("클릭")
                     || child_name.contains("입력");
-                let child_gamebar = looks_like_gamebar(&child_descriptor);
+                let child_is_gamebar_process = is_gamebar_process(&child_image);
+                let child_is_yummi_widget = is_yummi_widget_process(&child_image);
+                let child_gamebar = child_is_gamebar_process || child_is_yummi_widget;
                 let focused_process = focused_pid != 0 && child_pid == focused_pid;
                 let is_button = control_type == UIA_ButtonControlTypeId;
+                let enabled = child.CurrentIsEnabled().map(|v| v.as_bool()).unwrap_or(false);
+                let offscreen = child.CurrentIsOffscreen().map(|v| v.as_bool()).unwrap_or(false);
 
-                // For generic desktop apps, record only keyword/Game Bar matches.
-                // For hosted XAML windows and the currently focused process, also
-                // record buttons so the toolbar can be identified even if localized
-                // labels contain none of our keywords.
-                if !keyword
-                    && !child_gamebar
-                    && !(is_button && (hosted_window || focused_process || likely_gamebar))
-                {
+                if child_is_gamebar_process {
+                    gamebar_process_seen = true;
+                    if child_id == "TitleText"
+                        && child_name.contains("유미지지 오버레이")
+                        && !offscreen
+                    {
+                        yummi_selected = true;
+                        yummi_title_element = Some(child.clone());
+                    }
+                    if child_id == "HomeBarItemButton"
+                        && child_name.contains("유미지지 오버레이")
+                        && yummi_home_button.is_none()
+                    {
+                        yummi_home_button = Some(child.clone());
+                    }
+                    if child_id == "PinToggle" {
+                        pin_toggles.push(child.clone());
+                    }
+                    if child_id == "ClickThroughToggleButton" {
+                        clickthrough_toggles.push(child.clone());
+                    }
+                }
+                if child_is_yummi_widget {
+                    yummi_widget_seen = true;
+                }
+
+                // Do not let arbitrary desktop text such as a ChatGPT message containing
+                // "Game Bar" consume the candidate cap. Only actual GameBar.exe / Yummi
+                // widget elements, plus buttons hosted by ApplicationFrameWindow, qualify.
+                if !child_gamebar && !(is_button && hosted_window) {
                     continue;
                 }
 
-                let enabled = child.CurrentIsEnabled().map(|v| v.as_bool()).unwrap_or(false);
-                let offscreen = child.CurrentIsOffscreen().map(|v| v.as_bool()).unwrap_or(false);
                 let rect = child.CurrentBoundingRectangle().ok();
                 let bounds = rect.map(|r| serde_json::json!({
                     "left": r.left, "top": r.top, "right": r.right, "bottom": r.bottom
@@ -1794,9 +1981,170 @@ fn probe_gamebar_uia() -> Result<Value, String> {
             }
         }
 
+        let invoke_element = |element: &IUIAutomationElement, label: &str| -> Result<(), String> {
+            match element.GetCurrentPatternAs::<IUIAutomationInvokePattern>(UIA_InvokePatternId) {
+                Ok(pattern) => pattern
+                    .Invoke()
+                    .map_err(|error| format!("{label} Invoke 실패: {error}")),
+                Err(invoke_error) => element
+                    .SetFocus()
+                    .map_err(|focus_error| format!(
+                        "{label} Invoke 패턴 없음({invoke_error}); SetFocus 실패: {focus_error}"
+                    )),
+            }
+        };
+
+        let ensure_toggle_on = |element: &IUIAutomationElement, label: &str| -> Result<Value, String> {
+            let pattern = element
+                .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
+                .map_err(|error| format!("{label} Toggle 패턴 조회 실패: {error}"))?;
+            let before = pattern
+                .CurrentToggleState()
+                .map_err(|error| format!("{label} 상태 조회 실패: {error}"))?;
+            let mut toggled = false;
+            if before != ToggleState_On {
+                pattern
+                    .Toggle()
+                    .map_err(|error| format!("{label} Toggle 실패: {error}"))?;
+                toggled = true;
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            let after = pattern.CurrentToggleState().unwrap_or(before);
+            let message = format!(
+                "uia-auto {label} before={} toggled={} after={} enabled={}",
+                before.0, toggled, after.0, after == ToggleState_On
+            );
+            append_uia_probe_log(&message);
+            append_native_input_log(&message);
+            Ok(serde_json::json!({
+                "found": true,
+                "before": before.0,
+                "after": after.0,
+                "toggled": toggled,
+                "enabled": after == ToggleState_On,
+            }))
+        };
+
+        let mut selection_invoked = false;
+        let mut selection_error = String::new();
+        if gamebar_process_seen && !yummi_selected {
+            if let Some(button) = yummi_home_button.as_ref() {
+                match invoke_element(button, "유미지지 오버레이 선택") {
+                    Ok(()) => {
+                        selection_invoked = true;
+                        append_uia_probe_log("uia-auto yummi-select invoked");
+                        append_native_input_log("uia-auto yummi-select invoked");
+                    }
+                    Err(error) => {
+                        selection_error = error;
+                        let message = format!("uia-auto yummi-select failed error={selection_error}");
+                        append_uia_probe_log(&message);
+                        append_native_input_log(&message);
+                    }
+                }
+            } else {
+                selection_error = "유미지지 HomeBarItemButton을 찾지 못했습니다.".into();
+                let message = format!("uia-auto yummi-select missing error={selection_error}");
+                append_uia_probe_log(&message);
+                append_native_input_log(&message);
+            }
+        }
+
+        // Prefer toolbar controls that share the nearest raw-view ancestor with
+        // Yummi's visible TitleText. This prevents a second pinned Game Bar widget
+        // from donating its PinToggle when multiple widgets are open at once.
+        let raw_walker = automation.RawViewWalker().ok();
+        let choose_nearest_to_yummi = |elements: &[IUIAutomationElement]|
+            -> Option<(IUIAutomationElement, i32)> {
+            let Some(title) = yummi_title_element.as_ref() else {
+                return elements.first().cloned().map(|element| (element, -1));
+            };
+            let Some(walker) = raw_walker.as_ref() else {
+                return elements.first().cloned().map(|element| (element, -1));
+            };
+
+            let mut title_ancestors = Vec::new();
+            let mut current = title.clone();
+            for _ in 0..12 {
+                let Ok(parent) = walker.GetParentElement(&current) else { break };
+                title_ancestors.push(parent.clone());
+                current = parent;
+            }
+
+            let mut best: Option<(IUIAutomationElement, i32)> = None;
+            for element in elements {
+                let mut current = element.clone();
+                let mut candidate_ancestors = Vec::new();
+                for _ in 0..12 {
+                    let Ok(parent) = walker.GetParentElement(&current) else { break };
+                    candidate_ancestors.push(parent.clone());
+                    current = parent;
+                }
+                let mut score = -10_000;
+                'outer: for (candidate_depth, candidate_parent) in candidate_ancestors.iter().enumerate() {
+                    for (title_depth, title_parent) in title_ancestors.iter().enumerate() {
+                        if automation
+                            .CompareElements(candidate_parent, title_parent)
+                            .map(|same| same.as_bool())
+                            .unwrap_or(false)
+                        {
+                            score = 1_000 - (candidate_depth + title_depth) as i32;
+                            break 'outer;
+                        }
+                    }
+                }
+                if best.as_ref().map(|(_, best_score)| score > *best_score).unwrap_or(true) {
+                    best = Some((element.clone(), score));
+                }
+            }
+            best
+        };
+
+        // Never toggle toolbar controls until the Game Bar title explicitly says that
+        // Yummi is the selected widget. If selection was just invoked, the widget side
+        // retries this command after the hosted tree refreshes.
+        let selected_pin = if yummi_selected { choose_nearest_to_yummi(&pin_toggles) } else { None };
+        let selected_clickthrough = if yummi_selected { choose_nearest_to_yummi(&clickthrough_toggles) } else { None };
+        let pin_scope_score = selected_pin.as_ref().map(|(_, score)| *score).unwrap_or(-1);
+        let clickthrough_scope_score = selected_clickthrough.as_ref().map(|(_, score)| *score).unwrap_or(-1);
+        let mut pin = serde_json::json!({"found": !pin_toggles.is_empty(), "enabled": false, "scopeScore": pin_scope_score});
+        let mut clickthrough = serde_json::json!({"found": !clickthrough_toggles.is_empty(), "enabled": false, "scopeScore": clickthrough_scope_score});
+        if yummi_selected {
+            pin = match selected_pin.as_ref() {
+                Some((element, score)) => ensure_toggle_on(element, "PinToggle")
+                    .map(|mut value| {
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert("scopeScore".into(), Value::from(*score));
+                        }
+                        value
+                    })
+                    .unwrap_or_else(|error| serde_json::json!({"found": true, "enabled": false, "scopeScore": score, "error": error})),
+                None => serde_json::json!({"found": false, "enabled": false, "scopeScore": -1}),
+            };
+            clickthrough = match selected_clickthrough.as_ref() {
+                Some((element, score)) => ensure_toggle_on(element, "ClickThroughToggleButton")
+                    .map(|mut value| {
+                        if let Some(object) = value.as_object_mut() {
+                            object.insert("scopeScore".into(), Value::from(*score));
+                        }
+                        value
+                    })
+                    .unwrap_or_else(|error| serde_json::json!({"found": true, "enabled": false, "scopeScore": score, "error": error})),
+                None => serde_json::json!({"found": false, "enabled": false, "scopeScore": -1}),
+            };
+        }
+
+        let pin_enabled = pin.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+        let clickthrough_enabled = clickthrough
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let ready = gamebar_process_seen && yummi_selected && pin_enabled && clickthrough_enabled;
         let message = format!(
-            "uia-probe complete topWindows={} scannedDescendants={} candidates={} focusedPid={}",
-            top_windows.len(), scanned_descendants, candidates.len(), focused_pid
+            "uia-probe complete topWindows={} scannedDescendants={} candidates={} focusedPid={} gameBar={} yummiWidget={} yummiSelected={} selectInvoked={} pin={} clickThrough={} ready={}",
+            top_windows.len(), scanned_descendants, candidates.len(), focused_pid,
+            gamebar_process_seen, yummi_widget_seen, yummi_selected, selection_invoked,
+            pin_enabled, clickthrough_enabled, ready
         );
         append_native_input_log(&message);
         append_uia_probe_log(&message);
@@ -1805,6 +2153,14 @@ fn probe_gamebar_uia() -> Result<Value, String> {
             "candidates": candidates,
             "scannedDescendants": scanned_descendants,
             "focusedProcessId": focused_pid,
+            "gameBarFound": gamebar_process_seen,
+            "yummiWidgetFound": yummi_widget_seen,
+            "yummiSelected": yummi_selected,
+            "selectionInvoked": selection_invoked,
+            "selectionError": selection_error,
+            "pin": pin,
+            "clickThrough": clickthrough,
+            "ready": ready,
         }))
     }
 }

@@ -47,7 +47,7 @@ namespace YummiGameBarWidget
         }
         internal static bool BrowserPanelVisible
         {
-            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("BrowserPanelVisible", out value) || !(value is bool) || (bool)value; }
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("BrowserPanelVisible", out value) && value is bool && (bool)value; }
             set { Set("BrowserPanelVisible", value); }
         }
         internal static bool BrowserPanelExpanded
@@ -100,6 +100,16 @@ namespace YummiGameBarWidget
         {
             get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("NativeCursorMarkersVisible", out value) && value is bool && (bool)value; }
             set { Set("NativeCursorMarkersVisible", value); }
+        }
+        internal static bool VoiceChatPanelVisible
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("VoiceChatPanelVisible", out value) || !(value is bool) || (bool)value; }
+            set { Set("VoiceChatPanelVisible", value); }
+        }
+        internal static bool VoiceChatPanelClosed
+        {
+            get { object value; return ApplicationData.Current.LocalSettings.Values.TryGetValue("VoiceChatPanelClosed", out value) && value is bool && (bool)value; }
+            set { Set("VoiceChatPanelClosed", value); }
         }
         internal static double VoiceChatMessageLifetimeSeconds
         {

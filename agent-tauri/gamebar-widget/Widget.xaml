@@ -378,8 +378,13 @@
           <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
           <Border x:Name="VoiceChatMoveBar" Height="24" Background="#E6141020" BorderBrush="#507B5AA6" BorderThickness="0,0,0,1" Tag="voice-chat"
                   PointerPressed="PanelMoveBar_PointerPressed" PointerMoved="PanelMoveBar_PointerMoved" PointerReleased="PanelMoveBar_PointerReleased" PointerCanceled="PanelMoveBar_PointerCanceled" PointerCaptureLost="PanelMoveBar_PointerCaptureLost">
-            <Grid Padding="8,0,8,0">
+            <Grid Padding="8,0,3,0">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
               <TextBlock Text="Discord Chat" FontSize="11" Foreground="#D9CFE8" VerticalAlignment="Center"/>
+              <Button x:Name="VoiceChatEyeButton" Grid.Column="1" Tag="voice-chat" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Click="PanelEyeButton_Click" ToolTipService.ToolTip="실제 화면에서 숨기기">
+                <TextBlock Text="&#xE890;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="White"/>
+              </Button>
+              <Button Grid.Column="2" Tag="voice-chat" Content="×" Width="24" Height="22" Padding="0" Background="Transparent" BorderThickness="0" Foreground="White" FontSize="15" Click="PanelCloseButton_Click" ToolTipService.ToolTip="Discord Chat 닫기"/>
             </Grid>
           </Border>
           <Border x:Name="VoiceChatBody" Grid.Row="1" Height="190" Padding="10" CornerRadius="8" Background="Transparent" BorderBrush="Transparent" BorderThickness="0" IsHitTestVisible="False">
@@ -414,6 +419,33 @@
                   IsHitTestVisible="False"
                   Canvas.ZIndex="12000"/>
     </Grid>
+
+    <!-- Win+G-only quick panel selector. This lives outside HudPanel so the
+         user can recover hidden panels even when the runtime HUD itself is off. -->
+    <Border x:Name="WinGPanelSettings"
+            Width="230"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Top"
+            Margin="0,52,20,0"
+            Padding="12"
+            CornerRadius="12"
+            Background="#F21A1426"
+            BorderBrush="#8F7B5AA6"
+            BorderThickness="1"
+            Visibility="Collapsed"
+            Canvas.ZIndex="15000">
+      <StackPanel Spacing="7">
+        <TextBlock Text="오버레이 표시" FontSize="13" FontWeight="SemiBold" Foreground="White"/>
+        <TextBlock Text="Win+G에서 실제 게임 화면에 표시할 패널을 선택하세요."
+                   FontSize="9" Foreground="#B9ADC8" TextWrapping="Wrap"/>
+        <ToggleSwitch x:Name="WinGLcuToggle" Tag="lcu" Header="LCU" OnContent="켜짐" OffContent="꺼짐" Toggled="WinGPanelToggle_Toggled" Foreground="White"/>
+        <ToggleSwitch x:Name="WinGPartyToggle" Tag="party" Header="Party" OnContent="켜짐" OffContent="꺼짐" Toggled="WinGPanelToggle_Toggled" Foreground="White"/>
+        <ToggleSwitch x:Name="WinGYoutubeToggle" Tag="youtube" Header="YouTube" OnContent="켜짐" OffContent="꺼짐" Toggled="WinGPanelToggle_Toggled" Foreground="White"/>
+        <ToggleSwitch x:Name="WinGBrowserToggle" Tag="browser" Header="Chrome" OnContent="켜짐" OffContent="꺼짐" Toggled="WinGPanelToggle_Toggled" Foreground="White"/>
+        <ToggleSwitch x:Name="WinGNativeInputToggle" Tag="click-native" Header="Native Input" OnContent="켜짐" OffContent="꺼짐" Toggled="WinGPanelToggle_Toggled" Foreground="White"/>
+        <ToggleSwitch x:Name="WinGVoiceChatToggle" Tag="voice-chat" Header="Discord Chat" OnContent="켜짐" OffContent="꺼짐" Toggled="WinGPanelToggle_Toggled" Foreground="White"/>
+      </StackPanel>
+    </Border>
 
     <Grid x:Name="PinTutorialOverlay"
           Visibility="Collapsed"

@@ -91,6 +91,21 @@ try {
   if ($widgetSource -notmatch 'EnsureBrowserWebView2Async' -or $widgetSource -notmatch 'NormalizeBrowserInput') { throw 'Browser panel must use the shared WebView2 runtime and URL/search normalization' }
   if ($widgetSource -notmatch 'BrowserPanelVisible = show') { throw 'F9 must include the browser panel' }
   if ($widgetSource -notmatch 'ApplyPanelChrome\("browser"') { throw 'Browser panel must share eye/close panel semantics' }
+  $prefsSource = Get-Content (Join-Path $InstallerRoot 'HudPreferences.cs') -Raw -Encoding UTF8
+  if ($prefsSource -notmatch 'BrowserPanelVisible", out value\) && value is bool && \(bool\)value') { throw 'Browser panel must default hidden/off on a fresh install' }
+  if ($prefsSource -notmatch 'VoiceChatPanelVisible"' -or $prefsSource -notmatch '!ApplicationData.Current.LocalSettings.Values.TryGetValue\("VoiceChatPanelVisible"') { throw 'Discord Chat must default visible/on on a fresh install' }
+  if ($widgetXaml -notmatch 'x:Name="VoiceChatEyeButton"' -or $widgetXaml -notmatch 'Tag="voice-chat"') { throw 'Discord Chat must expose the shared eye/close panel controls' }
+  if ($widgetSource -notmatch 'VoiceChatPanelVisible = show' -or $widgetSource -notmatch 'VoiceChatPanelClosed') { throw 'Discord Chat must participate in shared F9 and closed-state decisions' }
+  if ($widgetXaml -notmatch 'x:Name="WinGPanelSettings"' -or $widgetSource -notmatch 'RefreshWinGPanelSettings') { throw 'Win+G must expose the quick panel selector' }
+  if ($widgetSource -notmatch 'GameBarDisplayMode != XboxGameBarDisplayMode\.PinnedOnly' -or $widgetSource -notmatch 'WinGPanelSettings\.Visibility = editing') { throw 'Quick panel selector must be visible only while Win+G is foreground' }
+  if ($widgetSource -notmatch 'WinGPanelToggle_Toggled' -or $widgetSource -notmatch 'SetPanelClosed\(key, false\)') { throw 'Win+G selector must reopen and toggle shared panels' }
+  $bridgeSource = Get-Content (Join-Path $InstallerRoot '..\src-tauri\src\gamebar_bridge.rs') -Raw -Encoding UTF8
+  if ($bridgeSource -notmatch 'is_gamebar_process' -or $bridgeSource -notmatch 'ends_with\("\\\\gamebar\.exe"\)') { throw 'Game Bar UIA matching must be process-based, not text-keyword based' }
+  if ($bridgeSource -notmatch 'automationId' -or $bridgeSource -notmatch 'HomeBarItemButton' -or $bridgeSource -notmatch '유미지지 오버레이') { throw 'Win+G automation must select the Yummi overlay entry' }
+  if ($bridgeSource -notmatch 'PinToggle' -or $bridgeSource -notmatch 'ClickThroughToggleButton' -or $bridgeSource -notmatch 'UIA_TogglePatternId') { throw 'Win+G automation must enable Yummi pin and click-through through UIA toggle patterns' }
+  if ($widgetSource -notmatch 'data.GetNamedBoolean\("ready", false\)' -or $widgetSource -notmatch 'gameBarUiaProbeCompleted = false') { throw 'Win+G automation must retry until ready and rearm for the next Win+G session' }
+  Write-Host 'PASS: Game Bar UIA auto-selects Yummi and enables pin/click-through using process-scoped AutomationIds'
+  Write-Host 'PASS: fresh defaults keep only Discord Chat enabled, Discord shares panel lifecycle, and Win+G has a panel selector'
   Write-Host 'PASS: single-tab browser panel, navigation, and panel lifecycle'
   # Exercise the production permission branch without changing OS settings.
   $tokens = $null
