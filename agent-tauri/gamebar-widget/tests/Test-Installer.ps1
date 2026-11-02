@@ -89,13 +89,15 @@ try {
   Write-Host 'PASS: eye ghost, hard close, native input button, pinned runtime drag, and YouTube native input semantics'
   if ($widgetXaml -notmatch 'x:Name="BrowserPanel"' -or $widgetXaml -notmatch 'x:Name="BrowserAddressBox"') { throw 'Single-tab browser panel must exist' }
   if ($widgetSource -notmatch 'EnsureBrowserWebView2Async' -or $widgetSource -notmatch 'NormalizeBrowserInput') { throw 'Browser panel must use the shared WebView2 runtime and URL/search normalization' }
-  if ($widgetSource -notmatch 'BrowserPanelVisible = show') { throw 'F9 must include the browser panel' }
+  if ($widgetSource -match 'BrowserPanelVisible = show') { throw 'F9 must not rewrite the browser visibility setting' }
   if ($widgetSource -notmatch 'ApplyPanelChrome\("browser"') { throw 'Browser panel must share eye/close panel semantics' }
   $prefsSource = Get-Content (Join-Path $InstallerRoot 'HudPreferences.cs') -Raw -Encoding UTF8
   if ($prefsSource -notmatch 'BrowserPanelVisible", out value\) && value is bool && \(bool\)value') { throw 'Browser panel must default hidden/off on a fresh install' }
   if ($prefsSource -notmatch 'VoiceChatPanelVisible"' -or $prefsSource -notmatch '!ApplicationData.Current.LocalSettings.Values.TryGetValue\("VoiceChatPanelVisible"') { throw 'Discord Chat must default visible/on on a fresh install' }
   if ($widgetXaml -notmatch 'x:Name="VoiceChatEyeButton"' -or $widgetXaml -notmatch 'Tag="voice-chat"') { throw 'Discord Chat must expose the shared eye/close panel controls' }
-  if ($widgetSource -notmatch 'VoiceChatPanelVisible = show' -or $widgetSource -notmatch 'VoiceChatPanelClosed') { throw 'Discord Chat must participate in shared F9 and closed-state decisions' }
+  if ($widgetSource -match 'VoiceChatPanelVisible = show') { throw 'F9 must not rewrite Discord Chat visibility' }
+  if ($widgetSource -notmatch 'runtimeOverlayHiddenByHotkey = !runtimeOverlayHiddenByHotkey' -or $widgetSource -notmatch 'effectiveHudVisible = hudVisible && \(!pinnedOnly \|\| !runtimeOverlayHiddenByHotkey\)') { throw 'F9 must use an independent runtime master visibility gate' }
+  if ($widgetSource -match 'HudPreferences\.Visible = true;[\s\S]{0,800}runtime-overlay-hotkey-toggle') { throw 'F9 must not rewrite the global HUD setting' }
   if ($widgetXaml -notmatch 'x:Name="WinGPanelSettings"' -or $widgetSource -notmatch 'RefreshWinGPanelSettings') { throw 'Win+G must expose the quick panel selector' }
   if ($widgetSource -notmatch 'GameBarDisplayMode != XboxGameBarDisplayMode\.PinnedOnly' -or $widgetSource -notmatch 'WinGPanelSettings\.Visibility = editing') { throw 'Quick panel selector must be visible only while Win+G is foreground' }
   if ($widgetSource -notmatch 'WinGPanelToggle_Toggled' -or $widgetSource -notmatch 'SetPanelClosed\(key, false\)') { throw 'Win+G selector must reopen and toggle shared panels' }

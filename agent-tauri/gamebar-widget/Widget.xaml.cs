@@ -180,6 +180,9 @@ namespace YummiGameBarWidget
         private XboxGameBarHotkeyWatcher runtimePanelsHotkeyWatcher;
         private bool overlayUpdateRequestedForForeground;
         private long lastRuntimePanelsToggleAtMs;
+        // F9 is a session-only master visibility gate. It must never rewrite
+        // persisted per-panel or global HUD preferences.
+        private bool runtimeOverlayHiddenByHotkey;
         private int foregroundChromeRefreshGeneration;
         private bool foregroundChromeRefreshInFlight;
         private long lastForegroundChromeRefreshAtMs;
@@ -333,15 +336,18 @@ namespace YummiGameBarWidget
         {
             var hudVisible = HudPreferences.Visible;
             var pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
-            // Win+G is always an edit surface: even if an old/global HUD flag is off,
-            // keep the container available so hidden panels can appear as 60% ghosts.
-            // The global HUD switch only suppresses the real pinned overlay.
-            HudPanel.Visibility = pinnedOnly && !hudVisible ? Visibility.Collapsed : Visibility.Visible;
+            // F9 is a transient master gate for the real pinned overlay. It is
+            // deliberately independent from HudPreferences.Visible and every
+            // per-panel Visible/Closed setting so Win+G remains a stable editor.
+            var effectiveHudVisible = hudVisible && (!pinnedOnly || !runtimeOverlayHiddenByHotkey);
+            // Win+G is always an edit surface: F9 changes only PinnedOnly output and
+            // therefore cannot visually mutate the editor or its saved toggles.
+            HudPanel.Visibility = pinnedOnly && !effectiveHudVisible ? Visibility.Collapsed : Visibility.Visible;
             HudPanel.Opacity = HudPreferences.Opacity;
-            RootGrid.Background = hudVisible && HudPreferences.CoverageTint
+            RootGrid.Background = effectiveHudVisible && HudPreferences.CoverageTint
                 ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
                 : new SolidColorBrush(Colors.Transparent);
-            ApplyCursorMarkersVisibility(hudVisible && HudPreferences.NativeCursorMarkersVisible);
+            ApplyCursorMarkersVisibility(effectiveHudVisible && HudPreferences.NativeCursorMarkersVisible);
             ApplyVoiceChatPreferences();
             UpdatePanelChrome();
             RefreshWinGPanelSettings();
@@ -504,25 +510,14 @@ namespace YummiGameBarWidget
             }
             lastRuntimePanelsToggleAtMs = now;
 
-            // Hide when any non-closed runtime panel is visible; the next F9 restores
-            // only those same non-closed panels. X-closed panels stay closed and keep
-            // their Settings toggle off until the user explicitly reopens them there.
-            var anyVisible = (!HudPreferences.LcuPanelClosed && HudPreferences.LcuPanelVisible) ||
-                             (!HudPreferences.PartyPanelClosed && HudPreferences.PartyPanelVisible) ||
-                             (!HudPreferences.YoutubePanelClosed && YoutubePreferences.Visible) ||
-                             (!HudPreferences.BrowserPanelClosed && HudPreferences.BrowserPanelVisible) ||
-                             (!HudPreferences.NativeInputPanelClosed && HudPreferences.NativeInputPanelVisible) ||
-                             (!HudPreferences.VoiceChatPanelClosed && HudPreferences.VoiceChatPanelVisible);
-            var show = !anyVisible;
-            if (show) HudPreferences.Visible = true;
-            if (!HudPreferences.LcuPanelClosed) HudPreferences.LcuPanelVisible = show;
-            if (!HudPreferences.PartyPanelClosed) HudPreferences.PartyPanelVisible = show;
-            if (!HudPreferences.YoutubePanelClosed) YoutubePreferences.Visible = show;
-            if (!HudPreferences.BrowserPanelClosed) HudPreferences.BrowserPanelVisible = show;
-            if (!HudPreferences.NativeInputPanelClosed) HudPreferences.NativeInputPanelVisible = show;
-            if (!HudPreferences.VoiceChatPanelClosed) HudPreferences.VoiceChatPanelVisible = show;
+            // F9 toggles only a transient runtime master gate. Persisted settings
+            // (global HUD enabled, panel visibility, panel closed state) are untouched.
+            // This means pressing F9 while Win+G is open cannot rewrite the editor.
+            runtimeOverlayHiddenByHotkey = !runtimeOverlayHiddenByHotkey;
             ApplyPreferences();
-            App.LogResize("runtime-panels-toggle source=" + source + " visible=" + show +
+            App.LogResize("runtime-overlay-hotkey-toggle source=" + source +
+                " hidden=" + runtimeOverlayHiddenByHotkey +
+                " configured=" + HudPreferences.Visible +
                 " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
                 " pinned=" + (widget != null && widget.Pinned));
         }
@@ -3394,7 +3389,8 @@ namespace YummiGameBarWidget
             int gamebarPrimaryX, int gamebarPrimaryY, int gamebarAltX, int gamebarAltY,
             int selectedX, int selectedY)
         {
-            if (widget == null || !HudPreferences.Visible || !HudPreferences.NativeCursorMarkersVisible) return;
+            if (widget == null || !HudPreferences.Visible || !HudPreferences.NativeCursorMarkersVisible ||
+                (widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly && runtimeOverlayHiddenByHotkey)) return;
             NativeCursorOverlay.Visibility = Visibility.Visible;
             var bounds = widget.WindowBounds;
             var scale = Math.Max(1.0, DisplayInformation.GetForCurrentView().RawPixelsPerViewPixel);
@@ -3427,7 +3423,9 @@ namespace YummiGameBarWidget
         private void UpdateRemotePointerMarker(bool visible, double normalizedX, double normalizedY)
         {
             if (RemotePointerOverlay == null || RemotePointerMarker == null || RootGrid == null) return;
-            if (!visible || !HudPreferences.Visible || RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0)
+            if (!visible || !HudPreferences.Visible ||
+                (widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly && runtimeOverlayHiddenByHotkey) ||
+                RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0)
             {
                 RemotePointerMarker.Visibility = Visibility.Collapsed;
                 return;
