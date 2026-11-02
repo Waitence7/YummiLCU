@@ -52,7 +52,7 @@ jobs:
             --zip release/tauri-0.8.0.zip \
             --exe "$exe" \
             --out release/agent-version.json \
-            --notes "Keep the desktop window visible across auto-updates and reject stale tray-hide completions after reopening." \
+            --notes "Preserve mouse gesture ownership so background drags cannot become overlay clicks after entering the overlay." \
             --channel beta \
             --release-label 0.8.0-beta.47 \
             --build-id "$build_id" \
