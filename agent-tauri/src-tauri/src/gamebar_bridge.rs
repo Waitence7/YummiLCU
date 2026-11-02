@@ -128,6 +128,7 @@ struct NativeInputBlockRect {
 struct NativeInputBlockState {
     active: bool,
     left_captured: bool,
+    blocked_left_down: bool,
     rects: Vec<NativeInputBlockRect>,
     blocked_down_count: u64,
     blocked_up_count: u64,
@@ -1051,6 +1052,7 @@ unsafe extern "system" fn native_input_block_hook(
                 };
 
                 if message == WM_LBUTTONUP && state.left_captured {
+                    state.blocked_left_down = false;
                     state.left_captured = false;
                     state.blocked_up_count = state.blocked_up_count.wrapping_add(1);
                     return LRESULT(1);
@@ -1059,6 +1061,11 @@ unsafe extern "system" fn native_input_block_hook(
                 if message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK {
                     if state.left_captured || (state.active && state.rects.iter().any(inside)) {
                         state.left_captured = true;
+                        // A swallowed low-level click may never become visible through
+                        // GetAsyncKeyState. Mirror the physical button state here so
+                        // the runtime drag / WebView forwarding path can still observe
+                        // the press while the underlying game remains protected.
+                        state.blocked_left_down = true;
                         state.blocked_down_count = state.blocked_down_count.wrapping_add(1);
                         return LRESULT(1);
                     }
@@ -1143,7 +1150,16 @@ fn external_mouse_input_thread() {
             continue;
         }
 
-        let down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+        let async_down = unsafe { GetAsyncKeyState(VK_LBUTTON.0 as i32) } < 0;
+        // WH_MOUSE_LL runs before the normal async button state is committed.
+        // When our input blocker intentionally swallows a click, Windows may never
+        // expose that press through GetAsyncKeyState. Merge the hook-owned state so
+        // pinned drag and forwarded overlay clicks continue to work in click-through.
+        let blocked_down = native_input_block_state()
+            .lock()
+            .map(|state| state.blocked_left_down)
+            .unwrap_or(false);
+        let down = async_down || blocked_down;
         use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
         let mut physical = POINT::default();
         let mut logical = POINT::default();
