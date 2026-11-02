@@ -65,13 +65,6 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
 
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: agent-tauri/src-tauri
-          cache-targets: true
-          cache-all-crates: true
-
       - name: Run Rust tests
         working-directory: agent-tauri/src-tauri
         run: cargo test --locked --jobs 4
