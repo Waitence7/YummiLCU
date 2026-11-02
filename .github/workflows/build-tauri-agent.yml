@@ -89,7 +89,20 @@ jobs:
           cache-all-crates: true
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Run Rust tests
-        run: cargo test --locked --jobs 4
+        shell: pwsh
+        run: |
+          cargo test --locked --jobs 4 *>&1 | Tee-Object -FilePath rust-test.log
+          $exitCode = $LASTEXITCODE
+          exit $exitCode
+
+      - name: Upload Rust test diagnostic log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rust-test-log-${{ github.run_id }}
+          path: agent-tauri/src-tauri/rust-test.log
+          if-no-files-found: warn
+          retention-days: 3
 
   build:
     if: ${{ github.event_name == 'push' }}
