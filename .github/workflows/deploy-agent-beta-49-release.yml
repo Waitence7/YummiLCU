@@ -1,4 +1,4 @@
-name: Deploy Agent Beta 48 Isolated Release
+name: Deploy Agent Beta 49 Isolated Release
 
 on:
   push:
@@ -19,7 +19,7 @@ jobs:
     env:
       SOURCE_SHA: b40faa37e81747f32e76cd6366cb360b021e581f
       SOURCE_SHORT: b40faa3
-      RELEASE_LABEL: 0.8.0-beta.48
+      RELEASE_LABEL: 0.8.0-beta.49
       PUBLIC_KEY_VAR: ${{ vars.YUMMI_AGENT_MANIFEST_PUBLIC_KEY }}
       PUBLIC_KEY_SECRET: ${{ secrets.YUMMI_AGENT_MANIFEST_PUBLIC_KEY }}
       CERT_THUMBPRINT_VAR: ${{ vars.YUMMI_AGENT_WINDOWS_SIGNING_THUMBPRINT }}
@@ -32,15 +32,14 @@ jobs:
         with:
           ref: b40faa37e81747f32e76cd6366cb360b021e581f
 
-      - name: Configure beta.48 metadata
+      - name: Configure beta.49 metadata
         run: |
-          $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
-          $buildId = "$date.$env:GITHUB_RUN_NUMBER"
+          $buildId = "20261102.1000"
           "YUMMI_AGENT_RELEASE_CHANNEL=beta" >> $env:GITHUB_ENV
           "YUMMI_AGENT_RELEASE_LABEL=$env:RELEASE_LABEL" >> $env:GITHUB_ENV
           "YUMMI_AGENT_BUILD_ID=$buildId" >> $env:GITHUB_ENV
           "YUMMI_AGENT_GIT_COMMIT=$env:SOURCE_SHORT" >> $env:GITHUB_ENV
-          "BETA48_BUILD_ID=$buildId" >> $env:GITHUB_ENV
+          "BETA49_BUILD_ID=$buildId" >> $env:GITHUB_ENV
 
       - uses: actions/setup-node@v4
         with:
@@ -122,13 +121,13 @@ jobs:
           "exe=$exe" >> $env:GITHUB_OUTPUT
           "nsis=$($nsis.FullName)" >> $env:GITHUB_OUTPUT
 
-      - name: Build beta.48 release payload
+      - name: Build beta.49 release payload
         env:
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
-          $release = Join-Path $env:RUNNER_TEMP "beta48-release"
-          $stage = Join-Path $env:RUNNER_TEMP "beta48-portable"
+          $release = Join-Path $env:RUNNER_TEMP "beta49-release"
+          $stage = Join-Path $env:RUNNER_TEMP "beta49-portable"
           New-Item -ItemType Directory -Force -Path $release, $stage | Out-Null
           $stageExe = Join-Path $stage "yummi-lcu-tauri.exe"
           Copy-Item "${{ steps.artifacts.outputs.exe }}" $stageExe -Force
@@ -140,17 +139,17 @@ jobs:
             --zip $zip `
             --exe $stageExe `
             --out (Join-Path $release "agent-version.json") `
-            --notes "Order beta releases by release label before CI build ID so manual beta apply works across isolated/promoted builds." `
+            --notes "Fix manual beta apply by ordering beta release labels before non-monotonic CI build IDs." `
             --channel beta `
             --release-label $env:RELEASE_LABEL `
-            --build-id $env:BETA48_BUILD_ID `
+            --build-id $env:BETA49_BUILD_ID `
             --commit $env:SOURCE_SHORT `
             --rollout-percent 100
 
       - uses: actions/upload-artifact@v4
         with:
-          name: beta48-release
-          path: ${{ runner.temp }}/beta48-release/*
+          name: beta49-release
+          path: ${{ runner.temp }}/beta49-release/*
           if-no-files-found: error
           retention-days: 3
 
@@ -166,13 +165,13 @@ jobs:
           node-version: "22"
       - uses: actions/download-artifact@v4
         with:
-          name: beta48-release
+          name: beta49-release
           path: release
-      - name: Publish beta.48
+      - name: Publish beta.49
         env:
           GH_TOKEN: ${{ github.token }}
           AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
           RELEASE_CHANNEL: beta
-          RELEASE_LABEL: 0.8.0-beta.48
+          RELEASE_LABEL: 0.8.0-beta.49
           TARGET_SHA: b40faa37e81747f32e76cd6366cb360b021e581f
         run: scripts/publish-agent-release.sh release
