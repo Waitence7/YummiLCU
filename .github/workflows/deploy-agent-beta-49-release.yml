@@ -175,3 +175,4 @@ jobs:
           RELEASE_LABEL: 0.8.0-beta.49
           TARGET_SHA: b40faa37e81747f32e76cd6366cb360b021e581f
         run: scripts/publish-agent-release.sh release
+
