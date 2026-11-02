@@ -25,6 +25,22 @@ AGENT_RECONNECTING_WINDOW_SEC = 120.0
 FORCE_RECONNECT_COOLDOWN_SEC = 10.0
 AGENT_SESSION_CONFLICT_CLOSE_CODE = 4009
 GAMEFLOW_EOG_GRACE_SEC = 180.0
+CHAMP_SELECT_LOG_INTERVAL_SEC = 60.0
+CHAMP_SELECT_LOG_MAX_USERS = 2048
+_champ_select_receipt_state: dict[int, tuple[tuple[Any, ...], float]] = {}
+
+
+def log_champ_select_receipt(discord_id: int, data: dict[str, Any]) -> None:
+    now = time.monotonic()
+    uid = int(discord_id)
+    signature = (str(data.get("game_id") or "")[:64], bool(data.get("active")), str(data.get("phase") or "")[:32])
+    previous = _champ_select_receipt_state.get(uid)
+    if previous is not None and previous[0] == signature and now - previous[1] < CHAMP_SELECT_LOG_INTERVAL_SEC:
+        return
+    if len(_champ_select_receipt_state) >= CHAMP_SELECT_LOG_MAX_USERS and uid not in _champ_select_receipt_state:
+        _champ_select_receipt_state.pop(next(iter(_champ_select_receipt_state)))
+    _champ_select_receipt_state[uid] = (signature, now)
+    logger.info("champ select relay received user=%s game=%s active=%s phase=%s", uid, signature[0] or None, signature[1], signature[2] or None)
 
 
 async def _send_bot_json(ws: WebSocket, payload: dict[str, Any]) -> None:
@@ -55,6 +71,7 @@ class ConnectionManager:
         self._pending_results: dict[tuple[int, str], asyncio.Future[dict[str, Any]]] = {}
         self._pending_bot_eog: dict[str, asyncio.Future[bool]] = {}
         self._bot_ws: WebSocket | None = None
+        self._champ_select_log_state: dict[int, tuple[tuple[Any, ...], float]] = {}
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._party_lobby: dict[int, tuple[float, dict[str, Any]]] = {}
         self._gameflow_subscribers: set[int] = set()
@@ -847,10 +864,24 @@ class ConnectionManager:
             return False
 
     async def forward_champ_select_update(self, discord_id: int, data: dict[str, Any]) -> bool:
+        started = time.monotonic()
         async with self._lock:
-            if int(discord_id) not in (self._match_dm_subscribers | self._gameflow_subscribers):
-                return False
+            subscribed = int(discord_id) in (self._match_dm_subscribers | self._gameflow_subscribers)
             ws = self._bot_ws
+        outcome = "forward" if subscribed and ws is not None else "unsubscribed" if not subscribed else "bot_disconnected"
+        signature = (str(data.get("game_id") or "")[:64], bool(data.get("active")), str(data.get("phase") or "")[:32], outcome)
+        previous = self._champ_select_log_state.get(int(discord_id))
+        sampled = previous is None or previous[0] != signature or started - previous[1] >= CHAMP_SELECT_LOG_INTERVAL_SEC
+        if sampled:
+            if len(self._champ_select_log_state) >= CHAMP_SELECT_LOG_MAX_USERS and int(discord_id) not in self._champ_select_log_state:
+                self._champ_select_log_state.pop(next(iter(self._champ_select_log_state)))
+            self._champ_select_log_state[int(discord_id)] = (signature, started)
+            logger.info(
+                "champ select relay start user=%s game=%s active=%s phase=%s decision=%s",
+                discord_id, signature[0] or None, signature[1], signature[2] or None, outcome,
+            )
+        if not subscribed:
+            return False
         if ws is None:
             return False
         try:
@@ -862,6 +893,11 @@ class ConnectionManager:
                     "data": data,
                 }
             )
+            if sampled:
+                logger.info(
+                    "champ select relay sent user=%s game=%s elapsed_ms=%s",
+                    discord_id, signature[0] or None, int((time.monotonic() - started) * 1000),
+                )
             return True
         except Exception:
             logger.exception(

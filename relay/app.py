@@ -40,6 +40,7 @@ from relay.connections import (
     AGENT_HEARTBEAT_STALE_SEC,
     AGENT_WS_SEND_TIMEOUT_SEC,
     ConnectionManager,
+    log_champ_select_receipt,
 )
 from relay.http_diagnostics import upstream_error_detail
 from relay.lcu_linked import (
@@ -4087,6 +4088,7 @@ async def _handle_agent_message(
         payload = data.get("data")
         if discord_id is None or not isinstance(payload, dict):
             return
+        log_champ_select_receipt(discord_id, payload)
         champ_at_ms = int(time.time() * 1000)
         current_action = payload.get("current_action")
         current_action = current_action if isinstance(current_action, dict) else {}
