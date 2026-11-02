@@ -177,6 +177,7 @@ mod imp {
         time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
+    use libwebrtc::{native::yuv_helper, prelude::I420Buffer};
     use serde::{Deserialize, Serialize};
     use windows::{
         core::HSTRING,
@@ -334,31 +335,6 @@ mod imp {
         })
     }
 
-    fn clamp_u8(value: i32) -> u8 {
-        value.clamp(0, 255) as u8
-    }
-
-    fn rgb_to_y(r: i32, g: i32, b: i32) -> u8 {
-        clamp_u8(((66 * r + 129 * g + 25 * b + 128) >> 8) + 16)
-    }
-
-    fn rgb_to_u(r: i32, g: i32, b: i32) -> u8 {
-        clamp_u8(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128)
-    }
-
-    fn rgb_to_v(r: i32, g: i32, b: i32) -> u8 {
-        clamp_u8(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128)
-    }
-
-    #[inline]
-    fn bgra_rgb(raw: &[u8], index: usize) -> (i32, i32, i32) {
-        (
-            raw[index + 2] as i32,
-            raw[index + 1] as i32,
-            raw[index] as i32,
-        )
-    }
-
     fn encode_live_stream(
         frame: &mut Frame,
         config: LiveStreamConfig,
@@ -368,7 +344,7 @@ mod imp {
             .map_err(|error| format!("실시간 중계 프레임 읽기 실패: {error}"))?;
         let source_width = buffer.width();
         let source_height = buffer.height();
-        let row_pitch = buffer.row_pitch() as usize;
+        let row_pitch = buffer.row_pitch();
         let (mut width, mut height) = bounded_dimensions(
             source_width,
             source_height,
@@ -377,78 +353,56 @@ mod imp {
         );
         width &= !1;
         height &= !1;
-        if width < 2 || height < 2 {
+        if source_width == 0 || source_height == 0 || width < 2 || height < 2 {
             return Err("실시간 중계 프레임 크기가 올바르지 않습니다.".into());
         }
+
         let raw = buffer.as_raw_buffer();
         let min_row_bytes = source_width as usize * 4;
-        let required_len = row_pitch
+        let row_pitch_usize = row_pitch as usize;
+        let required_len = row_pitch_usize
             .saturating_mul(source_height.saturating_sub(1) as usize)
             .saturating_add(min_row_bytes);
-        if row_pitch < min_row_bytes || raw.len() < required_len {
+        if row_pitch_usize < min_row_bytes || raw.len() < required_len {
             return Err("실시간 중계 픽셀 범위가 올바르지 않습니다.".into());
         }
 
-        // Precompute nearest-neighbour coordinates once per frame. The old path
-        // performed two integer divisions for every pixel sample and then sampled
-        // every pixel a second time for chroma, which made 720p/30 CPU-bound.
-        let source_x: Vec<usize> = (0..width)
-            .map(|x| (u64::from(x) * u64::from(source_width) / u64::from(width)) as usize)
-            .collect();
-        let source_y: Vec<usize> = (0..height)
-            .map(|y| (u64::from(y) * u64::from(source_height) / u64::from(height)) as usize)
-            .collect();
-
-        let width_usize = width as usize;
-        let height_usize = height as usize;
-        let chroma_width = width_usize / 2;
-        let chroma_height = height_usize / 2;
-        let mut y = vec![0u8; width_usize * height_usize];
-        let mut u = vec![0u8; chroma_width * chroma_height];
-        let mut v = vec![0u8; chroma_width * chroma_height];
-
-        // Convert one 2x2 block at a time. Each BGRA source pixel is sampled only
-        // once; its RGB value contributes to both luma and the shared chroma pair.
-        for cy in 0..chroma_height {
-            let ty0 = cy * 2;
-            let ty1 = ty0 + 1;
-            let row0 = source_y[ty0] * row_pitch;
-            let row1 = source_y[ty1] * row_pitch;
-            let y_row0 = ty0 * width_usize;
-            let y_row1 = ty1 * width_usize;
-            let uv_row = cy * chroma_width;
-
-            for cx in 0..chroma_width {
-                let tx0 = cx * 2;
-                let tx1 = tx0 + 1;
-                let sx0 = source_x[tx0] * 4;
-                let sx1 = source_x[tx1] * 4;
-                let (r00, g00, b00) = bgra_rgb(raw, row0 + sx0);
-                let (r01, g01, b01) = bgra_rgb(raw, row0 + sx1);
-                let (r10, g10, b10) = bgra_rgb(raw, row1 + sx0);
-                let (r11, g11, b11) = bgra_rgb(raw, row1 + sx1);
-
-                y[y_row0 + tx0] = rgb_to_y(r00, g00, b00);
-                y[y_row0 + tx1] = rgb_to_y(r01, g01, b01);
-                y[y_row1 + tx0] = rgb_to_y(r10, g10, b10);
-                y[y_row1 + tx1] = rgb_to_y(r11, g11, b11);
-
-                let r = (r00 + r01 + r10 + r11 + 2) / 4;
-                let g = (g00 + g01 + g10 + g11 + 2) / 4;
-                let b = (b00 + b01 + b10 + b11 + 2) / 4;
-                let uv_index = uv_row + cx;
-                u[uv_index] = rgb_to_u(r, g, b);
-                v[uv_index] = rgb_to_v(r, g, b);
-            }
+        // windows-capture Bgra8 is byte-compatible with libyuv's little-endian
+        // ARGB memory layout (B, G, R, A). Use libwebrtc's SIMD-optimized libyuv
+        // conversion instead of doing millions of per-pixel Rust operations in
+        // the GraphicsCapture callback. Downscaling is also delegated to libyuv.
+        let mut source_i420 = I420Buffer::new(source_width, source_height);
+        let (stride_y, stride_u, stride_v) = source_i420.strides();
+        {
+            let (dst_y, dst_u, dst_v) = source_i420.data_mut();
+            yuv_helper::argb_to_i420(
+                raw,
+                row_pitch,
+                dst_y,
+                stride_y,
+                dst_u,
+                stride_u,
+                dst_v,
+                stride_v,
+                source_width as i32,
+                source_height as i32,
+            );
         }
+
+        let output_i420 = if source_width == width && source_height == height {
+            source_i420
+        } else {
+            source_i420.scale(width as i32, height as i32)
+        };
+        let (y, u, v) = output_i420.data();
 
         Ok(LiveStreamFrame {
             captured_at_ms: timestamp_ms() as u64,
             width,
             height,
-            y,
-            u,
-            v,
+            y: y.to_vec(),
+            u: u.to_vec(),
+            v: v.to_vec(),
         })
     }
 
