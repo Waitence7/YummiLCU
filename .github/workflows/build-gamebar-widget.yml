@@ -312,7 +312,7 @@ jobs:
             content = $content
             branch = "main"
           }
-          if ($sha) { $payload.sha = $sha }
+          if ($sha) { $payload['sha'] = $sha }
           $payload | ConvertTo-Json -Compress | gh api --method PUT "repos/$env:GITHUB_REPOSITORY/contents/$path" --input - | Out-Null
           if ($LASTEXITCODE -ne 0) { throw "Failed to publish Game Bar latest index" }
           Write-Host "Published Game Bar latest index: $tag"
