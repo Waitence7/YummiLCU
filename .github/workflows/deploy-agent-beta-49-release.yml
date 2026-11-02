@@ -27,6 +27,8 @@ jobs:
       CARGO_BUILD_JOBS: 4
       CARGO_INCREMENTAL: 0
       CARGO_TARGET_DIR: ${{ github.workspace }}/agent-tauri/src-tauri/target
+      # LiveKit/libwebrtc for MSVC is built with the static release CRT (/MT).
+      RUSTFLAGS: -C target-feature=+crt-static
     steps:
       - uses: actions/checkout@v4
         with:
