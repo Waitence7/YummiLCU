@@ -101,7 +101,8 @@ try {
   if ($widgetSource -notmatch 'WinGPanelToggle_Toggled' -or $widgetSource -notmatch 'SetPanelClosed\(key, false\)') { throw 'Win+G selector must reopen and toggle shared panels' }
   $bridgeSource = Get-Content (Join-Path $InstallerRoot '..\src-tauri\src\gamebar_bridge.rs') -Raw -Encoding UTF8
   if ($bridgeSource -notmatch 'is_gamebar_process' -or $bridgeSource -notmatch 'ends_with\("\\\\gamebar\.exe"\)') { throw 'Game Bar UIA matching must be process-based, not text-keyword based' }
-  if ($bridgeSource -notmatch 'automationId' -or $bridgeSource -notmatch 'HomeBarItemButton' -or $bridgeSource -notmatch '유미지지 오버레이') { throw 'Win+G automation must select the Yummi overlay entry' }
+  $yummiOverlayTitle = -join ([char[]](0xC720,0xBBF8,0xC9C0,0xC9C0,0x20,0xC624,0xBC84,0xB808,0xC774))
+  if ($bridgeSource -notmatch 'automationId' -or $bridgeSource -notmatch 'HomeBarItemButton' -or $bridgeSource -notmatch [regex]::Escape($yummiOverlayTitle)) { throw 'Win+G automation must select the Yummi overlay entry' }
   if ($bridgeSource -notmatch 'PinToggle' -or $bridgeSource -notmatch 'ClickThroughToggleButton' -or $bridgeSource -notmatch 'UIA_TogglePatternId') { throw 'Win+G automation must enable Yummi pin and click-through through UIA toggle patterns' }
   if ($widgetSource -notmatch 'data.GetNamedBoolean\("ready", false\)' -or $widgetSource -notmatch 'gameBarUiaProbeCompleted = false') { throw 'Win+G automation must retry until ready and rearm for the next Win+G session' }
   Write-Host 'PASS: Game Bar UIA auto-selects Yummi and enables pin/click-through using process-scoped AutomationIds'
