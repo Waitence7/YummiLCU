@@ -35,7 +35,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from relay import auth, config
 from relay.audit_archive import append_archive_record
-from relay.actions import ALLOWED_ACTIONS, action_policy
+from relay.actions import ALLOWED_ACTIONS, action_policy, validate_web_input_payload
 from relay.connections import (
     AGENT_HEARTBEAT_STALE_SEC,
     AGENT_WS_SEND_TIMEOUT_SEC,
@@ -88,6 +88,7 @@ TOURNAMENT_BROADCAST_QUEUE_MAX = 64
 TOURNAMENT_BROADCAST_WORKERS = 4
 TOURNAMENT_BROADCAST_TIMEOUT_SEC = 3.0
 MAX_REPLAY_UPLOAD_BYTES = 128 * 1024 * 1024
+MAX_LIVE_PREVIEW_BYTES = 512 * 1024
 BOT_EOG_PERSIST_ACK_TIMEOUT_SEC = 8.0
 LIVE_DELTA_STATE_TTL_SEC = 2 * 60 * 60
 LIVE_DELTA_API_BLOCK_TTL_SEC = 30
@@ -1423,6 +1424,56 @@ async def _replay_upload_target(
         return {**guild_match, "targetKind": "guild_match"}
 
     return {"upload": False}
+
+
+@app.post("/agent/live-preview")
+@app.post("/lcu/live-preview")
+async def agent_live_preview(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+) -> JSONResponse:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+    if content_type != "image/jpeg":
+        raise HTTPException(415, "image/jpeg required")
+    raw_length = request.headers.get("content-length")
+    if raw_length:
+        try:
+            content_length = int(raw_length)
+        except ValueError as exc:
+            raise HTTPException(400, "invalid content-length") from exc
+        if content_length <= 0 or content_length > MAX_LIVE_PREVIEW_BYTES:
+            raise HTTPException(413, "live preview frame too large")
+    body = await request.body()
+    if not body or len(body) > MAX_LIVE_PREVIEW_BYTES:
+        raise HTTPException(413, "live preview frame too large")
+    if not body.startswith(b"\xff\xd8") or not body.endswith(b"\xff\xd9"):
+        raise HTTPException(400, "invalid jpeg")
+
+    def parse_header(name: str, *, minimum: int, maximum: int) -> int:
+        raw = request.headers.get(name, "")
+        try:
+            value = int(raw)
+        except ValueError as exc:
+            raise HTTPException(400, f"invalid {name}") from exc
+        if value < minimum or value > maximum:
+            raise HTTPException(400, f"invalid {name}")
+        return value
+
+    sequence = parse_header("x-yummi-preview-sequence", minimum=1, maximum=2**63 - 1)
+    captured_at_ms = parse_header("x-yummi-preview-captured-at", minimum=1, maximum=2**63 - 1)
+    width = parse_header("x-yummi-preview-width", minimum=1, maximum=4096)
+    height = parse_header("x-yummi-preview-height", minimum=1, maximum=4096)
+    conn: ConnectionManager = request.app.state.connections
+    conn.set_live_preview(
+        discord_id,
+        sequence=sequence,
+        captured_at_ms=captured_at_ms,
+        width=width,
+        height=height,
+        jpeg=body,
+    )
+    return JSONResponse({"ok": True, "sequence": sequence})
 
 
 @app.get("/agent/replay-upload-target")
@@ -4890,6 +4941,34 @@ async def ws_bot(websocket: WebSocket) -> None:
 # * ========================================================
 
 
+@app.get("/internal/live-preview/{discord_id}")
+async def internal_live_preview(
+    request: Request,
+    discord_id: int,
+    x_relay_internal_secret: str | None = Header(None),
+) -> Response:
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    if discord_id <= 0:
+        raise HTTPException(400, "invalid discord_id")
+    conn: ConnectionManager = request.app.state.connections
+    await conn.request_live_preview(discord_id)
+    preview = conn.get_live_preview(discord_id)
+    if preview is None:
+        raise HTTPException(404, "live preview unavailable")
+    return Response(
+        content=preview["jpeg"],
+        media_type="image/jpeg",
+        headers={
+            "Cache-Control": "no-store, max-age=0",
+            "X-Yummi-Preview-Sequence": str(preview["sequence"]),
+            "X-Yummi-Preview-Captured-At": str(preview["captured_at_ms"]),
+            "X-Yummi-Preview-Width": str(preview["width"]),
+            "X-Yummi-Preview-Height": str(preview["height"]),
+            "X-Yummi-Preview-Age-Ms": str(preview["age_ms"]),
+        },
+    )
+
+
 class InternalCommandBody(BaseModel):
     """봇 → Relay 명령."""
 
@@ -4929,6 +5008,8 @@ async def internal_command(
         ids = body.payload.get(key)
         if isinstance(ids, list) and len(ids) > max_items:
             raise HTTPException(400, f"{key} max {max_items}")
+    if body.action == "web_input" and not validate_web_input_payload(body.payload):
+        raise HTTPException(400, "invalid web_input payload")
     conn: ConnectionManager = request.app.state.connections
     if not conn.is_online(body.discord_id):
         raise HTTPException(404, "agent not connected")

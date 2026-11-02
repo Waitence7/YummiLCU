@@ -14,7 +14,7 @@ use std::{
 use futures_util::{FutureExt, SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tokio::{
     sync::{broadcast, mpsc, watch, Mutex},
     task::JoinHandle,
@@ -34,7 +34,7 @@ use crate::{
     platform::{launch_league_client, league_game_process_ids, open_login_url},
     session,
     state::{
-        AgentEvent, AppState, DiscordJoinResolution, DiscordPresenceMatchContext,
+        AgentEvent, AppState, DiscordJoinResolution, DiscordPresenceMatchContext, GameBarToast,
         VoiceChatOverlayMessage,
     },
 };
@@ -1826,6 +1826,51 @@ async fn connect_once(
     let (writer_half, mut reader) = websocket.split();
     let writer = Arc::new(Mutex::new(writer_half));
 
+    // Recording continues to write its normal H.264 MP4. A separate low-rate JPEG
+    // preview is uploaded over HTTP so web viewing cannot block the relay heartbeat
+    // or change the recording container/quality. The broadcast channel keeps only
+    // the newest frames when networking falls behind.
+    let preview_url = config.live_preview_upload_url(&session.session_id)?;
+    let preview_token = session.ws_token.clone();
+    let mut preview_rx = crate::recording::subscribe_live_preview();
+    let _live_preview_task = AbortTaskOnDrop(tokio::spawn(async move {
+        let client = match reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(3))
+            .timeout(Duration::from_secs(4))
+            .build()
+        {
+            Ok(client) => client,
+            Err(_) => return,
+        };
+        loop {
+            let mut frame = match preview_rx.recv().await {
+                Ok(frame) => frame,
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            };
+            while let Ok(newer) = preview_rx.try_recv() {
+                frame = newer;
+            }
+            // Relay enforces ownership by the same active session_id/ws_token pair.
+            // Failures are intentionally best-effort: live preview must never stop
+            // the local recording or force a relay reconnect.
+            let _ = client
+                .post(&preview_url)
+                .header("x-yummi-ws-token", &preview_token)
+                .header(reqwest::header::CONTENT_TYPE, "image/jpeg")
+                .header("x-yummi-preview-sequence", frame.sequence.to_string())
+                .header(
+                    "x-yummi-preview-captured-at",
+                    frame.captured_at_ms.to_string(),
+                )
+                .header("x-yummi-preview-width", frame.width.to_string())
+                .header("x-yummi-preview-height", frame.height.to_string())
+                .body(frame.jpeg)
+                .send()
+                .await;
+        }
+    }));
+
     let (heartbeat_failure_tx, mut heartbeat_failure_rx) = mpsc::channel::<String>(1);
     let heartbeat_awaiting = Arc::new(Mutex::new(None::<Instant>));
     let heartbeat_writer = Arc::clone(&writer);
@@ -3055,6 +3100,27 @@ where
             let action_label = parsed_action.map(Action::as_str).unwrap_or("unknown");
             let result = match parsed_action {
                 None => CommandResult::failure(request_id, "unknown action"),
+                Some(Action::WebInput) => match sanitize_web_input_payload(&payload) {
+                    Some(event) => {
+                        let _ = app.emit("yummi://web-input", event.clone());
+                        let label = event.get("name").and_then(Value::as_str).unwrap_or("input");
+                        let now = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        state.push_gamebar_toast(GameBarToast {
+                            id: format!("web-input-{request_id}"),
+                            source: "web.input".into(),
+                            title: "웹 입력".into(),
+                            body: format!("{label} 입력을 받았습니다."),
+                            tone: "info".into(),
+                            timestamp_ms: now,
+                            expires_at_ms: now.saturating_add(6_000),
+                        });
+                        CommandResult::success(request_id, "웹 입력 전달 완료", event)
+                    }
+                    None => CommandResult::failure(request_id, "웹 입력 형식이 올바르지 않습니다."),
+                },
                 Some(Action::LaunchClient) => {
                     match COMMAND_DISK_IO
                         .run(COMMAND_DISK_TIMEOUT, launch_league_client)
@@ -3258,6 +3324,17 @@ where
                 state.record_flight("discord_voice_chat", "clear").await;
             }
         }
+        IncomingMessage::LivePreviewControl { enabled, ttl_ms } => {
+            if session_bound {
+                crate::recording::set_live_preview_enabled(enabled, ttl_ms.unwrap_or(3_000));
+                state
+                    .record_flight(
+                        "recording_live_preview",
+                        format!("enabled={enabled} ttl_ms={}", ttl_ms.unwrap_or(3_000)),
+                    )
+                    .await;
+            }
+        }
         IncomingMessage::LiveGamePolling { enabled } => {
             if session_bound {
                 let _ = live_game_polling.send(enabled);
@@ -3291,6 +3368,31 @@ fn command_is_authorized(
     action: Option<Action>,
 ) -> bool {
     session_bound && (!session_new_device || action.is_some_and(Action::allowed_on_new_device))
+}
+
+fn sanitize_web_input_payload(payload: &Value) -> Option<Value> {
+    let object = payload.as_object()?;
+    let kind = object.get("kind")?.as_str()?;
+    if !matches!(kind, "button" | "value") {
+        return None;
+    }
+    let name = object.get("name")?.as_str()?.trim();
+    if name.is_empty()
+        || name.len() > 64
+        || !name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ':')
+        })
+    {
+        return None;
+    }
+    let value = object.get("value").cloned().unwrap_or(Value::Null);
+    let valid_value = match &value {
+        Value::Null | Value::Bool(_) => true,
+        Value::Number(number) => number.as_i64().is_some() || number.as_u64().is_some(),
+        Value::String(text) => text.chars().count() <= 256 && !text.contains('\0'),
+        _ => false,
+    };
+    valid_value.then(|| json!({ "kind": kind, "name": name, "value": value }))
 }
 
 fn safe_avatar_url(value: Option<String>) -> Option<String> {

@@ -40,6 +40,12 @@ type ResizeDirection =
   | "SouthWest"
   | "West";
 
+type WebInputPayload = {
+  kind: "button" | "value";
+  name: string;
+  value?: string | number | boolean | null;
+};
+
 type TabId =
   | "guild"
   | "history"
@@ -97,6 +103,7 @@ const TABS: { id: TabId; label: string; badge?: string }[] = [
 export function App() {
   const { state, recent, actionError, actions } = useAgentState();
   const [tab, setTab] = useState<TabId>("guild");
+  const [webInput, setWebInput] = useState<WebInputPayload | null>(null);
 
   useEffect(() => {
     if (useMockBridge) return;
@@ -176,6 +183,33 @@ export function App() {
 
   useEffect(() => {
     if (useMockBridge) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let hideTimer: number | undefined;
+
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<WebInputPayload>("yummi://web-input", ({ payload }) => {
+          setWebInput(payload);
+          if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+          hideTimer = window.setTimeout(() => setWebInput(null), 6_000);
+        }),
+      )
+      .then((dispose) => {
+        if (disposed) dispose();
+        else unlisten = dispose;
+      })
+      .catch((error) => void reportWindowFailure("web_input_listener", error));
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+      if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (useMockBridge) return;
     void syncMainWindowRotationMode().catch((error) =>
       reportWindowFailure("sync_rotation", error),
     );
@@ -208,6 +242,15 @@ export function App() {
       }}
     >
       <WindowResizeHandles />
+      {webInput && (
+        <div className="pointer-events-none absolute right-4 top-12 z-[100] max-w-xs rounded-xl border border-indigo-200 bg-white/95 px-4 py-3 text-xs shadow-xl backdrop-blur">
+          <div className="font-semibold text-indigo-700">웹 입력 수신</div>
+          <div className="mt-1 text-slate-700">{webInput.name}</div>
+          {webInput.value !== undefined && webInput.value !== null && (
+            <div className="mt-0.5 truncate text-slate-500">{String(webInput.value)}</div>
+          )}
+        </div>
+      )}
       <div
         data-yummi-app-surface
         className="yummi-window-surface relative isolate flex flex-col overflow-hidden bg-white text-slate-800"

@@ -14,6 +14,7 @@ logger = logging.getLogger("yummi_lcu.relay.connections")
 # endregion
 
 LIVE_GAME_CACHE_TTL_SEC = 15.0
+LIVE_PREVIEW_CACHE_TTL_SEC = 5.0
 LIVE_GAME_PARTICIPANT_COUNT = 10
 BOT_WS_SEND_TIMEOUT_SEC = 2.0
 AGENT_WS_SEND_TIMEOUT_SEC = 5.0
@@ -64,6 +65,8 @@ class ConnectionManager:
         self._participant_status_subscribers: set[int] = set()
         self._participant_status: dict[int, dict[str, Any]] = {}
         self._live_game: dict[int, tuple[float, dict[str, Any]]] = {}
+        self._live_preview: dict[int, tuple[float, int, int, int, int, bytes]] = {}
+        self._live_preview_control_last_at: dict[int, float] = {}
         self._agent_info: dict[int, dict[str, Any]] = {}
         self._pending_agent_info_by_ws: dict[int, dict[str, Any]] = {}
         self._lock = asyncio.Lock()
@@ -239,6 +242,8 @@ class ConnectionManager:
             self._agent_info.pop(did, None)
             self._gameflow.pop(did, None)
             self._live_game.pop(did, None)
+            self._live_preview.pop(did, None)
+            self._live_preview_control_last_at.pop(did, None)
             self._cancel_pending_for_discord_locked(did)
             logger.info("에이전트 해제: discord_id=%s", did)
         sid = self._ws_session.pop(wid, None)
@@ -745,6 +750,58 @@ class ConnectionManager:
             return None
         return {
             "data": dict(data),
+            "age_ms": max(0, int(age * 1000)),
+        }
+
+    async def request_live_preview(self, discord_id: int) -> bool:
+        did = int(discord_id)
+        if not self.is_online(did):
+            return False
+        now = time.monotonic()
+        last = self._live_preview_control_last_at.get(did, 0.0)
+        if now - last < 1.0:
+            return True
+        self._live_preview_control_last_at[did] = now
+        return await self.send_command(
+            did,
+            {"type": "live_preview_control", "enabled": True, "ttl_ms": 3_000},
+        )
+
+    def set_live_preview(
+        self,
+        discord_id: int,
+        *,
+        sequence: int,
+        captured_at_ms: int,
+        width: int,
+        height: int,
+        jpeg: bytes,
+    ) -> None:
+        self._live_preview[int(discord_id)] = (
+            time.monotonic(),
+            int(sequence),
+            int(captured_at_ms),
+            int(width),
+            int(height),
+            bytes(jpeg),
+        )
+
+    def get_live_preview(self, discord_id: int) -> dict[str, Any] | None:
+        did = int(discord_id)
+        cached = self._live_preview.get(did)
+        if cached is None:
+            return None
+        received_at, sequence, captured_at_ms, width, height, jpeg = cached
+        age = time.monotonic() - received_at
+        if age > LIVE_PREVIEW_CACHE_TTL_SEC:
+            self._live_preview.pop(did, None)
+            return None
+        return {
+            "sequence": sequence,
+            "captured_at_ms": captured_at_ms,
+            "width": width,
+            "height": height,
+            "jpeg": jpeg,
             "age_ms": max(0, int(age * 1000)),
         }
 

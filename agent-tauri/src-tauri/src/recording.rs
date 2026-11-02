@@ -1,4 +1,53 @@
 use serde::{Deserialize, Serialize};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    OnceLock,
+};
+use tokio::sync::broadcast;
+
+#[derive(Clone, Debug)]
+pub(crate) struct LivePreviewFrame {
+    pub(crate) sequence: u64,
+    pub(crate) captured_at_ms: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) jpeg: Vec<u8>,
+}
+
+static LIVE_PREVIEW_BUS: OnceLock<broadcast::Sender<LivePreviewFrame>> = OnceLock::new();
+static LIVE_PREVIEW_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
+
+fn live_preview_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+pub(crate) fn set_live_preview_enabled(enabled: bool, ttl_ms: u64) {
+    let deadline = if enabled {
+        live_preview_now_ms().saturating_add(ttl_ms.clamp(500, 10_000))
+    } else {
+        0
+    };
+    LIVE_PREVIEW_DEADLINE_MS.store(deadline, Ordering::Release);
+}
+
+fn live_preview_requested() -> bool {
+    let deadline = LIVE_PREVIEW_DEADLINE_MS.load(Ordering::Acquire);
+    deadline > 0 && live_preview_now_ms() <= deadline
+}
+
+fn live_preview_bus() -> &'static broadcast::Sender<LivePreviewFrame> {
+    LIVE_PREVIEW_BUS.get_or_init(|| {
+        let (sender, _) = broadcast::channel(2);
+        sender
+    })
+}
+
+pub(crate) fn subscribe_live_preview() -> broadcast::Receiver<LivePreviewFrame> {
+    live_preview_bus().subscribe()
+}
 
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -75,10 +124,17 @@ mod imp {
         window::Window,
     };
 
-    use super::{RecordingSessionMetadata, RecordingStatus};
+    use super::{
+        live_preview_bus, live_preview_requested, LivePreviewFrame, RecordingSessionMetadata,
+        RecordingStatus,
+    };
 
     const VIDEO_BITRATE: u32 = 15_000_000;
     const VIDEO_FPS: u32 = 60;
+    const LIVE_PREVIEW_INTERVAL: Duration = Duration::from_millis(333);
+    const LIVE_PREVIEW_MAX_WIDTH: u32 = 960;
+    const LIVE_PREVIEW_MAX_HEIGHT: u32 = 540;
+    const LIVE_PREVIEW_JPEG_QUALITY: u8 = 52;
     const SEGMENT_DURATION: Duration = Duration::from_secs(10);
     const MAX_BUFFER_DURATION: Duration = Duration::from_secs(75);
     const MIN_SEGMENT_DURATION: Duration = Duration::from_millis(300);
@@ -108,6 +164,75 @@ mod imp {
 
     struct GeneralCapture {
         encoder: Option<VideoEncoder>,
+        last_preview_at: Instant,
+        preview_sequence: u64,
+    }
+
+    fn live_preview_dimensions(width: u32, height: u32) -> (u32, u32) {
+        if width == 0 || height == 0 {
+            return (0, 0);
+        }
+        if width <= LIVE_PREVIEW_MAX_WIDTH && height <= LIVE_PREVIEW_MAX_HEIGHT {
+            return (width, height);
+        }
+        let width_scale = width as f64 / LIVE_PREVIEW_MAX_WIDTH as f64;
+        let height_scale = height as f64 / LIVE_PREVIEW_MAX_HEIGHT as f64;
+        let scale = width_scale.max(height_scale).max(1.0);
+        let out_width = ((width as f64 / scale).round() as u32).clamp(1, LIVE_PREVIEW_MAX_WIDTH);
+        let out_height = ((height as f64 / scale).round() as u32).clamp(1, LIVE_PREVIEW_MAX_HEIGHT);
+        (out_width, out_height)
+    }
+
+    fn encode_live_preview(
+        frame: &mut Frame,
+        sequence: u64,
+    ) -> Result<LivePreviewFrame, CaptureError> {
+        let mut buffer = frame
+            .buffer()
+            .map_err(|error| format!("실시간 프리뷰 프레임 읽기 실패: {error}"))?;
+        let source_width = buffer.width();
+        let source_height = buffer.height();
+        let row_pitch = buffer.row_pitch() as usize;
+        let (width, height) = live_preview_dimensions(source_width, source_height);
+        if width == 0 || height == 0 {
+            return Err("실시간 프리뷰 프레임 크기가 올바르지 않습니다.".into());
+        }
+        let raw = buffer.as_raw_buffer();
+        let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+        for target_y in 0..height {
+            let source_y =
+                (u64::from(target_y) * u64::from(source_height) / u64::from(height)) as usize;
+            for target_x in 0..width {
+                let source_x =
+                    (u64::from(target_x) * u64::from(source_width) / u64::from(width)) as usize;
+                let index = source_y
+                    .saturating_mul(row_pitch)
+                    .saturating_add(source_x.saturating_mul(4));
+                if index + 2 >= raw.len() {
+                    return Err("실시간 프리뷰 픽셀 범위가 올바르지 않습니다.".into());
+                }
+                // Capture settings are ColorFormat::Bgra8. JPEG expects RGB.
+                rgb.push(raw[index + 2]);
+                rgb.push(raw[index + 1]);
+                rgb.push(raw[index]);
+            }
+        }
+        let mut jpeg = Vec::with_capacity((width as usize * height as usize).saturating_div(2));
+        jpeg_encoder::Encoder::new(&mut jpeg, LIVE_PREVIEW_JPEG_QUALITY)
+            .encode(
+                &rgb,
+                u16::try_from(width).map_err(|_| "실시간 프리뷰 너비가 너무 큽니다.")?,
+                u16::try_from(height).map_err(|_| "실시간 프리뷰 높이가 너무 큽니다.")?,
+                jpeg_encoder::ColorType::Rgb,
+            )
+            .map_err(|error| format!("실시간 프리뷰 JPEG 인코딩 실패: {error}"))?;
+        Ok(LivePreviewFrame {
+            sequence,
+            captured_at_ms: timestamp_ms() as u64,
+            width,
+            height,
+            jpeg,
+        })
     }
 
     impl GraphicsCaptureApiHandler for GeneralCapture {
@@ -121,6 +246,8 @@ mod imp {
                     ctx.flags.width,
                     ctx.flags.height,
                 )?),
+                last_preview_at: Instant::now() - LIVE_PREVIEW_INTERVAL,
+                preview_sequence: 0,
             })
         }
 
@@ -133,6 +260,17 @@ mod imp {
                 encoder
                     .send_frame(frame)
                     .map_err(|error| format!("녹화 프레임 인코딩 실패: {error}"))?;
+            }
+            let preview_bus = live_preview_bus();
+            if live_preview_requested()
+                && preview_bus.receiver_count() > 0
+                && self.last_preview_at.elapsed() >= LIVE_PREVIEW_INTERVAL
+            {
+                self.last_preview_at = Instant::now();
+                self.preview_sequence = self.preview_sequence.saturating_add(1);
+                if let Ok(preview) = encode_live_preview(frame, self.preview_sequence) {
+                    let _ = preview_bus.send(preview);
+                }
             }
             Ok(())
         }

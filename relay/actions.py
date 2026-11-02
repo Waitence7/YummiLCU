@@ -56,6 +56,7 @@ ACTION_POLICIES: dict[str, ActionPolicy] = {
         "파티원 강퇴 (payload.summoner_id)",
         allow_new_device=True,
     ),
+    "web_input": ActionPolicy("웹에서 앱으로 전달하는 제한된 사용자 입력"),
 }
 
 ACTION_HELP: dict[str, str] = {name: policy.help for name, policy in ACTION_POLICIES.items()}
@@ -68,3 +69,24 @@ def action_policy(action: str) -> ActionPolicy | None:
 
 def is_allowed_action(action: str) -> bool:
     return action in ACTION_POLICIES
+
+
+WEB_INPUT_KINDS = frozenset({"button", "value"})
+
+
+def validate_web_input_payload(payload: dict[str, object]) -> bool:
+    kind = payload.get("kind")
+    name = payload.get("name")
+    value = payload.get("value")
+    if kind not in WEB_INPUT_KINDS or not isinstance(name, str):
+        return False
+    name = name.strip()
+    if (
+        not name
+        or len(name) > 64
+        or not all(ch.isascii() and (ch.isalnum() or ch in "_-.:") for ch in name)
+    ):
+        return False
+    if value is None or isinstance(value, bool) or isinstance(value, int):
+        return True
+    return isinstance(value, str) and len(value) <= 256 and "\x00" not in value

@@ -39,6 +39,12 @@ pub(crate) enum IncomingMessage {
     },
     #[serde(rename = "live_game_polling")]
     LiveGamePolling { enabled: bool },
+    #[serde(rename = "live_preview_control")]
+    LivePreviewControl {
+        enabled: bool,
+        #[serde(default)]
+        ttl_ms: Option<u64>,
+    },
     #[serde(rename = "server_hello")]
     ServerHello {
         protocol_version: u32,
@@ -179,6 +185,11 @@ impl IncomingMessage {
             {
                 Err("invalid Discord voice chat message")
             }
+            Self::LivePreviewControl { ttl_ms, .. }
+                if ttl_ms.is_some_and(|value| !(500..=10_000).contains(&value)) =>
+            {
+                Err("invalid live preview control")
+            }
             Self::ServerHello { capabilities, .. }
                 if capabilities.len() > 64
                     || capabilities
@@ -259,6 +270,7 @@ pub(crate) enum Action {
     InvitePartyMembers,
     CheckPartyMembers,
     KickPartyMember,
+    WebInput,
 }
 
 impl Action {
@@ -292,6 +304,7 @@ impl Action {
             "invite_party_members" => Self::InvitePartyMembers,
             "check_party_members" => Self::CheckPartyMembers,
             "kick_party_member" => Self::KickPartyMember,
+            "web_input" => Self::WebInput,
             _ => return None,
         })
     }
@@ -326,6 +339,7 @@ impl Action {
             Self::InvitePartyMembers => "invite_party_members",
             Self::CheckPartyMembers => "check_party_members",
             Self::KickPartyMember => "kick_party_member",
+            Self::WebInput => "web_input",
         }
     }
 

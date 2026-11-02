@@ -409,6 +409,14 @@ impl Config {
         Ok(url.into())
     }
 
+    pub(crate) fn live_preview_upload_url(&self, session_id: &str) -> AgentResult<String> {
+        let mut url = validate_relay_base_url(&self.relay_public_base_url, cfg!(debug_assertions))?;
+        url.set_path("/lcu/live-preview");
+        url.set_query(None);
+        url.query_pairs_mut().append_pair("session_id", session_id);
+        Ok(url.into())
+    }
+
     pub(crate) fn recording_context_url(
         &self,
         session_id: &str,
