@@ -49,6 +49,43 @@ pub(crate) fn subscribe_live_preview() -> broadcast::Receiver<LivePreviewFrame> 
     live_preview_bus().subscribe()
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct LiveStreamFrame {
+    pub(crate) sequence: u64,
+    pub(crate) captured_at_ms: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) jpeg: Vec<u8>,
+}
+
+static LIVE_STREAM_BUS: OnceLock<broadcast::Sender<LiveStreamFrame>> = OnceLock::new();
+static LIVE_STREAM_DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn set_live_stream_enabled(enabled: bool, ttl_ms: u64) {
+    let deadline = if enabled {
+        live_preview_now_ms().saturating_add(ttl_ms.clamp(1_000, 15_000))
+    } else {
+        0
+    };
+    LIVE_STREAM_DEADLINE_MS.store(deadline, Ordering::Release);
+}
+
+fn live_stream_requested() -> bool {
+    let deadline = LIVE_STREAM_DEADLINE_MS.load(Ordering::Acquire);
+    deadline > 0 && live_preview_now_ms() <= deadline
+}
+
+fn live_stream_bus() -> &'static broadcast::Sender<LiveStreamFrame> {
+    LIVE_STREAM_BUS.get_or_init(|| {
+        let (sender, _) = broadcast::channel(2);
+        sender
+    })
+}
+
+pub(crate) fn subscribe_live_stream() -> broadcast::Receiver<LiveStreamFrame> {
+    live_stream_bus().subscribe()
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RecordingStatus {
@@ -125,8 +162,8 @@ mod imp {
     };
 
     use super::{
-        live_preview_bus, live_preview_requested, LivePreviewFrame, RecordingSessionMetadata,
-        RecordingStatus,
+        live_preview_bus, live_preview_requested, live_stream_bus, live_stream_requested,
+        LivePreviewFrame, LiveStreamFrame, RecordingSessionMetadata, RecordingStatus,
     };
 
     const VIDEO_BITRATE: u32 = 15_000_000;
@@ -135,6 +172,10 @@ mod imp {
     const LIVE_PREVIEW_MAX_WIDTH: u32 = 960;
     const LIVE_PREVIEW_MAX_HEIGHT: u32 = 540;
     const LIVE_PREVIEW_JPEG_QUALITY: u8 = 52;
+    const LIVE_STREAM_INTERVAL: Duration = Duration::from_millis(66);
+    const LIVE_STREAM_MAX_WIDTH: u32 = 1280;
+    const LIVE_STREAM_MAX_HEIGHT: u32 = 720;
+    const LIVE_STREAM_JPEG_QUALITY: u8 = 58;
     const SEGMENT_DURATION: Duration = Duration::from_secs(10);
     const MAX_BUFFER_DURATION: Duration = Duration::from_secs(75);
     const MIN_SEGMENT_DURATION: Duration = Duration::from_millis(300);
@@ -166,34 +207,38 @@ mod imp {
         encoder: Option<VideoEncoder>,
         last_preview_at: Instant,
         preview_sequence: u64,
+        last_stream_at: Instant,
+        stream_sequence: u64,
     }
 
-    fn live_preview_dimensions(width: u32, height: u32) -> (u32, u32) {
+    fn bounded_dimensions(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
         if width == 0 || height == 0 {
             return (0, 0);
         }
-        if width <= LIVE_PREVIEW_MAX_WIDTH && height <= LIVE_PREVIEW_MAX_HEIGHT {
+        if width <= max_width && height <= max_height {
             return (width, height);
         }
-        let width_scale = width as f64 / LIVE_PREVIEW_MAX_WIDTH as f64;
-        let height_scale = height as f64 / LIVE_PREVIEW_MAX_HEIGHT as f64;
+        let width_scale = width as f64 / max_width as f64;
+        let height_scale = height as f64 / max_height as f64;
         let scale = width_scale.max(height_scale).max(1.0);
-        let out_width = ((width as f64 / scale).round() as u32).clamp(1, LIVE_PREVIEW_MAX_WIDTH);
-        let out_height = ((height as f64 / scale).round() as u32).clamp(1, LIVE_PREVIEW_MAX_HEIGHT);
+        let out_width = ((width as f64 / scale).round() as u32).clamp(1, max_width);
+        let out_height = ((height as f64 / scale).round() as u32).clamp(1, max_height);
         (out_width, out_height)
     }
 
-    fn encode_live_preview(
+    fn encode_jpeg_frame(
         frame: &mut Frame,
-        sequence: u64,
-    ) -> Result<LivePreviewFrame, CaptureError> {
+        max_width: u32,
+        max_height: u32,
+        quality: u8,
+    ) -> Result<(u64, u32, u32, Vec<u8>), CaptureError> {
         let mut buffer = frame
             .buffer()
             .map_err(|error| format!("실시간 프리뷰 프레임 읽기 실패: {error}"))?;
         let source_width = buffer.width();
         let source_height = buffer.height();
         let row_pitch = buffer.row_pitch() as usize;
-        let (width, height) = live_preview_dimensions(source_width, source_height);
+        let (width, height) = bounded_dimensions(source_width, source_height, max_width, max_height);
         if width == 0 || height == 0 {
             return Err("실시간 프리뷰 프레임 크기가 올바르지 않습니다.".into());
         }
@@ -218,7 +263,7 @@ mod imp {
             }
         }
         let mut jpeg = Vec::with_capacity((width as usize * height as usize).saturating_div(2));
-        jpeg_encoder::Encoder::new(&mut jpeg, LIVE_PREVIEW_JPEG_QUALITY)
+        jpeg_encoder::Encoder::new(&mut jpeg, quality)
             .encode(
                 &rgb,
                 u16::try_from(width).map_err(|_| "실시간 프리뷰 너비가 너무 큽니다.")?,
@@ -226,13 +271,27 @@ mod imp {
                 jpeg_encoder::ColorType::Rgb,
             )
             .map_err(|error| format!("실시간 프리뷰 JPEG 인코딩 실패: {error}"))?;
-        Ok(LivePreviewFrame {
-            sequence,
-            captured_at_ms: timestamp_ms() as u64,
-            width,
-            height,
-            jpeg,
-        })
+        Ok((timestamp_ms() as u64, width, height, jpeg))
+    }
+
+    fn encode_live_preview(frame: &mut Frame, sequence: u64) -> Result<LivePreviewFrame, CaptureError> {
+        let (captured_at_ms, width, height, jpeg) = encode_jpeg_frame(
+            frame,
+            LIVE_PREVIEW_MAX_WIDTH,
+            LIVE_PREVIEW_MAX_HEIGHT,
+            LIVE_PREVIEW_JPEG_QUALITY,
+        )?;
+        Ok(LivePreviewFrame { sequence, captured_at_ms, width, height, jpeg })
+    }
+
+    fn encode_live_stream(frame: &mut Frame, sequence: u64) -> Result<LiveStreamFrame, CaptureError> {
+        let (captured_at_ms, width, height, jpeg) = encode_jpeg_frame(
+            frame,
+            LIVE_STREAM_MAX_WIDTH,
+            LIVE_STREAM_MAX_HEIGHT,
+            LIVE_STREAM_JPEG_QUALITY,
+        )?;
+        Ok(LiveStreamFrame { sequence, captured_at_ms, width, height, jpeg })
     }
 
     impl GraphicsCaptureApiHandler for GeneralCapture {
@@ -248,6 +307,8 @@ mod imp {
                 )?),
                 last_preview_at: Instant::now() - LIVE_PREVIEW_INTERVAL,
                 preview_sequence: 0,
+                last_stream_at: Instant::now() - LIVE_STREAM_INTERVAL,
+                stream_sequence: 0,
             })
         }
 
@@ -261,6 +322,18 @@ mod imp {
                     .send_frame(frame)
                     .map_err(|error| format!("녹화 프레임 인코딩 실패: {error}"))?;
             }
+            let stream_bus = live_stream_bus();
+            if live_stream_requested()
+                && stream_bus.receiver_count() > 0
+                && self.last_stream_at.elapsed() >= LIVE_STREAM_INTERVAL
+            {
+                self.last_stream_at = Instant::now();
+                self.stream_sequence = self.stream_sequence.saturating_add(1);
+                if let Ok(stream_frame) = encode_live_stream(frame, self.stream_sequence) {
+                    let _ = stream_bus.send(stream_frame);
+                }
+            }
+
             let preview_bus = live_preview_bus();
             if live_preview_requested()
                 && preview_bus.receiver_count() > 0

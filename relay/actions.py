@@ -57,6 +57,7 @@ ACTION_POLICIES: dict[str, ActionPolicy] = {
         allow_new_device=True,
     ),
     "web_input": ActionPolicy("웹에서 앱으로 전달하는 제한된 사용자 입력"),
+    "live_webrtc_offer": ActionPolicy("웹 실시간 중계 WebRTC offer", timeout_sec=25.0),
 }
 
 ACTION_HELP: dict[str, str] = {name: policy.help for name, policy in ACTION_POLICIES.items()}

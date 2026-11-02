@@ -3100,6 +3100,14 @@ where
             let action_label = parsed_action.map(Action::as_str).unwrap_or("unknown");
             let result = match parsed_action {
                 None => CommandResult::failure(request_id, "unknown action"),
+                Some(Action::LiveWebrtcOffer) => match crate::live_webrtc::answer_offer(&payload).await {
+                    Ok(answer) => CommandResult::success(
+                        request_id,
+                        "WebRTC 실시간 중계 연결 준비 완료",
+                        answer,
+                    ),
+                    Err(error) => CommandResult::failure(request_id, error),
+                },
                 Some(Action::WebInput) => match sanitize_web_input_payload(&payload) {
                     Some(event) => {
                         let _ = app.emit("yummi://web-input", event.clone());

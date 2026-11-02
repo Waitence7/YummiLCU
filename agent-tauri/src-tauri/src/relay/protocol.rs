@@ -271,6 +271,7 @@ pub(crate) enum Action {
     CheckPartyMembers,
     KickPartyMember,
     WebInput,
+    LiveWebrtcOffer,
 }
 
 impl Action {
@@ -305,6 +306,7 @@ impl Action {
             "check_party_members" => Self::CheckPartyMembers,
             "kick_party_member" => Self::KickPartyMember,
             "web_input" => Self::WebInput,
+            "live_webrtc_offer" => Self::LiveWebrtcOffer,
             _ => return None,
         })
     }
@@ -340,6 +342,7 @@ impl Action {
             Self::CheckPartyMembers => "check_party_members",
             Self::KickPartyMember => "kick_party_member",
             Self::WebInput => "web_input",
+            Self::LiveWebrtcOffer => "live_webrtc_offer",
         }
     }
 
@@ -492,6 +495,7 @@ pub(crate) struct AgentCapabilities {
     update_diagnostics: bool,
     diagnostic_reports: bool,
     diagnostic_log_chunks: bool,
+    live_webrtc_v1: bool,
 }
 
 impl AgentCapabilities {
@@ -522,6 +526,7 @@ impl AgentCapabilities {
             update_diagnostics: true,
             diagnostic_reports: true,
             diagnostic_log_chunks: true,
+            live_webrtc_v1: true,
         }
     }
 }
@@ -1000,6 +1005,7 @@ mod tests {
         assert_eq!(value["capabilities"]["update_diagnostics"], true);
         assert_eq!(value["capabilities"]["diagnostic_reports"], true);
         assert_eq!(value["capabilities"]["diagnostic_log_chunks"], true);
+        assert_eq!(value["capabilities"]["live_webrtc_v1"], true);
     }
 
     #[test]
@@ -1082,6 +1088,8 @@ mod tests {
             "invite_party_members",
             "check_party_members",
             "kick_party_member",
+            "web_input",
+            "live_webrtc_offer",
         ];
         for action_name in relay_actions {
             let action = Action::parse(action_name).expect("Relay action must remain supported");

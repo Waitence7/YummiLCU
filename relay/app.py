@@ -129,6 +129,7 @@ _SERVER_CAPABILITIES = frozenset({
     "update_diagnostics",
     "diagnostic_reports",
     "diagnostic_log_chunks",
+    "live_webrtc_v1",
 })
 
 _AGENT_ERROR_COMPONENTS = frozenset({
