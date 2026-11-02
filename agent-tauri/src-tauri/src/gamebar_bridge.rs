@@ -129,9 +129,6 @@ struct NativeInputBlockState {
     active: bool,
     left_captured: bool,
     blocked_left_down: bool,
-    captured_cursor_x: i32,
-    captured_cursor_y: i32,
-    captured_cursor_valid: bool,
     rects: Vec<NativeInputBlockRect>,
     blocked_down_count: u64,
     blocked_up_count: u64,
@@ -143,17 +140,6 @@ static NATIVE_INPUT_BLOCK: OnceLock<Mutex<NativeInputBlockState>> = OnceLock::ne
 #[cfg(windows)]
 fn native_input_block_state() -> &'static Mutex<NativeInputBlockState> {
     NATIVE_INPUT_BLOCK.get_or_init(|| Mutex::new(NativeInputBlockState::default()))
-}
-
-#[cfg(windows)]
-fn captured_block_cursor() -> Option<(i32, i32)> {
-    native_input_block_state().lock().ok().and_then(|state| {
-        if state.blocked_left_down && state.captured_cursor_valid {
-            Some((state.captured_cursor_x, state.captured_cursor_y))
-        } else {
-            None
-        }
-    })
 }
 
 #[cfg(windows)]
@@ -1047,17 +1033,12 @@ unsafe extern "system" fn native_input_block_hook(
         Foundation::LRESULT,
         UI::WindowsAndMessaging::{
             CallNextHookEx, MSLLHOOKSTRUCT, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-            WM_MOUSEMOVE,
         },
     };
 
     if code >= 0 {
         let message = wparam.0 as u32;
-        if message == WM_LBUTTONDOWN
-            || message == WM_LBUTTONDBLCLK
-            || message == WM_LBUTTONUP
-            || message == WM_MOUSEMOVE
-        {
+        if message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK || message == WM_LBUTTONUP {
             let hook = &*(lparam.0 as *const MSLLHOOKSTRUCT);
             if let Ok(mut state) = native_input_block_state().lock() {
                 let inside = |rect: &NativeInputBlockRect| {
@@ -1083,24 +1064,7 @@ unsafe extern "system" fn native_input_block_hook(
                         || hit(rect.alt_x + mx, rect.alt_y + my, rect.alt_width, rect.alt_height)
                 };
 
-                // Once an overlay press owns the left button, suppress pointer motion
-                // as well as down/up. Otherwise the app behind the click-through overlay
-                // can receive WM_MOUSEMOVE while the physical button is held and start
-                // its own text/image/OLE drag, stealing the gesture from the overlay.
-                if message == WM_MOUSEMOVE && state.left_captured {
-                    // Returning non-zero can stop Windows from committing this move to
-                    // GetCursorPos/GetCursorInfo. Preserve the hook's screen coordinate
-                    // before swallowing it so overlay drag can use the real motion.
-                    state.captured_cursor_x = hook.pt.x;
-                    state.captured_cursor_y = hook.pt.y;
-                    state.captured_cursor_valid = true;
-                    return LRESULT(1);
-                }
-
                 if message == WM_LBUTTONUP && state.left_captured {
-                    state.captured_cursor_x = hook.pt.x;
-                    state.captured_cursor_y = hook.pt.y;
-                    state.captured_cursor_valid = true;
                     state.blocked_left_down = false;
                     state.left_captured = false;
                     state.blocked_up_count = state.blocked_up_count.wrapping_add(1);
@@ -1110,9 +1074,6 @@ unsafe extern "system" fn native_input_block_hook(
                 if message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK {
                     if state.left_captured || (state.active && state.rects.iter().any(inside)) {
                         state.left_captured = true;
-                        state.captured_cursor_x = hook.pt.x;
-                        state.captured_cursor_y = hook.pt.y;
-                        state.captured_cursor_valid = true;
                         // A swallowed low-level click may never become visible through
                         // GetAsyncKeyState. Mirror the physical button state here so
                         // the runtime drag / WebView forwarding path can still observe
@@ -1207,17 +1168,10 @@ fn external_mouse_input_thread() {
         // When our input blocker intentionally swallows a click, Windows may never
         // expose that press through GetAsyncKeyState. Merge the hook-owned state so
         // pinned drag and forwarded overlay clicks continue to work in click-through.
-        let (blocked_down, blocked_cursor) = native_input_block_state()
+        let blocked_down = native_input_block_state()
             .lock()
-            .map(|state| {
-                let cursor = if state.blocked_left_down && state.captured_cursor_valid {
-                    Some((state.captured_cursor_x, state.captured_cursor_y))
-                } else {
-                    None
-                };
-                (state.blocked_left_down, cursor)
-            })
-            .unwrap_or((false, None));
+            .map(|state| state.blocked_left_down)
+            .unwrap_or(false);
         let down = async_down || blocked_down;
         use windows::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO};
         let mut physical = POINT::default();
@@ -1229,9 +1183,7 @@ fn external_mouse_input_thread() {
         let physical_ok = unsafe { GetPhysicalCursorPos(&mut physical) }.is_ok();
         let logical_ok = unsafe { GetCursorPos(&mut logical) }.is_ok();
         let cursor_info_ok = unsafe { GetCursorInfo(&mut cursor_info) }.is_ok();
-        let (point, cursor_source) = if let Some((x, y)) = blocked_cursor {
-            (POINT { x, y }, Some("blocked-hook"))
-        } else if cursor_info_ok {
+        let (point, cursor_source) = if cursor_info_ok {
             (cursor_info.ptScreenPos, Some("cursor-info"))
         } else if physical_ok {
             (physical, Some("physical-fallback"))
@@ -1435,19 +1387,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
         let physical_ok = unsafe { GetPhysicalCursorPos(&mut physical) }.is_ok();
         let logical_ok = unsafe { GetCursorPos(&mut logical) }.is_ok();
         let cursor_info_ok = unsafe { GetCursorInfo(&mut cursor_info) }.is_ok();
-        if let Some((captured_x, captured_y)) = captured_block_cursor() {
-            Some((
-                captured_x,
-                captured_y,
-                "direct-blocked-hook",
-                physical,
-                logical,
-                cursor_info.ptScreenPos,
-                cursor_info_ok,
-                if cursor_info_ok { cursor_info.flags.0 } else { 0 },
-                if cursor_info_ok { cursor_info.hCursor.0 as usize as u64 } else { 0 },
-            ))
-        } else if cursor_info_ok {
+        if cursor_info_ok {
             Some((
                 cursor_info.ptScreenPos.x,
                 cursor_info.ptScreenPos.y,
