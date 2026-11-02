@@ -297,7 +297,14 @@ jobs:
         run: |
           $tag = "gamebar-v$env:VERSION"
           $path = "release-manifests/gamebar-latest.json"
-          $index = [ordered]@{ version = $env:VERSION; releaseTag = $tag } | ConvertTo-Json -Compress
+          $gamebar = [ordered]@{ version = $env:VERSION; releaseTag = $tag }
+          # Keep top-level fields for legacy Agents while newer Agents prefer gamebar.*.
+          $index = [ordered]@{
+            schemaVersion = 1
+            version = $env:VERSION
+            releaseTag = $tag
+            gamebar = $gamebar
+          } | ConvertTo-Json -Depth 3 -Compress
           $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($index + "`n"))
           $sha = gh api "repos/$env:GITHUB_REPOSITORY/contents/$path?ref=main" --jq '.sha' 2>$null
           $payload = @{

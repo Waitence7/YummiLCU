@@ -2415,12 +2415,15 @@ async fn fetch_published_gamebar_target(
         .json()
         .await
         .map_err(|e| format!("Game Bar 게시 인덱스 JSON 실패: {e}"))?;
-    let version = index
+    let published = index.get("gamebar").unwrap_or(&index);
+    let version = published
         .get("version")
+        .or_else(|| index.get("version"))
         .and_then(Value::as_str)
         .ok_or_else(|| "Game Bar 게시 인덱스에 version이 없습니다.".to_owned())?;
-    let release_tag = index
+    let release_tag = published
         .get("releaseTag")
+        .or_else(|| index.get("releaseTag"))
         .and_then(Value::as_str)
         .ok_or_else(|| "Game Bar 게시 인덱스에 releaseTag가 없습니다.".to_owned())?;
     if release_tag != format!("gamebar-v{version}")
