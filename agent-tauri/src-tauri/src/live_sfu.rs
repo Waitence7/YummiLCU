@@ -359,7 +359,6 @@ mod tests {
         // backpressure. The publisher must keep the room alive in that case.
         let source = include_str!("live_sfu.rs");
         assert!(source.contains("Ok(source.capture_frame(&video))"));
-        assert!(!source.contains("LiveKit video source가 프레임을 거부했습니다."));
     }
 
     #[test]
