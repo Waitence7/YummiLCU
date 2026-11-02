@@ -81,6 +81,8 @@ try {
   if ($widgetXaml -notmatch 'x:Name="OverlayToastHost"') { throw 'Shared overlay toast host must exist for transient notifications' }
   if ($widgetSource -notmatch 'ApplyOverlayToasts' -or $widgetSource -notmatch 'overlay_toasts') { throw 'Widget must render the shared overlay toast payload contract' }
   if ($widgetSource -notmatch 'HandlePinnedNativePanelDrag') { throw 'Pinned runtime must support native panel dragging' }
+  if ($widgetXaml -notmatch 'x:Name="LcuMoveBar"[^>]*PointerPressed="PanelMoveBar_PointerPressed"') { throw 'Win+G must keep the existing 24 DIP move-bar drag path' }
+  if ($widgetXaml -match 'x:Name="LcuPanel"[^>]*PointerPressed="PanelMoveBar_PointerPressed"') { throw 'Pinned full-card drag must not change Win+G panel-root hit testing' }
   if ($widgetSource -match 'RuntimeNativeDragBandHeight') { throw 'Pinned runtime drag must not use a fixed top-band height' }
   if ($widgetSource -notmatch 'AddNativeInputBlockPanel') { throw 'Pinned runtime drag must block the full panel rectangle' }
   if ($widgetSource -notmatch 'PointInsideRootElement\(NativeHookHitbox, point\)') { throw 'Native input button must retain its own non-drag hitbox' }
