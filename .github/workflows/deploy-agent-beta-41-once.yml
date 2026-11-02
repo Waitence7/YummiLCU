@@ -1,0 +1,62 @@
+name: Deploy Agent Beta 41 Once
+
+on:
+  workflow_run:
+    workflows: ["Deploy LCU Tauri Agent (manual Actions button)"]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_sha == '0cd23bc39e7efe501f9fcb84ef8ef8912074cf6b' }}
+    runs-on: ubuntu-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download verified agent candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf release
+          mkdir -p release
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name agent-candidate --dir release
+          test -s release/agent-version.json
+          jq -e '.version == "0.8.0" and .tauri.version == "0.8.0" and .tauri.commit == "0cd23bc"' release/agent-version.json >/dev/null
+          test -s release/Yummi-LCU-Agent-0.8.0-setup.exe
+          test -s release/tauri-0.8.0.zip
+
+      - name: Prepare beta.41 signed manifest
+        env:
+          YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          build_id="$(jq -r '.tauri.buildId // .buildId' release/agent-version.json)"
+          stage="${RUNNER_TEMP}/tauri-portable"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          unzip -q release/tauri-0.8.0.zip -d "$stage"
+          exe="$(find "$stage" -maxdepth 2 -type f -iname 'yummi-lcu-tauri.exe' -print -quit)"
+          test -n "$exe" && test -s "$exe"
+          node scripts/sync-tauri-agent-version.mjs             --zip release/tauri-0.8.0.zip             --exe "$exe"             --out release/agent-version.json             --notes "Capture mouse motion for the full overlay drag gesture so draggable text/images behind the overlay cannot steal it."             --channel beta             --release-label 0.8.0-beta.41             --build-id "$build_id"             --commit 0cd23bc             --rollout-percent 100
+          jq -e '.version == "0.8.0" and .tauri.channel == "beta" and .tauri.releaseLabel == "0.8.0-beta.41" and .tauri.commit == "0cd23bc" and .tauri.rolloutPercent == 100' release/agent-version.json >/dev/null
+
+      - name: Publish beta.41
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_CHANNEL: beta
+          RELEASE_LABEL: 0.8.0-beta.41
+          TARGET_SHA: 0cd23bc39e7efe501f9fcb84ef8ef8912074cf6b
+        shell: bash
+        run: scripts/publish-agent-release.sh release
