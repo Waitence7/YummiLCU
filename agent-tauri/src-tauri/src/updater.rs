@@ -300,19 +300,25 @@ fn is_newer_target(
         return false;
     }
 
-    if let (Some(remote), Some(local)) = (
-        target.build_id.as_deref().and_then(numeric_identifier),
-        numeric_identifier(current_build_id),
-    ) {
-        return remote > local;
-    }
-
+    // For prerelease channels the published release sequence is the canonical
+    // ordering. Build IDs describe a particular CI artifact and are not monotonic
+    // across isolated/promoted releases (for example beta.47 may intentionally
+    // reuse or rebuild an older candidate with a smaller run number).
     if let (Some(remote), Some(local)) = (
         target
             .release_label
             .as_deref()
             .and_then(|label| release_sequence(label, &target.version, channel)),
         release_sequence(current_release_label, current_version, channel),
+    ) {
+        return remote > local;
+    }
+
+    // Fall back to build IDs only when either side does not have a comparable
+    // channel release label (developer/candidate builds, legacy manifests, etc.).
+    if let (Some(remote), Some(local)) = (
+        target.build_id.as_deref().and_then(numeric_identifier),
+        numeric_identifier(current_build_id),
     ) {
         return remote > local;
     }
@@ -612,11 +618,45 @@ async fn download_limited(client: &Client, url: Url, max_bytes: usize) -> AgentR
     Ok(bytes)
 }
 
+fn installed_release_identity() -> (String, String, String) {
+    let fallback_label = option_env!("YUMMI_AGENT_RELEASE_LABEL")
+        .unwrap_or(env!("CARGO_PKG_VERSION"))
+        .to_owned();
+    let fallback_build = option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local").to_owned();
+    let fallback_commit = option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown").to_owned();
+
+    let Some(path) = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join(".yummi-release.json")))
+    else {
+        return (fallback_label, fallback_build, fallback_commit);
+    };
+    let Ok(raw) = fs::read_to_string(path) else {
+        return (fallback_label, fallback_build, fallback_commit);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&raw) else {
+        return (fallback_label, fallback_build, fallback_commit);
+    };
+    let text = |key: &str, fallback: String| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or(fallback)
+    };
+    (
+        text("releaseLabel", fallback_label),
+        text("buildId", fallback_build),
+        text("commit", fallback_commit),
+    )
+}
+
 fn current_build_matches_target(target: &UpdateTarget) -> bool {
-    let current_build = option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local");
-    let current_commit = option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown");
-    target.build_id.as_deref() == Some(current_build)
-        && target.commit.as_deref() == Some(current_commit)
+    let (_, current_build, current_commit) = installed_release_identity();
+    target.build_id.as_deref() == Some(current_build.as_str())
+        && target.commit.as_deref() == Some(current_commit.as_str())
 }
 
 fn persist_release_identity(target_dir: &Path, target: &UpdateTarget) -> AgentResult<()> {
@@ -646,13 +686,12 @@ async fn apply_update(
         return Ok(false);
     };
     let current_version = env!("CARGO_PKG_VERSION");
-    let current_release_label = option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(current_version);
-    let current_build_id = option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local");
+    let (current_release_label, current_build_id, _) = installed_release_identity();
     if !should_apply_target(
         &target_manifest,
         current_version,
-        current_release_label,
-        current_build_id,
+        &current_release_label,
+        &current_build_id,
         &config.update_channel,
     ) {
         return Ok(false);
@@ -1102,11 +1141,12 @@ pub(crate) async fn check_and_apply_update(
                 }
             }
         }
+        let (installed_release_label, installed_build_id, _) = installed_release_identity();
         if should_apply_target(
             &target,
             env!("CARGO_PKG_VERSION"),
-            option_env!("YUMMI_AGENT_RELEASE_LABEL").unwrap_or(env!("CARGO_PKG_VERSION")),
-            option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local"),
+            &installed_release_label,
+            &installed_build_id,
             &config.update_channel,
         ) {
             state
@@ -1389,6 +1429,46 @@ mod tests {
             "0.7.0",
             "20260825.31",
             "stable",
+        ));
+    }
+
+    #[test]
+    fn beta_release_sequence_beats_non_monotonic_build_id() {
+        let target = UpdateTarget {
+            version: "0.8.0".into(),
+            channel: Some("beta".into()),
+            release_label: Some("0.8.0-beta.47".into()),
+            build_id: Some("20261102.1".into()),
+            commit: Some("239aba3".into()),
+            rollout_percent: Some(100),
+            min_version: None,
+            blocked_versions: None,
+            url: None,
+            patch_url: None,
+            patch_from: None,
+            sha256: None,
+            patch_sha256: None,
+            executable: None,
+            signature: None,
+            publisher_thumbprint: None,
+            files: None,
+        };
+
+        // beta.47 is newer than beta.46 even though the isolated release's
+        // CI build ID is numerically lower than beta.46's normal CI run.
+        assert!(should_apply_target(
+            &target,
+            "0.8.0",
+            "0.8.0-beta.46",
+            "20261102.264",
+            "beta",
+        ));
+        assert!(!should_apply_target(
+            &target,
+            "0.8.0",
+            "0.8.0-beta.48",
+            "20261102.999",
+            "beta",
         ));
     }
 
