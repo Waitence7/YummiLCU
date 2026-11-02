@@ -196,9 +196,6 @@ pub(crate) async fn start_main_window_drag(
         if let Err(error) = window.set_skip_taskbar(false) {
             report_window_failure(&window, "drag_taskbar_restore", error);
         }
-        if let Err(error) = ensure_windows_taskbar_style(&window) {
-            report_window_failure(&window, "drag_taskbar_style_restore", error);
-        }
 
         let config = state.config.read().await.clone();
         let generation = WINDOW_MOTION_GENERATION
@@ -402,9 +399,6 @@ impl Drop for MotionVisualGuard {
             if let Err(error) = self.window.set_skip_taskbar(false) {
                 report_window_failure(&self.window, "motion_taskbar_restore", error);
             }
-            if let Err(error) = ensure_windows_taskbar_style(&self.window) {
-                report_window_failure(&self.window, "motion_taskbar_style_restore", error);
-            }
             emit_motion_visual(
                 &self.window,
                 0.0,
@@ -511,16 +505,8 @@ fn run_windows_physics_drag(
             break;
         };
         let now = Instant::now();
-        let desired_x = cursor.x.saturating_add(offset_x);
-        let desired_y = cursor.y.saturating_add(offset_y);
-        let (x, y) = keep_drag_clear_of_taskbar(
-            cursor.x,
-            cursor.y,
-            desired_x,
-            desired_y,
-            initial_size.width as i32,
-            initial_size.height as i32,
-        );
+        let x = cursor.x.saturating_add(offset_x);
+        let y = cursor.y.saturating_add(offset_y);
 
         if let Err(error) = window.set_position(Position::Physical(PhysicalPosition::new(x, y))) {
             if motion_is_current(generation) {
@@ -547,16 +533,8 @@ fn run_windows_physics_drag(
 
     if let Some(cursor) = cursor_position() {
         let now = Instant::now();
-        let desired_x = cursor.x.saturating_add(offset_x);
-        let desired_y = cursor.y.saturating_add(offset_y);
-        let (x, y) = keep_drag_clear_of_taskbar(
-            cursor.x,
-            cursor.y,
-            desired_x,
-            desired_y,
-            initial_size.width as i32,
-            initial_size.height as i32,
-        );
+        let x = cursor.x.saturating_add(offset_x);
+        let y = cursor.y.saturating_add(offset_y);
         if let Err(error) = window.set_position(Position::Physical(PhysicalPosition::new(x, y))) {
             if motion_is_current(generation) {
                 report_window_failure(&window, "release_set_position", error);
@@ -1225,10 +1203,6 @@ struct MonitorWorkArea {
     top: f64,
     right: f64,
     bottom: f64,
-    monitor_left: f64,
-    monitor_top: f64,
-    monitor_right: f64,
-    monitor_bottom: f64,
 }
 
 #[cfg(windows)]
@@ -1258,81 +1232,7 @@ fn monitor_work_area(x: i32, y: i32) -> Option<MonitorWorkArea> {
         top: info.rcWork.top as f64,
         right: info.rcWork.right as f64,
         bottom: info.rcWork.bottom as f64,
-        monitor_left: info.rcMonitor.left as f64,
-        monitor_top: info.rcMonitor.top as f64,
-        monitor_right: info.rcMonitor.right as f64,
-        monitor_bottom: info.rcMonitor.bottom as f64,
     })
-}
-
-#[cfg(windows)]
-fn keep_drag_clear_of_taskbar(
-    cursor_x: i32,
-    cursor_y: i32,
-    mut x: i32,
-    mut y: i32,
-    width: i32,
-    height: i32,
-) -> (i32, i32) {
-    let Some(area) = monitor_work_area(cursor_x, cursor_y) else {
-        return (x, y);
-    };
-
-    // Constrain only the edge occupied by the taskbar. Other screen edges stay
-    // unrestricted so multi-monitor/off-screen dragging keeps its old behavior.
-    if area.left > area.monitor_left {
-        x = x.max(area.left.round() as i32);
-    }
-    if area.right < area.monitor_right {
-        x = x.min(area.right.round() as i32 - width);
-    }
-    if area.top > area.monitor_top {
-        y = y.max(area.top.round() as i32);
-    }
-    if area.bottom < area.monitor_bottom {
-        y = y.min(area.bottom.round() as i32 - height);
-    }
-
-    (x, y)
-}
-
-#[cfg(windows)]
-fn ensure_windows_taskbar_style(window: &tauri::WebviewWindow) -> Result<(), String> {
-    use windows::Win32::{
-        Foundation::HWND,
-        UI::WindowsAndMessaging::{
-            GetWindowLongPtrW, SetWindowLongPtrW, SetWindowPos, GWL_EXSTYLE, SWP_FRAMECHANGED,
-            SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, WS_EX_APPWINDOW,
-            WS_EX_TOOLWINDOW,
-        },
-    };
-
-    let native = window.hwnd().map_err(|error| error.to_string())?;
-    let hwnd = HWND(native.0);
-    let current = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
-    let desired = (current | WS_EX_APPWINDOW.0) & !WS_EX_TOOLWINDOW.0;
-    if desired == current {
-        return Ok(());
-    }
-
-    unsafe {
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, desired as isize);
-        SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            0,
-            0,
-            SWP_NOMOVE
-                | SWP_NOSIZE
-                | SWP_NOZORDER
-                | SWP_NOACTIVATE
-                | SWP_FRAMECHANGED,
-        )
-        .map_err(|error| error.to_string())?;
-    }
-    Ok(())
 }
 
 #[cfg(windows)]
