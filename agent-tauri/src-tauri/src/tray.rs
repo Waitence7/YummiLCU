@@ -1,6 +1,6 @@
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 
 use tauri::{
@@ -20,6 +20,7 @@ const QUIT_MENU_ID: &str = "quit";
 static OPENING_MAIN_WINDOW: AtomicBool = AtomicBool::new(false);
 static EXITING: AtomicBool = AtomicBool::new(false);
 static HIDE_REQUEST_ID: AtomicU64 = AtomicU64::new(0);
+static WINDOW_VISIBILITY_LOCK: Mutex<()> = Mutex::new(());
 
 fn report_ui_error(app: &AppHandle, code: &'static str, error: impl ToString) {
     let summary = error.to_string();
@@ -70,6 +71,7 @@ pub(crate) fn setup(app: &tauri::App) -> tauri::Result<()> {
 }
 
 pub(crate) fn request_main_window(app: &AppHandle) {
+    let _visibility_guard = WINDOW_VISIBILITY_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     cancel_pending_hide();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         #[cfg(windows)]
@@ -115,6 +117,7 @@ pub(crate) fn remove(app: &AppHandle) {
 }
 
 pub(crate) fn hide_main_window(app: &AppHandle) {
+    let _visibility_guard = WINDOW_VISIBILITY_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     cancel_pending_hide();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         if let Err(error) = window.set_skip_taskbar(true) {
@@ -140,7 +143,7 @@ pub(crate) fn request_animated_hide(app: &AppHandle) {
         .unwrap_or(1.0);
     let watchdog_ms = tray_hide_watchdog_ms(playback_rate);
     let emitted = if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-        match window.emit("yummi://tray-hide-requested", ()) {
+        match window.emit("yummi://tray-hide-requested", request_id) {
             Ok(()) => true,
             Err(error) => {
                 report_ui_error(app, "tray_hide_event_emit_failed", error);
@@ -161,6 +164,38 @@ pub(crate) fn request_animated_hide(app: &AppHandle) {
     }
 }
 
+
+pub(crate) fn complete_animated_hide(app: &AppHandle, request_id: u64) -> bool {
+    let _visibility_guard = WINDOW_VISIBILITY_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    // A reopen increments HIDE_REQUEST_ID. Only the exact hide animation that is
+    // still current may hide/destroy the window. This prevents a late frontend
+    // completion callback from closing a window the user has just reopened.
+    if HIDE_REQUEST_ID
+        .compare_exchange(
+            request_id,
+            request_id.wrapping_add(1),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return false;
+    }
+
+    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+        if let Err(error) = window.set_skip_taskbar(true) {
+            report_ui_error(app, "window_taskbar_hide_failed", error);
+        }
+        if let Err(error) = window.hide() {
+            report_ui_error(app, "window_hide_failed", error);
+        }
+        if let Err(error) = window.destroy() {
+            report_ui_error(app, "window_destroy_failed", error);
+        }
+    }
+    true
+}
+
 fn tray_hide_watchdog_ms(playback_rate: f64) -> u64 {
     let rate = playback_rate.clamp(0.1, 4.0);
     // book-return is currently the longest effect at 1040 ms. Keep extra time
@@ -169,6 +204,7 @@ fn tray_hide_watchdog_ms(playback_rate: f64) -> u64 {
 }
 
 pub(crate) fn destroy_main_window(app: &AppHandle) {
+    let _visibility_guard = WINDOW_VISIBILITY_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     cancel_pending_hide();
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         if let Err(error) = window.destroy() {
@@ -188,6 +224,7 @@ fn cancel_pending_hide() {
 }
 
 fn create_main_window(app: &AppHandle) -> tauri::Result<()> {
+    let _visibility_guard = WINDOW_VISIBILITY_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
         window.set_skip_taskbar(false)?;
         window.show()?;

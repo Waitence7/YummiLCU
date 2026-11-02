@@ -147,14 +147,10 @@ pub(crate) fn hide_main_window(app: AppHandle) {
 }
 
 #[tauri::command]
-pub(crate) fn complete_tray_hide(app: AppHandle) {
+pub(crate) fn complete_tray_hide(app: AppHandle, request_id: u64) {
     cancel_window_motion();
     store_rotation_angle(0.0);
-    tray::hide_main_window(&app);
-    tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        tray::destroy_main_window(&app);
-    });
+    let _ = tray::complete_animated_hide(&app, request_id);
 }
 
 #[tauri::command]

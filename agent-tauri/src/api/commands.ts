@@ -57,7 +57,8 @@ export const matchReplayAnalysis = (gameId: string, jobId: string) =>
 export const downloadMatchReplay = (gameId: string, gameVersion?: string) =>
   call<void>("download_match_replay", { gameId, gameVersion });
 export const hideMainWindow = () => call<void>("hide_main_window");
-export const completeTrayHide = () => call<void>("complete_tray_hide");
+export const completeTrayHide = (requestId: number) =>
+  call<void>("complete_tray_hide", { requestId });
 export const minimizeMainWindow = () => call<void>("minimize_main_window");
 export const requestTrayHide = () => call<void>("request_tray_hide");
 export const startMainWindowDrag = () =>

@@ -14,7 +14,7 @@ use reqwest::{redirect::Policy, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tokio::time::sleep;
 use url::Url;
 use uuid::Uuid;
@@ -928,7 +928,21 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
                 .report_update_diagnostic("blocked", "auto_update_enabled=false", None)
                 .await;
         } else if let Some(url) = config.update_manifest_url.clone() {
-            check_succeeded = check_and_apply_update(&url, &config, &app, &state, false).await;
+            // Preserve the user's current UI state across an automatic update.
+            // Previously every scheduled update restarted with --background, so an
+            // open desktop window appeared to vanish as soon as the update applied.
+            let reopen_window_after_update = app
+                .get_webview_window("main")
+                .and_then(|window| window.is_visible().ok())
+                .unwrap_or(false);
+            check_succeeded = check_and_apply_update(
+                &url,
+                &config,
+                &app,
+                &state,
+                reopen_window_after_update,
+            )
+            .await;
             if *shutdown.borrow() {
                 return;
             }

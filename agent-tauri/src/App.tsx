@@ -125,19 +125,19 @@ export function App() {
 
     void import("@tauri-apps/api/event")
       .then(({ listen }) =>
-        listen("yummi://tray-hide-requested", () => {
+        listen<number>("yummi://tray-hide-requested", ({ payload: requestId }) => {
           void playTrayHideEffect(
             state.config.TrayHideEffect,
             async () => {
               await waitForCloseSound();
-              await completeTrayHide();
+              await completeTrayHide(requestId);
             },
             {
               playbackRate: state.config.TrayEffectPlaybackRate,
             },
           ).catch((error) => {
             void reportWindowFailure("tray_effect", error);
-            return completeTrayHide().catch((hideError) =>
+            return completeTrayHide(requestId).catch((hideError) =>
               reportWindowFailure("complete_tray_hide", hideError),
             );
           });
