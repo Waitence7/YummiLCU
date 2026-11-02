@@ -1,0 +1,78 @@
+name: Deploy Agent Beta 48 Once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/deploy-agent-beta-48-once.yml"
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-slim
+    env:
+      SOURCE_SHA: fc6fadf25aaaf0af7818cc8e26c98bf2678f18ae
+      SOURCE_SHORT: fc6fadf
+      SOURCE_RUN_ID: "41409150888"
+      VERSION: "0.8.0"
+      RELEASE_LABEL: "0.8.0-beta.48"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Download verified Windows candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          rm -rf release
+          mkdir -p release
+          gh run download "$SOURCE_RUN_ID" --repo "$GITHUB_REPOSITORY" --name agent-candidate --dir release
+          test -s release/agent-version.json
+          test -s "release/Yummi-LCU-Agent-${VERSION}-setup.exe"
+          test -s "release/tauri-${VERSION}.zip"
+          jq -e --arg version "$VERSION" --arg commit "$SOURCE_SHORT" \
+            '.version == $version and .tauri.version == $version and .tauri.commit == $commit' \
+            release/agent-version.json >/dev/null
+
+      - name: Prepare beta.48 signed release manifest
+        env:
+          YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          build_id="$(jq -r '.tauri.buildId // .buildId' release/agent-version.json)"
+          test -n "$build_id" && test "$build_id" != null
+          stage="${RUNNER_TEMP}/tauri-portable"
+          rm -rf "$stage"
+          mkdir -p "$stage"
+          unzip -q "release/tauri-${VERSION}.zip" -d "$stage"
+          exe="$(find "$stage" -maxdepth 2 -type f -iname 'yummi-lcu-tauri.exe' -print -quit)"
+          test -n "$exe" && test -s "$exe"
+          node scripts/sync-tauri-agent-version.mjs \
+            --zip "release/tauri-${VERSION}.zip" \
+            --exe "$exe" \
+            --out release/agent-version.json \
+            --notes "LiveKit H.264 SFU multi-viewer streaming and real-time web pointer mirroring." \
+            --channel beta \
+            --release-label "$RELEASE_LABEL" \
+            --build-id "$build_id" \
+            --commit "$SOURCE_SHORT" \
+            --rollout-percent 100
+          jq -e --arg version "$VERSION" --arg label "$RELEASE_LABEL" --arg commit "$SOURCE_SHORT" \
+            '.version == $version and .tauri.version == $version and .tauri.channel == "beta" and .tauri.releaseLabel == $label and .tauri.commit == $commit' \
+            release/agent-version.json >/dev/null
+
+      - name: Publish beta.48
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AGENT_DEPLOY_TOKEN: ${{ secrets.YUMMI_AGENT_DEPLOY_TOKEN }}
+          RELEASE_CHANNEL: beta
+          RELEASE_LABEL: 0.8.0-beta.48
+          TARGET_SHA: fc6fadf25aaaf0af7818cc8e26c98bf2678f18ae
+        run: scripts/publish-agent-release.sh release
