@@ -602,9 +602,9 @@ mod tests {
     #[test]
     fn ping_packets_are_current_wheel_types_and_viewer_scoped() {
         let payload = br#"{"v":1,"x":0.12,"y":0.34,"type":"enemy_vision"}"#;
-        let ping = parse_live_ping(payload, Some(PING_TOPIC), Some("viewer-42-abc".into())).unwrap();
+        let ping = parse_live_ping(payload, Some(PING_TOPIC), Some("viewer-777777-abc".into())).unwrap();
         assert_eq!(ping.ping_type, "enemy_vision");
-        assert!(parse_live_ping(br#"{"v":1,"x":0.5,"y":0.5,"type":"bait"}"#, Some(PING_TOPIC), Some("viewer-42-abc".into())).is_none());
+        assert!(parse_live_ping(br#"{"v":1,"x":0.5,"y":0.5,"type":"bait"}"#, Some(PING_TOPIC), Some("viewer-777777-abc".into())).is_none());
         assert!(parse_live_ping(payload, Some(PING_TOPIC), Some("agent-42".into())).is_none());
     }
 
