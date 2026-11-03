@@ -76,9 +76,12 @@
     <Canvas x:Name="RemotePingOverlay" IsHitTestVisible="False" Canvas.ZIndex="10001">
       <Grid x:Name="RemotePingMarker" Width="72" Height="72" Visibility="Collapsed">
         <Ellipse x:Name="RemotePingRing" Width="46" Height="46" HorizontalAlignment="Center" VerticalAlignment="Top" Fill="#44101820" Stroke="#FFE3BD43" StrokeThickness="3"/>
-        <Border Width="30" Height="30" Margin="0,8,0,0" HorizontalAlignment="Center" VerticalAlignment="Top" CornerRadius="15" Background="#E6111522">
-          <TextBlock x:Name="RemotePingGlyph" Text="!" Foreground="White" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
-        </Border>
+        <Grid Width="42" Height="42" Margin="0,2,0,0" HorizontalAlignment="Center" VerticalAlignment="Top">
+          <Image x:Name="RemotePingImage" Width="42" Height="42" Stretch="Uniform" Visibility="Collapsed"/>
+          <Border x:Name="RemotePingGlyphFallback" Width="30" Height="30" HorizontalAlignment="Center" VerticalAlignment="Center" CornerRadius="15" Background="#E6111522">
+            <TextBlock x:Name="RemotePingGlyph" Text="!" Foreground="White" FontSize="18" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+          </Border>
+        </Grid>
         <Border Margin="0,50,0,0" Padding="6,2" HorizontalAlignment="Center" VerticalAlignment="Top" CornerRadius="5" Background="#E6111522">
           <TextBlock x:Name="RemotePingLabel" Text="핑" Foreground="White" FontSize="9" FontWeight="SemiBold"/>
         </Border>

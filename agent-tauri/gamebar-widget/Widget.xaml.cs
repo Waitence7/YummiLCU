@@ -140,6 +140,22 @@ namespace YummiGameBarWidget
         private ulong lastNativeInputSequence;
         private ulong lastRemotePingSequence;
         private CancellationTokenSource remotePingHideCts;
+        private readonly Dictionary<string, BitmapImage> remotePingImageCache = new Dictionary<string, BitmapImage>(StringComparer.Ordinal);
+        private readonly HashSet<string> remotePingImageReady = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> remotePingImageFailed = new HashSet<string>(StringComparer.Ordinal);
+        private string activeRemotePingImageType = "";
+        private const string RemotePingImageRoot = "https://wiki.leagueoflegends.com/en-us/Special:Redirect/file/";
+        private static readonly Dictionary<string, string> RemotePingImageFiles = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["retreat"] = "Retreat_ping.png",
+            ["push"] = "Push_ping.png",
+            ["on_my_way"] = "On_My_Way_ping.png",
+            ["all_in"] = "All_In_ping.png",
+            ["assist_me"] = "Assist_Me_ping.png",
+            ["need_vision"] = "Need_Vision_ping.png",
+            ["enemy_missing"] = "Enemy_Missing_ping.png",
+            ["enemy_vision"] = "Enemy_Vision_ping.png",
+        };
         private ulong lastHudToggleSequence;
         private bool hudToggleSequenceInitialized;
         private string lastAgentCommandTransport = "none";
@@ -199,6 +215,7 @@ namespace YummiGameBarWidget
         public Widget()
         {
             InitializeComponent();
+            PreloadRemotePingImages();
             CursorMarkersToggle.IsOn = HudPreferences.NativeCursorMarkersVisible;
             ApplyCursorMarkersVisibility(CursorMarkersToggle.IsOn);
             ClickNativeResult.Text = "Agent native input initializing";
@@ -3490,6 +3507,66 @@ namespace YummiGameBarWidget
             RemotePointerMarker.Visibility = Visibility.Visible;
         }
 
+        private static string RemotePingImageUrl(string pingType)
+        {
+            return RemotePingImageFiles.TryGetValue(pingType ?? "", out var fileName)
+                ? RemotePingImageRoot + Uri.EscapeDataString(fileName)
+                : null;
+        }
+
+        private BitmapImage EnsureRemotePingImage(string pingType)
+        {
+            if (string.IsNullOrWhiteSpace(pingType)) return null;
+            if (remotePingImageCache.TryGetValue(pingType, out var cached)) return cached;
+            var url = RemotePingImageUrl(pingType);
+            if (string.IsNullOrWhiteSpace(url)) return null;
+
+            var bitmap = new BitmapImage { DecodePixelWidth = 64 };
+            bitmap.ImageOpened += (_, __) =>
+            {
+                remotePingImageFailed.Remove(pingType);
+                remotePingImageReady.Add(pingType);
+                if (string.Equals(activeRemotePingImageType, pingType, StringComparison.Ordinal) && RemotePingImage != null)
+                {
+                    RemotePingImage.Source = bitmap;
+                    RemotePingImage.Visibility = Visibility.Visible;
+                    if (RemotePingGlyphFallback != null) RemotePingGlyphFallback.Visibility = Visibility.Collapsed;
+                }
+            };
+            bitmap.ImageFailed += (_, args) =>
+            {
+                remotePingImageReady.Remove(pingType);
+                remotePingImageFailed.Add(pingType);
+                App.LogStage("remote-ping-image-failed type=" + pingType + " error=" + (args?.ErrorMessage ?? "unknown"));
+                if (string.Equals(activeRemotePingImageType, pingType, StringComparison.Ordinal))
+                {
+                    if (RemotePingImage != null) RemotePingImage.Visibility = Visibility.Collapsed;
+                    if (RemotePingGlyphFallback != null) RemotePingGlyphFallback.Visibility = Visibility.Visible;
+                }
+            };
+            remotePingImageCache[pingType] = bitmap;
+            bitmap.UriSource = new Uri(url);
+            return bitmap;
+        }
+
+        private void PreloadRemotePingImages()
+        {
+            foreach (var pingType in RemotePingImageFiles.Keys) EnsureRemotePingImage(pingType);
+        }
+
+        private void ApplyRemotePingImage(string pingType)
+        {
+            activeRemotePingImageType = pingType ?? "";
+            var bitmap = EnsureRemotePingImage(activeRemotePingImageType);
+            var ready = bitmap != null && remotePingImageReady.Contains(activeRemotePingImageType) && !remotePingImageFailed.Contains(activeRemotePingImageType);
+            if (RemotePingImage != null)
+            {
+                RemotePingImage.Source = bitmap;
+                RemotePingImage.Visibility = ready ? Visibility.Visible : Visibility.Collapsed;
+            }
+            if (RemotePingGlyphFallback != null) RemotePingGlyphFallback.Visibility = ready ? Visibility.Collapsed : Visibility.Visible;
+        }
+
         private void PlayOverlaySoundEffect(string assetName)
         {
             if (!HudPreferences.OverlaySoundEffectsEnabled || OverlaySoundPlayer == null || string.IsNullOrWhiteSpace(assetName)) return;
@@ -3549,6 +3626,7 @@ namespace YummiGameBarWidget
             RemotePingLabel.Text = label;
             RemotePingRing.Stroke = new SolidColorBrush(accent);
             RemotePingGlyph.Foreground = new SolidColorBrush(accent);
+            ApplyRemotePingImage(pingType);
             RemotePingOverlay.Visibility = Visibility.Visible;
             var x = Math.Max(0.0, Math.Min(1.0, normalizedX)) * RootGrid.ActualWidth;
             var y = Math.Max(0.0, Math.Min(1.0, normalizedY)) * RootGrid.ActualHeight;
