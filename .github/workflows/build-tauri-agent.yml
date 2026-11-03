@@ -407,7 +407,7 @@ jobs:
 
   deploy-existing-candidate:
     name: Deploy existing verified agent candidate
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish-beta54]')) }}
+    if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-slim
     permissions:
       actions: read
@@ -423,8 +423,8 @@ jobs:
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
-          REQUESTED_VERSION: ${{ github.event.inputs.version || '0.8.0' }}
-          REQUESTED_SHA: ${{ github.event.inputs.source_sha || 'eef6148aa6539c363e57bce9be526a4fd691dd0b' }}
+          REQUESTED_VERSION: ${{ github.event.inputs.version }}
+          REQUESTED_SHA: ${{ github.event.inputs.source_sha }}
         shell: bash
         run: |
           set -euo pipefail
@@ -473,10 +473,10 @@ jobs:
         id: release_meta
         env:
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
-          VERSION: ${{ github.event.inputs.version || '0.8.0' }}
-          CHANNEL: ${{ github.event.inputs.channel || 'beta' }}
-          BETA_NUMBER: ${{ github.event.inputs.beta_number || '54' }}
-          RELEASE_NOTES: ${{ github.event.inputs.release_notes || '라이브 공유 앱 제어 및 관전자 커서/핑 기능 재빌드 배포' }}
+          VERSION: ${{ github.event.inputs.version }}
+          CHANNEL: ${{ github.event.inputs.channel }}
+          BETA_NUMBER: ${{ github.event.inputs.beta_number }}
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
           ROLLOUT_PERCENT: ${{ github.event.inputs.rollout_percent || '100' }}
           SOURCE_SHORT: ${{ steps.candidate.outputs.source_short }}
           BUILD_ID: ${{ steps.candidate.outputs.build_id }}
