@@ -10,6 +10,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from relay.operational_log import _log_operational_failure
+
 logger = logging.getLogger("yummi_lcu.relay.audit_archive")
 
 
@@ -52,5 +54,5 @@ async def append_archive_record(
     path = directory / f"{dt:%Y-%m-%d}.ndjson"
     try:
         await asyncio.to_thread(_write_record, path, record)
-    except Exception:
-        logger.exception("LCU audit file append failed path=%s kind=%s", path, kind)
+    except Exception as error:
+        _log_operational_failure(logger, "audit_archive.append", error, level=logging.ERROR)

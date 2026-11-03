@@ -138,6 +138,8 @@ namespace YummiGameBarWidget
         private long syncingNativeInputSinceMs;
         private int nativeInputSyncGeneration;
         private ulong lastNativeInputSequence;
+        private ulong lastRemotePingSequence;
+        private CancellationTokenSource remotePingHideCts;
         private ulong lastHudToggleSequence;
         private bool hudToggleSequenceInitialized;
         private string lastAgentCommandTransport = "none";
@@ -3015,6 +3017,11 @@ namespace YummiGameBarWidget
                 var remotePointerVisible = response.GetNamedBoolean("remotePointerVisible", false);
                 var remotePointerX = Math.Max(0.0, Math.Min(1.0, response.GetNamedNumber("remotePointerX", 0.5)));
                 var remotePointerY = Math.Max(0.0, Math.Min(1.0, response.GetNamedNumber("remotePointerY", 0.5)));
+                var remotePingX = Math.Max(0.0, Math.Min(1.0, response.GetNamedNumber("remotePingX", 0.5)));
+                var remotePingY = Math.Max(0.0, Math.Min(1.0, response.GetNamedNumber("remotePingY", 0.5)));
+                var remotePingType = response.GetNamedString("remotePingType", "");
+                var remotePingSequence = (ulong)Math.Max(0, response.GetNamedNumber("remotePingSequence", 0));
+                var remotePingAgeMs = (ulong)Math.Max(0, response.GetNamedNumber("remotePingAgeMs", 999999));
 
                 var fallbackHovered =
                     PointInRect(cursorX, cursorY, rectX, rectY, rectWidth, rectHeight) ||
@@ -3043,6 +3050,7 @@ namespace YummiGameBarWidget
                         gamebarPrimaryX, gamebarPrimaryY, gamebarAltX, gamebarAltY, cursorX, cursorY);
                 }
                 UpdateRemotePointerMarker(remotePointerVisible, remotePointerX, remotePointerY);
+                UpdateRemotePingMarker(remotePingSequence, remotePingX, remotePingY, remotePingType, remotePingAgeMs);
 
                 if (diagnosticRequested) ClickNativeResult.Text =
                     "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError +
@@ -3473,6 +3481,56 @@ namespace YummiGameBarWidget
             Canvas.SetLeft(RemotePointerMarker, x - 11.0);
             Canvas.SetTop(RemotePointerMarker, y - 11.0);
             RemotePointerMarker.Visibility = Visibility.Visible;
+        }
+
+        private void UpdateRemotePingMarker(ulong sequence, double normalizedX, double normalizedY, string pingType, ulong ageMs)
+        {
+            if (RemotePingOverlay == null || RemotePingMarker == null || RootGrid == null || sequence == 0 || sequence == lastRemotePingSequence || ageMs > 2000) return;
+            lastRemotePingSequence = sequence;
+            if (!HudPreferences.Visible || (widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly && runtimeOverlayHiddenByHotkey) || RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0) return;
+
+            string glyph = "◆", label = "핑";
+            Color accent = Color.FromArgb(255, 76, 185, 232);
+            switch (pingType)
+            {
+                case "retreat": glyph = "!"; label = "후퇴"; accent = Color.FromArgb(255, 232, 86, 86); break;
+                case "push": glyph = "↟"; label = "밀기"; accent = Color.FromArgb(255, 71, 201, 162); break;
+                case "on_my_way": glyph = "↘"; label = "가는 중"; accent = Color.FromArgb(255, 76, 185, 232); break;
+                case "all_in": glyph = "×"; label = "올인"; accent = Color.FromArgb(255, 216, 102, 102); break;
+                case "assist_me": glyph = "+"; label = "도움"; accent = Color.FromArgb(255, 73, 205, 176); break;
+                case "need_vision": glyph = "◉"; label = "시야 필요"; accent = Color.FromArgb(255, 121, 184, 216); break;
+                case "enemy_missing": glyph = "?"; label = "적 사라짐"; accent = Color.FromArgb(255, 227, 189, 67); break;
+                case "enemy_vision": glyph = "◇"; label = "적 와드"; accent = Color.FromArgb(255, 212, 92, 105); break;
+                default: return;
+            }
+            RemotePingGlyph.Text = glyph;
+            RemotePingLabel.Text = label;
+            RemotePingRing.Stroke = new SolidColorBrush(accent);
+            RemotePingGlyph.Foreground = new SolidColorBrush(accent);
+            RemotePingOverlay.Visibility = Visibility.Visible;
+            var x = Math.Max(0.0, Math.Min(1.0, normalizedX)) * RootGrid.ActualWidth;
+            var y = Math.Max(0.0, Math.Min(1.0, normalizedY)) * RootGrid.ActualHeight;
+            Canvas.SetLeft(RemotePingMarker, x - 36.0);
+            Canvas.SetTop(RemotePingMarker, y - 23.0);
+            RemotePingMarker.Opacity = 1.0;
+            RemotePingMarker.Visibility = Visibility.Visible;
+
+            remotePingHideCts?.Cancel();
+            remotePingHideCts?.Dispose();
+            remotePingHideCts = new CancellationTokenSource();
+            var token = remotePingHideCts.Token;
+            _ = Dispatcher.RunAsync(CoreDispatcherPriority.Low, async () =>
+            {
+                try
+                {
+                    await Task.Delay(1400, token);
+                    if (!token.IsCancellationRequested)
+                    {
+                        RemotePingMarker.Visibility = Visibility.Collapsed;
+                    }
+                }
+                catch (TaskCanceledException) { }
+            });
         }
 
         private async Task<string> SendAgentCommandAsync(string payload)

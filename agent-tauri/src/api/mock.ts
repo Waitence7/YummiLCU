@@ -8,6 +8,7 @@ import {
   type Config,
   type RecentMatch,
   type RecordingStatus,
+  type LiveControlStatus,
 } from "../state/types";
 import { previewHistory, previewReplay } from "./mock-matches";
 
@@ -19,6 +20,13 @@ const timers: ReturnType<typeof setTimeout>[] = [];
 
 
 let mockOverlayInstalled = false;
+
+let liveControlStatus: LiveControlStatus = {
+  enabled: false,
+  profile: "balanced",
+  shareUrl: null,
+  expiresAt: null,
+};
 
 let recordingStatus: RecordingStatus = {
   supported: true,
@@ -240,6 +248,19 @@ export async function mockInvoke<T>(
       );
       emit();
       return undefined as T;
+    }
+    case "get_live_control_status":
+      return structuredClone(liveControlStatus) as T;
+    case "set_live_control_enabled": {
+      const enabled = args?.enabled === true;
+      const profile = args?.profile === "data" || args?.profile === "high" || args?.profile === "ultra" ? args.profile : "balanced";
+      liveControlStatus = {
+        enabled,
+        profile,
+        shareUrl: enabled ? "https://yummi.duckdns.org/lcu/live/share/mock-live-token" : null,
+        expiresAt: enabled ? Math.floor(Date.now() / 1000) + 86400 : null,
+      };
+      return structuredClone(liveControlStatus) as T;
     }
     case "get_recording_status":
       return structuredClone(recordingStatus) as T;

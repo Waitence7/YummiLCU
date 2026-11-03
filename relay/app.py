@@ -95,12 +95,19 @@ LIVE_STREAM_BOUNDARY = "yummi-live-frame"
 BOT_EOG_PERSIST_ACK_TIMEOUT_SEC = 8.0
 LIVE_DELTA_STATE_TTL_SEC = 2 * 60 * 60
 LIVE_DELTA_API_BLOCK_TTL_SEC = 30
+LIVE_OWNER_TTL_SEC = 24 * 60 * 60
+LIVE_OWNER_KEY = "relay:live_owner:{discord_id}"
 MAX_LIVE_DELTA_OPS = 4096
 MAX_LIVE_DELTA_PATH_DEPTH = 24
 _SERVER_PROTOCOL_VERSION = 1
 class RefreshSessionRevokeBody(BaseModel):
     session_id: str = Field(min_length=36, max_length=36)
     refresh_token: str = Field(min_length=32, max_length=256)
+
+
+class LiveControlBody(BaseModel):
+    enabled: bool
+    profile: str = Field(default="balanced", min_length=1, max_length=16)
 
 
 _LCU_DATA_MESSAGE_TYPES = frozenset({
@@ -1337,6 +1344,57 @@ async def auth_callback(
     )
 
 
+def _live_owner_redis_key(discord_id: int) -> str:
+    return LIVE_OWNER_KEY.format(discord_id=int(discord_id))
+
+
+async def _live_owner_state(r: redis.Redis, discord_id: int) -> dict[str, Any] | None:
+    raw = await r.get(_live_owner_redis_key(discord_id))
+    if not raw:
+        return None
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("enabled") is not True:
+        return None
+    return value
+
+
+async def _mint_live_share(http: aiohttp.ClientSession, discord_id: int, profile: str) -> dict[str, Any]:
+    token = config.tournament_bot_internal_token()
+    if not token:
+        raise HTTPException(503, "live share token service unavailable")
+    url = f"{config.tournament_api_base_url()}/api/internal/lcu/live-share-token"
+    try:
+        async with http.post(
+            url,
+            headers={"x-internal-bot-token": token, "content-type": "application/json"},
+            json={"discordUserId": str(discord_id), "profile": profile},
+            timeout=aiohttp.ClientTimeout(total=8),
+        ) as response:
+            body = await response.json(content_type=None)
+            if response.status >= 400 or not isinstance(body, dict):
+                raise HTTPException(503, "live share token service unavailable")
+    except HTTPException:
+        raise
+    except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
+        raise HTTPException(503, "live share token service unavailable") from exc
+    share_url = body.get("shareUrl")
+    share_token = body.get("token")
+    expires_at = body.get("expiresAt")
+    if (
+        not isinstance(share_url, str)
+        or not share_url.startswith("https://")
+        or not isinstance(share_token, str)
+        or not share_token
+        or len(share_token) > 768
+        or not isinstance(expires_at, int)
+    ):
+        raise HTTPException(503, "invalid live share response")
+    return {"share_url": share_url, "share_token": share_token, "expires_at": expires_at}
+
+
 async def _authenticate_agent_http(request: Request, session_id: str) -> int:
     try:
         uuid.UUID(session_id)
@@ -1433,6 +1491,62 @@ async def _replay_upload_target(
         return {**guild_match, "targetKind": "guild_match"}
 
     return {"upload": False}
+
+
+@app.get("/lcu/live-control")
+async def get_agent_live_control(
+    request: Request,
+    session_id: str = Query(..., min_length=8, max_length=64),
+) -> JSONResponse:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    state = await _live_owner_state(request.app.state.redis, discord_id)
+    if not state:
+        return JSONResponse({"enabled": False, "profile": "balanced", "shareUrl": None, "expiresAt": None})
+    return JSONResponse({
+        "enabled": True,
+        "profile": state.get("profile", "balanced"),
+        "shareUrl": state.get("share_url"),
+        "expiresAt": state.get("expires_at"),
+    }, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/lcu/live-control")
+async def set_agent_live_control(
+    request: Request,
+    body: LiveControlBody,
+    session_id: str = Query(..., min_length=8, max_length=64),
+) -> JSONResponse:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    r: redis.Redis = request.app.state.redis
+    conn: ConnectionManager = request.app.state.connections
+    try:
+        quality = livekit_sfu.stream_profile(body.profile)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if not body.enabled:
+        await r.delete(_live_owner_redis_key(discord_id))
+        request.app.state.livekit_profiles.pop(discord_id, None)
+        await conn.send_command(discord_id, {"type": "live_sfu_control", "enabled": False, "ttl_ms": 1000})
+        return JSONResponse({"enabled": False, "profile": quality.name, "shareUrl": None, "expiresAt": None})
+
+    share = await _mint_live_share(request.app.state.http, discord_id, quality.name)
+    state = {
+        "enabled": True,
+        "profile": quality.name,
+        "share_url": share["share_url"],
+        "expires_at": share["expires_at"],
+        "share_token_hash": hashlib.sha256(share["share_token"].encode("utf-8")).hexdigest(),
+        "session_id": session_id,
+    }
+    ttl = max(60, min(LIVE_OWNER_TTL_SEC, int(share["expires_at"]) - int(time.time())))
+    await r.set(_live_owner_redis_key(discord_id), json.dumps(state, separators=(",", ":")), ex=ttl)
+    request.app.state.livekit_profiles[discord_id] = quality.name
+    return JSONResponse({
+        "enabled": True,
+        "profile": quality.name,
+        "shareUrl": share["share_url"],
+        "expiresAt": share["expires_at"],
+    }, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/agent/live-preview")
@@ -4967,6 +5081,7 @@ async def internal_livekit_session(
     profile: str = Query("balanced", min_length=1, max_length=16),
     interactive: bool = Query(True),
     x_relay_internal_secret: str | None = Header(None),
+    x_yummi_live_share_token: str | None = Header(None),
 ) -> JSONResponse:
     await _verify_internal_secret(request, x_relay_internal_secret)
     if discord_id <= 0:
@@ -4974,6 +5089,14 @@ async def internal_livekit_session(
     if not livekit_sfu.configured():
         raise HTTPException(503, "LiveKit SFU not configured")
     conn: ConnectionManager = request.app.state.connections
+    live_owner = await _live_owner_state(request.app.state.redis, discord_id)
+    if not live_owner:
+        raise HTTPException(403, "live is disabled by owner")
+    if x_yummi_live_share_token is not None:
+        expected_hash = live_owner.get("share_token_hash")
+        supplied_hash = hashlib.sha256(x_yummi_live_share_token.encode("utf-8")).hexdigest()
+        if not isinstance(expected_hash, str) or not hmac.compare_digest(expected_hash, supplied_hash):
+            raise HTTPException(403, "live share link was revoked")
     if not conn.is_online(discord_id):
         raise HTTPException(404, "agent not connected")
     if conn.trust_level_for_discord(discord_id) == "new_device":
@@ -4983,12 +5106,11 @@ async def internal_livekit_session(
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     profiles: dict[int, str] = request.app.state.livekit_profiles
+    owner_profile = live_owner.get("profile") if isinstance(live_owner.get("profile"), str) else None
+    quality = livekit_sfu.stream_profile(owner_profile) if owner_profile else requested_quality
     if interactive:
-        quality = requested_quality
         profiles[discord_id] = quality.name
     else:
-        current_profile = profiles.get(discord_id)
-        quality = livekit_sfu.stream_profile(current_profile) if current_profile else requested_quality
         profiles.setdefault(discord_id, quality.name)
     publisher = livekit_sfu.publisher_session(discord_id)
     viewer = livekit_sfu.viewer_session(
@@ -5034,6 +5156,7 @@ async def internal_livekit_lease(
     profile: str = Query("balanced", min_length=1, max_length=16),
     follow_current: bool = Query(False),
     x_relay_internal_secret: str | None = Header(None),
+    x_yummi_live_share_token: str | None = Header(None),
 ) -> JSONResponse:
     await _verify_internal_secret(request, x_relay_internal_secret)
     if discord_id <= 0:
@@ -5041,6 +5164,14 @@ async def internal_livekit_lease(
     if not livekit_sfu.configured():
         raise HTTPException(503, "LiveKit SFU not configured")
     conn: ConnectionManager = request.app.state.connections
+    live_owner = await _live_owner_state(request.app.state.redis, discord_id)
+    if not live_owner:
+        raise HTTPException(403, "live is disabled by owner")
+    if x_yummi_live_share_token is not None:
+        expected_hash = live_owner.get("share_token_hash")
+        supplied_hash = hashlib.sha256(x_yummi_live_share_token.encode("utf-8")).hexdigest()
+        if not isinstance(expected_hash, str) or not hmac.compare_digest(expected_hash, supplied_hash):
+            raise HTTPException(403, "live share link was revoked")
     if not conn.is_online(discord_id):
         raise HTTPException(404, "agent not connected")
     if conn.trust_level_for_discord(discord_id) == "new_device":
@@ -5050,12 +5181,15 @@ async def internal_livekit_lease(
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     profiles: dict[int, str] = request.app.state.livekit_profiles
+    owner_profile = live_owner.get("profile") if isinstance(live_owner.get("profile"), str) else None
     current_profile = profiles.get(discord_id)
-    if follow_current and current_profile:
+    if owner_profile:
+        quality = livekit_sfu.stream_profile(owner_profile)
+    elif follow_current and current_profile:
         quality = livekit_sfu.stream_profile(current_profile)
     else:
         quality = requested_quality
-        profiles[discord_id] = quality.name
+    profiles[discord_id] = quality.name
     publisher = livekit_sfu.publisher_session(discord_id)
     ok = await conn.send_command(discord_id, {
         "type": "live_sfu_control",
@@ -5084,6 +5218,8 @@ async def internal_live_preview(
     await _verify_internal_secret(request, x_relay_internal_secret)
     if discord_id <= 0:
         raise HTTPException(400, "invalid discord_id")
+    if not await _live_owner_state(request.app.state.redis, discord_id):
+        raise HTTPException(403, "live is disabled by owner")
     conn: ConnectionManager = request.app.state.connections
     await conn.request_live_preview(discord_id)
     preview = conn.get_live_preview(discord_id)

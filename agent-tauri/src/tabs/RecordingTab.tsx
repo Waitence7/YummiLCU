@@ -2,15 +2,25 @@ import { useCallback, useEffect, useState } from 'react';
 
 import {
   getRecordingStatus,
+  getLiveControlStatus,
   requestBorderlessCaptureAccess,
   saveLastClip,
   startClipBuffer,
   startRecording,
+  setLiveControlEnabled,
   stopClipBuffer,
   stopRecording,
 } from '../api/commands';
-import type { RecordingCaptureSource, RecordingStatus } from '../state/types';
+import type { LiveControlStatus, LiveQualityProfile, RecordingCaptureSource, RecordingStatus } from '../state/types';
 import { RecordingReview } from '../components/recording/RecordingReview';
+
+const EMPTY_LIVE: LiveControlStatus = { enabled: false, profile: 'balanced', shareUrl: null, expiresAt: null };
+const LIVE_QUALITY_OPTIONS: Array<{ value: LiveQualityProfile; label: string }> = [
+  { value: 'data', label: '절약 · 540p 15fps' },
+  { value: 'balanced', label: '표준 · 720p 30fps' },
+  { value: 'high', label: '고화질 · 1080p 30fps' },
+  { value: 'ultra', label: '최고 · 1440p 30fps' },
+];
 
 const EMPTY: RecordingStatus = {
   supported: true,
@@ -42,6 +52,10 @@ export function RecordingTab({ connected }: { connected: boolean }) {
   const [busy, setBusy] = useState(false);
   const [recordingSource, setRecordingSource] = useState<RecordingCaptureSource>('monitor');
   const [clipSource, setClipSource] = useState<RecordingCaptureSource>('leagueWindow');
+  const [liveStatus, setLiveStatus] = useState<LiveControlStatus>(EMPTY_LIVE);
+  const [liveProfile, setLiveProfile] = useState<LiveQualityProfile>('balanced');
+  const [liveBusy, setLiveBusy] = useState(false);
+  const [liveMessage, setLiveMessage] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -56,6 +70,48 @@ export function RecordingTab({ connected }: { connected: boolean }) {
     const timer = window.setInterval(() => void refresh(), 1_000);
     return () => window.clearInterval(timer);
   }, [refresh]);
+
+  useEffect(() => {
+    let stopped = false;
+    const refreshLive = async () => {
+      try {
+        const next = await getLiveControlStatus();
+        if (stopped) return;
+        setLiveStatus(next);
+        setLiveProfile(next.profile);
+      } catch (cause) {
+        if (!stopped) setLiveMessage(String(cause));
+      }
+    };
+    void refreshLive();
+    const timer = window.setInterval(() => void refreshLive(), 3_000);
+    return () => { stopped = true; window.clearInterval(timer); };
+  }, []);
+
+  const toggleLive = useCallback(async () => {
+    setLiveBusy(true);
+    setLiveMessage(null);
+    try {
+      const next = await setLiveControlEnabled(!liveStatus.enabled, liveProfile);
+      setLiveStatus(next);
+      setLiveProfile(next.profile);
+      setLiveMessage(next.enabled ? '라이브 공유가 켜졌습니다.' : '라이브 공유가 꺼졌습니다. 기존 링크도 즉시 차단됩니다.');
+    } catch (cause) {
+      setLiveMessage(String(cause));
+    } finally {
+      setLiveBusy(false);
+    }
+  }, [liveProfile, liveStatus.enabled]);
+
+  const copyLiveLink = useCallback(async () => {
+    if (!liveStatus.shareUrl) return;
+    try {
+      await navigator.clipboard.writeText(liveStatus.shareUrl);
+      setLiveMessage('공유 링크를 복사했습니다.');
+    } catch {
+      setLiveMessage('링크를 자동 복사하지 못했습니다. 아래 링크를 직접 복사해 주세요.');
+    }
+  }, [liveStatus.shareUrl]);
 
   const run = useCallback(async (operation: () => Promise<RecordingStatus>) => {
     setBusy(true);
@@ -72,6 +128,46 @@ export function RecordingTab({ connected }: { connected: boolean }) {
 
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-3">
+      <section className={`rounded-xl border p-4 shadow-sm ${liveStatus.enabled ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}`}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h2 className="text-sm font-semibold text-slate-900">실시간 라이브 공유</h2>
+            <p className="mt-1 max-w-2xl text-xs leading-5 text-slate-500">
+              앱에서 켠 동안에만 공유 링크로 화면을 볼 수 있습니다. 라이브 캡처는 녹화와 분리되어 MP4 파일을 만들지 않습니다.
+            </p>
+          </div>
+          <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${liveStatus.enabled ? 'bg-emerald-600 text-white' : 'bg-slate-100 text-slate-500'}`}>
+            {liveStatus.enabled ? 'LIVE 허용' : '꺼짐'}
+          </span>
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <select
+            value={liveProfile}
+            disabled={liveBusy || liveStatus.enabled}
+            onChange={(event) => setLiveProfile(event.target.value as LiveQualityProfile)}
+            className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs text-slate-700 disabled:opacity-50"
+          >
+            {LIVE_QUALITY_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
+          <button
+            type="button"
+            disabled={liveBusy || !connected}
+            onClick={() => void toggleLive()}
+            className={`rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 ${liveStatus.enabled ? 'bg-red-600' : 'bg-emerald-600'}`}
+          >
+            {liveBusy ? '처리 중…' : liveStatus.enabled ? '라이브 끄기' : '라이브 켜기'}
+          </button>
+          {liveStatus.enabled && liveStatus.shareUrl ? (
+            <button type="button" onClick={() => void copyLiveLink()} className="rounded-lg border border-emerald-300 bg-white px-3 py-2 text-xs font-semibold text-emerald-800">공유 링크 복사</button>
+          ) : null}
+        </div>
+        {liveStatus.enabled && liveStatus.shareUrl ? (
+          <div className="mt-3 break-all rounded-lg bg-white/80 px-3 py-2 text-[11px] text-slate-700">{liveStatus.shareUrl}</div>
+        ) : null}
+        <p className="mt-2 text-[10px] text-slate-500">로그인한 관전자만 좌클릭 홀드 커서와 G/Ctrl 핑을 보낼 수 있습니다. 익명 관전자는 보기만 가능합니다.</p>
+        {liveMessage ? <p className="mt-2 text-[11px] text-slate-600">{liveMessage}</p> : null}
+      </section>
+
       <RecordingReview connected={connected} />
       <section className="rounded-xl border border-violet-200 bg-violet-50 p-4 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">

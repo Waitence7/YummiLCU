@@ -10,6 +10,7 @@ from typing import Any
 import aiohttp
 
 from relay import config
+from relay.operational_log import _log_operational_failure
 
 logger = logging.getLogger("yummi_lcu.relay.auth")
 # endregion
@@ -57,6 +58,7 @@ async def fetch_discord_user(session: aiohttp.ClientSession, access_token: str) 
     try:
         async with session.get(f"{DISCORD_API}/users/@me", headers=headers) as resp:
             if resp.status != 200:
+                _log_operational_failure(logger, "discord.current_user.http", status=resp.status)
                 return None
             return await resp.json()
     except Exception:

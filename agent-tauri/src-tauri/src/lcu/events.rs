@@ -100,6 +100,21 @@ pub(crate) struct LcuEventPoller {
 }
 
 impl LcuEventPoller {
+    async fn live_replay_watch_phase(&mut self, config: &Config) -> Option<String> {
+        let discovery = if let Some(discovery) = self.cached_lockfile_discovery.clone() {
+            discovery
+        } else {
+            let discovery = discover_lockfile_nonblocking(config).await.ok()?;
+            self.cached_lockfile_discovery = Some(discovery.clone());
+            discovery
+        };
+        let path = discovery.path?;
+        let client = LcuClient::from_lockfile(&path)
+            .or_else(|_| LcuClient::from_lockfile_legacy(&path))
+            .ok()?;
+        client.gameflow_watch_phase().await.ok().flatten()
+    }
+
     fn reset_lcu_snapshot(&mut self) {
         self.gameflow = None;
         self.last_gameflow_emit = None;
@@ -516,6 +531,21 @@ impl LcuEventPoller {
                         if let Some(mut payload) =
                             live_game_payload(&value, live_events_response.as_ref())
                         {
+                            if payload.get("client_mode").and_then(Value::as_str) == Some("spectator") {
+                                if let Some(watch_phase) = self.live_replay_watch_phase(config).await {
+                                    if replay_watch_phase_is_active(&watch_phase) {
+                                        payload["replay_mode"] = Value::Bool(true);
+                                        payload["replay_watch_phase"] = Value::String(watch_phase.clone());
+                                        if self.schema_warnings.insert("live_replay_detected") {
+                                            self.diagnostic(format!(
+                                                "Live Client replay 데이터 감지: watch_phase={watch_phase}; SSOT 전달 차단 대상"
+                                            ));
+                                        }
+                                    } else {
+                                        self.schema_warnings.remove("live_replay_detected");
+                                    }
+                                }
+                            }
                             apply_authoritative_live_game_id(
                                 &mut payload,
                                 self.authoritative_game_id.as_deref(),
@@ -1351,6 +1381,11 @@ fn clear_inactive_phase_snapshots(
             events,
         );
     }
+}
+
+fn replay_watch_phase_is_active(phase: &str) -> bool {
+    let normalized = phase.trim();
+    !normalized.is_empty() && !normalized.eq_ignore_ascii_case("none")
 }
 
 fn is_expected_missing_lcu_endpoint(error: &AgentError) -> bool {
@@ -3426,6 +3461,14 @@ mod tests {
         assert!(events.iter().any(|(kind, payload)| {
             *kind == "participant_status_update" && payload["status"] == "in_game"
         }));
+    }
+
+    #[test]
+    fn replay_watch_phase_requires_non_none_value() {
+        assert!(!replay_watch_phase_is_active(""));
+        assert!(!replay_watch_phase_is_active("None"));
+        assert!(!replay_watch_phase_is_active(" none "));
+        assert!(replay_watch_phase_is_active("WatchInProgress"));
     }
 
     #[test]

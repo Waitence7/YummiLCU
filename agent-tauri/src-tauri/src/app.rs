@@ -103,6 +103,8 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::recording::start_clip_buffer,
             crate::commands::recording::stop_clip_buffer,
             crate::commands::recording::save_last_clip,
+            crate::commands::live::get_live_control_status,
+            crate::commands::live::set_live_control_enabled,
             crate::commands::update::get_beta_release_info,
             crate::commands::update::open_beta_download,
             crate::commands::update::apply_beta_update_now,

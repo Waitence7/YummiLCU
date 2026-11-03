@@ -73,6 +73,15 @@ export type AgentState = {
 };
 
 
+export type LiveQualityProfile = 'data' | 'balanced' | 'high' | 'ultra';
+
+export type LiveControlStatus = {
+  enabled: boolean;
+  profile: LiveQualityProfile;
+  shareUrl?: string | null;
+  expiresAt?: number | null;
+};
+
 export type RecordingCaptureSource = 'monitor' | 'leagueWindow';
 
 export type RecordingStatus = {

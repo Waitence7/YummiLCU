@@ -4,6 +4,8 @@ import type {
   Config,
   RecentMatch,
   RecordingStatus,
+  LiveControlStatus,
+  LiveQualityProfile,
   RecordingCaptureSource,
   RecordingGameContext,
   RecordingSession,
@@ -126,6 +128,10 @@ export const reportTrayEffectDiagnostic = (code: string, detail: string) =>
   call<void>("report_tray_effect_diagnostic", { code, detail });
 export const reportRecordingDiagnostic = (code: string, detail: string) =>
   call<void>("report_recording_diagnostic", { code, detail });
+
+export const getLiveControlStatus = () => call<LiveControlStatus>("get_live_control_status");
+export const setLiveControlEnabled = (enabled: boolean, profile: LiveQualityProfile) =>
+  call<LiveControlStatus>("set_live_control_enabled", { enabled, profile });
 
 export const getRecordingStatus = () => call<RecordingStatus>("get_recording_status");
 export const listRecordingSessions = () => call<RecordingSession[]>("list_recording_sessions");

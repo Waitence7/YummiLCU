@@ -22,7 +22,9 @@ const MAX_URL_BYTES: usize = 2_048;
 const MAX_ROOM_BYTES: usize = 128;
 const MAX_TOKEN_BYTES: usize = 8_192;
 const POINTER_TOPIC: &str = "yummi.live.pointer.v1";
+const PING_TOPIC: &str = "yummi.live.ping.v1";
 const POINTER_MAX_BYTES: usize = 256;
+const PING_MAX_BYTES: usize = 512;
 const POINTER_VISIBLE_TTL_MS: u64 = 900;
 
 #[derive(Clone, Debug)]
@@ -64,7 +66,30 @@ struct WirePointer {
     visible: bool,
 }
 
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RemotePingSnapshot {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) ping_type: String,
+    pub(crate) sequence: u64,
+    pub(crate) updated_at_ms: u64,
+    pub(crate) viewer: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WirePing {
+    v: u8,
+    x: f64,
+    y: f64,
+    #[serde(rename = "type")]
+    ping_type: String,
+}
+
 static REMOTE_POINTER: OnceLock<RwLock<RemotePointerSnapshot>> = OnceLock::new();
+static REMOTE_PING: OnceLock<RwLock<RemotePingSnapshot>> = OnceLock::new();
+static PING_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+static LAST_PING_MS: AtomicU64 = AtomicU64::new(0);
 
 static DEADLINE_MS: AtomicU64 = AtomicU64::new(0);
 static STREAM_GENERATION: AtomicU64 = AtomicU64::new(1);
@@ -81,6 +106,14 @@ fn task_slot() -> &'static Mutex<Option<JoinHandle<()>>> {
 
 fn pointer_slot() -> &'static RwLock<RemotePointerSnapshot> {
     REMOTE_POINTER.get_or_init(|| RwLock::new(RemotePointerSnapshot::default()))
+}
+
+fn ping_slot() -> &'static RwLock<RemotePingSnapshot> {
+    REMOTE_PING.get_or_init(|| RwLock::new(RemotePingSnapshot::default()))
+}
+
+pub(crate) fn remote_ping_snapshot() -> RemotePingSnapshot {
+    ping_slot().read().map(|value| value.clone()).unwrap_or_default()
 }
 
 pub(crate) fn remote_pointer_snapshot() -> RemotePointerSnapshot {
@@ -135,6 +168,36 @@ fn handle_live_pointer(
         *current = snapshot.clone();
     }
     let _ = app.emit("yummi://live-pointer", snapshot);
+}
+
+
+fn valid_ping_type(value: &str) -> bool {
+    matches!(value, "retreat" | "push" | "on_my_way" | "all_in" | "assist_me" | "need_vision" | "enemy_missing" | "enemy_vision")
+}
+
+fn parse_live_ping(payload: &[u8], topic: Option<&str>, participant_identity: Option<String>) -> Option<RemotePingSnapshot> {
+    if topic != Some(PING_TOPIC) || payload.is_empty() || payload.len() > PING_MAX_BYTES { return None; }
+    let viewer = participant_identity.filter(|value| value.starts_with("viewer-"))?;
+    let ping = serde_json::from_slice::<WirePing>(payload).ok()?;
+    if ping.v != 1 || !ping.x.is_finite() || !ping.y.is_finite() || !(0.0..=1.0).contains(&ping.x) || !(0.0..=1.0).contains(&ping.y) || !valid_ping_type(&ping.ping_type) { return None; }
+    Some(RemotePingSnapshot {
+        x: ping.x,
+        y: ping.y,
+        ping_type: ping.ping_type,
+        sequence: PING_SEQUENCE.fetch_add(1, Ordering::AcqRel).saturating_add(1),
+        updated_at_ms: now_ms(),
+        viewer,
+    })
+}
+
+fn handle_live_ping(app: &AppHandle, payload: &[u8], topic: Option<&str>, participant_identity: Option<String>) {
+    let Some(snapshot) = parse_live_ping(payload, topic, participant_identity) else { return; };
+    let now = snapshot.updated_at_ms;
+    let previous = LAST_PING_MS.load(Ordering::Acquire);
+    if previous > 0 && now.saturating_sub(previous) < 250 { return; }
+    LAST_PING_MS.store(now, Ordering::Release);
+    if let Ok(mut current) = ping_slot().write() { *current = snapshot.clone(); }
+    let _ = app.emit("yummi://live-ping", snapshot);
 }
 
 fn now_ms() -> u64 {
@@ -357,11 +420,18 @@ async fn run_session(config: SfuConfig, generation: u64) -> Result<(), String> {
                 match event {
                     Some(RoomEvent::Disconnected { .. }) | None => break,
                     Some(RoomEvent::DataReceived { payload, topic, participant, .. }) => {
+                        let participant_identity = participant.map(|value| value.identity().to_string());
                         handle_live_pointer(
                             &config.app,
                             payload.as_slice(),
                             topic.as_deref(),
-                            participant.map(|value| value.identity().to_string()),
+                            participant_identity.clone(),
+                        );
+                        handle_live_ping(
+                            &config.app,
+                            payload.as_slice(),
+                            topic.as_deref(),
+                            participant_identity,
                         );
                     }
                     _ => {}
@@ -449,4 +519,14 @@ mod tests {
         )
         .is_none());
     }
+
+    #[test]
+    fn ping_packets_are_current_wheel_types_and_viewer_scoped() {
+        let payload = br#"{"v":1,"x":0.12,"y":0.34,"type":"enemy_vision"}"#;
+        let ping = parse_live_ping(payload, Some(PING_TOPIC), Some("viewer-42-abc".into())).unwrap();
+        assert_eq!(ping.ping_type, "enemy_vision");
+        assert!(parse_live_ping(br#"{"v":1,"x":0.5,"y":0.5,"type":"bait"}"#, Some(PING_TOPIC), Some("viewer-42-abc".into())).is_none());
+        assert!(parse_live_ping(payload, Some(PING_TOPIC), Some("agent-42".into())).is_none());
+    }
+
 }

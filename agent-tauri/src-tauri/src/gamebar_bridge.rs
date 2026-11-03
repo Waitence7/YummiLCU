@@ -1770,6 +1770,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
         set_gamebar_input_shield_visible(false);
     }
     let remote_pointer = crate::live_sfu::remote_pointer_snapshot();
+    let remote_ping = crate::live_sfu::remote_ping_snapshot();
     serde_json::json!({
         "ok": true,
         "active": state.active,
@@ -1829,6 +1830,12 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "remotePointerY": remote_pointer.y,
         "remotePointerAgeMs": now.saturating_sub(remote_pointer.updated_at_ms),
         "remotePointerViewer": remote_pointer.viewer,
+        "remotePingX": remote_ping.x,
+        "remotePingY": remote_ping.y,
+        "remotePingType": remote_ping.ping_type,
+        "remotePingSequence": remote_ping.sequence,
+        "remotePingAgeMs": now.saturating_sub(remote_ping.updated_at_ms),
+        "remotePingViewer": remote_ping.viewer,
         "pollAgeMs": now.saturating_sub(state.poll_updated_at_ms),
         "agentPid": std::process::id(),
         "agentReleaseLabel": option_env!("YUMMI_AGENT_RELEASE_LABEL")

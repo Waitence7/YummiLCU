@@ -54,6 +54,15 @@ type LivePointerPayload = {
   viewer: string;
 };
 
+type LivePingPayload = {
+  x: number;
+  y: number;
+  pingType: string;
+  sequence: number;
+  updatedAtMs: number;
+  viewer: string;
+};
+
 type TabId =
   | "guild"
   | "history"
@@ -100,7 +109,7 @@ function WindowResizeHandles() {
 const TABS: { id: TabId; label: string; badge?: string }[] = [
   { id: "guild", label: "내전" },
   { id: "history", label: "전적" },
-  { id: "recording", label: "녹화" },
+  { id: "recording", label: "라이브·녹화" },
   { id: "overlay", label: "오버레이" },
   { id: "settings", label: "편의기능" },
   { id: "voice", label: "음성", badge: "예정" },
@@ -113,6 +122,7 @@ export function App() {
   const [tab, setTab] = useState<TabId>("guild");
   const [webInput, setWebInput] = useState<WebInputPayload | null>(null);
   const [livePointer, setLivePointer] = useState<LivePointerPayload | null>(null);
+  const [livePing, setLivePing] = useState<LivePingPayload | null>(null);
 
   useEffect(() => {
     if (useMockBridge) return;
@@ -249,6 +259,23 @@ export function App() {
 
   useEffect(() => {
     if (useMockBridge) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let hideTimer: number | undefined;
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) => listen<LivePingPayload>("yummi://live-ping", ({ payload }) => {
+        if (!Number.isFinite(payload.x) || !Number.isFinite(payload.y)) return;
+        setLivePing(payload);
+        if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+        hideTimer = window.setTimeout(() => setLivePing(null), 1_800);
+      }))
+      .then((dispose) => { if (disposed) dispose(); else unlisten = dispose; })
+      .catch((error) => void reportWindowFailure("live_ping_listener", error));
+    return () => { disposed = true; unlisten?.(); if (hideTimer !== undefined) window.clearTimeout(hideTimer); };
+  }, []);
+
+  useEffect(() => {
+    if (useMockBridge) return;
     void syncMainWindowRotationMode().catch((error) =>
       reportWindowFailure("sync_rotation", error),
     );
@@ -281,6 +308,11 @@ export function App() {
       }}
     >
       <WindowResizeHandles />
+      {livePing && (
+        <div aria-hidden className="pointer-events-none absolute z-[121] -translate-x-1/2 -translate-y-1/2" style={{ left: `${Math.max(0, Math.min(1, livePing.x)) * 100}%`, top: `${Math.max(0, Math.min(1, livePing.y)) * 100}%` }}>
+          <div className="flex h-11 w-11 animate-ping items-center justify-center rounded-full border-2 border-amber-200 bg-slate-950/65 text-sm font-black text-white shadow-xl">{livePing.pingType === "enemy_missing" ? "?" : livePing.pingType === "enemy_vision" ? "◇" : livePing.pingType === "need_vision" ? "◉" : livePing.pingType === "retreat" ? "!" : "◆"}</div>
+        </div>
+      )}
       {livePointer && (
         <div
           aria-hidden
