@@ -1,0 +1,31 @@
+name: Dispatch Agent Beta 54 Once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/dispatch-agent-beta54-once.yml"
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch:
+    if: ${{ github.event.head_commit.message == 'chore(release): dispatch beta.54' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch verified candidate as beta.54
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST \
+            -H "Accept: application/vnd.github+json" \
+            "/repos/${GITHUB_REPOSITORY}/actions/workflows/build-tauri-agent.yml/dispatches" \
+            -f ref=main \
+            -f 'inputs[version]=0.8.0' \
+            -f 'inputs[release_notes]=라이브 공유 앱 제어 및 관전자 커서/핑 기능 재빌드 배포' \
+            -f 'inputs[channel]=beta' \
+            -f 'inputs[beta_number]=54' \
+            -f 'inputs[rollout_percent]=100' \
+            -f 'inputs[source_sha]=eef6148aa6539c363e57bce9be526a4fd691dd0b'
