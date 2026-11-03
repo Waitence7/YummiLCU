@@ -407,7 +407,7 @@ jobs:
 
   deploy-existing-candidate:
     name: Deploy existing verified agent candidate
-    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.event.head_commit.message == 'chore(release): publish beta.54 via verified candidate') }}
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[publish-beta54]')) }}
     runs-on: ubuntu-slim
     permissions:
       actions: read
