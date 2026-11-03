@@ -5099,8 +5099,6 @@ async def internal_livekit_session(
             raise HTTPException(403, "live share link was revoked")
     if not conn.is_online(discord_id):
         raise HTTPException(404, "agent not connected")
-    if conn.trust_level_for_discord(discord_id) == "new_device":
-        raise HTTPException(403, "live stream unavailable for new device")
     try:
         requested_quality = livekit_sfu.stream_profile(profile)
     except ValueError as exc:
@@ -5174,8 +5172,6 @@ async def internal_livekit_lease(
             raise HTTPException(403, "live share link was revoked")
     if not conn.is_online(discord_id):
         raise HTTPException(404, "agent not connected")
-    if conn.trust_level_for_discord(discord_id) == "new_device":
-        raise HTTPException(403, "live stream unavailable for new device")
     try:
         requested_quality = livekit_sfu.stream_profile(profile)
     except ValueError as exc:
