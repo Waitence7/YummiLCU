@@ -232,7 +232,7 @@ async fn ensure_vgmstream() -> Result<PathBuf, String> {
         let mut entry = archive
             .by_index(index)
             .map_err(|e| format!("vgmstream ZIP 항목 실패: {e}"))?;
-        let Some(relative) = entry.enclosed_name().map(Path::to_path_buf) else {
+        let Some(relative) = entry.enclosed_name() else {
             return Err("vgmstream ZIP 경로 검증 실패".into());
         };
         if entry.is_dir() {
