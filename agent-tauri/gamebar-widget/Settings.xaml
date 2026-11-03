@@ -11,6 +11,15 @@
         <TextBlock Text="HUD 불투명도" Foreground="White"/>
         <Slider x:Name="HudOpacitySlider" Minimum="10" Maximum="100" StepFrequency="5" Value="100" ValueChanged="HudOpacitySlider_ValueChanged"/>
       </StackPanel>
+      <Border Background="#342A203A" CornerRadius="10" Padding="12">
+        <StackPanel Spacing="8">
+          <TextBlock Text="효과음" Foreground="White" FontWeight="SemiBold"/>
+          <ToggleSwitch x:Name="OverlaySoundEffectsToggle" Header="핑/알림 효과음" OnContent="켜짐" OffContent="꺼짐" Toggled="OverlaySoundEffectsToggle_Toggled" Foreground="White"/>
+          <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions><TextBlock Text="효과음 볼륨" Foreground="White"/><TextBlock x:Name="OverlaySoundEffectsVolumeText" Grid.Column="1" Text="65%" Foreground="#CDBDE8"/></Grid>
+          <Slider x:Name="OverlaySoundEffectsVolumeSlider" Minimum="0" Maximum="100" StepFrequency="5" Value="65" ValueChanged="OverlaySoundEffectsVolumeSlider_ValueChanged"/>
+          <TextBlock Text="웹 시청자의 핑과 오버레이 알림에 사용합니다. Riot 원본 음원은 사용하지 않습니다." Foreground="#B9AAD2" TextWrapping="Wrap"/>
+        </StackPanel>
+      </Border>
       <Button x:Name="CompactHudButton" Content="핀·위치 조절용으로 줄이기" Click="CompactHudButton_Click" Padding="16,8"/>
       <TextBlock Text="핀이나 제목줄이 안 보이면 먼저 작게 줄여 주세요. HUD 제목줄에서 핀과 위치를 조절한 뒤 다시 확대하면 선택한 위치를 유지합니다." Foreground="#BDB1D0" TextWrapping="Wrap"/>
       <Button x:Name="FitHudButton" Content="Game Bar 최대 크기로 맞추기" Click="FitHudButton_Click" Padding="16,8"/>

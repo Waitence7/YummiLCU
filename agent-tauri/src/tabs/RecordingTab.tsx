@@ -11,15 +11,20 @@ import {
   stopClipBuffer,
   stopRecording,
 } from '../api/commands';
-import type { LiveControlStatus, LiveQualityProfile, RecordingCaptureSource, RecordingStatus } from '../state/types';
+import type { LiveControlStatus, LiveFrameRate, LiveQualityProfile, RecordingCaptureSource, RecordingStatus } from '../state/types';
 import { RecordingReview } from '../components/recording/RecordingReview';
 
-const EMPTY_LIVE: LiveControlStatus = { enabled: false, profile: 'balanced', shareUrl: null, expiresAt: null };
+const EMPTY_LIVE: LiveControlStatus = { enabled: false, profile: 'balanced', fps: 30, shareUrl: null, expiresAt: null };
 const LIVE_QUALITY_OPTIONS: Array<{ value: LiveQualityProfile; label: string }> = [
-  { value: 'data', label: '절약 · 540p 15fps' },
-  { value: 'balanced', label: '표준 · 720p 30fps' },
-  { value: 'high', label: '고화질 · 1080p 30fps' },
-  { value: 'ultra', label: '최고 · 1440p 30fps' },
+  { value: 'data', label: '절약 · 540p' },
+  { value: 'balanced', label: '표준 · 720p' },
+  { value: 'high', label: '고화질 · 1080p' },
+  { value: 'ultra', label: '최고 · 1440p' },
+];
+const LIVE_FPS_OPTIONS: Array<{ value: LiveFrameRate; label: string }> = [
+  { value: 15, label: '15fps · 데이터 절약' },
+  { value: 30, label: '30fps · 기본' },
+  { value: 60, label: '60fps · 부드러움' },
 ];
 
 const EMPTY: RecordingStatus = {
@@ -46,7 +51,7 @@ function fileName(path?: string | null) {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
-export function RecordingTab({ connected }: { connected: boolean }) {
+export function RecordingTab({ relayConnected, lcuConnected }: { relayConnected: boolean; lcuConnected: boolean }) {
   const [status, setStatus] = useState<RecordingStatus>(EMPTY);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -54,12 +59,15 @@ export function RecordingTab({ connected }: { connected: boolean }) {
   const [clipSource, setClipSource] = useState<RecordingCaptureSource>('leagueWindow');
   const [liveStatus, setLiveStatus] = useState<LiveControlStatus>(EMPTY_LIVE);
   const [liveProfile, setLiveProfile] = useState<LiveQualityProfile>('balanced');
+  const [liveFps, setLiveFps] = useState<LiveFrameRate>(30);
   const [liveBusy, setLiveBusy] = useState(false);
   const [liveMessage, setLiveMessage] = useState<string | null>(null);
+  const [liveError, setLiveError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       setStatus(await getRecordingStatus());
+      setError(null);
     } catch (cause) {
       setError(String(cause));
     }
@@ -78,9 +86,13 @@ export function RecordingTab({ connected }: { connected: boolean }) {
         const next = await getLiveControlStatus();
         if (stopped) return;
         setLiveStatus(next);
-        setLiveProfile(next.profile);
+        if (next.enabled) {
+          setLiveProfile(next.profile);
+          setLiveFps(next.fps);
+        }
+        setLiveError(null);
       } catch (cause) {
-        if (!stopped) setLiveMessage(String(cause));
+        if (!stopped) setLiveError(String(cause));
       }
     };
     void refreshLive();
@@ -91,17 +103,19 @@ export function RecordingTab({ connected }: { connected: boolean }) {
   const toggleLive = useCallback(async () => {
     setLiveBusy(true);
     setLiveMessage(null);
+    setLiveError(null);
     try {
-      const next = await setLiveControlEnabled(!liveStatus.enabled, liveProfile);
+      const next = await setLiveControlEnabled(!liveStatus.enabled, liveProfile, liveFps);
       setLiveStatus(next);
       setLiveProfile(next.profile);
+      setLiveFps(next.fps);
       setLiveMessage(next.enabled ? '라이브 공유가 켜졌습니다.' : '라이브 공유가 꺼졌습니다. 기존 링크도 즉시 차단됩니다.');
     } catch (cause) {
-      setLiveMessage(String(cause));
+      setLiveError(String(cause));
     } finally {
       setLiveBusy(false);
     }
-  }, [liveProfile, liveStatus.enabled]);
+  }, [liveFps, liveProfile, liveStatus.enabled]);
 
   const copyLiveLink = useCallback(async () => {
     if (!liveStatus.shareUrl) return;
@@ -149,9 +163,17 @@ export function RecordingTab({ connected }: { connected: boolean }) {
           >
             {LIVE_QUALITY_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
           </select>
+          <select
+            value={liveFps}
+            disabled={liveBusy || liveStatus.enabled}
+            onChange={(event) => setLiveFps(Number(event.target.value) as LiveFrameRate)}
+            className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-xs text-slate-700 disabled:opacity-50"
+          >
+            {LIVE_FPS_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
+          </select>
           <button
             type="button"
-            disabled={liveBusy || !connected}
+            disabled={liveBusy || !relayConnected}
             onClick={() => void toggleLive()}
             className={`rounded-lg px-3 py-2 text-xs font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40 ${liveStatus.enabled ? 'bg-red-600' : 'bg-emerald-600'}`}
           >
@@ -164,11 +186,12 @@ export function RecordingTab({ connected }: { connected: boolean }) {
         {liveStatus.enabled && liveStatus.shareUrl ? (
           <div className="mt-3 break-all rounded-lg bg-white/80 px-3 py-2 text-[11px] text-slate-700">{liveStatus.shareUrl}</div>
         ) : null}
-        <p className="mt-2 text-[10px] text-slate-500">로그인한 관전자만 좌클릭 홀드 커서와 G/Ctrl 핑을 보낼 수 있습니다. 익명 관전자는 보기만 가능합니다.</p>
+        <p className="mt-2 text-[10px] text-slate-500">로그인한 관전자만 좌클릭 홀드 커서와 G/Ctrl 핑을 보낼 수 있습니다. 익명 관전자는 보기만 가능합니다. 화질/FPS 변경은 기존 공유 링크를 유지하기 위해 라이브를 끈 상태에서만 가능합니다.</p>
         {liveMessage ? <p className="mt-2 text-[11px] text-slate-600">{liveMessage}</p> : null}
+        {liveError ? <p className="mt-2 text-[11px] text-red-600">{liveError}</p> : null}
       </section>
 
-      <RecordingReview connected={connected} />
+      <RecordingReview connected={lcuConnected} />
       <section className="rounded-xl border border-violet-200 bg-violet-50 p-4 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>

@@ -62,12 +62,17 @@ _STREAM_PROFILES = {
 }
 
 
-def stream_profile(value: str | None) -> LiveStreamProfile:
+def stream_profile(value: str | None, fps: int | None = None) -> LiveStreamProfile:
     key = (value or "balanced").strip().lower()
     profile = _STREAM_PROFILES.get(key)
     if profile is None:
         raise ValueError("unsupported live stream profile")
-    return profile
+    if fps is None:
+        return profile
+    if fps not in {15, 30, 60}:
+        raise ValueError("unsupported live stream fps")
+    bitrate = min(20_000_000, max(1_000_000, round(profile.bitrate * fps / profile.fps)))
+    return LiveStreamProfile(profile.name, profile.width, profile.height, fps, bitrate)
 
 
 def _token(*, identity: str, room: str, can_publish: bool, can_subscribe: bool, can_publish_data: bool, name: str) -> tuple[str, int]:

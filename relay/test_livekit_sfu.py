@@ -14,6 +14,12 @@ class LiveKitSfuTests(unittest.TestCase):
         self.assertEqual((high.width, high.height), (1920, 1080))
         self.assertEqual((ultra.width, ultra.height), (2560, 1440))
         self.assertLessEqual(ultra.bitrate, 20_000_000)
+        balanced_60 = livekit_sfu.stream_profile("balanced", 60)
+        ultra_60 = livekit_sfu.stream_profile("ultra", 60)
+        self.assertEqual((balanced_60.fps, balanced_60.bitrate), (60, 8_000_000))
+        self.assertEqual((ultra_60.fps, ultra_60.bitrate), (60, 20_000_000))
+        with self.assertRaises(ValueError):
+            livekit_sfu.stream_profile("balanced", 45)
         with self.assertRaises(ValueError):
             livekit_sfu.stream_profile("4k")
 

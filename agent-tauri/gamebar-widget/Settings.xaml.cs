@@ -36,6 +36,9 @@ namespace YummiGameBarWidget
             HudVisibleToggle.IsOn = HudPreferences.Visible;
             CoverageTintToggle.IsOn = HudPreferences.CoverageTint;
             HudOpacitySlider.Value = HudPreferences.Opacity * 100;
+            OverlaySoundEffectsToggle.IsOn = HudPreferences.OverlaySoundEffectsEnabled;
+            OverlaySoundEffectsVolumeSlider.Value = HudPreferences.OverlaySoundEffectsVolume * 100;
+            OverlaySoundEffectsVolumeText.Text = Math.Round(HudPreferences.OverlaySoundEffectsVolume * 100).ToString("0") + "%";
             LcuVisibleToggle.IsOn = HudPreferences.LcuPanelVisible;
             PartyVisibleToggle.IsOn = HudPreferences.PartyPanelVisible;
             BrowserVisibleToggle.IsOn = HudPreferences.BrowserPanelVisible && !HudPreferences.BrowserPanelClosed;
@@ -83,6 +86,15 @@ namespace YummiGameBarWidget
         private void HudOpacitySlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs args)
         {
             if (preferencesLoaded) HudPreferences.Opacity = args.NewValue / 100;
+        }
+        private void OverlaySoundEffectsToggle_Toggled(object sender, RoutedEventArgs args)
+        {
+            if (preferencesLoaded) HudPreferences.OverlaySoundEffectsEnabled = OverlaySoundEffectsToggle.IsOn;
+        }
+        private void OverlaySoundEffectsVolumeSlider_ValueChanged(object sender, RangeBaseValueChangedEventArgs args)
+        {
+            OverlaySoundEffectsVolumeText.Text = Math.Round(args.NewValue).ToString("0") + "%";
+            if (preferencesLoaded) HudPreferences.OverlaySoundEffectsVolume = args.NewValue / 100.0;
         }
         private void LcuVisibleToggle_Toggled(object sender, RoutedEventArgs args)
         {

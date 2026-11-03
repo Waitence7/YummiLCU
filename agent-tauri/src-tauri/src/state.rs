@@ -159,6 +159,7 @@ fn installed_at() -> Option<u64> {
 
 const GAMEBAR_VOICE_CHAT_MAX_RETENTION_MS: u64 = 60_000;
 const GAMEBAR_TOAST_DEFAULT_RETENTION_MS: u64 = 6_000;
+pub(crate) const GAMEBAR_TOAST_STICKY_EXPIRES_AT_MS: u64 = 4_102_444_800_000; // 2100-01-01 UTC
 const GAMEBAR_TOAST_MAX_ITEMS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -644,6 +645,9 @@ impl AppState {
                 .iter_mut()
                 .find(|current| current.id == toast.id)
             {
+                if toast.expires_at_ms == GAMEBAR_TOAST_STICKY_EXPIRES_AT_MS {
+                    toast.timestamp_ms = existing.timestamp_ms;
+                }
                 if *existing != toast {
                     *existing = toast;
                     changed = true;
@@ -656,6 +660,18 @@ impl AppState {
                     snapshot.overlay_toasts.drain(0..remove);
                 }
             }
+        }
+        if changed {
+            self.notify_gamebar_snapshot_update();
+        }
+    }
+
+    pub(crate) fn remove_gamebar_toast(&self, id: &str) {
+        let mut changed = false;
+        if let Ok(mut snapshot) = self.gamebar_snapshot.write() {
+            let before = snapshot.overlay_toasts.len();
+            snapshot.overlay_toasts.retain(|toast| toast.id != id);
+            changed = before != snapshot.overlay_toasts.len();
         }
         if changed {
             self.notify_gamebar_snapshot_update();

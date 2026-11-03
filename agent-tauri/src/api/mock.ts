@@ -24,6 +24,7 @@ let mockOverlayInstalled = false;
 let liveControlStatus: LiveControlStatus = {
   enabled: false,
   profile: "balanced",
+  fps: 30,
   shareUrl: null,
   expiresAt: null,
 };
@@ -254,9 +255,11 @@ export async function mockInvoke<T>(
     case "set_live_control_enabled": {
       const enabled = args?.enabled === true;
       const profile = args?.profile === "data" || args?.profile === "high" || args?.profile === "ultra" ? args.profile : "balanced";
+      const fps = args?.fps === 15 || args?.fps === 60 ? args.fps : 30;
       liveControlStatus = {
         enabled,
         profile,
+        fps,
         shareUrl: enabled ? "https://yummi.duckdns.org/lcu/live/share/mock-live-token" : null,
         expiresAt: enabled ? Math.floor(Date.now() / 1000) + 86400 : null,
       };

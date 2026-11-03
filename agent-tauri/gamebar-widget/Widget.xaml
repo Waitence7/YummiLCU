@@ -54,6 +54,7 @@
     </Style>
   </Page.Resources>
   <Grid x:Name="RootGrid" Background="Transparent">
+    <MediaElement x:Name="OverlaySoundPlayer" Width="1" Height="1" Opacity="0" IsHitTestVisible="False" AutoPlay="False"/>
     <Canvas x:Name="NativeCursorOverlay" IsHitTestVisible="False" Canvas.ZIndex="9999">
       <Grid x:Name="CursorMarkerPhysical" Visibility="Collapsed"><Ellipse Width="14" Height="14" Fill="#CCFF3B30" Stroke="White" StrokeThickness="1"/><TextBlock Text="P" Foreground="White" FontSize="8" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>
       <Grid x:Name="CursorMarkerLogical" Visibility="Collapsed"><Ellipse Width="12" Height="12" Fill="#CCFF9500" Stroke="White" StrokeThickness="1"/><TextBlock Text="L" Foreground="White" FontSize="7" FontWeight="Bold" HorizontalAlignment="Center" VerticalAlignment="Center"/></Grid>

@@ -7,7 +7,7 @@ use crate::{
     lcu::remote_recording_context,
     recording::{self, RecordingSessionMetadata, RecordingStatus},
     session,
-    state::AppState,
+    state::{AppState, GameBarToast, GAMEBAR_TOAST_STICKY_EXPIRES_AT_MS},
 };
 
 async fn report_failure(
@@ -43,17 +43,46 @@ async fn run_blocking_status(
     }
 }
 
+pub(crate) fn sync_recording_overlay_toast(state: &Arc<AppState>, status: &RecordingStatus) {
+    const TOAST_ID: &str = "recording.capture.active";
+    if !status.recording {
+        state.remove_gamebar_toast(TOAST_ID);
+        return;
+    }
+    let body = if status.auto_game_recording {
+        match status.auto_game_id.as_deref() {
+            Some(game_id) if !game_id.is_empty() => format!("자동 게임 녹화 · {game_id}"),
+            _ => "자동 게임 녹화".into(),
+        }
+    } else if status.recording_source == "leagueWindow" {
+        "게임 창 녹화".into()
+    } else {
+        "화면 전체 녹화".into()
+    };
+    state.push_gamebar_toast(GameBarToast {
+        id: TOAST_ID.into(),
+        source: "recording.capture".into(),
+        title: "녹화 중".into(),
+        body,
+        tone: "error".into(),
+        timestamp_ms: 0,
+        expires_at_ms: GAMEBAR_TOAST_STICKY_EXPIRES_AT_MS,
+    });
+}
+
 #[tauri::command]
 pub(crate) async fn get_recording_status(
     state: State<'_, Arc<AppState>>,
 ) -> Result<RecordingStatus, String> {
-    run_blocking_status(
+    let status = run_blocking_status(
         state.inner(),
         "녹화 상태 조회",
         "status_failed",
         recording::status,
     )
-    .await
+    .await?;
+    sync_recording_overlay_toast(state.inner(), &status);
+    Ok(status)
 }
 
 #[tauri::command]
@@ -141,26 +170,30 @@ pub(crate) async fn start_recording(
     state: State<'_, Arc<AppState>>,
     source: Option<String>,
 ) -> Result<RecordingStatus, String> {
-    run_blocking_status(
+    let status = run_blocking_status(
         state.inner(),
         "녹화 시작",
         "manual_start_failed",
         move || recording::start_recording(source.as_deref()),
     )
-    .await
+    .await?;
+    sync_recording_overlay_toast(state.inner(), &status);
+    Ok(status)
 }
 
 #[tauri::command]
 pub(crate) async fn stop_recording(
     state: State<'_, Arc<AppState>>,
 ) -> Result<RecordingStatus, String> {
-    run_blocking_status(
+    let status = run_blocking_status(
         state.inner(),
         "녹화 중지",
         "manual_stop_failed",
         recording::stop_recording,
     )
-    .await
+    .await?;
+    sync_recording_overlay_toast(state.inner(), &status);
+    Ok(status)
 }
 
 #[tauri::command]

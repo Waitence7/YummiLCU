@@ -142,6 +142,21 @@ namespace YummiGameBarWidget
             }
             set { Set("VoiceChatBackgroundOpacity", Math.Max(0.0, Math.Min(1.0, value))); }
         }
+        internal static bool OverlaySoundEffectsEnabled
+        {
+            get { object value; return !ApplicationData.Current.LocalSettings.Values.TryGetValue("OverlaySoundEffectsEnabled", out value) || !(value is bool) || (bool)value; }
+            set { Set("OverlaySoundEffectsEnabled", value); }
+        }
+        internal static double OverlaySoundEffectsVolume
+        {
+            get
+            {
+                object value;
+                if (!ApplicationData.Current.LocalSettings.Values.TryGetValue("OverlaySoundEffectsVolume", out value) || !(value is double)) return 0.65;
+                return Math.Max(0.0, Math.Min(1.0, (double)value));
+            }
+            set { Set("OverlaySoundEffectsVolume", Math.Max(0.0, Math.Min(1.0, value))); }
+        }
         internal static double Opacity
         {
             get

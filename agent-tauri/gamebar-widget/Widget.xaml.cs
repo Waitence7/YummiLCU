@@ -1420,8 +1420,14 @@ namespace YummiGameBarWidget
                 .OrderByDescending(item => item.Item4)
                 .Take(4)
                 .ToList();
-            var signature = string.Join("|", visible.Select(item => item.Item1 + ":" + item.Item3));
+            var signature = string.Join("|", visible.Select(item =>
+                item.Item1 + ":" + item.Item3 + ":" +
+                SnapshotJson.String(item.Item2, "tone") + ":" +
+                SnapshotJson.String(item.Item2, "title") + ":" +
+                SnapshotJson.String(item.Item2, "body")));
             if (signature == overlayToastSignature) return;
+            var previousIds = new HashSet<string>(overlayToastRowsById.Keys, StringComparer.Ordinal);
+            var hasNewToast = visible.Any(item => !previousIds.Contains(item.Item1));
             overlayToastSignature = signature;
             overlayToastExpiresAtMs.Clear();
             overlayToastRowsById.Clear();
@@ -1435,6 +1441,7 @@ namespace YummiGameBarWidget
                 overlayToastExpiresAtMs[item.Item1] = item.Item3;
             }
             OverlayToastHost.Visibility = OverlayToastHost.Children.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+            if (hasNewToast) PlayOverlaySoundEffect("toast-notify.wav");
         }
 
         private FrameworkElement BuildOverlayToastRow(string id, JsonObject item)
@@ -3483,10 +3490,45 @@ namespace YummiGameBarWidget
             RemotePointerMarker.Visibility = Visibility.Visible;
         }
 
+        private void PlayOverlaySoundEffect(string assetName)
+        {
+            if (!HudPreferences.OverlaySoundEffectsEnabled || OverlaySoundPlayer == null || string.IsNullOrWhiteSpace(assetName)) return;
+            try
+            {
+                OverlaySoundPlayer.Stop();
+                OverlaySoundPlayer.Volume = HudPreferences.OverlaySoundEffectsVolume;
+                OverlaySoundPlayer.Source = new Uri("ms-appx:///Assets/Sounds/" + assetName);
+                OverlaySoundPlayer.Play();
+            }
+            catch (Exception ex)
+            {
+                App.LogStage("overlay-sound-failed-" + ErrorCode(ex));
+            }
+        }
+
+        private void PlayRemotePingSound(string pingType)
+        {
+            string assetName;
+            switch (pingType)
+            {
+                case "retreat": assetName = "ping-retreat.wav"; break;
+                case "push": assetName = "ping-push.wav"; break;
+                case "on_my_way": assetName = "ping-on-my-way.wav"; break;
+                case "all_in": assetName = "ping-all-in.wav"; break;
+                case "assist_me": assetName = "ping-assist-me.wav"; break;
+                case "need_vision": assetName = "ping-need-vision.wav"; break;
+                case "enemy_missing": assetName = "ping-enemy-missing.wav"; break;
+                case "enemy_vision": assetName = "ping-enemy-vision.wav"; break;
+                default: return;
+            }
+            PlayOverlaySoundEffect(assetName);
+        }
+
         private void UpdateRemotePingMarker(ulong sequence, double normalizedX, double normalizedY, string pingType, ulong ageMs)
         {
             if (RemotePingOverlay == null || RemotePingMarker == null || RootGrid == null || sequence == 0 || sequence == lastRemotePingSequence || ageMs > 2000) return;
             lastRemotePingSequence = sequence;
+            PlayRemotePingSound(pingType);
             if (!HudPreferences.Visible || (widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly && runtimeOverlayHiddenByHotkey) || RootGrid.ActualWidth <= 0 || RootGrid.ActualHeight <= 0) return;
 
             string glyph = "◆", label = "핑";

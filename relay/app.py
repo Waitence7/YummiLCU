@@ -108,6 +108,7 @@ class RefreshSessionRevokeBody(BaseModel):
 class LiveControlBody(BaseModel):
     enabled: bool
     profile: str = Field(default="balanced", min_length=1, max_length=16)
+    fps: int | None = Field(default=None, ge=15, le=60)
 
 
 _LCU_DATA_MESSAGE_TYPES = frozenset({
@@ -1361,6 +1362,24 @@ async def _live_owner_state(r: redis.Redis, discord_id: int) -> dict[str, Any] |
     return value
 
 
+def _live_owner_quality(state: dict[str, Any]) -> livekit_sfu.LiveStreamProfile:
+    profile = state.get("profile") if isinstance(state.get("profile"), str) else "balanced"
+    raw_fps = state.get("fps")
+    fps: int | None = None
+    if raw_fps is not None:
+        try:
+            fps = int(raw_fps)
+        except (TypeError, ValueError):
+            fps = None
+    try:
+        return livekit_sfu.stream_profile(profile, fps)
+    except ValueError:
+        try:
+            return livekit_sfu.stream_profile(profile)
+        except ValueError:
+            return livekit_sfu.stream_profile("balanced")
+
+
 async def _mint_live_share(http: aiohttp.ClientSession, discord_id: int, profile: str) -> dict[str, Any]:
     token = config.tournament_bot_internal_token()
     if not token:
@@ -1501,10 +1520,12 @@ async def get_agent_live_control(
     discord_id = await _authenticate_agent_http(request, session_id)
     state = await _live_owner_state(request.app.state.redis, discord_id)
     if not state:
-        return JSONResponse({"enabled": False, "profile": "balanced", "shareUrl": None, "expiresAt": None})
+        return JSONResponse({"enabled": False, "profile": "balanced", "fps": 30, "shareUrl": None, "expiresAt": None})
+    quality = _live_owner_quality(state)
     return JSONResponse({
         "enabled": True,
-        "profile": state.get("profile", "balanced"),
+        "profile": quality.name,
+        "fps": quality.fps,
         "shareUrl": state.get("share_url"),
         "expiresAt": state.get("expires_at"),
     }, headers={"Cache-Control": "no-store"})
@@ -1520,19 +1541,20 @@ async def set_agent_live_control(
     r: redis.Redis = request.app.state.redis
     conn: ConnectionManager = request.app.state.connections
     try:
-        quality = livekit_sfu.stream_profile(body.profile)
+        quality = livekit_sfu.stream_profile(body.profile, body.fps)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if not body.enabled:
         await r.delete(_live_owner_redis_key(discord_id))
         request.app.state.livekit_profiles.pop(discord_id, None)
         await conn.send_command(discord_id, {"type": "live_sfu_control", "enabled": False, "ttl_ms": 1000})
-        return JSONResponse({"enabled": False, "profile": quality.name, "shareUrl": None, "expiresAt": None})
+        return JSONResponse({"enabled": False, "profile": quality.name, "fps": quality.fps, "shareUrl": None, "expiresAt": None})
 
     share = await _mint_live_share(request.app.state.http, discord_id, quality.name)
     state = {
         "enabled": True,
         "profile": quality.name,
+        "fps": quality.fps,
         "share_url": share["share_url"],
         "expires_at": share["expires_at"],
         "share_token_hash": hashlib.sha256(share["share_token"].encode("utf-8")).hexdigest(),
@@ -1544,6 +1566,7 @@ async def set_agent_live_control(
     return JSONResponse({
         "enabled": True,
         "profile": quality.name,
+        "fps": quality.fps,
         "shareUrl": share["share_url"],
         "expiresAt": share["expires_at"],
     }, headers={"Cache-Control": "no-store"})
@@ -5105,7 +5128,7 @@ async def internal_livekit_session(
         raise HTTPException(400, str(exc)) from exc
     profiles: dict[int, str] = request.app.state.livekit_profiles
     owner_profile = live_owner.get("profile") if isinstance(live_owner.get("profile"), str) else None
-    quality = livekit_sfu.stream_profile(owner_profile) if owner_profile else requested_quality
+    quality = _live_owner_quality(live_owner) if owner_profile else requested_quality
     if interactive:
         profiles[discord_id] = quality.name
     else:
@@ -5180,7 +5203,7 @@ async def internal_livekit_lease(
     owner_profile = live_owner.get("profile") if isinstance(live_owner.get("profile"), str) else None
     current_profile = profiles.get(discord_id)
     if owner_profile:
-        quality = livekit_sfu.stream_profile(owner_profile)
+        quality = _live_owner_quality(live_owner)
     elif follow_current and current_profile:
         quality = livekit_sfu.stream_profile(current_profile)
     else:

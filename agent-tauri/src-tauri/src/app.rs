@@ -246,7 +246,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 lcu_state.clone(),
                 "lcu_watcher",
                 "task_panicked",
-                watch_lcu(handle.clone(), lcu_state),
+                watch_lcu(handle.clone(), lcu_state.clone()),
             );
             spawn_monitored(
                 presence_state.clone(),
@@ -259,6 +259,12 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 "relay_watchdog",
                 "task_panicked",
                 watch_relay_supervisor(handle.clone(), relay_watchdog_state),
+            );
+            spawn_monitored(
+                lcu_state.clone(),
+                "live_status_watcher",
+                "task_panicked",
+                watch_live_control_status(lcu_state.clone()),
             );
             let start_report_state = connect_state.clone();
             spawn_monitored(connect_state, "relay", "task_panicked", async move {
@@ -679,7 +685,8 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
                 let old_game = previous_game.clone().unwrap_or_default();
                 match tokio::task::spawn_blocking(crate::recording::stop_auto_game_recording).await
                 {
-                    Ok(Ok(_)) => {
+                    Ok(Ok(status)) => {
+                        crate::commands::recording::sync_recording_overlay_toast(&state, &status);
                         state
                             .record_flight(
                                 "recording",
@@ -729,6 +736,7 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
                 .await;
                 match result {
                     Ok(Ok(status)) if status.auto_game_recording => {
+                        crate::commands::recording::sync_recording_overlay_toast(&state, &status);
                         last_start_error = None;
                         state
                             .record_flight(
@@ -783,6 +791,7 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
                     tokio::task::spawn_blocking(crate::recording::stop_auto_game_recording).await;
                 match result {
                     Ok(Ok(status)) => {
+                        crate::commands::recording::sync_recording_overlay_toast(&state, &status);
                         state
                             .record_flight(
                                 "recording",
@@ -831,6 +840,22 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
 
         tokio::select! {
             _ = sleep(Duration::from_secs(2)) => {}
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() { break; }
+            }
+        }
+    }
+}
+
+async fn watch_live_control_status(state: Arc<AppState>) {
+    let mut shutdown = state.shutdown_receiver();
+    loop {
+        if *shutdown.borrow() {
+            break;
+        }
+        let _ = crate::commands::live::refresh_live_control_status(&state).await;
+        tokio::select! {
+            _ = sleep(Duration::from_secs(10)) => {}
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() { break; }
             }

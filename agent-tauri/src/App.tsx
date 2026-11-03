@@ -392,7 +392,7 @@ export function App() {
           <div hidden={tab !== "history"} className="h-full">
             <MatchHistoryTab connected={state.lcu} active={tab === "history"} />
           </div>
-          {tab === "recording" && <RecordingTab connected={state.lcu} />}
+          {tab === "recording" && <RecordingTab relayConnected={state.relay} lcuConnected={state.lcu} />}
           {tab === "overlay" && (
             <OverlayTab releaseChannel={state.release_channel ?? state.config.UpdateChannel} />
           )}

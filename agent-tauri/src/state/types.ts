@@ -74,10 +74,12 @@ export type AgentState = {
 
 
 export type LiveQualityProfile = 'data' | 'balanced' | 'high' | 'ultra';
+export type LiveFrameRate = 15 | 30 | 60;
 
 export type LiveControlStatus = {
   enabled: boolean;
   profile: LiveQualityProfile;
+  fps: LiveFrameRate;
   shareUrl?: string | null;
   expiresAt?: number | null;
 };
