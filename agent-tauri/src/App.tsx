@@ -106,6 +106,7 @@ function WindowResizeHandles() {
   );
 }
 
+// Release rebuild marker: beta.54 live controls.
 const TABS: { id: TabId; label: string; badge?: string }[] = [
   { id: "guild", label: "내전" },
   { id: "history", label: "전적" },
