@@ -120,9 +120,11 @@ def viewer_session(
     *,
     can_publish_data: bool = True,
     name: str = "Yummi Web Viewer",
+    viewer_discord_id: int | None = None,
 ) -> LiveKitSession:
     room = room_name(discord_id)
-    identity = f"viewer-{int(discord_id)}-{secrets.token_hex(8)}"
+    identity_id = int(viewer_discord_id) if can_publish_data and viewer_discord_id and viewer_discord_id > 0 else int(discord_id)
+    identity = f"viewer-{identity_id}-{secrets.token_hex(8)}"
     token, exp = _token(
         identity=identity,
         room=room,

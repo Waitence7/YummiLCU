@@ -144,6 +144,7 @@ namespace YummiGameBarWidget
         private readonly HashSet<string> remotePingImageReady = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> remotePingImageFailed = new HashSet<string>(StringComparer.Ordinal);
         private string activeRemotePingImageType = "";
+        private readonly Dictionary<string, BitmapImage> remotePingAvatarCache = new Dictionary<string, BitmapImage>(StringComparer.Ordinal);
         private const string RemotePingImageRoot = "https://wiki.leagueoflegends.com/en-us/Special:Redirect/file/";
         private static readonly Dictionary<string, string> RemotePingImageFiles = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -3046,6 +3047,8 @@ namespace YummiGameBarWidget
                 var remotePingType = response.GetNamedString("remotePingType", "");
                 var remotePingSequence = (ulong)Math.Max(0, response.GetNamedNumber("remotePingSequence", 0));
                 var remotePingAgeMs = (ulong)Math.Max(0, response.GetNamedNumber("remotePingAgeMs", 999999));
+                var remotePingViewerName = response.GetNamedString("remotePingViewerName", "");
+                var remotePingAvatarUrl = response.GetNamedString("remotePingAvatarUrl", "");
 
                 var fallbackHovered =
                     PointInRect(cursorX, cursorY, rectX, rectY, rectWidth, rectHeight) ||
@@ -3074,7 +3077,7 @@ namespace YummiGameBarWidget
                         gamebarPrimaryX, gamebarPrimaryY, gamebarAltX, gamebarAltY, cursorX, cursorY);
                 }
                 UpdateRemotePointerMarker(remotePointerVisible, remotePointerX, remotePointerY);
-                UpdateRemotePingMarker(remotePingSequence, remotePingX, remotePingY, remotePingType, remotePingAgeMs);
+                UpdateRemotePingMarker(remotePingSequence, remotePingX, remotePingY, remotePingType, remotePingAgeMs, remotePingViewerName, remotePingAvatarUrl);
 
                 if (diagnosticRequested) ClickNativeResult.Text =
                     "transport=" + lastAgentCommandTransport + " pipeErr=" + lastAgentPipeError + " tcpErr=" + lastAgentTcpError +
@@ -3585,23 +3588,40 @@ namespace YummiGameBarWidget
 
         private void PlayRemotePingSound(string pingType)
         {
-            string assetName;
-            switch (pingType)
+            if (!HudPreferences.OverlaySoundEffectsEnabled || string.IsNullOrWhiteSpace(pingType)) return;
+            var payload = new JsonObject
             {
-                case "retreat": assetName = "ping-retreat.wav"; break;
-                case "push": assetName = "ping-push.wav"; break;
-                case "on_my_way": assetName = "ping-on-my-way.wav"; break;
-                case "all_in": assetName = "ping-all-in.wav"; break;
-                case "assist_me": assetName = "ping-assist-me.wav"; break;
-                case "need_vision": assetName = "ping-need-vision.wav"; break;
-                case "enemy_missing": assetName = "ping-enemy-missing.wav"; break;
-                case "enemy_vision": assetName = "ping-enemy-vision.wav"; break;
-                default: return;
-            }
-            PlayOverlaySoundEffect(assetName);
+                ["command"] = JsonValue.CreateStringValue("play_league_ping_sound"),
+                ["pingType"] = JsonValue.CreateStringValue(pingType),
+            }.Stringify();
+            _ = SendAgentCommandAsync(payload).ContinueWith(task =>
+            {
+                if (task.IsFaulted)
+                    App.LogStage("league-ping-sound-agent-error-" + ErrorCode(task.Exception));
+            });
         }
 
-        private void UpdateRemotePingMarker(ulong sequence, double normalizedX, double normalizedY, string pingType, ulong ageMs)
+        private void ApplyRemotePingAvatar(string avatarUrl, string viewerName)
+        {
+            if (RemotePingAvatarBadge == null || RemotePingAvatarBrush == null)
+                return;
+            RemotePingAvatarBadge.Visibility = Visibility.Collapsed;
+            RemotePingAvatarBrush.ImageSource = null;
+            if (!Uri.TryCreate(avatarUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps)
+                return;
+            BitmapImage image;
+            if (!remotePingAvatarCache.TryGetValue(avatarUrl, out image))
+            {
+                image = new BitmapImage { DecodePixelWidth = 40, UriSource = uri };
+                if (remotePingAvatarCache.Count >= 32) remotePingAvatarCache.Clear();
+                remotePingAvatarCache[avatarUrl] = image;
+            }
+            RemotePingAvatarBrush.ImageSource = image;
+            ToolTipService.SetToolTip(RemotePingAvatarBadge, string.IsNullOrWhiteSpace(viewerName) ? "Discord viewer" : viewerName);
+            RemotePingAvatarBadge.Visibility = Visibility.Visible;
+        }
+
+        private void UpdateRemotePingMarker(ulong sequence, double normalizedX, double normalizedY, string pingType, ulong ageMs, string viewerName, string avatarUrl)
         {
             if (RemotePingOverlay == null || RemotePingMarker == null || RootGrid == null || sequence == 0 || sequence == lastRemotePingSequence || ageMs > 2000) return;
             lastRemotePingSequence = sequence;
@@ -3627,6 +3647,7 @@ namespace YummiGameBarWidget
             RemotePingRing.Stroke = new SolidColorBrush(accent);
             RemotePingGlyph.Foreground = new SolidColorBrush(accent);
             ApplyRemotePingImage(pingType);
+            ApplyRemotePingAvatar(avatarUrl, viewerName);
             RemotePingOverlay.Visibility = Visibility.Visible;
             var x = Math.Max(0.0, Math.Min(1.0, normalizedX)) * RootGrid.ActualWidth;
             var y = Math.Max(0.0, Math.Min(1.0, normalizedY)) * RootGrid.ActualHeight;

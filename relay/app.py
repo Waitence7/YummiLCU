@@ -5103,6 +5103,7 @@ async def internal_livekit_session(
     discord_id: int,
     profile: str = Query("balanced", min_length=1, max_length=16),
     interactive: bool = Query(True),
+    viewer_discord_id: int | None = Query(None, gt=0),
     x_relay_internal_secret: str | None = Header(None),
     x_yummi_live_share_token: str | None = Header(None),
 ) -> JSONResponse:
@@ -5138,6 +5139,7 @@ async def internal_livekit_session(
         discord_id,
         can_publish_data=interactive,
         name="Yummi Web Viewer" if interactive else "Yummi Shared Viewer",
+        viewer_discord_id=viewer_discord_id if interactive else None,
     )
     ok = await conn.send_command(discord_id, {
         "type": "live_sfu_control",

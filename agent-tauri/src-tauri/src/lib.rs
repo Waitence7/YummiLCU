@@ -9,6 +9,7 @@ mod error;
 mod gamebar_bridge;
 mod http_diagnostics;
 mod lcu;
+mod league_ping_audio;
 mod live_sfu;
 mod platform;
 mod recording;

@@ -1836,6 +1836,9 @@ fn sync_external_click_test(parsed: &Value) -> String {
         "remotePingSequence": remote_ping.sequence,
         "remotePingAgeMs": now.saturating_sub(remote_ping.updated_at_ms),
         "remotePingViewer": remote_ping.viewer,
+        "remotePingViewerDiscordId": remote_ping.viewer_discord_id,
+        "remotePingViewerName": remote_ping.viewer_name,
+        "remotePingAvatarUrl": remote_ping.viewer_avatar_url,
         "pollAgeMs": now.saturating_sub(state.poll_updated_at_ms),
         "agentPid": std::process::id(),
         "agentReleaseLabel": option_env!("YUMMI_AGENT_RELEASE_LABEL")
@@ -2453,6 +2456,20 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
                 append_uia_probe_log(&message);
                 json_response(false, &error)
             }
+        };
+    }
+    if command == "play_league_ping_sound" {
+        let Some(ping_type) = parsed.get("pingType").and_then(Value::as_str) else {
+            return json_response(false, "핑 타입이 없습니다.");
+        };
+        if !crate::live_sfu::valid_ping_type(ping_type) {
+            return json_response(false, "지원하지 않는 핑 타입입니다.");
+        }
+        crate::league_ping_audio::warm_up();
+        return if crate::league_ping_audio::play(ping_type) {
+            json_response(true, "League 원본 핑 효과음을 재생했습니다.")
+        } else {
+            json_response(false, "League 원본 핑 효과음을 준비 중입니다.")
         };
     }
     if command == "open_url" {

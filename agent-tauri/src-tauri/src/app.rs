@@ -121,6 +121,9 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::window::stabilize_main_window_rotation
         ])
         .setup(move |app| {
+            // Prepare the real League ping SFX cache early so the first remote
+            // ping can play immediately once live sharing starts.
+            crate::league_ping_audio::warm_up();
             // The installer only launches this argument when it observed an
             // older Agent process. If that process exits during the race
             // between the check and launch, this process becomes primary and

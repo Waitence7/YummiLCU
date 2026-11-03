@@ -55,6 +55,16 @@ class LiveKitSfuTests(unittest.TestCase):
         self.assertTrue(claims["video"]["canPublishData"])
         self.assertNotIn("canPublishSources", claims["video"])
 
+    def test_interactive_viewer_identity_uses_authenticated_discord_user(self) -> None:
+        with patch.dict(os.environ, {
+            "LIVEKIT_PUBLIC_URL": "wss://live.example.test",
+            "LIVEKIT_API_KEY": "test-key",
+            "LIVEKIT_API_SECRET": "0123456789abcdef0123456789abcdef",
+        }, clear=False):
+            session = livekit_sfu.viewer_session(42, viewer_discord_id=777777)
+        self.assertEqual(session.room, "yummi-live-42")
+        self.assertTrue(session.identity.startswith("viewer-777777-"))
+
     def test_shared_viewer_token_cannot_publish_data(self) -> None:
         with patch.dict(os.environ, {
             "LIVEKIT_PUBLIC_URL": "wss://live.example.test",

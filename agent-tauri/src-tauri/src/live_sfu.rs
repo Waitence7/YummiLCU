@@ -24,7 +24,7 @@ const MAX_TOKEN_BYTES: usize = 8_192;
 const POINTER_TOPIC: &str = "yummi.live.pointer.v1";
 const PING_TOPIC: &str = "yummi.live.ping.v1";
 const POINTER_MAX_BYTES: usize = 256;
-const PING_MAX_BYTES: usize = 512;
+const PING_MAX_BYTES: usize = 1_024;
 const POINTER_VISIBLE_TTL_MS: u64 = 900;
 
 #[derive(Clone, Debug)]
@@ -75,6 +75,19 @@ pub(crate) struct RemotePingSnapshot {
     pub(crate) sequence: u64,
     pub(crate) updated_at_ms: u64,
     pub(crate) viewer: String,
+    pub(crate) viewer_discord_id: String,
+    pub(crate) viewer_name: String,
+    pub(crate) viewer_avatar_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WirePingSender {
+    discord_id: String,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,6 +97,8 @@ struct WirePing {
     y: f64,
     #[serde(rename = "type")]
     ping_type: String,
+    #[serde(default)]
+    sender: Option<WirePingSender>,
 }
 
 static REMOTE_POINTER: OnceLock<RwLock<RemotePointerSnapshot>> = OnceLock::new();
@@ -171,15 +186,41 @@ fn handle_live_pointer(
 }
 
 
-fn valid_ping_type(value: &str) -> bool {
+pub(crate) fn valid_ping_type(value: &str) -> bool {
     matches!(value, "retreat" | "push" | "on_my_way" | "all_in" | "assist_me" | "need_vision" | "enemy_missing" | "enemy_vision")
+}
+
+fn viewer_discord_id(identity: &str) -> Option<&str> {
+    let raw = identity.strip_prefix("viewer-")?;
+    let id = raw.split('-').next()?;
+    (id.len() >= 6 && id.len() <= 25 && id.bytes().all(|byte| byte.is_ascii_digit()) && !id.starts_with('0')).then_some(id)
+}
+
+fn valid_discord_avatar_url(value: &str, discord_id: &str) -> bool {
+    if value.len() > 512 { return false; }
+    let Ok(url) = url::Url::parse(value) else { return false; };
+    if url.scheme() != "https" || !matches!(url.host_str(), Some("cdn.discordapp.com" | "media.discordapp.net")) { return false; }
+    let path = url.path();
+    path.starts_with(&format!("/avatars/{discord_id}/")) || path.starts_with("/embed/avatars/")
+}
+
+fn clean_viewer_name(value: Option<String>) -> String {
+    value.unwrap_or_default().trim().chars().filter(|ch| !ch.is_control()).take(64).collect()
 }
 
 fn parse_live_ping(payload: &[u8], topic: Option<&str>, participant_identity: Option<String>) -> Option<RemotePingSnapshot> {
     if topic != Some(PING_TOPIC) || payload.is_empty() || payload.len() > PING_MAX_BYTES { return None; }
     let viewer = participant_identity.filter(|value| value.starts_with("viewer-"))?;
+    let trusted_viewer_id = viewer_discord_id(&viewer)?.to_owned();
     let ping = serde_json::from_slice::<WirePing>(payload).ok()?;
     if ping.v != 1 || !ping.x.is_finite() || !ping.y.is_finite() || !(0.0..=1.0).contains(&ping.x) || !(0.0..=1.0).contains(&ping.y) || !valid_ping_type(&ping.ping_type) { return None; }
+    let (viewer_name, viewer_avatar_url) = ping.sender
+        .filter(|sender| sender.discord_id == trusted_viewer_id)
+        .map(|sender| {
+            let avatar = sender.avatar_url.filter(|value| valid_discord_avatar_url(value, &trusted_viewer_id)).unwrap_or_default();
+            (clean_viewer_name(sender.display_name), avatar)
+        })
+        .unwrap_or_default();
     Some(RemotePingSnapshot {
         x: ping.x,
         y: ping.y,
@@ -187,6 +228,9 @@ fn parse_live_ping(payload: &[u8], topic: Option<&str>, participant_identity: Op
         sequence: PING_SEQUENCE.fetch_add(1, Ordering::AcqRel).saturating_add(1),
         updated_at_ms: now_ms(),
         viewer,
+        viewer_discord_id: trusted_viewer_id,
+        viewer_name,
+        viewer_avatar_url,
     })
 }
 
@@ -273,6 +317,7 @@ pub(crate) async fn control(
         bitrate.unwrap_or(defaults.bitrate),
     )?;
     let ttl_ms = ttl_ms.clamp(1_000, 30_000);
+    crate::league_ping_audio::warm_up();
     DEADLINE_MS.store(now_ms().saturating_add(ttl_ms), Ordering::Release);
     crate::recording::set_live_stream_enabled(true, ttl_ms);
     crate::recording::start_live_stream_capture(stream)?;
@@ -498,6 +543,40 @@ mod tests {
         assert_eq!(parse_codec(None).unwrap(), VideoCodec::H264);
         assert_eq!(parse_codec(Some("av1")).unwrap(), VideoCodec::AV1);
         assert!(parse_codec(Some("vp8")).is_err());
+    }
+
+    #[test]
+    fn ping_sender_profile_must_match_authenticated_viewer_identity() {
+        let accepted = parse_live_ping(
+            br#"{"v":1,"x":0.25,"y":0.75,"type":"retreat","sender":{"discordId":"777777","displayName":"tester","avatarUrl":"https://cdn.discordapp.com/avatars/777777/hash.png"}}"#,
+            Some(PING_TOPIC),
+            Some("viewer-777777-abc".into()),
+        )
+        .unwrap();
+        assert_eq!(accepted.viewer_discord_id, "777777");
+        assert_eq!(accepted.viewer_name, "tester");
+        assert_eq!(accepted.viewer_avatar_url, "https://cdn.discordapp.com/avatars/777777/hash.png");
+
+        let spoofed = parse_live_ping(
+            br#"{"v":1,"x":0.25,"y":0.75,"type":"retreat","sender":{"discordId":"888888","displayName":"spoof","avatarUrl":"https://cdn.discordapp.com/avatars/888888/hash.png"}}"#,
+            Some(PING_TOPIC),
+            Some("viewer-777777-abc".into()),
+        )
+        .unwrap();
+        assert_eq!(spoofed.viewer_discord_id, "777777");
+        assert!(spoofed.viewer_name.is_empty());
+        assert!(spoofed.viewer_avatar_url.is_empty());
+    }
+
+    #[test]
+    fn ping_avatar_rejects_non_discord_hosts() {
+        let ping = parse_live_ping(
+            br#"{"v":1,"x":0.25,"y":0.75,"type":"push","sender":{"discordId":"777777","avatarUrl":"https://example.com/avatar.png"}}"#,
+            Some(PING_TOPIC),
+            Some("viewer-777777-abc".into()),
+        )
+        .unwrap();
+        assert!(ping.viewer_avatar_url.is_empty());
     }
 
     #[test]
