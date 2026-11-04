@@ -1,4 +1,9 @@
-use std::{future::Future, panic::AssertUnwindSafe, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    panic::AssertUnwindSafe,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures_util::FutureExt;
 use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
@@ -74,6 +79,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::config::load_config,
             crate::commands::config::save_config,
             crate::commands::config::set_window_glide_strength,
+            crate::commands::config::set_auto_record_league_games,
             crate::commands::agent::start_agent,
             crate::commands::agent::stop_agent,
             crate::commands::agent::logout,
@@ -562,16 +568,39 @@ fn recording_riot_id(value: &serde_json::Value) -> Option<String> {
     })
 }
 
+async fn probe_recording_clock(state: &Arc<AppState>, game_id: &str) -> i64 {
+    match LcuClient::live_game_request("/liveclientdata/allgamedata").await {
+        Ok(value) => recording_game_clock_ms(&value),
+        Err(error) => {
+            state
+                .report_diagnostic(
+                    "recording",
+                    "live_clock_probe_failed",
+                    format!("game_id={game_id} error={error}"),
+                )
+                .await;
+            0
+        }
+    }
+}
+
 async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
     let mut shutdown = state.shutdown_receiver();
     let mut inactive_ticks = 0u8;
     let mut last_start_error: Option<String> = None;
+    let mut last_start_failure: Option<(String, Instant)> = None;
+    let mut last_clock_probe: Option<(String, Instant, i64)> = None;
     loop {
         if *shutdown.borrow() {
             break;
         }
 
         let enabled = state.config.read().await.auto_record_league_games;
+        if !enabled {
+            last_start_error = None;
+            last_start_failure = None;
+            last_clock_probe = None;
+        }
         let mut active_game: Option<(String, Option<String>, i64)> = None;
         if enabled {
             let config = state.config.read().await.clone();
@@ -586,40 +615,58 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
                                     match client.gameflow_session().await {
                                         Ok(session) => {
                                             if let Some(game_id) = recording_game_id(&session) {
-                                                let riot_id = match client.current_summoner().await
-                                                {
-                                                    Ok(value) => recording_riot_id(&value),
-                                                    Err(error) => {
-                                                        state
-                                                            .report_diagnostic(
-                                                                "recording",
-                                                                "identity_probe_failed",
-                                                                format!("game_id={game_id} error={error}"),
-                                                            )
-                                                            .await;
-                                                        None
-                                                    }
-                                                };
-                                                let game_clock_offset_ms =
-                                                    match LcuClient::live_game_request(
-                                                        "/liveclientdata/allgamedata",
-                                                    )
-                                                    .await
-                                                    {
-                                                        Ok(value) => {
-                                                            recording_game_clock_ms(&value)
-                                                        }
+                                                let needs_start = crate::recording::auto_game_id()
+                                                    .as_deref()
+                                                    != Some(game_id.as_str());
+                                                let riot_id = if needs_start {
+                                                    match client.current_summoner().await {
+                                                        Ok(value) => recording_riot_id(&value),
                                                         Err(error) => {
-                                                            state
-                                                            .report_diagnostic(
-                                                                "recording",
-                                                                "live_clock_probe_failed",
+                                                            state.report_diagnostic(
+                                                                "recording", "identity_probe_failed",
                                                                 format!("game_id={game_id} error={error}"),
-                                                            )
-                                                            .await;
-                                                            0
+                                                            ).await;
+                                                            None
                                                         }
-                                                    };
+                                                    }
+                                                } else {
+                                                    None
+                                                };
+                                                let game_clock_offset_ms = if !needs_start {
+                                                    0
+                                                } else if let Some((
+                                                    cached_game,
+                                                    checked_at,
+                                                    offset,
+                                                )) = &last_clock_probe
+                                                {
+                                                    if cached_game == &game_id
+                                                        && checked_at.elapsed()
+                                                            < Duration::from_secs(60)
+                                                    {
+                                                        *offset
+                                                    } else {
+                                                        let offset =
+                                                            probe_recording_clock(&state, &game_id)
+                                                                .await;
+                                                        last_clock_probe = Some((
+                                                            game_id.clone(),
+                                                            Instant::now(),
+                                                            offset,
+                                                        ));
+                                                        offset
+                                                    }
+                                                } else {
+                                                    let offset =
+                                                        probe_recording_clock(&state, &game_id)
+                                                            .await;
+                                                    last_clock_probe = Some((
+                                                        game_id.clone(),
+                                                        Instant::now(),
+                                                        offset,
+                                                    ));
+                                                    offset
+                                                };
                                                 active_game =
                                                     Some((game_id, riot_id, game_clock_offset_ms));
                                             } else {
@@ -728,6 +775,36 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
                 }
             }
             if crate::recording::auto_game_id().as_deref() != Some(game_id.as_str()) {
+                // Avoid attempting Media Foundation encoder initialization every
+                // two seconds when the machine repeatedly rejects a codec profile.
+                if last_start_failure
+                    .as_ref()
+                    .is_some_and(|(failed_game, failed_at)| {
+                        failed_game == &game_id && failed_at.elapsed() < Duration::from_secs(60)
+                    })
+                {
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(2)) => {}
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() { break; }
+                        }
+                    }
+                    continue;
+                }
+                // Serialize toggling with starting a recording. Otherwise a
+                // settings change during LCU polling can start a new capture
+                // *after* the disable command has already returned.
+                let auto_start_guard = state.command_lock.lock().await;
+                if !state.config.read().await.auto_record_league_games {
+                    drop(auto_start_guard);
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(2)) => {}
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() { break; }
+                        }
+                    }
+                    continue;
+                }
                 let game_id_for_worker = game_id.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     crate::recording::start_auto_game_recording(
@@ -737,10 +814,12 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
                     )
                 })
                 .await;
+                drop(auto_start_guard);
                 match result {
                     Ok(Ok(status)) if status.auto_game_recording => {
                         crate::commands::recording::sync_recording_overlay_toast(&state, &status);
                         last_start_error = None;
+                        last_start_failure = None;
                         state
                             .record_flight(
                                 "recording",
@@ -756,6 +835,7 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
                     }
                     Ok(Ok(_)) => {}
                     Ok(Err(error)) => {
+                        last_start_failure = Some((game_id.clone(), Instant::now()));
                         if last_start_error.as_deref() != Some(error.as_str()) {
                             let detail = format!("game_id={game_id} error={error}");
                             state
@@ -771,6 +851,7 @@ async fn watch_game_recording(app: AppHandle, state: Arc<AppState>) {
                         }
                     }
                     Err(error) => {
+                        last_start_failure = Some((game_id.clone(), Instant::now()));
                         let message = format!("auto recording worker failed: {error}");
                         if last_start_error.as_deref() != Some(message.as_str()) {
                             state.record_flight("recording_error", &message).await;

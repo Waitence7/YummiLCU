@@ -147,18 +147,29 @@ pub(crate) async fn request_borderless_capture_access(
         recording::request_borderless_access,
     )
     .await?;
-    if status.borderless_capture_requested
-        && !status.borderless_capture_allowed
-        && matches!(
-            status.borderless_capture_status.as_str(),
-            "not_declared_by_app" | "denied_by_system" | "unavailable" | "unknown"
-        )
-    {
+    let detail = format!(
+        "status={} allowed={} error={}",
+        status.borderless_capture_status,
+        status.borderless_capture_allowed,
+        status
+            .borderless_capture_detail
+            .as_deref()
+            .unwrap_or("none")
+    );
+    state
+        .record_flight("recording", format!("borderless_access_result {detail}"))
+        .await;
+    // Record every user-initiated attempt, including successful authorization
+    // and DeniedByUser, to distinguish system policy from user choices.
+    state
+        .report_diagnostic("recording", "borderless_access_result", &detail)
+        .await;
+    if !status.borderless_capture_allowed {
         report_failure(
             state.inner(),
             "recording",
             "borderless_unavailable",
-            format!("status={}", status.borderless_capture_status),
+            &detail,
         )
         .await;
     }

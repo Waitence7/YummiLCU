@@ -3,6 +3,8 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   getRecordingStatus,
   getLiveControlStatus,
+  loadConfig,
+  setAutoRecordLeagueGames,
   requestBorderlessCaptureAccess,
   saveLastClip,
   startClipBuffer,
@@ -41,6 +43,7 @@ const EMPTY: RecordingStatus = {
   borderlessCaptureRequested: false,
   borderlessCaptureAllowed: false,
   borderlessCaptureStatus: 'not_requested',
+  borderlessCaptureDetail: null,
   autoGameRecording: false,
   autoGameId: null,
   activeRecordingMetadataPath: null,
@@ -63,6 +66,7 @@ export function RecordingTab({ relayConnected, lcuConnected }: { relayConnected:
   const [liveBusy, setLiveBusy] = useState(false);
   const [liveMessage, setLiveMessage] = useState<string | null>(null);
   const [liveError, setLiveError] = useState<string | null>(null);
+  const [autoRecordingEnabled, setAutoRecordingEnabled] = useState<boolean | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -71,6 +75,12 @@ export function RecordingTab({ relayConnected, lcuConnected }: { relayConnected:
     } catch (cause) {
       setError(String(cause));
     }
+  }, []);
+
+  useEffect(() => {
+    void loadConfig()
+      .then((config) => setAutoRecordingEnabled(config.AutoRecordLeagueGames))
+      .catch((cause) => setError(`자동 녹화 설정 조회 실패: ${String(cause)}`));
   }, []);
 
   useEffect(() => {
@@ -140,6 +150,27 @@ export function RecordingTab({ relayConnected, lcuConnected }: { relayConnected:
     }
   }, [refresh]);
 
+  const toggleAutoRecording = useCallback(async () => {
+    if (autoRecordingEnabled === null || busy) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const next = !autoRecordingEnabled;
+      await setAutoRecordLeagueGames(next);
+      setAutoRecordingEnabled(next);
+      await refresh();
+    } catch (cause) {
+      setError(String(cause));
+      try {
+        setAutoRecordingEnabled((await loadConfig()).AutoRecordLeagueGames);
+      } catch {
+        // The main operation error remains visible.
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [autoRecordingEnabled, busy, refresh]);
+
   return (
     <div className="mx-auto flex w-full max-w-6xl flex-col gap-3">
       <section className={`rounded-xl border p-4 shadow-sm ${liveStatus.enabled ? 'border-emerald-200 bg-emerald-50' : 'border-slate-200 bg-white'}`}>
@@ -198,15 +229,29 @@ export function RecordingTab({ relayConnected, lcuConnected }: { relayConnected:
             <h2 className="text-sm font-semibold text-violet-950">자동 게임 녹화</h2>
             <p className="mt-1 text-xs leading-5 text-violet-800/75">League가 InProgress가 되면 게임 창 녹화를 자동 시작하고 경기 종료를 확인하면 자동 저장합니다.</p>
           </div>
-          <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${status.autoGameRecording ? 'bg-red-100 text-red-700' : 'bg-white text-violet-700'}`}>
-            {status.autoGameRecording ? `REC · ${status.autoGameId ?? 'game'}` : '자동 감지 대기'}
-          </span>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              role="switch"
+              aria-label="자동 게임 녹화"
+              aria-checked={autoRecordingEnabled === true}
+              disabled={busy || autoRecordingEnabled === null}
+              onClick={() => void toggleAutoRecording()}
+              className={`rounded-lg px-3 py-2 text-xs font-semibold disabled:opacity-50 ${autoRecordingEnabled ? 'bg-violet-700 text-white' : 'border border-violet-300 bg-white text-violet-800'}`}
+            >
+              자동 녹화 {autoRecordingEnabled === null ? '설정 확인 중' : autoRecordingEnabled ? '켜짐' : '꺼짐'}
+            </button>
+            <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${status.autoGameRecording ? 'bg-red-100 text-red-700' : 'bg-white text-violet-700'}`}>
+              {status.autoGameRecording ? `REC · ${status.autoGameId ?? 'game'}` : autoRecordingEnabled ? '자동 감지 대기' : '자동 녹화 중지'}
+            </span>
+          </div>
         </div>
         <div className="mt-3 flex flex-wrap items-center gap-2">
-          <button type="button" disabled={busy || status.borderlessCaptureRequested} onClick={() => void run(requestBorderlessCaptureAccess)} className="rounded-lg border border-violet-300 bg-white px-3 py-2 text-xs font-semibold text-violet-800 disabled:cursor-not-allowed disabled:opacity-50">
-            {status.borderlessCaptureAllowed ? '테두리 없는 캡처 허용됨' : status.borderlessCaptureRequested ? '캡처 권한 요청 완료' : '테두리 없는 캡처 권한 1회 요청'}
+          <button type="button" disabled={busy || status.borderlessCaptureAllowed} onClick={() => void run(requestBorderlessCaptureAccess)} className="rounded-lg border border-violet-300 bg-white px-3 py-2 text-xs font-semibold text-violet-800 disabled:cursor-not-allowed disabled:opacity-50">
+            {status.borderlessCaptureAllowed ? '테두리 없는 캡처 허용됨' : status.borderlessCaptureRequested ? '캡처 권한 다시 요청' : '테두리 없는 캡처 권한 요청'}
           </button>
           <span className="text-[10px] text-violet-700/70">상태: {status.borderlessCaptureStatus}</span>
+          {status.borderlessCaptureDetail && <span className="w-full break-words text-[10px] text-amber-800">{status.borderlessCaptureDetail}</span>}
         </div>
       </section>
 
@@ -327,7 +372,7 @@ export function RecordingTab({ relayConnected, lcuConnected }: { relayConnected:
       </section>
 
       <section className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-[11px] leading-5 text-amber-900">
-        <b>Windows 10 1903 이상 / Windows 11 지원.</b> Borderless 권한 API가 지원되지 않거나 앱 패키지 권한이 없으면 기존 WGC 테두리 모드로 자동 fallback합니다. 현재 영상 전용이며 오디오는 다음 단계입니다.
+        <b>Windows 10 1903 이상 / Windows 11 지원.</b> 테두리 없는 WGC 캡처는 Windows 패키지의 graphicsCaptureWithoutBorder 권한이 필요합니다. 현재 NSIS 설치에서는 권한 요청에 실패할 수 있으며 이 경우 기본 테두리 모드로 캡처합니다. 권한 문제와 무관하게 자동 녹화는 위 스위치에서 끌 수 있습니다. 현재 영상 전용입니다.
       </section>
 
       {(error || status.lastError) && (

@@ -103,6 +103,79 @@ pub(crate) async fn save_config(
 }
 
 #[tauri::command]
+pub(crate) async fn set_auto_record_league_games(
+    app: AppHandle,
+    state: State<'_, Arc<AppState>>,
+    enabled: bool,
+) -> Result<(), String> {
+    let _guard = state.command_lock.lock().await;
+    let mut config = state.config.read().await.clone();
+    if config.auto_record_league_games == enabled {
+        return Ok(());
+    }
+    config.auto_record_league_games = enabled;
+    if let Err(error) = config.save() {
+        let detail = format!("auto_record_setting_save_failed enabled={enabled} error={error}");
+        state.record_flight("recording_error", &detail).await;
+        state
+            .report_diagnostic("recording", "auto_record_setting_save_failed", &detail)
+            .await;
+        return Err(error.to_string());
+    }
+    state.update_config(config).await;
+    state
+        .record_flight(
+            "recording",
+            format!("auto_record_setting enabled={enabled}"),
+        )
+        .await;
+    state
+        .report_diagnostic(
+            "recording",
+            "auto_record_setting_changed",
+            format!("enabled={enabled}"),
+        )
+        .await;
+    state.emit(&app).await;
+    if !enabled && crate::recording::auto_game_id().is_some() {
+        match tokio::task::spawn_blocking(crate::recording::stop_auto_game_recording).await {
+            Ok(Ok(status)) => {
+                state
+                    .record_flight(
+                        "recording",
+                        format!(
+                            "auto_record_disabled_stopped file_present={}",
+                            status.recording_path.is_some()
+                        ),
+                    )
+                    .await;
+            }
+            Ok(Err(error)) => {
+                state
+                    .report_diagnostic("recording", "auto_record_disable_stop_failed", &error)
+                    .await;
+                return Err(format!(
+                    "자동 녹화 설정은 꺼졌지만 진행 중인 녹화 종료에 실패했습니다: {error}"
+                ));
+            }
+            Err(error) => {
+                state
+                    .report_diagnostic(
+                        "recording",
+                        "auto_record_disable_worker_failed",
+                        error.to_string(),
+                    )
+                    .await;
+                return Err(format!(
+                    "자동 녹화 설정은 꺼졌지만 종료 작업이 실패했습니다: {error}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub(crate) async fn set_window_glide_strength(
     app: AppHandle,
     state: State<'_, Arc<AppState>>,

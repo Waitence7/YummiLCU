@@ -282,7 +282,7 @@ export function RecordingReview({ connected }: { connected: boolean }) {
                       const mediaError = event.currentTarget.error;
                       void reportRecordingDiagnostic(
                         "video_load_failed",
-                        `game_id=${selected.gameId} media_error_code=${mediaError?.code ?? "unknown"}`,
+                        `game_id=${selected.gameId} media_error_code=${mediaError?.code ?? "unknown"} media_message=${(mediaError?.message ?? "none").slice(0, 200)} network_state=${event.currentTarget.networkState} ready_state=${event.currentTarget.readyState} ended_at_ms=${selected.endedAtMs ?? "none"}`,
                       ).catch(() => undefined);
                     }}
                     onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}

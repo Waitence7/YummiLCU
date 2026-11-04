@@ -147,6 +147,7 @@ pub(crate) struct RecordingStatus {
     pub borderless_capture_requested: bool,
     pub borderless_capture_allowed: bool,
     pub borderless_capture_status: String,
+    pub borderless_capture_detail: Option<String>,
     pub auto_game_recording: bool,
     pub auto_game_id: Option<String>,
     pub active_recording_metadata_path: Option<String>,
@@ -234,16 +235,98 @@ mod imp {
     }
 
     fn new_encoder(path: &Path, width: u32, height: u32) -> Result<VideoEncoder, CaptureError> {
-        VideoEncoder::new(
-            VideoSettingsBuilder::new(width, height)
-                .sub_type(VideoSettingsSubType::H264)
-                .bitrate(VIDEO_BITRATE)
-                .frame_rate(VIDEO_FPS),
-            AudioSettingsBuilder::new().disabled(true),
-            ContainerSettingsBuilder::new(),
-            path,
-        )
-        .map_err(|error| format!("영상 인코더 시작 실패: {error}"))
+        if width < 2 || height < 2 {
+            return Err(format!("영상 인코더 해상도 오류: {width}x{height}"));
+        }
+        // H.264 MFT support varies by GPU driver and source resolution.
+        // Try a conservative 30fps profile and a 720p profile before failing.
+        // windows-capture rescales incoming frames to the requested target.
+        let source = (width & !1, height & !1);
+        let smaller = bounded_dimensions(width, height, 1280, 720);
+        let smaller = ((smaller.0 & !1).max(2), (smaller.1 & !1).max(2));
+        let profiles = [
+            (source.0, source.1, VIDEO_FPS, VIDEO_BITRATE),
+            (source.0, source.1, 30, 8_000_000),
+            (smaller.0, smaller.1, 30, 5_000_000),
+            (smaller.0, smaller.1, 24, 3_000_000),
+        ];
+        let mut failures = Vec::new();
+        for (index, &(w, h, fps, bitrate)) in profiles.iter().enumerate() {
+            if profiles[..index].contains(&(w, h, fps, bitrate)) {
+                continue;
+            }
+            match VideoEncoder::new(
+                VideoSettingsBuilder::new(w, h)
+                    .sub_type(VideoSettingsSubType::H264)
+                    .bitrate(bitrate)
+                    .frame_rate(fps),
+                AudioSettingsBuilder::new().disabled(true),
+                ContainerSettingsBuilder::new(),
+                path,
+            ) {
+                Ok(encoder) => return Ok(encoder),
+                Err(error) => failures.push(format!("{w}x{h}@{fps}fps/{bitrate}bps: {error}")),
+            }
+        }
+        // Failed initialization may leave an empty file. Do not remove files
+        // holding user video; clean up only zero-length encoder artifacts.
+        if fs::metadata(path).is_ok_and(|info| info.len() == 0) {
+            let _ = fs::remove_file(path);
+        }
+        Err(format!(
+            "영상 인코더 시작 실패 source={width}x{height} codec=H264 color=BGRA8 audio=off attempts=[{}]",
+            failures.join(" | ")
+        ))
+    }
+
+    fn validate_recorded_video(path: &Path) -> Result<u64, CaptureError> {
+        use std::io::{Read, Seek, SeekFrom};
+        let size = fs::metadata(path)
+            .map_err(|error| format!("녹화 파일 조회 실패: {error}"))?
+            .len();
+        if size < 1024 {
+            return Err(format!("녹화 파일이 비었거나 너무 작습니다: bytes={size}"));
+        }
+        let mut file =
+            fs::File::open(path).map_err(|error| format!("녹화 파일 확인 실패: {error}"))?;
+        let mut position = 0_u64;
+        let mut first_box = true;
+        // Inspect top-level MP4 atom headers, without reading video payloads.
+        // An MP4 that has ftyp/mdat but no moov cannot be played in WebView2.
+        while position + 8 <= size {
+            file.seek(SeekFrom::Start(position))
+                .map_err(|error| format!("MP4 box 탐색 실패: {error}"))?;
+            let mut header = [0_u8; 8];
+            file.read_exact(&mut header)
+                .map_err(|error| format!("MP4 box 헤더 읽기 실패: {error}"))?;
+            let length = u32::from_be_bytes(header[..4].try_into().unwrap());
+            let box_type = &header[4..8];
+            if first_box && box_type != b"ftyp" {
+                return Err(format!("녹화 파일 MP4 ftyp 헤더가 없습니다: bytes={size}"));
+            }
+            first_box = false;
+            let box_size = match length {
+                0 => size - position,
+                1 => {
+                    let mut extended = [0_u8; 8];
+                    file.read_exact(&mut extended)
+                        .map_err(|error| format!("MP4 extended box 오류: {error}"))?;
+                    u64::from_be_bytes(extended)
+                }
+                length => u64::from(length),
+            };
+            let min_size = if length == 1 { 16 } else { 8 };
+            if box_size < min_size || box_size > size - position {
+                return Err(format!(
+                    "잘못된 MP4 box 크기: offset={position} bytes={size}"
+                ));
+            }
+            if box_type == b"moov" {
+                return Ok(size);
+            }
+            position += box_size;
+        }
+        Err(format!("녹화 MP4 인덱스(moov)가 없습니다: bytes={size}"))
     }
 
     struct GeneralCapture {
@@ -714,6 +797,7 @@ mod imp {
         borderless_capture_requested: bool,
         borderless_capture_allowed: bool,
         borderless_capture_status: String,
+        borderless_capture_detail: Option<String>,
         auto_game_recording: bool,
         auto_game_id: Option<String>,
         active_recording_metadata_path: Option<PathBuf>,
@@ -737,6 +821,7 @@ mod imp {
                 borderless_capture_requested: false,
                 borderless_capture_allowed: false,
                 borderless_capture_status: "not_requested".into(),
+                borderless_capture_detail: None,
                 auto_game_recording: false,
                 auto_game_id: None,
                 active_recording_metadata_path: None,
@@ -798,6 +883,7 @@ mod imp {
                 borderless_capture_requested: self.borderless_capture_requested,
                 borderless_capture_allowed: self.borderless_capture_allowed,
                 borderless_capture_status: self.borderless_capture_status.clone(),
+                borderless_capture_detail: self.borderless_capture_detail.clone(),
                 auto_game_recording: self.auto_game_recording,
                 auto_game_id: self.auto_game_id.clone(),
                 active_recording_metadata_path: self
@@ -817,6 +903,7 @@ mod imp {
                 manager.borderless_capture_requested = state.requested;
                 manager.borderless_capture_allowed = state.allowed;
                 manager.borderless_capture_status = state.status;
+                manager.borderless_capture_detail = state.detail;
             }
             Mutex::new(manager)
         })
@@ -889,6 +976,8 @@ mod imp {
         requested: bool,
         allowed: bool,
         status: String,
+        #[serde(default)]
+        detail: Option<String>,
     }
 
     fn load_borderless_state() -> Option<BorderlessState> {
@@ -1309,7 +1398,17 @@ mod imp {
                 .stop()
                 .map_err(|error| format!("일반 녹화 중지 실패: {error}"))?;
         }
+        let integrity = {
+            let manager = lock_manager()?;
+            manager
+                .recording_path
+                .as_ref()
+                .map(|path| validate_recorded_video(path))
+        };
         let mut manager = lock_manager()?;
+        if let Some(Err(error)) = &integrity {
+            manager.last_error = Some(error.clone());
+        }
         if let (Some(path), Some(mut metadata)) = (
             manager.active_recording_metadata_path.clone(),
             manager.active_recording_metadata.take(),
@@ -1322,7 +1421,11 @@ mod imp {
         manager.auto_game_recording = false;
         manager.auto_game_id = None;
         manager.active_recording_metadata_path = None;
-        Ok(manager.status())
+        let result = manager.status();
+        if let Some(Err(error)) = integrity {
+            return Err(error);
+        }
+        Ok(result)
     }
 
     pub(super) fn stop_auto_game_recording() -> Result<RecordingStatus, String> {
@@ -1441,16 +1544,18 @@ mod imp {
     pub(super) fn request_borderless_access() -> Result<RecordingStatus, String> {
         {
             let manager = lock_manager()?;
-            if manager.borderless_capture_requested {
+            // Successful authorization is cached, but failed or unsupported
+            // requests must remain retryable after a Windows/app update.
+            if manager.borderless_capture_allowed {
                 drop(manager);
                 return status();
             }
         }
         let request_result = WinRtGuard::new().and_then(|_winrt| {
             GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
-                .map_err(|error| format!("테두리 없는 캡처 권한 요청 시작 실패: {error}"))?
+                .map_err(|error| format!("RequestAccessAsync 시작 실패: {error:?}"))?
                 .get()
-                .map_err(|error| format!("테두리 없는 캡처 권한 요청 실패: {error}"))
+                .map_err(|error| format!("RequestAccessAsync 완료 실패: {error:?}"))
         });
         let (allowed, label, request_error) = match request_result {
             Ok(result) if result == AppCapabilityAccessStatus::Allowed => (true, "allowed", None),
@@ -1466,21 +1571,31 @@ mod imp {
             Ok(result) if result == AppCapabilityAccessStatus::UserPromptRequired => {
                 (false, "prompt_required", None)
             }
-            Ok(_) => (false, "unknown", None),
+            Ok(result) => (
+                false,
+                "unknown",
+                Some(format!("Windows returned {result:?}")),
+            ),
             Err(error) => (false, "unavailable", Some(error)),
         };
         let persisted = BorderlessState {
             requested: true,
             allowed,
             status: label.into(),
+            detail: request_error.clone(),
         };
         save_borderless_state(&persisted);
         let mut manager = lock_manager()?;
         manager.borderless_capture_requested = true;
         manager.borderless_capture_allowed = allowed;
         manager.borderless_capture_status = label.into();
+        manager.borderless_capture_detail = request_error.clone();
         if let Some(error) = request_error {
-            manager.last_error = Some(format!("{error} · 기본 WGC 테두리 모드로 계속합니다."));
+            manager.last_error = Some(format!(
+                "테두리 없는 캡처: {error} · 기본 WGC 테두리 모드로 계속합니다."
+            ));
+        } else if allowed {
+            manager.last_error = None;
         }
         Ok(manager.status())
     }

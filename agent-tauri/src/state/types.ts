@@ -49,6 +49,7 @@ export type Config = {
   TrayEffectPlaybackRate: number;
   WindowGlideStrength: number | null;
   WindowFreeRotation: boolean;
+  AutoRecordLeagueGames: boolean;
   UiTestMode: boolean;
 };
 
@@ -100,6 +101,7 @@ export type RecordingStatus = {
   borderlessCaptureRequested: boolean;
   borderlessCaptureAllowed: boolean;
   borderlessCaptureStatus: string;
+  borderlessCaptureDetail?: string | null;
   autoGameRecording: boolean;
   autoGameId?: string | null;
   activeRecordingMetadataPath?: string | null;

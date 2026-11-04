@@ -133,7 +133,8 @@ export const reportRecordingDiagnostic = (code: string, detail: string) =>
 export const getLiveControlStatus = () => call<LiveControlStatus>("get_live_control_status");
 export const setLiveControlEnabled = (enabled: boolean, profile: LiveQualityProfile, fps: LiveFrameRate) =>
   call<LiveControlStatus>("set_live_control_enabled", { enabled, profile, fps });
-
+export const setAutoRecordLeagueGames = (enabled: boolean) =>
+  call<void>("set_auto_record_league_games", { enabled });
 export const getRecordingStatus = () => call<RecordingStatus>("get_recording_status");
 export const listRecordingSessions = () => call<RecordingSession[]>("list_recording_sessions");
 export const recordingGameContext = (gameId: string) =>
