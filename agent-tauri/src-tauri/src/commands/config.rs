@@ -140,6 +140,7 @@ pub(crate) async fn set_auto_record_league_games(
     if !enabled && crate::recording::auto_game_id().is_some() {
         match tokio::task::spawn_blocking(crate::recording::stop_auto_game_recording).await {
             Ok(Ok(status)) => {
+                crate::commands::recording::sync_recording_overlay_toast(state.inner(), &status);
                 state
                     .record_flight(
                         "recording",
