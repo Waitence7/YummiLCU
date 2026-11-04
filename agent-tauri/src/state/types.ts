@@ -176,6 +176,7 @@ export const initialState: AgentState = {
     TrayEffectPlaybackRate: 1,
     WindowGlideStrength: 1,
     WindowFreeRotation: false,
+    AutoRecordLeagueGames: true,
     UiTestMode: false,
   },
 };
