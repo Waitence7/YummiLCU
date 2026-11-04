@@ -75,6 +75,10 @@ pub struct Config {
     pub window_glide_strength: Option<f64>,
     pub window_free_rotation: bool,
     pub auto_record_league_games: bool,
+    /// None preserves the original Game Bar auto-setup behavior (ON).
+    /// Explicit choices are retained across desktop restarts.
+    pub overlay_pin_preference: Option<bool>,
+    pub overlay_click_through_preference: Option<bool>,
     pub ui_test_mode: bool,
 }
 
@@ -103,6 +107,8 @@ impl Default for Config {
             window_glide_strength: Some(1.0),
             window_free_rotation: false,
             auto_record_league_games: false,
+            overlay_pin_preference: None,
+            overlay_click_through_preference: None,
             ui_test_mode: false,
         }
     }
@@ -569,6 +575,23 @@ mod tests {
         assert_eq!(config.tray_effect_playback_rate, 1.0);
         assert_eq!(config.window_glide_strength, Some(1.0));
         assert!(!config.window_free_rotation);
+    }
+
+    #[test]
+    fn overlay_control_preferences_keep_explicit_off_and_legacy_defaults() {
+        let old: Config = serde_json::from_str(r#"{"UpdateChannel":"stable"}"#).unwrap();
+        assert_eq!(old.overlay_pin_preference, None);
+        assert_eq!(old.overlay_click_through_preference, None);
+        let saved: Config = serde_json::from_str(
+            r#"{"OverlayPinPreference":false,"OverlayClickThroughPreference":true}"#,
+        )
+        .unwrap();
+        assert_eq!(saved.overlay_pin_preference, Some(false));
+        assert_eq!(saved.overlay_click_through_preference, Some(true));
+        let serialized = serde_json::to_string(&saved).unwrap();
+        let loaded: Config = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(loaded.overlay_pin_preference, Some(false));
+        assert_eq!(loaded.overlay_click_through_preference, Some(true));
     }
 
     #[test]

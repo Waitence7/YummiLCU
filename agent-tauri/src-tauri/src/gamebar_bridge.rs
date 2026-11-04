@@ -1958,7 +1958,41 @@ fn command_pipe_server(app: AppHandle, state: Arc<AppState>) {
 
 
 #[cfg(windows)]
-fn probe_gamebar_uia() -> Result<Value, String> {
+pub(crate) fn probe_overlay_controls(
+    pin_target: Option<bool>,
+    clickthrough_target: Option<bool>,
+    select_if_missing: bool,
+) -> Result<Value, String> {
+    probe_gamebar_uia(pin_target, clickthrough_target, select_if_missing)
+}
+
+#[cfg(windows)]
+fn probe_gamebar_uia(
+    pin_target: Option<bool>,
+    clickthrough_target: Option<bool>,
+    select_if_missing: bool,
+) -> Result<Value, String> {
+    // Serialize direct UI controls with the widget's foreground auto-setup.
+    // Otherwise a delayed probe can undo a just-completed user toggle.
+    static UIA_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    let lock = UIA_LOCK.get_or_init(|| std::sync::Mutex::new(()));
+    let _guard = lock
+        .lock()
+        .map_err(|_| "Game Bar UIA 제어 잠금 실패".to_string())?;
+    // A widget foreground auto-setup reads the preferences *after* locking,
+    // so it cannot replay stale ON values after a desktop OFF toggle.
+    let (pin_target, clickthrough_target) = if select_if_missing
+        && pin_target.is_none()
+        && clickthrough_target.is_none()
+    {
+        let config = crate::config::Config::load();
+        (
+            Some(config.overlay_pin_preference.unwrap_or(true)),
+            Some(config.overlay_click_through_preference.unwrap_or(true)),
+        )
+    } else {
+        (pin_target, clickthrough_target)
+    };
     use windows::{
         core::PWSTR,
         Win32::{
@@ -1974,8 +2008,8 @@ fn probe_gamebar_uia() -> Result<Value, String> {
             },
             UI::Accessibility::{
                 CUIAutomation, IUIAutomation, IUIAutomationElement, IUIAutomationInvokePattern,
-                IUIAutomationTogglePattern, TreeScope_Children, TreeScope_Subtree,
-                ToggleState_On, UIA_ButtonControlTypeId, UIA_InvokePatternId, UIA_TogglePatternId,
+                IUIAutomationTogglePattern, ToggleState_On, TreeScope_Children, TreeScope_Subtree,
+                UIA_ButtonControlTypeId, UIA_InvokePatternId, UIA_TogglePatternId,
             },
         },
     };
@@ -1991,9 +2025,9 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         if process_id == 0 {
             return String::new();
         }
-        let Ok(handle) = (unsafe {
-            OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id)
-        }) else {
+        let Ok(handle) =
+            (unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, process_id) })
+        else {
             return String::new();
         };
         let mut buffer = vec![0_u16; 32_768];
@@ -2030,8 +2064,9 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         append_native_input_log(&message);
         append_uia_probe_log(&message);
 
-        let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
-            .map_err(|e| format!("UI Automation 생성 실패: {e}"))?;
+        let automation: IUIAutomation =
+            CoCreateInstance(&CUIAutomation, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| format!("UI Automation 생성 실패: {e}"))?;
         let root = automation
             .GetRootElement()
             .map_err(|e| format!("UI Automation desktop root 실패: {e}"))?;
@@ -2075,7 +2110,9 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         let mut clickthrough_toggles: Vec<IUIAutomationElement> = Vec::new();
         let top_len = top.Length().unwrap_or(0).clamp(0, 96);
         for i in 0..top_len {
-            let Ok(element) = top.GetElement(i) else { continue };
+            let Ok(element) = top.GetElement(i) else {
+                continue;
+            };
             let name = text(element.CurrentName());
             let automation_id = text(element.CurrentAutomationId());
             let class_name = text(element.CurrentClassName());
@@ -2111,11 +2148,15 @@ fn probe_gamebar_uia() -> Result<Value, String> {
             // Game Bar can be hosted under an unnamed ApplicationFrameWindow and
             // therefore not advertise "Xbox" or "Game Bar" at the desktop root.
             // Inspect every top-level subtree once, but only emit compact candidates.
-            let Ok(descendants) = element.FindAll(TreeScope_Subtree, &true_condition) else { continue };
+            let Ok(descendants) = element.FindAll(TreeScope_Subtree, &true_condition) else {
+                continue;
+            };
             let descendant_len = descendants.Length().unwrap_or(0).clamp(0, 1200);
             scanned_descendants += descendant_len as usize;
             for j in 0..descendant_len {
-                let Ok(child) = descendants.GetElement(j) else { continue };
+                let Ok(child) = descendants.GetElement(j) else {
+                    continue;
+                };
                 let child_name = text(child.CurrentName());
                 let child_id = text(child.CurrentAutomationId());
                 let child_class = text(child.CurrentClassName());
@@ -2127,9 +2168,8 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 } else {
                     process_image(child_pid)
                 };
-                let child_descriptor = format!(
-                    "{child_name} {child_id} {child_class} {localized_type} {child_image}"
-                );
+                let child_descriptor =
+                    format!("{child_name} {child_id} {child_class} {localized_type} {child_image}");
                 let child_lower = child_descriptor.to_ascii_lowercase();
                 let keyword = child_lower.contains("click")
                     || child_lower.contains("through")
@@ -2143,8 +2183,14 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 let child_gamebar = child_is_gamebar_process || child_is_yummi_widget;
                 let focused_process = focused_pid != 0 && child_pid == focused_pid;
                 let is_button = control_type == UIA_ButtonControlTypeId;
-                let enabled = child.CurrentIsEnabled().map(|v| v.as_bool()).unwrap_or(false);
-                let offscreen = child.CurrentIsOffscreen().map(|v| v.as_bool()).unwrap_or(false);
+                let enabled = child
+                    .CurrentIsEnabled()
+                    .map(|v| v.as_bool())
+                    .unwrap_or(false);
+                let offscreen = child
+                    .CurrentIsOffscreen()
+                    .map(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 if child_is_gamebar_process {
                     gamebar_process_seen = true;
@@ -2180,9 +2226,11 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 }
 
                 let rect = child.CurrentBoundingRectangle().ok();
-                let bounds = rect.map(|r| serde_json::json!({
-                    "left": r.left, "top": r.top, "right": r.right, "bottom": r.bottom
-                }));
+                let bounds = rect.map(|r| {
+                    serde_json::json!({
+                        "left": r.left, "top": r.top, "right": r.right, "bottom": r.bottom
+                    })
+                });
                 let message = format!(
                     "uia-probe candidate topClass={:?} name={:?} automationId={:?} class={:?} type={:?} controlType={} pid={} image={:?} keyword={} gamebar={} focusedProcess={} enabled={} offscreen={}",
                     class_name, child_name, child_id, child_class, localized_type,
@@ -2218,15 +2266,18 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 Ok(pattern) => pattern
                     .Invoke()
                     .map_err(|error| format!("{label} Invoke 실패: {error}")),
-                Err(invoke_error) => element
-                    .SetFocus()
-                    .map_err(|focus_error| format!(
+                Err(invoke_error) => element.SetFocus().map_err(|focus_error| {
+                    format!(
                         "{label} Invoke 패턴 없음({invoke_error}); SetFocus 실패: {focus_error}"
-                    )),
+                    )
+                }),
             }
         };
 
-        let ensure_toggle_on = |element: &IUIAutomationElement, label: &str| -> Result<Value, String> {
+        let set_or_read_toggle = |element: &IUIAutomationElement,
+                                  label: &str,
+                                  requested: Option<bool>|
+         -> Result<Value, String> {
             let pattern = element
                 .GetCurrentPatternAs::<IUIAutomationTogglePattern>(UIA_TogglePatternId)
                 .map_err(|error| format!("{label} Toggle 패턴 조회 실패: {error}"))?;
@@ -2234,17 +2285,21 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 .CurrentToggleState()
                 .map_err(|error| format!("{label} 상태 조회 실패: {error}"))?;
             let mut toggled = false;
-            if before != ToggleState_On {
+            if requested.is_some_and(|wanted| (before == ToggleState_On) != wanted) {
                 pattern
                     .Toggle()
                     .map_err(|error| format!("{label} Toggle 실패: {error}"))?;
                 toggled = true;
-                std::thread::sleep(std::time::Duration::from_millis(40));
+                std::thread::sleep(std::time::Duration::from_millis(65));
             }
-            let after = pattern.CurrentToggleState().unwrap_or(before);
+            let after = pattern
+                .CurrentToggleState()
+                .map_err(|error| format!("{label} 변경 후 상태 조회 실패: {error}"))?;
+            let enabled = after == ToggleState_On;
+            let verified = requested.is_none_or(|wanted| enabled == wanted);
             let message = format!(
-                "uia-auto {label} before={} toggled={} after={} enabled={}",
-                before.0, toggled, after.0, after == ToggleState_On
+                "uia-control {label} requested={requested:?} before={} toggled={} after={} enabled={} verified={verified}",
+                before.0, toggled, after.0, enabled
             );
             append_uia_probe_log(&message);
             append_native_input_log(&message);
@@ -2253,13 +2308,14 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 "before": before.0,
                 "after": after.0,
                 "toggled": toggled,
-                "enabled": after == ToggleState_On,
+                "enabled": enabled,
+                "verified": verified,
             }))
         };
 
         let mut selection_invoked = false;
         let mut selection_error = String::new();
-        if gamebar_process_seen && !yummi_selected {
+        if select_if_missing && gamebar_process_seen && !yummi_selected {
             if let Some(button) = yummi_home_button.as_ref() {
                 match invoke_element(button, "유미지지 오버레이 선택") {
                     Ok(()) => {
@@ -2269,7 +2325,8 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                     }
                     Err(error) => {
                         selection_error = error;
-                        let message = format!("uia-auto yummi-select failed error={selection_error}");
+                        let message =
+                            format!("uia-auto yummi-select failed error={selection_error}");
                         append_uia_probe_log(&message);
                         append_native_input_log(&message);
                     }
@@ -2286,64 +2343,85 @@ fn probe_gamebar_uia() -> Result<Value, String> {
         // Yummi's visible TitleText. This prevents a second pinned Game Bar widget
         // from donating its PinToggle when multiple widgets are open at once.
         let raw_walker = automation.RawViewWalker().ok();
-        let choose_nearest_to_yummi = |elements: &[IUIAutomationElement]|
-            -> Option<(IUIAutomationElement, i32)> {
-            let Some(title) = yummi_title_element.as_ref() else {
-                return elements.first().cloned().map(|element| (element, -1));
-            };
-            let Some(walker) = raw_walker.as_ref() else {
-                return elements.first().cloned().map(|element| (element, -1));
-            };
+        let choose_nearest_to_yummi =
+            |elements: &[IUIAutomationElement]| -> Option<(IUIAutomationElement, i32)> {
+                let Some(title) = yummi_title_element.as_ref() else {
+                    return elements.first().cloned().map(|element| (element, -1));
+                };
+                let Some(walker) = raw_walker.as_ref() else {
+                    return elements.first().cloned().map(|element| (element, -1));
+                };
 
-            let mut title_ancestors = Vec::new();
-            let mut current = title.clone();
-            for _ in 0..12 {
-                let Ok(parent) = walker.GetParentElement(&current) else { break };
-                title_ancestors.push(parent.clone());
-                current = parent;
-            }
-
-            let mut best: Option<(IUIAutomationElement, i32)> = None;
-            for element in elements {
-                let mut current = element.clone();
-                let mut candidate_ancestors = Vec::new();
+                let mut title_ancestors = Vec::new();
+                let mut current = title.clone();
                 for _ in 0..12 {
-                    let Ok(parent) = walker.GetParentElement(&current) else { break };
-                    candidate_ancestors.push(parent.clone());
+                    let Ok(parent) = walker.GetParentElement(&current) else {
+                        break;
+                    };
+                    title_ancestors.push(parent.clone());
                     current = parent;
                 }
-                let mut score = -10_000;
-                'outer: for (candidate_depth, candidate_parent) in candidate_ancestors.iter().enumerate() {
-                    for (title_depth, title_parent) in title_ancestors.iter().enumerate() {
-                        if automation
-                            .CompareElements(candidate_parent, title_parent)
-                            .map(|same| same.as_bool())
-                            .unwrap_or(false)
-                        {
-                            score = 1_000 - (candidate_depth + title_depth) as i32;
-                            break 'outer;
+
+                let mut best: Option<(IUIAutomationElement, i32)> = None;
+                for element in elements {
+                    let mut current = element.clone();
+                    let mut candidate_ancestors = Vec::new();
+                    for _ in 0..12 {
+                        let Ok(parent) = walker.GetParentElement(&current) else {
+                            break;
+                        };
+                        candidate_ancestors.push(parent.clone());
+                        current = parent;
+                    }
+                    let mut score = -10_000;
+                    'outer: for (candidate_depth, candidate_parent) in
+                        candidate_ancestors.iter().enumerate()
+                    {
+                        for (title_depth, title_parent) in title_ancestors.iter().enumerate() {
+                            if automation
+                                .CompareElements(candidate_parent, title_parent)
+                                .map(|same| same.as_bool())
+                                .unwrap_or(false)
+                            {
+                                score = 1_000 - (candidate_depth + title_depth) as i32;
+                                break 'outer;
+                            }
                         }
                     }
+                    if best
+                        .as_ref()
+                        .map(|(_, best_score)| score > *best_score)
+                        .unwrap_or(true)
+                    {
+                        best = Some((element.clone(), score));
+                    }
                 }
-                if best.as_ref().map(|(_, best_score)| score > *best_score).unwrap_or(true) {
-                    best = Some((element.clone(), score));
-                }
-            }
-            best
-        };
+                best
+            };
 
         // Never toggle toolbar controls until the Game Bar title explicitly says that
         // Yummi is the selected widget. If selection was just invoked, the widget side
         // retries this command after the hosted tree refreshes.
-        let selected_pin = if yummi_selected { choose_nearest_to_yummi(&pin_toggles) } else { None };
-        let selected_clickthrough = if yummi_selected { choose_nearest_to_yummi(&clickthrough_toggles) } else { None };
+        let selected_pin = if yummi_selected {
+            choose_nearest_to_yummi(&pin_toggles)
+        } else {
+            None
+        };
+        let selected_clickthrough = if yummi_selected {
+            choose_nearest_to_yummi(&clickthrough_toggles)
+        } else {
+            None
+        };
         let pin_scope_score = selected_pin.as_ref().map(|(_, score)| *score).unwrap_or(-1);
-        let clickthrough_scope_score = selected_clickthrough.as_ref().map(|(_, score)| *score).unwrap_or(-1);
+        let clickthrough_scope_score = selected_clickthrough
+            .as_ref()
+            .map(|(_, score)| *score)
+            .unwrap_or(-1);
         let mut pin = serde_json::json!({"found": !pin_toggles.is_empty(), "enabled": false, "scopeScore": pin_scope_score});
         let mut clickthrough = serde_json::json!({"found": !clickthrough_toggles.is_empty(), "enabled": false, "scopeScore": clickthrough_scope_score});
         if yummi_selected {
             pin = match selected_pin.as_ref() {
-                Some((element, score)) => ensure_toggle_on(element, "PinToggle")
+                Some((element, score)) => set_or_read_toggle(element, "PinToggle", pin_target)
                     .map(|mut value| {
                         if let Some(object) = value.as_object_mut() {
                             object.insert("scopeScore".into(), Value::from(*score));
@@ -2354,7 +2432,7 @@ fn probe_gamebar_uia() -> Result<Value, String> {
                 None => serde_json::json!({"found": false, "enabled": false, "scopeScore": -1}),
             };
             clickthrough = match selected_clickthrough.as_ref() {
-                Some((element, score)) => ensure_toggle_on(element, "ClickThroughToggleButton")
+                Some((element, score)) => set_or_read_toggle(element, "ClickThroughToggleButton", clickthrough_target)
                     .map(|mut value| {
                         if let Some(object) = value.as_object_mut() {
                             object.insert("scopeScore".into(), Value::from(*score));
@@ -2371,7 +2449,15 @@ fn probe_gamebar_uia() -> Result<Value, String> {
             .get("enabled")
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let ready = gamebar_process_seen && yummi_selected && pin_enabled && clickthrough_enabled;
+        let pin_verified = pin
+            .get("verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let clickthrough_verified = clickthrough
+            .get("verified")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let ready = gamebar_process_seen && yummi_selected && pin_verified && clickthrough_verified;
         let message = format!(
             "uia-probe complete topWindows={} scannedDescendants={} candidates={} focusedPid={} gameBar={} yummiWidget={} yummiSelected={} selectInvoked={} pin={} clickThrough={} ready={}",
             top_windows.len(), scanned_descendants, candidates.len(), focused_pid,
@@ -2443,7 +2529,7 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
     }
     if command == "probe_gamebar_uia" {
         append_uia_probe_log("uia-probe request-received");
-        return match probe_gamebar_uia() {
+        return match probe_gamebar_uia(None, None, true) {
             Ok(data) => serde_json::json!({
                 "ok": true,
                 "message": "Game Bar UI Automation probe를 완료했습니다.",

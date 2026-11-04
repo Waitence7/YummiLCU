@@ -11,6 +11,7 @@ import type {
   RecordingGameContext,
   RecordingSession,
   OverlayInstallStatus,
+  OverlayControlsStatus,
 } from "../state/types";
 import type {
   MatchFightAnalysis,
@@ -86,6 +87,10 @@ export const getBetaReleaseInfo = () =>
 export const openBetaDownload = () => call<void>("open_beta_download");
 export const applyBetaUpdateNow = () => call<void>("apply_beta_update_now");
 export const openWindowsGameBar = () => call<void>("open_windows_game_bar");
+export const getOverlayControlsStatus = () =>
+  call<OverlayControlsStatus>("get_overlay_controls_status");
+export const setOverlayControl = (control: 'pin' | 'clickThrough', enabled: boolean) =>
+  call<OverlayControlsStatus>("set_overlay_control", { control, enabled });
 export const getOverlayInstallStatus = () =>
   call<OverlayInstallStatus>("get_overlay_install_status");
 export const installOverlay = () =>

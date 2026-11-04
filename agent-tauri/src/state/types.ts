@@ -1,4 +1,16 @@
 
+export type OverlayControlsStatus = {
+  supported: boolean;
+  gameBarFound: boolean;
+  yummiSelected: boolean;
+  pin: boolean | null;
+  clickThrough: boolean | null;
+  pinPreference: boolean | null;
+  clickThroughPreference: boolean | null;
+  selectionInvoked: boolean;
+  message?: string | null;
+};
+
 export type OverlayInstallStatus = {
   supported: boolean;
   installed: boolean;
@@ -50,6 +62,8 @@ export type Config = {
   WindowGlideStrength: number | null;
   WindowFreeRotation: boolean;
   AutoRecordLeagueGames: boolean;
+  OverlayPinPreference?: boolean | null;
+  OverlayClickThroughPreference?: boolean | null;
   UiTestMode: boolean;
 };
 
@@ -177,6 +191,8 @@ export const initialState: AgentState = {
     WindowGlideStrength: 1,
     WindowFreeRotation: false,
     AutoRecordLeagueGames: false,
+    OverlayPinPreference: null,
+    OverlayClickThroughPreference: null,
     UiTestMode: false,
   },
 };

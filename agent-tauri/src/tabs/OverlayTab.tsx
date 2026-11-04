@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 
 import * as api from "../api/commands";
 import { Button, Card } from "../components/ui";
-import type { OverlayInstallStatus } from "../state/types";
+import type { OverlayControlsStatus, OverlayInstallStatus } from "../state/types";
 
 function Key({ children }: { children: string }) {
   return (
@@ -47,6 +47,10 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
   const [tutorialResetMessage, setTutorialResetMessage] = useState<string | null>(null);
   const [fullResetting, setFullResetting] = useState(false);
   const [fullResetMessage, setFullResetMessage] = useState<string | null>(null);
+  const [controls, setControls] = useState<OverlayControlsStatus | null>(null);
+  const [controlsLoading, setControlsLoading] = useState(false);
+  const [controlBusy, setControlBusy] = useState(false);
+  const [controlMessage, setControlMessage] = useState<string | null>(null);
 
   const refresh = async () => {
     setLoading(true);
@@ -60,8 +64,43 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
     }
   };
 
+  const refreshControls = async () => {
+    setControlsLoading(true);
+    try {
+      setControls(await api.getOverlayControlsStatus());
+    } catch (cause) {
+      setControlMessage(`Game Bar 상태 확인 실패 · ${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally {
+      setControlsLoading(false);
+    }
+  };
+
+  const toggleControl = async (control: 'pin' | 'clickThrough', enabled: boolean) => {
+    setControlBusy(true);
+    setControlMessage(null);
+    try {
+      const next = await api.setOverlayControl(control, enabled);
+      setControls(next);
+      const current = control === 'pin' ? next.pin : next.clickThrough;
+      const label = control === 'pin' ? '핀 고정' : '클릭 패스스루';
+      setControlMessage(
+        current === enabled
+          ? `${label} ${enabled ? 'ON' : 'OFF'} · Game Bar에서 적용 확인됨`
+          : `${label} ${enabled ? 'ON' : 'OFF'} 설정 저장됨 · Game Bar를 열고 유미지지 위젯을 선택하면 적용됩니다.`,
+      );
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      setControlMessage(`오버레이 설정 변경 실패 · ${detail}`);
+      void api.reportUiFailure(`overlay_control_${control}`, cause);
+      void refreshControls();
+    } finally {
+      setControlBusy(false);
+    }
+  };
+
   useEffect(() => {
     void refresh();
+    void refreshControls();
   }, []);
 
   const install = async () => {
@@ -135,6 +174,9 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
     }
   };
 
+  const pinEnabled = controls?.pinPreference ?? controls?.pin ?? true;
+  const clickThroughEnabled = controls?.clickThroughPreference ?? controls?.clickThrough ?? true;
+
   const developerToolsVisible = releaseChannel === "beta" || releaseChannel === "dev";
 
   return (
@@ -198,6 +240,61 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
             번 뜰 수 있습니다.
           </p>
           {error && <p className="text-[10px] text-rose-600">{error}</p>}
+        </div>
+      </Card>
+
+      <Card
+        title="핀 고정 · 클릭 패스스루"
+        action={
+          <Button variant="ghost" disabled={controlsLoading || controlBusy} onClick={() => void refreshControls()}>
+            {controlsLoading ? "확인 중…" : "상태 새로고침"}
+          </Button>
+        }
+      >
+        <div className="space-y-2.5">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+            <div className="min-w-0">
+              <strong className="block text-xs text-slate-900">핀 고정</strong>
+              <p className="mt-1 text-[10px] text-slate-500">ON: Game Bar를 닫아도 게임 화면에 표시 · OFF: 고정 해제</p>
+              <p className="mt-1 text-[10px] text-slate-500">
+                실제 상태: {controls?.pin == null ? '확인되지 않음' : controls.pin ? '고정됨' : '고정 해제됨'}
+              </p>
+            </div>
+            <Button
+              role="switch"
+              aria-label="유미지지 오버레이 핀 고정"
+              aria-checked={pinEnabled}
+              variant={pinEnabled ? 'primary' : 'default'}
+              disabled={controlBusy || controlsLoading || !controls?.supported}
+              onClick={() => void toggleControl('pin', !pinEnabled)}
+            >
+              {pinEnabled ? '핀 고정 ON' : '핀 고정 OFF'}
+            </Button>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
+            <div className="min-w-0">
+              <strong className="block text-xs text-slate-900">클릭 패스스루</strong>
+              <p className="mt-1 text-[10px] text-slate-500">ON: 클릭을 게임으로 통과 · OFF: 오버레이에서 클릭 받기</p>
+              <p className="mt-1 text-[10px] text-slate-500">
+                실제 상태: {controls?.clickThrough == null ? '확인되지 않음' : controls.clickThrough ? '통과 켜짐' : '통과 꺼짐'}
+              </p>
+            </div>
+            <Button
+              role="switch"
+              aria-label="유미지지 오버레이 클릭 패스스루"
+              aria-checked={clickThroughEnabled}
+              variant={clickThroughEnabled ? 'primary' : 'default'}
+              disabled={controlBusy || controlsLoading || !controls?.supported}
+              onClick={() => void toggleControl('clickThrough', !clickThroughEnabled)}
+            >
+              {clickThroughEnabled ? '패스스루 ON' : '패스스루 OFF'}
+            </Button>
+          </div>
+          <p className="text-[10px] leading-relaxed text-slate-500">
+            설정은 저장되어 재시작해도 유지됩니다. Game Bar가 열려 있고 유미지지 위젯이 선택된 경우 바로 적용하며, 닫혀 있다면 다음에 열 때 적용합니다. 현재 상태를 확인하려면 Win+G를 열고 새로고침하세요.
+          </p>
+          {controls?.message && <p className="text-[10px] text-amber-700">{controls.message}</p>}
+          {controlMessage && <p role="status" className="text-[10px] text-indigo-700">{controlMessage}</p>}
         </div>
       </Card>
 

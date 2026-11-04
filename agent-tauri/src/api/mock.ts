@@ -95,6 +95,40 @@ export async function mockInvoke<T>(
       log("Game Bar 실행 요청 (UI 프리뷰)");
       emit();
       return undefined as T;
+    case "get_overlay_controls_status":
+      return {
+        supported: true,
+        gameBarFound: true,
+        yummiSelected: true,
+        pin: state.config.OverlayPinPreference ?? true,
+        clickThrough: state.config.OverlayClickThroughPreference ?? true,
+        pinPreference: state.config.OverlayPinPreference ?? null,
+        clickThroughPreference: state.config.OverlayClickThroughPreference ?? null,
+        selectionInvoked: false,
+        message: null,
+      } as T;
+    case "set_overlay_control": {
+      const control = args?.control;
+      if (control !== "pin" && control !== "clickThrough") {
+        throw new Error("지원하지 않는 Game Bar 제어입니다.");
+      }
+      const enabled = args?.enabled === true;
+      if (control === "pin") state.config.OverlayPinPreference = enabled;
+      else state.config.OverlayClickThroughPreference = enabled;
+      log(`Game Bar ${control} ${enabled ? "ON" : "OFF"}`);
+      emit();
+      return {
+        supported: true,
+        gameBarFound: true,
+        yummiSelected: true,
+        pin: state.config.OverlayPinPreference ?? true,
+        clickThrough: state.config.OverlayClickThroughPreference ?? true,
+        pinPreference: state.config.OverlayPinPreference ?? null,
+        clickThroughPreference: state.config.OverlayClickThroughPreference ?? null,
+        selectionInvoked: false,
+        message: null,
+      } as T;
+    }
     case "get_overlay_install_status":
       return {
         supported: true,
