@@ -40,6 +40,8 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
   const [status, setStatus] = useState<OverlayInstallStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [installing, setInstalling] = useState(false);
+  const [openingGameBar, setOpeningGameBar] = useState(false);
+  const [gameBarOpenMessage, setGameBarOpenMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [resettingTutorial, setResettingTutorial] = useState(false);
   const [tutorialResetMessage, setTutorialResetMessage] = useState<string | null>(null);
@@ -72,6 +74,21 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
       void api.reportUiFailure("overlay_install_tab", cause);
     } finally {
       setInstalling(false);
+    }
+  };
+
+  const openGameBar = async () => {
+    setOpeningGameBar(true);
+    setGameBarOpenMessage(null);
+    try {
+      await api.openWindowsGameBar();
+      setGameBarOpenMessage("Game Bar 열기 요청을 보냈습니다. 보이지 않으면 Windows의 Game Bar 설정을 확인하세요.");
+    } catch (cause) {
+      const detail = cause instanceof Error ? cause.message : String(cause);
+      setGameBarOpenMessage(`Game Bar 열기 실패 · ${detail}`);
+      void api.reportUiFailure("overlay_open_game_bar", cause);
+    } finally {
+      setOpeningGameBar(false);
     }
   };
 
@@ -164,6 +181,17 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
                   : "오버레이 설치"}
             </Button>
           </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="default"
+              disabled={openingGameBar || status?.supported === false}
+              onClick={() => void openGameBar()}
+            >
+              {openingGameBar ? "Game Bar 실행 요청 중…" : "Xbox Game Bar 열기"}
+            </Button>
+            <span className="text-[10px] text-slate-500">Win+G 대신 시스템 Game Bar를 엽니다. 처음에는 위젯 메뉴에서 유미지지를 선택하세요.</span>
+          </div>
+          {gameBarOpenMessage && <p role="status" className="text-[10px] text-slate-600">{gameBarOpenMessage}</p>}
           <p className="text-[10px] leading-relaxed text-slate-500">
             최신 서명 manifest와 SHA256을 검증한 뒤 자동 설치합니다. 최초
             설치에서는 인증서와 localhost 예외 등록 때문에 Windows UAC 승인이 한

@@ -91,6 +91,10 @@ export async function mockInvoke<T>(
   args?: Record<string, unknown>,
 ): Promise<T> {
   switch (command) {
+    case "open_windows_game_bar":
+      log("Game Bar 실행 요청 (UI 프리뷰)");
+      emit();
+      return undefined as T;
     case "get_overlay_install_status":
       return {
         supported: true,
@@ -311,7 +315,20 @@ export async function mockInvoke<T>(
         borderlessCaptureStatus: "allowed",
       };
       return structuredClone(recordingStatus) as T;
+    case "set_auto_record_league_games": {
+      state.config.AutoRecordLeagueGames = args?.enabled === true;
+      log(`자동 게임 녹화 ${state.config.AutoRecordLeagueGames ? "켜짐" : "꺼짐"}`);
+      emit();
+      return undefined as T;
+    }
     case "start_recording":
+      // Mirrors the desktop command's permission request before capture.
+      recordingStatus = {
+        ...recordingStatus,
+        borderlessCaptureRequested: true,
+        borderlessCaptureAllowed: true,
+        borderlessCaptureStatus: "allowed",
+      };
       recordingStatus = {
         ...recordingStatus,
         recording: true,

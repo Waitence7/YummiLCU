@@ -97,6 +97,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::lcu::match_replay_analysis,
             crate::commands::lcu::download_match_replay,
             crate::commands::overlay::get_overlay_install_status,
+            crate::commands::overlay::open_windows_game_bar,
             crate::commands::overlay::install_overlay,
             crate::commands::overlay::reset_overlay_tutorial,
             crate::commands::overlay::reset_development_onboarding,

@@ -102,7 +102,7 @@ impl Default for Config {
             tray_effect_playback_rate: 1.0,
             window_glide_strength: Some(1.0),
             window_free_rotation: false,
-            auto_record_league_games: true,
+            auto_record_league_games: false,
             ui_test_mode: false,
         }
     }
@@ -569,6 +569,19 @@ mod tests {
         assert_eq!(config.tray_effect_playback_rate, 1.0);
         assert_eq!(config.window_glide_strength, Some(1.0));
         assert!(!config.window_free_rotation);
+    }
+
+    #[test]
+    fn auto_recording_defaults_off_and_explicit_choice_survives() {
+        assert!(!Config::default().auto_record_league_games);
+        let missing: Config = serde_json::from_str(r#"{"UpdateChannel":"stable"}"#).unwrap();
+        assert!(!missing.auto_record_league_games);
+        let explicit_on: Config =
+            serde_json::from_str(r#"{"AutoRecordLeagueGames":true}"#).unwrap();
+        assert!(explicit_on.auto_record_league_games);
+        let explicit_off: Config =
+            serde_json::from_str(r#"{"AutoRecordLeagueGames":false}"#).unwrap();
+        assert!(!explicit_off.auto_record_league_games);
     }
 
     #[test]

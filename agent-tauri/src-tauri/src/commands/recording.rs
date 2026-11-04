@@ -181,6 +181,46 @@ pub(crate) async fn start_recording(
     state: State<'_, Arc<AppState>>,
     source: Option<String>,
 ) -> Result<RecordingStatus, String> {
+    // A single click starts both the permission flow and manual recording.
+    // Permission is optional: denied/missing borderless capability must not
+    // prevent ordinary WGC capture with its default system border.
+    match run_blocking_status(
+        state.inner(),
+        "일반 녹화 시작 전 테두리 없는 캡처 권한 요청",
+        "manual_borderless_request_failed",
+        recording::request_borderless_access,
+    )
+    .await
+    {
+        Ok(access) => {
+            let detail = format!(
+                "status={} allowed={} error={}",
+                access.borderless_capture_status,
+                access.borderless_capture_allowed,
+                access
+                    .borderless_capture_detail
+                    .as_deref()
+                    .unwrap_or("none")
+            );
+            state
+                .record_flight("recording", format!("manual_start_borderless {detail}"))
+                .await;
+            if !access.borderless_capture_allowed {
+                state
+                    .report_diagnostic("recording", "manual_borderless_unavailable", &detail)
+                    .await;
+            }
+        }
+        Err(error) => {
+            state
+                .record_flight(
+                    "recording_error",
+                    format!("manual_start_borderless_request_failed {error}"),
+                )
+                .await;
+            // run_blocking_status already records a structured error.
+        }
+    }
     let status = run_blocking_status(
         state.inner(),
         "녹화 시작",

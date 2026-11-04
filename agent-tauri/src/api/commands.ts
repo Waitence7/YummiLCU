@@ -85,6 +85,7 @@ export const getBetaReleaseInfo = () =>
   call<BetaReleaseInfo>("get_beta_release_info");
 export const openBetaDownload = () => call<void>("open_beta_download");
 export const applyBetaUpdateNow = () => call<void>("apply_beta_update_now");
+export const openWindowsGameBar = () => call<void>("open_windows_game_bar");
 export const getOverlayInstallStatus = () =>
   call<OverlayInstallStatus>("get_overlay_install_status");
 export const installOverlay = () =>

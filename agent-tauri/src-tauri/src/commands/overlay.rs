@@ -8,6 +8,63 @@ use crate::{
     state::AppState,
 };
 
+#[cfg(windows)]
+fn launch_windows_game_bar() -> Result<(), String> {
+    use windows::{
+        core::{w, PCWSTR},
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    };
+    // Only the normal Game Bar URI is allowed here. Launching a specific
+    // third-party widget is not guaranteed to work outside the Game Bar host.
+    let handle = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            w!("ms-gamebar:"),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    let result = handle.0 as isize;
+    if result <= 32 {
+        Err(format!(
+            "Windows Game Bar URI 실행 실패: ShellExecuteW={result}"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn launch_windows_game_bar() -> Result<(), String> {
+    Err("Xbox Game Bar 열기는 Windows에서만 지원됩니다.".into())
+}
+
+#[tauri::command]
+pub(crate) async fn open_windows_game_bar(state: State<'_, Arc<AppState>>) -> Result<(), String> {
+    state
+        .record_flight("overlay", "game_bar_open_requested")
+        .await;
+    let result = launch_windows_game_bar();
+    match &result {
+        Ok(()) => {
+            state
+                .record_flight("overlay", "game_bar_uri_dispatched")
+                .await;
+        }
+        Err(error) => {
+            state
+                .record_flight("overlay_error", format!("game_bar_open_failed {error}"))
+                .await;
+            state
+                .report_diagnostic("overlay", "game_bar_open_failed", error)
+                .await;
+        }
+    }
+    result
+}
+
 #[tauri::command]
 pub(crate) async fn get_overlay_install_status(
     state: State<'_, Arc<AppState>>,
