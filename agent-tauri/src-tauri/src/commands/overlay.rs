@@ -131,8 +131,10 @@ fn controls_from_probe(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let message = fallback_message.or_else(|| {
-        if !game_bar_found {
-            Some("Game Bar가 닫혀 있습니다. 선택한 상태는 다음에 열 때 적용됩니다.".into())
+        if probe.is_none() {
+            Some("현재 설정은 저장되어 있습니다. Game Bar 실제 상태는 ‘상태 새로고침’에서 확인할 수 있습니다.".into())
+        } else if !game_bar_found {
+            Some("Game Bar 상태를 UI 자동화에서 찾지 못했습니다. 위젯을 연 뒤 다시 확인해 주세요.".into())
         } else if !selected {
             Some("Game Bar에서 유미지지 오버레이를 선택하면 제어가 적용됩니다.".into())
         } else if probe
@@ -262,9 +264,16 @@ async fn probe_controls(
 #[tauri::command]
 pub(crate) async fn get_overlay_controls_status(
     state: State<'_, Arc<AppState>>,
+    force_live: Option<bool>,
 ) -> Result<OverlayControlsStatus, String> {
     let config = state.config.read().await.clone();
-    let probe = probe_controls(None, None, false).await;
+    // A full desktop-wide UIA traversal can take a long time (or fail if Game
+    // Bar isn't focused). Never gate the initial toggle UI on it.
+    let probe = if force_live.unwrap_or(false) {
+        probe_controls(None, None, false).await
+    } else {
+        Ok(None)
+    };
     Ok(enrich_with_widget_report(match probe {
         Ok(data) => controls_from_probe(&config, data.as_ref(), None),
         Err(error) => controls_from_probe(
@@ -312,65 +321,70 @@ pub(crate) async fn set_overlay_control(
         .await;
     drop(_guard);
 
-    let pin_target = (control == "pin").then_some(enabled);
-    let click_through_target = (control == "clickThrough").then_some(enabled);
-    let mut probe = probe_controls(pin_target, click_through_target, true).await;
-    if probe
-        .as_ref()
-        .ok()
-        .and_then(Option::as_ref)
-        .and_then(|data| data.get("selectionInvoked"))
-        .and_then(Value::as_bool)
-        == Some(true)
-    {
-        tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-        probe = probe_controls(pin_target, click_through_target, false).await;
-    }
-
-    let result = enrich_with_widget_report(match probe {
-        Ok(data) => controls_from_probe(&config, data.as_ref(), None),
-        Err(error) => {
-            state
-                .report_diagnostic(
-                    "overlay",
-                    "control_apply_failed",
-                    format!("control={control} error={error}"),
-                )
-                .await;
-            controls_from_probe(
-                &config,
-                None,
-                Some(format!(
-                    "설정은 저장됐지만 즉시 적용에 실패했습니다: {error}"
-                )),
-            )
+    // The settings write is the user-visible operation and must complete
+    // promptly. Game Bar UIA can enumerate thousands of desktop elements, so
+    // apply it *asynchronously* instead of holding the Tauri command open and
+    // leaving the toggle visually disabled for the entire probe.
+    let apply_state = state.inner().clone();
+    let apply_control = control.clone();
+    tauri::async_runtime::spawn(async move {
+        // The native bridge reads the latest persisted pin/pass-through
+        // preferences while holding its UIA mutex, so rapid user reversals
+        // cannot be overwritten by an earlier queued request.
+        let mut result = probe_controls(None, None, true).await;
+        if result
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .and_then(|data| data.get("selectionInvoked"))
+            .and_then(Value::as_bool)
+            == Some(true)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            result = probe_controls(None, None, true).await;
+        }
+        match result {
+            Ok(Some(data)) => {
+                let latest = Config::load();
+                let expected = if apply_control == "pin" {
+                    latest.overlay_pin_preference
+                } else {
+                    latest.overlay_click_through_preference
+                };
+                let actual = ui_toggle_state(
+                    &data,
+                    if apply_control == "pin" {
+                        "pin"
+                    } else {
+                        "clickThrough"
+                    },
+                );
+                let event = if actual.is_some() && actual == expected {
+                    "control_applied"
+                } else {
+                    "control_pending"
+                };
+                apply_state.record_flight("overlay", format!(
+                    "{event} control={apply_control} requested={expected:?} actual={actual:?} selected={}",
+                    data.get("yummiSelected").and_then(Value::as_bool).unwrap_or(false),
+                )).await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                apply_state
+                    .report_diagnostic(
+                        "overlay",
+                        "control_apply_failed",
+                        format!("control={apply_control} error={error}",),
+                    )
+                    .await;
+            }
         }
     });
-    let actual = if control == "pin" {
-        result.pin
-    } else {
-        result.click_through
-    };
-    let live_source = if control == "pin" {
-        result.pin_source.as_deref()
-    } else {
-        result.click_through_source.as_deref()
-    };
-    if actual != Some(enabled) || live_source != Some("uia") {
-        state
-            .record_flight(
-                "overlay",
-                format!("control_pending control={control} enabled={enabled} current={actual:?}"),
-            )
-            .await;
-    } else {
-        state
-            .record_flight(
-                "overlay",
-                format!("control_applied control={control} enabled={enabled}"),
-            )
-            .await;
-    }
+
+    let mut result = controls_from_probe(&config, None, None);
+    result = enrich_with_widget_report(result);
+    result.message = Some("설정 저장 완료 · Game Bar에 적용을 요청했습니다. 실제 반영 여부는 상태 새로고침으로 확인하세요.".into());
     Ok(result)
 }
 

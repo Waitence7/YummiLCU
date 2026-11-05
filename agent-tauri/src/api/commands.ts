@@ -87,8 +87,8 @@ export const getBetaReleaseInfo = () =>
 export const openBetaDownload = () => call<void>("open_beta_download");
 export const applyBetaUpdateNow = () => call<void>("apply_beta_update_now");
 export const openWindowsGameBar = () => call<void>("open_windows_game_bar");
-export const getOverlayControlsStatus = () =>
-  call<OverlayControlsStatus>("get_overlay_controls_status");
+export const getOverlayControlsStatus = (forceLive = false) =>
+  call<OverlayControlsStatus>("get_overlay_controls_status", { forceLive });
 export const setOverlayControl = (control: 'pin' | 'clickThrough', enabled: boolean) =>
   call<OverlayControlsStatus>("set_overlay_control", { control, enabled });
 export const getOverlayInstallStatus = () =>
