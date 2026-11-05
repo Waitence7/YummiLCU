@@ -84,7 +84,7 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
       const current = control === 'pin' ? next.pin : next.clickThrough;
       const label = control === 'pin' ? '핀 고정' : '클릭 패스스루';
       setControlMessage(
-        current === enabled
+        current === enabled && (control === 'pin' ? next.pinSource : next.clickThroughSource) === 'uia'
           ? `${label} ${enabled ? 'ON' : 'OFF'} · Game Bar에서 적용 확인됨`
           : `${label} ${enabled ? 'ON' : 'OFF'} 설정 저장됨 · Game Bar를 열고 유미지지 위젯을 선택하면 적용됩니다.`,
       );
@@ -121,7 +121,7 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
     setGameBarOpenMessage(null);
     try {
       await api.openWindowsGameBar();
-      setGameBarOpenMessage("Game Bar 열기 요청을 보냈습니다. 보이지 않으면 Windows의 Game Bar 설정을 확인하세요.");
+      setGameBarOpenMessage("Win+G 입력을 전송했습니다. 화면이 바뀌지 않으면 진단 로그를 확인하세요.");
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
       setGameBarOpenMessage(`Game Bar 열기 실패 · ${detail}`);
@@ -257,7 +257,7 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
               <strong className="block text-xs text-slate-900">핀 고정</strong>
               <p className="mt-1 text-[10px] text-slate-500">ON: Game Bar를 닫아도 게임 화면에 표시 · OFF: 고정 해제</p>
               <p className="mt-1 text-[10px] text-slate-500">
-                실제 상태: {controls?.pin == null ? '확인되지 않음' : controls.pin ? '고정됨' : '고정 해제됨'}
+                상태: {controls?.pin == null ? '확인되지 않음' : controls.pin ? '고정됨' : '고정 해제됨'} {controls?.pinSource === 'widget_last_report' ? '(위젯 마지막 보고)' : ''}
               </p>
             </div>
             <Button
@@ -276,7 +276,7 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
               <strong className="block text-xs text-slate-900">클릭 패스스루</strong>
               <p className="mt-1 text-[10px] text-slate-500">ON: 클릭을 게임으로 통과 · OFF: 오버레이에서 클릭 받기</p>
               <p className="mt-1 text-[10px] text-slate-500">
-                실제 상태: {controls?.clickThrough == null ? '확인되지 않음' : controls.clickThrough ? '통과 켜짐' : '통과 꺼짐'}
+                상태: {controls?.clickThrough == null ? '확인되지 않음' : controls.clickThrough ? '통과 켜짐' : '통과 꺼짐'} {controls?.clickThroughSource === 'widget_last_report' ? '(위젯 마지막 보고)' : ''}
               </p>
             </div>
             <Button

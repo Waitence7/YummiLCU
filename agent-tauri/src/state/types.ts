@@ -5,6 +5,9 @@ export type OverlayControlsStatus = {
   yummiSelected: boolean;
   pin: boolean | null;
   clickThrough: boolean | null;
+  pinSource?: 'uia' | 'widget_last_report' | null;
+  clickThroughSource?: 'uia' | 'widget_last_report' | null;
+  widgetReportAgeSecs?: number | null;
   pinPreference: boolean | null;
   clickThroughPreference: boolean | null;
   selectionInvoked: boolean;

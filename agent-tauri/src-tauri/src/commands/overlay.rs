@@ -14,30 +14,44 @@ use crate::{
 
 #[cfg(windows)]
 fn launch_windows_game_bar() -> Result<(), String> {
-    use windows::{
-        core::{w, PCWSTR},
-        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        VIRTUAL_KEY, VK_LWIN,
     };
-    // Only the normal Game Bar URI is allowed here. Launching a specific
-    // third-party widget is not guaranteed to work outside the Game Bar host.
-    let handle = unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            w!("ms-gamebar:"),
-            PCWSTR::null(),
-            PCWSTR::null(),
-            SW_SHOWNORMAL,
-        )
+
+    // ShellExecuteW("ms-gamebar:") may report a successful protocol dispatch
+    // without showing the *overlay*. The real keyboard Win+G works on those
+    // machines, so send exactly that hotkey through the interactive session.
+    let key = |code: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: code,
+                dwFlags: flags,
+                ..Default::default()
+            },
+        },
     };
-    let result = handle.0 as isize;
-    if result <= 32 {
-        Err(format!(
-            "Windows Game Bar URI 실행 실패: ShellExecuteW={result}"
-        ))
-    } else {
-        Ok(())
+    let g = VIRTUAL_KEY(b'G' as u16);
+    let inputs = [
+        key(VK_LWIN, KEYBD_EVENT_FLAGS::default()),
+        key(g, KEYBD_EVENT_FLAGS::default()),
+        key(g, KEYEVENTF_KEYUP),
+        key(VK_LWIN, KEYEVENTF_KEYUP),
+    ];
+    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+    if sent != inputs.len() as u32 {
+        let win32_error = windows::core::Error::from_win32();
+        // If Windows accepted only part of the batch, release both keys to
+        // avoid leaving a synthetic Windows modifier logically held down.
+        let release = [key(g, KEYEVENTF_KEYUP), key(VK_LWIN, KEYEVENTF_KEYUP)];
+        unsafe { SendInput(&release, std::mem::size_of::<INPUT>() as i32) };
+        return Err(format!(
+            "Win+G 키 입력 전송 실패: accepted={sent}/{} win32={win32_error}",
+            inputs.len()
+        ));
     }
+    Ok(())
 }
 
 #[cfg(not(windows))]
@@ -54,7 +68,7 @@ pub(crate) async fn open_windows_game_bar(state: State<'_, Arc<AppState>>) -> Re
     match &result {
         Ok(()) => {
             state
-                .record_flight("overlay", "game_bar_uri_dispatched")
+                .record_flight("overlay", "game_bar_hotkey_dispatched")
                 .await;
         }
         Err(error) => {
@@ -77,6 +91,9 @@ pub(crate) struct OverlayControlsStatus {
     yummi_selected: bool,
     pin: Option<bool>,
     click_through: Option<bool>,
+    pin_source: Option<String>,
+    click_through_source: Option<String>,
+    widget_report_age_secs: Option<u64>,
     pin_preference: Option<bool>,
     click_through_preference: Option<bool>,
     selection_invoked: bool,
@@ -131,6 +148,9 @@ fn controls_from_probe(
         }
     });
     OverlayControlsStatus {
+        pin_source: pin.map(|_| "uia".to_string()),
+        click_through_source: click_through.map(|_| "uia".to_string()),
+        widget_report_age_secs: None,
         supported: cfg!(windows),
         game_bar_found,
         yummi_selected: selected,
@@ -141,6 +161,81 @@ fn controls_from_probe(
         selection_invoked,
         message,
     }
+}
+
+#[cfg(windows)]
+fn read_widget_last_report() -> Option<(Value, u64)> {
+    use std::time::SystemTime;
+
+    // The UWP widget writes its own authoritative host SDK state into
+    // LocalState/hud-status.json. The desktop UI can read this report even
+    // when the Game Bar titlebar is hidden or UI Automation cannot attach.
+    // Treat it as last-reported state, never as a verified live UIA result.
+    let package_root = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("Packages");
+    let mut latest: Option<(SystemTime, std::path::PathBuf)> = None;
+    for entry in std::fs::read_dir(package_root).ok()?.flatten().take(512) {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.starts_with("YummiGameBarWidget_") {
+            continue;
+        }
+        let path = entry.path().join("LocalState").join("hud-status.json");
+        let Ok(metadata) = std::fs::metadata(&path) else {
+            continue;
+        };
+        if !metadata.is_file() || metadata.len() > 64 * 1024 {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        if latest
+            .as_ref()
+            .is_none_or(|(previous, _)| modified > *previous)
+        {
+            latest = Some((modified, path));
+        }
+    }
+    let (modified, path) = latest?;
+    let age_secs = modified.elapsed().ok()?.as_secs();
+    // Do not represent a report from a previous day as the current state.
+    if age_secs > 6 * 60 * 60 {
+        return None;
+    }
+    let report: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    report.get("pinned")?.as_bool()?;
+    report.get("clickThroughEnabled")?.as_bool()?;
+    Some((report, age_secs))
+}
+
+#[cfg(not(windows))]
+fn read_widget_last_report() -> Option<(Value, u64)> {
+    None
+}
+
+fn enrich_with_widget_report(mut status: OverlayControlsStatus) -> OverlayControlsStatus {
+    if status.pin.is_some() && status.click_through.is_some() {
+        return status;
+    }
+    let Some((report, age)) = read_widget_last_report() else {
+        return status;
+    };
+    if status.pin.is_none() {
+        status.pin = report.get("pinned").and_then(Value::as_bool);
+        if status.pin.is_some() {
+            status.pin_source = Some("widget_last_report".into());
+        }
+    }
+    if status.click_through.is_none() {
+        status.click_through = report.get("clickThroughEnabled").and_then(Value::as_bool);
+        if status.click_through.is_some() {
+            status.click_through_source = Some("widget_last_report".into());
+        }
+    }
+    status.widget_report_age_secs = Some(age);
+    status.message = Some(format!(
+        "Game Bar 제목줄에서 상태를 읽을 수 없어 위젯의 마지막 보고({age}초 전)를 표시합니다. 실시간 상태가 아닐 수 있습니다."
+    ));
+    status
 }
 
 async fn probe_controls(
@@ -170,14 +265,14 @@ pub(crate) async fn get_overlay_controls_status(
 ) -> Result<OverlayControlsStatus, String> {
     let config = state.config.read().await.clone();
     let probe = probe_controls(None, None, false).await;
-    Ok(match probe {
+    Ok(enrich_with_widget_report(match probe {
         Ok(data) => controls_from_probe(&config, data.as_ref(), None),
         Err(error) => controls_from_probe(
             &config,
             None,
             Some(format!("Game Bar 상태 확인 실패: {error}")),
         ),
-    })
+    }))
 }
 
 #[tauri::command]
@@ -232,7 +327,7 @@ pub(crate) async fn set_overlay_control(
         probe = probe_controls(pin_target, click_through_target, false).await;
     }
 
-    let result = match probe {
+    let result = enrich_with_widget_report(match probe {
         Ok(data) => controls_from_probe(&config, data.as_ref(), None),
         Err(error) => {
             state
@@ -250,13 +345,18 @@ pub(crate) async fn set_overlay_control(
                 )),
             )
         }
-    };
+    });
     let actual = if control == "pin" {
         result.pin
     } else {
         result.click_through
     };
-    if actual != Some(enabled) {
+    let live_source = if control == "pin" {
+        result.pin_source.as_deref()
+    } else {
+        result.click_through_source.as_deref()
+    };
+    if actual != Some(enabled) || live_source != Some("uia") {
         state
             .record_flight(
                 "overlay",
