@@ -300,7 +300,7 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
             </Button>
           </div>
           <p className="text-[10px] leading-relaxed text-slate-500">
-            상태 확인이 안 되어도 토글을 누를 수 있습니다. 설정을 먼저 저장하고 Game Bar에 비동기로 적용하므로 상태 조회를 기다리지 않습니다. 반영을 확인하려면 Win+G에서 유미지지 위젯을 연 뒤 상태 새로고침을 눌러 주세요.
+            상태 확인이 안 되어도 토글을 누를 수 있습니다. 핀 ON은 Game Bar가 닫혀 있으면 앱 활성화와 재시도를 자동으로 진행합니다. 적용 실패 시 Win+G로 유미지지 위젯을 열고 상태 새로고침을 눌러 주세요.
           </p>
           {controls?.message && <p className="text-[10px] text-amber-700">{controls.message}</p>}
           {controlMessage && <p role="status" className="text-[10px] text-indigo-700">{controlMessage}</p>}

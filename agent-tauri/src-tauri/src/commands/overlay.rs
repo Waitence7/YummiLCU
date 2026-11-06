@@ -438,6 +438,103 @@ pub(crate) async fn set_overlay_control(
             }
             result = probe_controls(None, None, true).await;
         }
+        // Unlike OFF, pin ON may be requested while Game Bar is closed and
+        // unpinned widget toolbar controls are absent from the UIA tree. Bring
+        // up the packaged Game Bar first, then retry selection and pinning.
+        // This is intentionally only for an explicit pin-ON action; clicking
+        // pass-through or turning pin OFF must not raise Game Bar unexpectedly.
+        let pin_is_on = |probe: &Result<Option<Value>, String>| {
+            probe
+                .as_ref()
+                .ok()
+                .and_then(Option::as_ref)
+                .and_then(|data| {
+                    data.get("yummiSelected")
+                        .and_then(Value::as_bool)
+                        .filter(|selected| *selected)
+                        .and_then(|_| ui_toggle_state(data, "pin"))
+                })
+                == Some(true)
+        };
+        if apply_control == "pin" && enabled && !pin_is_on(&result) {
+            apply_state
+                .record_flight(
+                    "overlay",
+                    format!("pin_on_open_gamebar_started generation={request_generation}"),
+                )
+                .await;
+            let activation = tokio::task::spawn_blocking(launch_windows_game_bar).await;
+            match &activation {
+                Ok(Ok(launch)) => {
+                    apply_state
+                        .record_flight(
+                            "overlay",
+                            format!("pin_on_open_gamebar_dispatched activation={launch:?}"),
+                        )
+                        .await;
+                }
+                Ok(Err(error)) => {
+                    apply_state
+                        .record_flight(
+                            "overlay_error",
+                            format!("pin_on_open_gamebar_failed error={error}"),
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    apply_state
+                        .record_flight(
+                            "overlay_error",
+                            format!("pin_on_open_gamebar_task_failed error={error}"),
+                        )
+                        .await;
+                }
+            }
+            // Game Bar host/titlebar and Yummi selection become available at
+            // different times. Retry in a bounded window, without blocking the
+            // UI thread. Every attempt checks the request generation first.
+            for (attempt, delay_ms) in [(1, 300u64), (2, 600), (3, 950), (4, 1200)] {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                if request_generation != CONTROL_REQUEST_GENERATION.load(Ordering::SeqCst) {
+                    apply_state.record_flight(
+                        "overlay",
+                        format!("control_superseded_after_gamebar_open generation={request_generation}"),
+                    ).await;
+                    return;
+                }
+                result = probe_controls(None, None, true).await;
+                apply_state
+                    .record_flight(
+                        "overlay",
+                        format!(
+                            "pin_on_retry attempt={attempt} selected={} applied={} elapsedMs={}",
+                            result
+                                .as_ref()
+                                .ok()
+                                .and_then(Option::as_ref)
+                                .and_then(|data| data.get("yummiSelected"))
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                            pin_is_on(&result),
+                            requested_at.elapsed().as_millis(),
+                        ),
+                    )
+                    .await;
+                if pin_is_on(&result) {
+                    break;
+                }
+            }
+            if !pin_is_on(&result) {
+                apply_state
+                    .record_flight(
+                        "overlay",
+                        format!(
+                    "pin_on_requires_gamebar_foreground generation={request_generation} attempts=4"
+                ),
+                    )
+                    .await;
+            }
+        }
         let probe_ms = probe_started.elapsed().as_millis();
         match result {
             Ok(Some(data)) => {
