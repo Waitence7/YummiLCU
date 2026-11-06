@@ -721,6 +721,13 @@ pub(crate) async fn install_overlay(
     state
         .record_flight("overlay_install", "user_requested")
         .await;
+    // Only the first installation should raise Game Bar. Recovery or a
+    // subsequent version update must not unexpectedly steal foreground focus.
+    let was_installed = tokio::task::spawn_blocking(gamebar_bridge::overlay_install_status)
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .map(|status| status.installed);
     match gamebar_bridge::install_overlay_latest().await {
         Ok(status) => {
             state
@@ -732,6 +739,54 @@ pub(crate) async fn install_overlay(
                     ),
                 )
                 .await;
+            if was_installed == Some(false) && status.installed {
+                state
+                    .record_flight("overlay_install", "first_install_gamebar_open_requested")
+                    .await;
+                // Game Bar's manifest ActivateAfterInstall=true opens the
+                // widget, while activating the Game Bar packaged app brings
+                // its host on screen. A launch failure does not undo a verified
+                // AppX installation; it is reported separately to the user.
+                match tokio::task::spawn_blocking(launch_windows_game_bar).await {
+                    #[cfg(windows)]
+                    Ok(Ok(launch)) => {
+                        state
+                            .record_flight(
+                                "overlay_install",
+                                format!(
+                                    "first_install_gamebar_open_dispatched method={} pid={:?}",
+                                    launch.method, launch.process_id
+                                ),
+                            )
+                            .await;
+                    }
+                    #[cfg(not(windows))]
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        state
+                            .record_flight(
+                                "overlay_install_error",
+                                format!("first_install_gamebar_open_failed {error}"),
+                            )
+                            .await;
+                        state
+                            .report_diagnostic(
+                                "overlay",
+                                "first_install_gamebar_open_failed",
+                                &error,
+                            )
+                            .await;
+                    }
+                    Err(error) => {
+                        state
+                            .record_flight(
+                                "overlay_install_error",
+                                format!("first_install_gamebar_open_task_failed {error}"),
+                            )
+                            .await;
+                    }
+                }
+            }
             Ok(status)
         }
         Err(error) => {

@@ -243,9 +243,10 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
           </div>
           {gameBarOpenMessage && <p role="status" className="text-[10px] text-slate-600">{gameBarOpenMessage}</p>}
           <p className="text-[10px] leading-relaxed text-slate-500">
-            최신 서명 manifest와 SHA256을 검증한 뒤 자동 설치합니다. 최초
-            설치에서는 인증서와 localhost 예외 등록 때문에 Windows UAC 승인이 한
-            번 뜰 수 있습니다.
+            최신 서명 manifest와 SHA256을 검증한 뒤 자동 설치합니다. 최초 설치가
+            완료되면 Xbox Game Bar와 유미지지 위젯을 자동으로 열도록 요청합니다.
+            복구/재설치 때는 자동으로 열지 않습니다. 인증서와 localhost 예외 등록을
+            위해 최초 설치 중 Windows UAC 승인이 필요할 수 있습니다.
           </p>
           {error && <p className="text-[10px] text-rose-600">{error}</p>}
         </div>

@@ -216,7 +216,6 @@ namespace YummiGameBarWidget
         private volatile bool nativeInputDiagnosticsWanted;
         private volatile bool nativeInputRuntimeDragWanted;
         private bool nativeInputDeactivatedWhileIdle;
-        private const double HiddenRuntimePanelOpacity = 0.60;
         private const double RuntimeNativeDragThreshold = 2.0;
 
         public Widget()
@@ -362,12 +361,10 @@ namespace YummiGameBarWidget
         {
             var hudVisible = HudPreferences.Visible;
             var pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
-            // F9 is a transient master gate for the real pinned overlay. It is
-            // deliberately independent from HudPreferences.Visible and every
-            // per-panel Visible/Closed setting so Win+G remains a stable editor.
+            // F9 remains a runtime-only master switch; Win+G still provides
+            // the right-side panel selector. Its individual OFF switches hide
+            // panels in both modes via UpdatePanelChrome below.
             var effectiveHudVisible = hudVisible && (!pinnedOnly || !runtimeOverlayHiddenByHotkey);
-            // Win+G is always an edit surface: F9 changes only PinnedOnly output and
-            // therefore cannot visually mutate the editor or its saved toggles.
             HudPanel.Visibility = pinnedOnly && !effectiveHudVisible ? Visibility.Collapsed : Visibility.Visible;
             HudPanel.Opacity = HudPreferences.Opacity;
             RootGrid.Background = effectiveHudVisible && HudPreferences.CoverageTint
@@ -2091,9 +2088,9 @@ namespace YummiGameBarWidget
             var key = (sender as FrameworkElement)?.Tag as string;
             if (string.IsNullOrWhiteSpace(key)) return;
 
-            // The eye controls runtime visibility, not layout expansion. In Win+G
-            // hidden panels stay present as a 60% ghost so the user can immediately
-            // click the eye again; only PinnedOnly/the real game overlay collapses them.
+            // Right-side panel selection and eye controls share a visibility
+            // preference. OFF must hide the entire panel even when Win+G is open;
+            // the right-side switch is the way to show it again.
             var visible = !GetPanelVisible(key);
             SetPanelVisible(key, visible);
             if (visible) HudPreferences.Visible = true;
@@ -2498,12 +2495,10 @@ namespace YummiGameBarWidget
             var hidden = !runtimeVisible;
             var closed = HudPreferences.NativeInputPanelClosed;
 
-            // Eye-hidden: 60% ghost in Win+G, invisible in the real overlay.
-            // X-closed: completely absent in both modes without using the old
-            // expanded/collapsed state as a close mechanism.
-            ClickNativePanel.Visibility = Visibility.Visible;
-            ClickNativePanel.Opacity = closed ? 0.0 : (!pinnedOnly && hidden ? HiddenRuntimePanelOpacity : (pinnedOnly && hidden ? 0.0 : 1.0));
-            ClickNativePanel.IsHitTestVisible = !closed && !pinnedOnly;
+            // Both the Win+G selector and the pinned HUD honor OFF equally.
+            ClickNativePanel.Visibility = (closed || hidden) ? Visibility.Collapsed : Visibility.Visible;
+            ClickNativePanel.Opacity = 1.0;
+            ClickNativePanel.IsHitTestVisible = !closed && !hidden && !pinnedOnly;
             ClickNativeMoveBar.Visibility = !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
             ClickNativeBody.Visibility = Visibility.Visible;
             ClickNativeDetails.Visibility = expanded ? Visibility.Visible : Visibility.Collapsed;
@@ -2531,11 +2526,11 @@ namespace YummiGameBarWidget
             var closed = HudPreferences.VoiceChatPanelClosed;
             var showRuntimeContent = runtimeVisible && voiceChatHasVisibleMessages;
 
-            // Match the other panels: eye-hidden stays as a 60% Win+G ghost but
-            // disappears from the real overlay; X-closed is absent from both modes.
-            VoiceChatPanel.Visibility = editing || showRuntimeContent ? Visibility.Visible : Visibility.Collapsed;
-            VoiceChatPanel.Opacity = closed ? 0.0 : (!pinnedOnly && hidden ? HiddenRuntimePanelOpacity : 1.0);
-            VoiceChatPanel.IsHitTestVisible = !closed && !pinnedOnly;
+            // A disabled selector hides the entire Discord panel in all modes.
+            VoiceChatPanel.Visibility = !closed && !hidden && (editing || showRuntimeContent)
+                ? Visibility.Visible : Visibility.Collapsed;
+            VoiceChatPanel.Opacity = 1.0;
+            VoiceChatPanel.IsHitTestVisible = !closed && !hidden && !pinnedOnly;
             VoiceChatMoveBar.Visibility = editing ? Visibility.Visible : Visibility.Collapsed;
             VoiceChatBody.Visibility = editing || showRuntimeContent ? Visibility.Visible : Visibility.Collapsed;
             VoiceChatOverlay.Visibility = voiceChatHasVisibleMessages ? Visibility.Visible : Visibility.Collapsed;
@@ -2572,11 +2567,11 @@ namespace YummiGameBarWidget
             bool hidden = !runtimeVisible;
             bool closed = GetPanelClosed(key);
 
-            // Eye-hidden: 60% ghost in Win+G, invisible in the real overlay.
-            // X-closed: fully absent from both modes, independently of expanded state.
-            panel.Visibility = Visibility.Visible;
-            panel.Opacity = closed ? 0.0 : (!pinnedOnly && hidden ? HiddenRuntimePanelOpacity : (pinnedOnly && hidden ? 0.0 : 1.0));
-            panel.IsHitTestVisible = !closed && !pinnedOnly;
+            // The right-side switch controls actual visibility, not merely
+            // opacity. An OFF panel is absent from Win+G as well as PinnedOnly.
+            panel.Visibility = (closed || hidden) ? Visibility.Collapsed : Visibility.Visible;
+            panel.Opacity = 1.0;
+            panel.IsHitTestVisible = !closed && !hidden && !pinnedOnly;
             moveBar.Visibility = !pinnedOnly ? Visibility.Visible : Visibility.Collapsed;
             body.Visibility = pinnedOnly ? Visibility.Visible : (expanded ? Visibility.Visible : Visibility.Collapsed);
             eyeButton.Opacity = runtimeVisible ? 1.0 : 0.5;
@@ -4124,7 +4119,7 @@ namespace YummiGameBarWidget
 
         private void ApplyYoutubeRuntimeVisibility(bool pinnedOnly)
         {
-            var renderVideo = !HudPreferences.YoutubePanelClosed && (!pinnedOnly || YoutubePreferences.Visible);
+            var renderVideo = !HudPreferences.YoutubePanelClosed && YoutubePreferences.Visible;
             if (youtubeWebView2 != null)
                 youtubeWebView2.Visibility = renderVideo && !youtubeUsingFallback ? Visibility.Visible : Visibility.Collapsed;
             if (YoutubeFallbackWebView != null)
