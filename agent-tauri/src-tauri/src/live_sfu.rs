@@ -580,6 +580,35 @@ mod tests {
     }
 
     #[test]
+    fn ping_packets_accept_the_league_radial_command_set() {
+        for ping_type in [
+            "on_my_way",
+            "enemy_missing",
+            "retreat",
+            "assist_me",
+            "enemy_vision",
+            "push",
+            "all_in",
+            "need_vision",
+        ] {
+            let payload = format!(r#"{{"v":1,"x":0.25,"y":0.75,"type":"{ping_type}"}}"#);
+            let ping = parse_live_ping(
+                payload.as_bytes(),
+                Some(PING_TOPIC),
+                Some("viewer-420000-abc".into()),
+            )
+            .unwrap();
+            assert_eq!(ping.ping_type, ping_type);
+        }
+        assert!(parse_live_ping(
+            br#"{"v":1,"x":0.25,"y":0.75,"type":"unknown"}"#,
+            Some(PING_TOPIC),
+            Some("viewer-420000-abc".into())
+        )
+        .is_none());
+    }
+
+    #[test]
     fn pointer_packets_are_bounded_and_viewer_scoped() {
         let payload = br#"{"v":1,"x":0.25,"y":0.75,"visible":true}"#;
         let pointer =
