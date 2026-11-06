@@ -1972,6 +1972,7 @@ fn probe_gamebar_uia(
     clickthrough_target: Option<bool>,
     select_if_missing: bool,
 ) -> Result<Value, String> {
+    let probe_started = std::time::Instant::now();
     // Serialize direct UI controls with the widget's foreground auto-setup.
     // Otherwise a delayed probe can undo a just-completed user toggle.
     static UIA_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -1979,20 +1980,19 @@ fn probe_gamebar_uia(
     let _guard = lock
         .lock()
         .map_err(|_| "Game Bar UIA 제어 잠금 실패".to_string())?;
+    let lock_wait_ms = probe_started.elapsed().as_millis();
     // A widget foreground auto-setup reads the preferences *after* locking,
     // so it cannot replay stale ON values after a desktop OFF toggle.
-    let (pin_target, clickthrough_target) = if select_if_missing
-        && pin_target.is_none()
-        && clickthrough_target.is_none()
-    {
-        let config = crate::config::Config::load();
-        (
-            Some(config.overlay_pin_preference.unwrap_or(true)),
-            Some(config.overlay_click_through_preference.unwrap_or(true)),
-        )
-    } else {
-        (pin_target, clickthrough_target)
-    };
+    let (pin_target, clickthrough_target) =
+        if select_if_missing && pin_target.is_none() && clickthrough_target.is_none() {
+            let config = crate::config::Config::load();
+            (
+                Some(config.overlay_pin_preference.unwrap_or(true)),
+                Some(config.overlay_click_through_preference.unwrap_or(true)),
+            )
+        } else {
+            (pin_target, clickthrough_target)
+        };
     use windows::{
         core::PWSTR,
         Win32::{
@@ -2100,6 +2100,13 @@ fn probe_gamebar_uia(
 
         let mut top_windows = Vec::new();
         let mut candidates = Vec::new();
+        // A UIA descendant query can block for seconds in Discord/Chrome/Office.
+        // Cache process paths so the Game Bar subtree does not open a process
+        // handle for every individual accessibility node.
+        let mut process_images: std::collections::HashMap<i32, String> =
+            std::collections::HashMap::new();
+        let mut hosted_windows_scanned = 0usize;
+        let mut non_gamebar_windows_skipped = 0usize;
         let mut scanned_descendants = 0usize;
         let mut gamebar_process_seen = false;
         let mut yummi_widget_seen = false;
@@ -2118,13 +2125,21 @@ fn probe_gamebar_uia(
             let class_name = text(element.CurrentClassName());
             let framework = text(element.CurrentFrameworkId());
             let process_id = element.CurrentProcessId().unwrap_or(0);
-            let image = process_image(process_id);
+            let image = process_images
+                .entry(process_id)
+                .or_insert_with(|| process_image(process_id))
+                .clone();
             let likely_gamebar = is_gamebar_process(&image);
+            let likely_yummi_widget = is_yummi_widget_process(&image);
             gamebar_process_seen |= likely_gamebar;
+            // Game Bar is often hosted by Explorer in an unnamed
+            // ApplicationFrameWindow. Its top-level PID alone is not enough,
+            // but scanning unrelated Win32 windows is both slow and risky.
             let hosted_window = class_name.eq_ignore_ascii_case("ApplicationFrameWindow")
                 || class_name.to_ascii_lowercase().contains("corewindow")
                 || class_name.to_ascii_lowercase().contains("xaml")
-                || likely_gamebar;
+                || likely_gamebar
+                || likely_yummi_widget;
 
             if !name.is_empty() || !class_name.is_empty() {
                 let message = format!(
@@ -2145,9 +2160,14 @@ fn probe_gamebar_uia(
                 }));
             }
 
-            // Game Bar can be hosted under an unnamed ApplicationFrameWindow and
-            // therefore not advertise "Xbox" or "Game Bar" at the desktop root.
-            // Inspect every top-level subtree once, but only emit compact candidates.
+            // Game Bar can be hosted under an unnamed ApplicationFrameWindow
+            // owned by Explorer, so preserve those host trees. Never enumerate
+            // unrelated Win32 app subtrees (Discord/Chrome/Goodnotes/etc.).
+            if !hosted_window {
+                non_gamebar_windows_skipped += 1;
+                continue;
+            }
+            hosted_windows_scanned += 1;
             let Ok(descendants) = element.FindAll(TreeScope_Subtree, &true_condition) else {
                 continue;
             };
@@ -2157,17 +2177,23 @@ fn probe_gamebar_uia(
                 let Ok(child) = descendants.GetElement(j) else {
                     continue;
                 };
+                let child_pid = child.CurrentProcessId().unwrap_or(process_id);
+                let child_image = process_images
+                    .entry(child_pid)
+                    .or_insert_with(|| process_image(child_pid));
+                let child_is_gamebar_process = is_gamebar_process(child_image);
+                let child_is_yummi_widget = is_yummi_widget_process(child_image);
+                // These two processes own the only controls we may interact
+                // with. Skip expensive name/type/bounds queries on other apps.
+                if !child_is_gamebar_process && !child_is_yummi_widget {
+                    continue;
+                }
+                let child_image = child_image.clone();
                 let child_name = text(child.CurrentName());
                 let child_id = text(child.CurrentAutomationId());
                 let child_class = text(child.CurrentClassName());
                 let localized_type = text(child.CurrentLocalizedControlType());
                 let control_type = child.CurrentControlType().unwrap_or_default();
-                let child_pid = child.CurrentProcessId().unwrap_or(process_id);
-                let child_image = if child_pid == process_id {
-                    image.clone()
-                } else {
-                    process_image(child_pid)
-                };
                 let child_descriptor =
                     format!("{child_name} {child_id} {child_class} {localized_type} {child_image}");
                 let child_lower = child_descriptor.to_ascii_lowercase();
@@ -2178,9 +2204,7 @@ fn probe_gamebar_uia(
                     || child_name.contains("통과")
                     || child_name.contains("클릭")
                     || child_name.contains("입력");
-                let child_is_gamebar_process = is_gamebar_process(&child_image);
-                let child_is_yummi_widget = is_yummi_widget_process(&child_image);
-                let child_gamebar = child_is_gamebar_process || child_is_yummi_widget;
+                let child_gamebar = true;
                 let focused_process = focused_pid != 0 && child_pid == focused_pid;
                 let is_button = control_type == UIA_ButtonControlTypeId;
                 let enabled = child
@@ -2218,13 +2242,8 @@ fn probe_gamebar_uia(
                     yummi_widget_seen = true;
                 }
 
-                // Do not let arbitrary desktop text such as a ChatGPT message containing
-                // "Game Bar" consume the candidate cap. Only actual GameBar.exe / Yummi
-                // widget elements, plus buttons hosted by ApplicationFrameWindow, qualify.
-                if !child_gamebar && !(is_button && hosted_window) {
-                    continue;
-                }
-
+                // Only log nodes owned by Game Bar or the Yummi widget. Other
+                // hosted app controls are never candidates for our toggles.
                 let rect = child.CurrentBoundingRectangle().ok();
                 let bounds = rect.map(|r| {
                     serde_json::json!({
@@ -2459,8 +2478,10 @@ fn probe_gamebar_uia(
             .unwrap_or(false);
         let ready = gamebar_process_seen && yummi_selected && pin_verified && clickthrough_verified;
         let message = format!(
-            "uia-probe complete topWindows={} scannedDescendants={} candidates={} focusedPid={} gameBar={} yummiWidget={} yummiSelected={} selectInvoked={} pin={} clickThrough={} ready={}",
-            top_windows.len(), scanned_descendants, candidates.len(), focused_pid,
+            "uia-probe complete elapsedMs={} lockWaitMs={} topWindows={} hostedWindowsScanned={} otherWindowsSkipped={} processImageLookups={} scannedDescendants={} candidates={} focusedPid={} gameBar={} yummiWidget={} yummiSelected={} selectInvoked={} pin={} clickThrough={} ready={}",
+            probe_started.elapsed().as_millis(), lock_wait_ms,
+            top_windows.len(), hosted_windows_scanned, non_gamebar_windows_skipped,
+            process_images.len(), scanned_descendants, candidates.len(), focused_pid,
             gamebar_process_seen, yummi_widget_seen, yummi_selected, selection_invoked,
             pin_enabled, clickthrough_enabled, ready
         );

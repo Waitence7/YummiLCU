@@ -1,4 +1,17 @@
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, OnceLock,
+};
+use std::time::{Duration, Instant};
+
+// Every toggle updates the same persisted pin/click-through settings. Coalesce
+// rapid requests so an old UIA traversal cannot clog the queue for minutes.
+static CONTROL_REQUEST_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn control_apply_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 use serde::Serialize;
 use serde_json::Value;
@@ -319,6 +332,7 @@ pub(crate) async fn set_overlay_control(
             format!("control_requested control={control} enabled={enabled}"),
         )
         .await;
+    let request_generation = CONTROL_REQUEST_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
     drop(_guard);
 
     // The settings write is the user-visible operation and must complete
@@ -328,9 +342,24 @@ pub(crate) async fn set_overlay_control(
     let apply_state = state.inner().clone();
     let apply_control = control.clone();
     tauri::async_runtime::spawn(async move {
-        // The native bridge reads the latest persisted pin/pass-through
-        // preferences while holding its UIA mutex, so rapid user reversals
-        // cannot be overwritten by an earlier queued request.
+        let requested_at = Instant::now();
+        // Rapid ON/OFF/ON changes need only one traversal with the latest
+        // persisted preferences. Do not hold the UIA lock during the debounce.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let _apply_guard = control_apply_lock().lock().await;
+        if request_generation != CONTROL_REQUEST_GENERATION.load(Ordering::SeqCst) {
+            apply_state
+                .record_flight(
+                    "overlay",
+                    format!("control_superseded control={apply_control} generation={request_generation}"),
+                )
+                .await;
+            return;
+        }
+        let queue_wait_ms = requested_at.elapsed().as_millis();
+        let probe_started = Instant::now();
+        // The native bridge loads the latest preferences while holding its
+        // UIA mutex, so an older running probe cannot replay a stale state.
         let mut result = probe_controls(None, None, true).await;
         if result
             .as_ref()
@@ -340,34 +369,52 @@ pub(crate) async fn set_overlay_control(
             .and_then(Value::as_bool)
             == Some(true)
         {
-            tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+            tokio::time::sleep(Duration::from_millis(350)).await;
+            // A newer toggle may arrive while Game Bar switches widgets.
+            // Let its queued job perform the refreshed lookup instead.
+            if request_generation != CONTROL_REQUEST_GENERATION.load(Ordering::SeqCst) {
+                apply_state.record_flight(
+                    "overlay",
+                    format!("control_superseded_after_select control={apply_control} generation={request_generation}"),
+                ).await;
+                return;
+            }
             result = probe_controls(None, None, true).await;
         }
+        let probe_ms = probe_started.elapsed().as_millis();
         match result {
             Ok(Some(data)) => {
                 let latest = Config::load();
-                let expected = if apply_control == "pin" {
-                    latest.overlay_pin_preference
-                } else {
-                    latest.overlay_click_through_preference
-                };
-                let actual = ui_toggle_state(
-                    &data,
-                    if apply_control == "pin" {
-                        "pin"
+                // A single traversal applies both preferences. Report both
+                // outcomes even if the most recent request changed only one.
+                for (name, field, expected) in [
+                    (
+                        "pin",
+                        "pin",
+                        Some(latest.overlay_pin_preference.unwrap_or(true)),
+                    ),
+                    (
+                        "clickThrough",
+                        "clickThrough",
+                        Some(latest.overlay_click_through_preference.unwrap_or(true)),
+                    ),
+                ] {
+                    let actual = ui_toggle_state(&data, field);
+                    let toggled = data
+                        .get(field)
+                        .and_then(|value| value.get("toggled"))
+                        .and_then(Value::as_bool);
+                    let event = if actual.is_some() && actual == expected {
+                        "control_applied"
                     } else {
-                        "clickThrough"
-                    },
-                );
-                let event = if actual.is_some() && actual == expected {
-                    "control_applied"
-                } else {
-                    "control_pending"
-                };
-                apply_state.record_flight("overlay", format!(
-                    "{event} control={apply_control} requested={expected:?} actual={actual:?} selected={}",
-                    data.get("yummiSelected").and_then(Value::as_bool).unwrap_or(false),
-                )).await;
+                        "control_pending"
+                    };
+                    apply_state.record_flight("overlay", format!(
+                        "{event} control={name} trigger={apply_control} requested={expected:?} actual={actual:?} toggleInvoked={toggled:?} selected={} queueWaitMs={queue_wait_ms} probeMs={probe_ms} totalMs={}",
+                        data.get("yummiSelected").and_then(Value::as_bool).unwrap_or(false),
+                        requested_at.elapsed().as_millis(),
+                    )).await;
+                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -375,7 +422,7 @@ pub(crate) async fn set_overlay_control(
                     .report_diagnostic(
                         "overlay",
                         "control_apply_failed",
-                        format!("control={apply_control} error={error}",),
+                        format!("control={apply_control} queueWaitMs={queue_wait_ms} probeMs={probe_ms} error={error}"),
                     )
                     .await;
             }
