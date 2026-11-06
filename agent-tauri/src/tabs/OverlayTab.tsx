@@ -184,7 +184,6 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
   };
 
   const pinEnabled = controls?.pinPreference ?? controls?.pin ?? true;
-  const clickThroughEnabled = controls?.clickThroughPreference ?? controls?.clickThrough ?? true;
 
   const developerToolsVisible = releaseChannel === "beta" || releaseChannel === "dev";
 
@@ -283,24 +282,17 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3">
             <div className="min-w-0">
               <strong className="block text-xs text-slate-900">클릭 패스스루</strong>
-              <p className="mt-1 text-[10px] text-slate-500">ON: 클릭을 게임으로 통과 · OFF: 오버레이에서 클릭 받기</p>
+              <p className="mt-1 text-[10px] text-slate-500">항상 ON · 클릭은 게임으로 통과하며 별도 입력 영역만 Agent가 처리합니다.</p>
               <p className="mt-1 text-[10px] text-slate-500">
                 상태: {controls?.clickThrough == null ? '확인되지 않음' : controls.clickThrough ? '통과 켜짐' : '통과 꺼짐'} {controls?.clickThroughSource === 'widget_last_report' ? '(위젯 마지막 보고)' : ''}
               </p>
             </div>
-            <Button
-              role="switch"
-              aria-label="유미지지 오버레이 클릭 패스스루"
-              aria-checked={clickThroughEnabled}
-              variant={clickThroughEnabled ? 'primary' : 'default'}
-              disabled={controlBusy || controls?.supported === false}
-              onClick={() => void toggleControl('clickThrough', !clickThroughEnabled)}
-            >
-              {clickThroughEnabled ? '패스스루 ON' : '패스스루 OFF'}
-            </Button>
+            <span className="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-800">
+              패스스루 항상 ON
+            </span>
           </div>
           <p className="text-[10px] leading-relaxed text-slate-500">
-            상태 확인이 안 되어도 토글을 누를 수 있습니다. 핀 ON은 Game Bar가 닫혀 있으면 앱 활성화와 재시도를 자동으로 진행합니다. 적용 실패 시 Win+G로 유미지지 위젯을 열고 상태 새로고침을 눌러 주세요.
+            핀 ON/OFF는 개별 제어할 수 있습니다. 클릭 패스스루는 항상 ON으로 복원되며, Game Bar가 버튼을 숨겼을 때는 앱 활성화 후 재시도합니다. 호스트에서 상태를 확인할 수 없으면 Win+G를 열고 새로고침해 주세요.
           </p>
           {controls?.message && <p className="text-[10px] text-amber-700">{controls.message}</p>}
           {controlMessage && <p role="status" className="text-[10px] text-indigo-700">{controlMessage}</p>}

@@ -448,13 +448,16 @@ namespace YummiGameBarWidget
                 widget.SettingsClicked += WidgetSettingsClicked;
                 widget.WindowBoundsChanged += WidgetStateChanged;
                 widget.PinnedChanged += WidgetStateChanged;
-                widget.ClickThroughEnabledChanged += WidgetStateChanged;
+                widget.ClickThroughEnabledChanged += ClickThroughStateChanged;
                 widget.GameBarDisplayModeChanged += DisplayModeChanged;
                 StartRuntimePanelsHotkey();
                 RequestImmediateOverlayUpdateIfForeground("navigated");
                 UpdateNativeInputDiagnosticsMode(true);
                 UpdatePinTutorial();
                 QueueTutorialStateRefresh("navigated");
+                // Enforce ON even when the widget was already OFF before the
+                // agent/window connected (there may be no new SDK event).
+                if (!widget.ClickThroughEnabled) _ = RequestAlwaysOnClickThroughAsync("navigated");
             }
             else
             {
@@ -472,7 +475,7 @@ namespace YummiGameBarWidget
                 widget.SettingsClicked -= WidgetSettingsClicked;
                 widget.WindowBoundsChanged -= WidgetStateChanged;
                 widget.PinnedChanged -= WidgetStateChanged;
-                widget.ClickThroughEnabledChanged -= WidgetStateChanged;
+                widget.ClickThroughEnabledChanged -= ClickThroughStateChanged;
                 widget.GameBarDisplayModeChanged -= DisplayModeChanged;
             }
             notificationManager = null;
@@ -606,6 +609,46 @@ namespace YummiGameBarWidget
                 UpdateInputState();
                 UpdatePinTutorial();
             });
+        }
+
+        private async void ClickThroughStateChanged(XboxGameBarWidget sender, object args)
+        {
+            try
+            {
+                await Dispatcher.RunAsync(CoreDispatcherPriority.Normal, () =>
+                {
+                    UpdateDisplayState();
+                    UpdateInputState();
+                    UpdatePinTutorial();
+                    if (widget == null || widget.ClickThroughEnabled) return;
+                    // Even if Game Bar marked a previous UIA probe complete,
+                    // a user or host change to OFF must allow another probe.
+                    gameBarUiaProbeCompleted = false;
+                    gameBarUiaProbeAttempts = 0;
+                    lastGameBarUiaProbeAttemptAtMs = 0;
+                    App.LogStage("clickthrough-always-on observed-off");
+                    _ = RequestAlwaysOnClickThroughAsync("sdk-state-changed");
+                });
+            }
+            catch (Exception ex)
+            {
+                App.LogStage("clickthrough-always-on event-error=" + ErrorCode(ex));
+            }
+        }
+
+        private async Task RequestAlwaysOnClickThroughAsync(string reason)
+        {
+            try
+            {
+                // The Agent coalesces repeated requests and retries UIA after
+                // activating Game Bar if its toolbar is not currently visible.
+                var result = await SendAgentCommandAsync("{\"command\":\"enforce_clickthrough_on\"}");
+                App.LogStage("clickthrough-always-on request=" + reason + " result=" + (result ?? ""));
+            }
+            catch (Exception ex)
+            {
+                App.LogStage("clickthrough-always-on request-failed=" + reason + " error=" + ErrorCode(ex));
+            }
         }
 
         private async void DisplayModeChanged(XboxGameBarWidget sender, object args)

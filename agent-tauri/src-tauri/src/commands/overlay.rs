@@ -229,7 +229,7 @@ fn controls_from_probe(
         pin,
         click_through,
         pin_preference: config.overlay_pin_preference,
-        click_through_preference: config.overlay_click_through_preference,
+        click_through_preference: Some(true),
         selection_invoked,
         message,
     }
@@ -331,6 +331,65 @@ async fn probe_controls(
     }
 }
 
+// Called when the widget SDK reports click-through was turned OFF. Restore
+// the always-on policy, including after Game Bar is reactivated. The UIA
+// mutex prevents this recovery from racing direct pin controls.
+#[cfg(windows)]
+pub(crate) async fn enforce_clickthrough_from_widget(state: Arc<AppState>) {
+    let _guard = control_apply_lock().lock().await;
+    let started = Instant::now();
+    let is_on = |probe: &Result<Option<Value>, String>| {
+        probe
+            .as_ref()
+            .ok()
+            .and_then(Option::as_ref)
+            .and_then(|data| {
+                data.get("yummiSelected")
+                    .and_then(Value::as_bool)
+                    .filter(|selected| *selected)
+                    .and_then(|_| ui_toggle_state(data, "clickThrough"))
+            })
+            == Some(true)
+    };
+    let mut result = probe_controls(None, Some(true), true).await;
+    if !is_on(&result) {
+        let launch = tokio::task::spawn_blocking(launch_windows_game_bar).await;
+        state
+            .record_flight(
+                "overlay",
+                format!("clickthrough_enforce_activate_gamebar result={launch:?}",),
+            )
+            .await;
+        for (attempt, delay_ms) in [(1, 300u64), (2, 550), (3, 900), (4, 1200)] {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            result = probe_controls(None, Some(true), true).await;
+            state
+                .record_flight(
+                    "overlay",
+                    format!(
+                        "clickthrough_enforce_retry attempt={attempt} applied={} elapsedMs={}",
+                        is_on(&result),
+                        started.elapsed().as_millis(),
+                    ),
+                )
+                .await;
+            if is_on(&result) {
+                break;
+            }
+        }
+    }
+    state
+        .record_flight(
+            "overlay",
+            format!(
+                "clickthrough_enforce_result applied={} elapsedMs={}",
+                is_on(&result),
+                started.elapsed().as_millis(),
+            ),
+        )
+        .await;
+}
+
 #[tauri::command]
 pub(crate) async fn get_overlay_controls_status(
     state: State<'_, Arc<AppState>>,
@@ -367,13 +426,17 @@ pub(crate) async fn set_overlay_control(
     if control != "pin" && control != "clickThrough" {
         return Err("지원하지 않는 Game Bar 제어 항목입니다.".into());
     }
+    if control == "clickThrough" && !enabled {
+        return Err("클릭 패스스루는 항상 ON으로 유지됩니다.".into());
+    }
     let _guard = state.command_lock.lock().await;
     let mut config = state.config.read().await.clone();
     match control.as_str() {
         "pin" => config.overlay_pin_preference = Some(enabled),
-        "clickThrough" => config.overlay_click_through_preference = Some(enabled),
+        "clickThrough" => config.overlay_click_through_preference = Some(true),
         _ => unreachable!(),
     }
+    config.normalize();
     if let Err(error) = config.save() {
         let detail = format!("control={control} enabled={enabled} error={error}");
         state

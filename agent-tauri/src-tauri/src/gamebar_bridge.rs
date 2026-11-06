@@ -2,7 +2,7 @@
 use std::{
     io::Write,
     net::TcpListener,
-    sync::{atomic::{AtomicUsize, Ordering}, Mutex, OnceLock},
+    sync::{atomic::{AtomicU64, AtomicUsize, Ordering}, Mutex, OnceLock},
 };
 use std::{
     sync::Arc,
@@ -41,6 +41,9 @@ const GAMEBAR_LOOPBACK_ADDR: &str = "127.0.0.1:19514";
 const GAMEBAR_COMMAND_LOOPBACK_ADDR: &str = "127.0.0.1:19515";
 #[cfg(windows)]
 const GAMEBAR_WS_LOOPBACK_ADDR: &str = "127.0.0.1:19517";
+
+#[cfg(windows)]
+static LAST_CLICKTHROUGH_ENFORCE_MS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(windows)]
 const GAMEBAR_INPUT_SHIELD_LABEL: &str = "gamebar-input-shield";
@@ -2547,6 +2550,26 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
                 "오버레이 업데이트 확인을 시작했습니다."
             },
         );
+    }
+    if command == "enforce_clickthrough_on" {
+        // Coalesce notifications from the SDK so a failed Game Bar activation
+        // cannot reopen it repeatedly within seconds.
+        let now = now_ms();
+        let previous = LAST_CLICKTHROUGH_ENFORCE_MS.load(Ordering::Acquire);
+        if now.saturating_sub(previous) < 15_000 {
+            return json_response(true, "클릭 패스스루 ON 복구는 이미 처리 중입니다.");
+        }
+        if LAST_CLICKTHROUGH_ENFORCE_MS
+            .compare_exchange(previous, now, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return json_response(true, "클릭 패스스루 ON 복구 요청이 합쳐졌습니다.");
+        }
+        append_uia_probe_log("clickthrough enforce requested by widget");
+        tauri::async_runtime::spawn(async move {
+            crate::commands::overlay::enforce_clickthrough_from_widget(state).await;
+        });
+        return json_response(true, "클릭 패스스루 ON 복구를 시작했습니다.");
     }
     if command == "probe_gamebar_uia" {
         append_uia_probe_log("uia-probe request-received");

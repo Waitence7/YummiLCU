@@ -75,8 +75,7 @@ pub struct Config {
     pub window_glide_strength: Option<f64>,
     pub window_free_rotation: bool,
     pub auto_record_league_games: bool,
-    /// None preserves the original Game Bar auto-setup behavior (ON).
-    /// Explicit choices are retained across desktop restarts.
+    /// Pin remains user-controlled; click-through is always enforced ON.
     pub overlay_pin_preference: Option<bool>,
     pub overlay_click_through_preference: Option<bool>,
     pub ui_test_mode: bool,
@@ -108,7 +107,7 @@ impl Default for Config {
             window_free_rotation: false,
             auto_record_league_games: false,
             overlay_pin_preference: None,
-            overlay_click_through_preference: None,
+            overlay_click_through_preference: Some(true),
             ui_test_mode: false,
         }
     }
@@ -143,6 +142,9 @@ impl Config {
     }
 
     pub(crate) fn normalize(&mut self) {
+        // Always-on click-through is a product invariant, even if an older
+        // installation or another settings screen wrote an explicit OFF.
+        self.overlay_click_through_preference = Some(true);
         self.relay_public_base_url = Self::secure_url(&self.relay_public_base_url);
         self.update_channel = self.update_channel.trim().to_ascii_lowercase();
         self.tray_hide_effect = self.tray_hide_effect.trim().to_ascii_lowercase();
@@ -269,7 +271,10 @@ impl Config {
                 "설정 저장 경로가 올바르지 않습니다.".into(),
             ));
         }
-        let serialized = serde_json::to_vec_pretty(self)
+        // Persist the forced ON policy, not stale OFF from a legacy caller.
+        let mut normalized = self.clone();
+        normalized.normalize();
+        let serialized = serde_json::to_vec_pretty(&normalized)
             .map_err(|error| AgentError::Config(format!("설정 직렬화 실패: {error}")))?;
         let parent = path
             .parent()
@@ -578,10 +583,25 @@ mod tests {
     }
 
     #[test]
-    fn overlay_control_preferences_keep_explicit_off_and_legacy_defaults() {
+    fn click_through_is_always_on_even_with_saved_off_preference() {
+        assert_eq!(
+            Config::default().overlay_click_through_preference,
+            Some(true)
+        );
+        let mut old: Config = serde_json::from_str(
+            r#"{"OverlayPinPreference":false,"OverlayClickThroughPreference":false}"#,
+        )
+        .unwrap();
+        old.normalize();
+        assert_eq!(old.overlay_pin_preference, Some(false));
+        assert_eq!(old.overlay_click_through_preference, Some(true));
+    }
+
+    #[test]
+    fn overlay_control_preferences_keep_pin_choice_and_force_clickthrough_on() {
         let old: Config = serde_json::from_str(r#"{"UpdateChannel":"stable"}"#).unwrap();
         assert_eq!(old.overlay_pin_preference, None);
-        assert_eq!(old.overlay_click_through_preference, None);
+        assert_eq!(old.overlay_click_through_preference, Some(true));
         let saved: Config = serde_json::from_str(
             r#"{"OverlayPinPreference":false,"OverlayClickThroughPreference":true}"#,
         )
