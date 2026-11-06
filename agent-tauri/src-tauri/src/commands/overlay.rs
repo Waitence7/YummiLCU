@@ -26,31 +26,94 @@ use crate::{
 };
 
 #[cfg(windows)]
-fn launch_windows_game_bar() -> Result<&'static str, String> {
+#[derive(Debug)]
+struct GameBarLaunch {
+    method: &'static str,
+    process_id: Option<u32>,
+}
+
+#[cfg(windows)]
+fn launch_windows_game_bar() -> Result<GameBarLaunch, String> {
     use windows::{
         core::w,
-        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+        Win32::{
+            System::Com::{
+                CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
+                COINIT_APARTMENTTHREADED,
+            },
+            UI::{
+                Shell::{
+                    ApplicationActivationManager, IApplicationActivationManager, ShellExecuteW,
+                    AO_NONE,
+                },
+                WindowsAndMessaging::SW_SHOWNORMAL,
+            },
+        },
     };
 
-    // Game Bar is a packaged Windows application. Starting its GameBar.exe
-    // directly bypasses package activation and is not reliable across updates.
-    // Use Microsoft's Game Bar launch URI instead of synthesizing Win+G.
-    // The explicit launch command is preferred; the plain URI is a fallback
-    // for older package handlers. ShellExecuteW reports dispatch errors.
-    for (uri, name) in [
-        (w!("ms-gamebar://launch"), "ms-gamebar://launch"),
-        (w!("ms-gamebar:"), "ms-gamebar:"),
-    ] {
-        let result = unsafe { ShellExecuteW(None, w!("open"), uri, None, None, SW_SHOWNORMAL) };
-        if (result.0 as isize) > 32 {
-            return Ok(name);
-        }
+    // Game Bar is a packaged app. Activate its registered Start-menu AUMID
+    // rather than dispatching a URI whose shell handler can report success
+    // while no Game Bar window is opened. This asks Windows to launch the
+    // actual registered GameBar app in the interactive user's session.
+    let aumid_result = (|| {
+        let initialized = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) }
+            .ok()
+            .map_err(|e| format!("COM initialization failed: {e}"))?;
+        let result = (|| {
+            let manager: IApplicationActivationManager = unsafe {
+                CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)
+            }
+            .map_err(|e| format!("Game Bar activation manager unavailable: {e}"))?;
+            let pid = unsafe {
+                manager.ActivateApplication(
+                    w!("Microsoft.XboxGamingOverlay_8wekyb3d8bbwe!App"),
+                    w!(""),
+                    AO_NONE,
+                )
+            }
+            .map_err(|e| format!("Game Bar AUMID activation failed: {e}"))?;
+            Ok::<u32, String>(pid)
+        })();
+        // Every successful CoInitializeEx call, including S_FALSE, must be
+        // paired with CoUninitialize on this same blocking worker thread.
+        let _ = initialized;
+        unsafe { CoUninitialize() };
+        result
+    })();
+    if let Ok(pid) = aumid_result {
+        return Ok(GameBarLaunch {
+            method: "aumid",
+            process_id: Some(pid),
+        });
     }
-    Err("Xbox Game Bar 실행 요청 실패: ms-gamebar 프로토콜이 등록되어 있는지 확인하세요.".into())
+
+    // Fallback: ask Explorer to activate the same registered packaged app.
+    // This is a Start-menu app launch, not a synthetic Win+G hotkey.
+    let fallback = unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            w!("explorer.exe"),
+            w!("shell:AppsFolder\\Microsoft.XboxGamingOverlay_8wekyb3d8bbwe!App"),
+            None,
+            SW_SHOWNORMAL,
+        )
+    };
+    if (fallback.0 as isize) > 32 {
+        return Ok(GameBarLaunch {
+            method: "explorer_appsfolder",
+            process_id: None,
+        });
+    }
+    Err(format!(
+        "Xbox Game Bar 앱 활성화 실패: {} (Explorer 응답={}). Windows 설정에서 Xbox Game Bar 설치 상태를 확인하세요.",
+        aumid_result.unwrap_err(),
+        fallback.0 as isize,
+    ))
 }
 
 #[cfg(not(windows))]
-fn launch_windows_game_bar() -> Result<&'static str, String> {
+fn launch_windows_game_bar() -> Result<(), String> {
     Err("Xbox Game Bar 열기는 Windows에서만 지원됩니다.".into())
 }
 
@@ -59,13 +122,25 @@ pub(crate) async fn open_windows_game_bar(state: State<'_, Arc<AppState>>) -> Re
     state
         .record_flight("overlay", "game_bar_open_requested")
         .await;
-    let result = launch_windows_game_bar();
+    // COM activation can take time. Do not block Tauri's async/UI runtime.
+    let result = tokio::task::spawn_blocking(launch_windows_game_bar)
+        .await
+        .map_err(|error| format!("Game Bar 실행 작업 실패: {error}"))?;
     match &result {
-        Ok(uri) => {
+        #[cfg(windows)]
+        Ok(launch) => {
             state
-                .record_flight("overlay", format!("game_bar_protocol_dispatched uri={uri}"))
+                .record_flight(
+                    "overlay",
+                    format!(
+                        "game_bar_app_activation_requested method={} pid={:?}",
+                        launch.method, launch.process_id
+                    ),
+                )
                 .await;
         }
+        #[cfg(not(windows))]
+        Ok(()) => {}
         Err(error) => {
             state
                 .record_flight("overlay_error", format!("game_bar_open_failed {error}"))
