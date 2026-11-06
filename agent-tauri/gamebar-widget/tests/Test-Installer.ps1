@@ -58,8 +58,11 @@ try {
   if ($updaterText -notmatch [regex]::Escape('[switch]$ForceFinalize')) { throw 'Updater must accept forced stale-registration finalization from the Agent' }
   if ($updaterText -match 'Stop-Process -Force') { throw 'Updater must not directly kill Xbox Game Bar processes' }
   $manifestText = Get-Content (Join-Path $InstallerRoot 'Package.appxmanifest') -Raw -Encoding UTF8
-  if ($manifestText -notmatch '<ActivateAfterInstall>false</ActivateAfterInstall>') { throw 'Game Bar widget must not auto-activate after package registration' }
-  Write-Host 'PASS: automatic updates defer in-use registration and never auto-activate the widget'
+  if ($manifestText -notmatch '<ActivateAfterInstall>true</ActivateAfterInstall>') { throw 'Primary Game Bar widget must activate on first install' }
+  $agentOverlay = Get-Content (Join-Path $InstallerRoot '..\src-tauri\src\commands\overlay.rs') -Raw -Encoding UTF8
+  if ($agentOverlay -notmatch 'was_installed == Some\(false\) && status\.installed') { throw 'Agent must only auto-open Game Bar after a verified first installation' }
+  if ($agentOverlay -notmatch 'first_install_gamebar_open_dispatched') { throw 'Agent must log Game Bar launch after the first overlay install' }
+  Write-Host 'PASS: updates defer in-use registration and Agent only auto-opens Game Bar on initial install'
 
   $widgetSource = Get-Content (Join-Path $InstallerRoot 'Widget.xaml.cs') -Raw -Encoding UTF8
   if ($widgetSource -match 'CenterWindowAsync') { throw 'Widget must never auto-center the user window' }
@@ -69,9 +72,12 @@ try {
 
   $widgetXaml = Get-Content (Join-Path $InstallerRoot 'Widget.xaml') -Raw -Encoding UTF8
   if ($widgetSource -notmatch 'SetPanelClosed\(key, true\)') { throw 'X close must use a dedicated closed state' }
-  if ($widgetSource -notmatch 'closed \? 0\.0') { throw 'Closed panels must render fully invisible in both Win+G and pinned modes' }
-  if ($widgetSource -notmatch 'SetPanelVisible\(key, visible\)') { throw 'Eye control must toggle runtime visibility' }
-  if ($widgetSource -notmatch 'HiddenRuntimePanelOpacity = 0\.60') { throw 'Eye-hidden Win+G ghost opacity must remain 60 percent' }
+  if ($widgetSource -notmatch 'panel\.Visibility = \(closed \|\| hidden\) \? Visibility\.Collapsed') { throw 'Disabled panels must be collapsed in Win+G and pinned modes' }
+  if ($widgetSource -notmatch 'ClickNativePanel\.Visibility = \(closed \|\| hidden\)') { throw 'Disabled native input panel must be collapsed in all display modes' }
+  if ($widgetSource -notmatch 'VoiceChatPanel\.Visibility = !closed && !hidden') { throw 'Disabled Discord panel must be collapsed in all display modes' }
+  if ($widgetSource -notmatch 'WinGPanelSettings\.Visibility = editing') { throw 'Right-side Win+G toggle panel must remain accessible' }
+  if ($widgetSource -notmatch 'SetPanelVisible\(key, visible\)') { throw 'Right-side selector and eye control must toggle panel visibility' }
+  if ($widgetSource -match 'HiddenRuntimePanelOpacity') { throw 'Hidden panels must never remain as translucent ghosts' }
   if ($widgetXaml -notmatch '<Button x:Name="NativeHookHitbox"') { throw 'Native input hitbox must be a real Button control' }
   if ($widgetXaml -notmatch 'x:Name="PointerOver"' -or $widgetXaml -notmatch 'x:Name="Pressed"') { throw 'Native input button must provide hover and pressed visual states' }
   if ($widgetXaml -notmatch 'x:Name="NativeHookClickCountText"' -or $widgetSource -notmatch 'NativeHookClickCountText\.Text = clickCount\.ToString\(\)') { throw 'Native input button must show the live native click count' }
@@ -90,7 +96,7 @@ try {
   if ($widgetSource -notmatch 'HandlePinnedYoutubeNativeInputAsync') { throw 'Pinned runtime must forward native mouse input to YouTube' }
   if ($widgetSource -notmatch 'Input\.dispatchMouseEvent') { throw 'YouTube runtime input must use WebView2 DevTools mouse dispatch' }
   if ($widgetSource -match 'local\.Y < RuntimeNativeDragBandHeight') { throw 'YouTube runtime input must not reserve a fixed top drag band' }
-  Write-Host 'PASS: eye ghost, hard close, native input button, pinned runtime drag, and YouTube native input semantics'
+  Write-Host 'PASS: right-side selector hides panels in all modes, native input button and runtime drag preserved'
   if ($widgetXaml -notmatch 'x:Name="BrowserPanel"' -or $widgetXaml -notmatch 'x:Name="BrowserAddressBox"') { throw 'Single-tab browser panel must exist' }
   if ($widgetSource -notmatch 'EnsureBrowserWebView2Async' -or $widgetSource -notmatch 'NormalizeBrowserInput') { throw 'Browser panel must use the shared WebView2 runtime and URL/search normalization' }
   if ($widgetSource -match 'BrowserPanelVisible = show') { throw 'F9 must not rewrite the browser visibility setting' }
