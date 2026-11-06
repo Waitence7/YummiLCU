@@ -130,7 +130,7 @@ export function OverlayTab({ releaseChannel }: { releaseChannel: string }) {
     setGameBarOpenMessage(null);
     try {
       await api.openWindowsGameBar();
-      setGameBarOpenMessage("Win+G 입력을 전송했습니다. 화면이 바뀌지 않으면 진단 로그를 확인하세요.");
+      setGameBarOpenMessage("Windows 게임 바 실행 요청을 전송했습니다. 열리지 않으면 Xbox Game Bar 설치 및 프로토콜 연결을 확인하세요.");
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
       setGameBarOpenMessage(`Game Bar 열기 실패 · ${detail}`);

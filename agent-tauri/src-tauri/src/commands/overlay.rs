@@ -26,49 +26,31 @@ use crate::{
 };
 
 #[cfg(windows)]
-fn launch_windows_game_bar() -> Result<(), String> {
-    use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
-        VIRTUAL_KEY, VK_LWIN,
+fn launch_windows_game_bar() -> Result<&'static str, String> {
+    use windows::{
+        core::w,
+        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
     };
 
-    // ShellExecuteW("ms-gamebar:") may report a successful protocol dispatch
-    // without showing the *overlay*. The real keyboard Win+G works on those
-    // machines, so send exactly that hotkey through the interactive session.
-    let key = |code: VIRTUAL_KEY, flags: KEYBD_EVENT_FLAGS| INPUT {
-        r#type: INPUT_KEYBOARD,
-        Anonymous: INPUT_0 {
-            ki: KEYBDINPUT {
-                wVk: code,
-                dwFlags: flags,
-                ..Default::default()
-            },
-        },
-    };
-    let g = VIRTUAL_KEY(b'G' as u16);
-    let inputs = [
-        key(VK_LWIN, KEYBD_EVENT_FLAGS::default()),
-        key(g, KEYBD_EVENT_FLAGS::default()),
-        key(g, KEYEVENTF_KEYUP),
-        key(VK_LWIN, KEYEVENTF_KEYUP),
-    ];
-    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-    if sent != inputs.len() as u32 {
-        let win32_error = windows::core::Error::from_win32();
-        // If Windows accepted only part of the batch, release both keys to
-        // avoid leaving a synthetic Windows modifier logically held down.
-        let release = [key(g, KEYEVENTF_KEYUP), key(VK_LWIN, KEYEVENTF_KEYUP)];
-        unsafe { SendInput(&release, std::mem::size_of::<INPUT>() as i32) };
-        return Err(format!(
-            "Win+G 키 입력 전송 실패: accepted={sent}/{} win32={win32_error}",
-            inputs.len()
-        ));
+    // Game Bar is a packaged Windows application. Starting its GameBar.exe
+    // directly bypasses package activation and is not reliable across updates.
+    // Use Microsoft's Game Bar launch URI instead of synthesizing Win+G.
+    // The explicit launch command is preferred; the plain URI is a fallback
+    // for older package handlers. ShellExecuteW reports dispatch errors.
+    for (uri, name) in [
+        (w!("ms-gamebar://launch"), "ms-gamebar://launch"),
+        (w!("ms-gamebar:"), "ms-gamebar:"),
+    ] {
+        let result = unsafe { ShellExecuteW(None, w!("open"), uri, None, None, SW_SHOWNORMAL) };
+        if (result.0 as isize) > 32 {
+            return Ok(name);
+        }
     }
-    Ok(())
+    Err("Xbox Game Bar 실행 요청 실패: ms-gamebar 프로토콜이 등록되어 있는지 확인하세요.".into())
 }
 
 #[cfg(not(windows))]
-fn launch_windows_game_bar() -> Result<(), String> {
+fn launch_windows_game_bar() -> Result<&'static str, String> {
     Err("Xbox Game Bar 열기는 Windows에서만 지원됩니다.".into())
 }
 
@@ -79,9 +61,9 @@ pub(crate) async fn open_windows_game_bar(state: State<'_, Arc<AppState>>) -> Re
         .await;
     let result = launch_windows_game_bar();
     match &result {
-        Ok(()) => {
+        Ok(uri) => {
             state
-                .record_flight("overlay", "game_bar_hotkey_dispatched")
+                .record_flight("overlay", format!("game_bar_protocol_dispatched uri={uri}"))
                 .await;
         }
         Err(error) => {
@@ -93,7 +75,7 @@ pub(crate) async fn open_windows_game_bar(state: State<'_, Arc<AppState>>) -> Re
                 .await;
         }
     }
-    result
+    result.map(|_| ())
 }
 
 #[derive(Clone, Debug, Serialize)]

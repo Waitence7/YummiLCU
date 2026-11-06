@@ -21,6 +21,8 @@ using Windows.System;
 using Windows.UI.Xaml;
 using Windows.UI.Xaml.Controls;
 using Windows.UI.Xaml.Controls.Primitives;
+using Windows.UI.Xaml.Automation.Peers;
+using Windows.UI.Xaml.Automation.Provider;
 using Windows.UI.Xaml.Media;
 using Windows.UI.Xaml.Media.Animation;
 using Windows.UI.Xaml.Media.Imaging;
@@ -99,6 +101,10 @@ namespace YummiGameBarWidget
         private bool nativePanelDragMoved;
         private int nativePanelDragActive;
         private bool nativePanelMouseWasDown;
+        // The pinned Game Bar surface is click-through, so its XAML Button
+        // handlers are invoked from the Agent's native mouse input stream.
+        private FrameworkElement nativePressedPinnedControl;
+        private int nativePinnedControlCoordinateMode = -1;
         private FrameworkElement resizedPanel;
         private FrameworkElement resizedBody;
         private uint? panelResizePointerId;
@@ -3125,12 +3131,19 @@ namespace YummiGameBarWidget
             if (!pinnedOnly || !HudPreferences.Visible || HudPanel.Visibility != Visibility.Visible)
             {
                 if (nativeDraggedPanel != null) EndPinnedNativePanelDrag(true);
+                nativePressedPinnedControl = null;
+                nativePinnedControlCoordinateMode = -1;
                 nativePanelMouseWasDown = leftButtonDown;
                 return;
             }
 
             if (leftButtonDown && !nativePanelMouseWasDown)
-                TryBeginPinnedNativePanelDrag(cursorX, cursorY, monitorX, monitorY);
+            {
+                // Hit-test visible buttons before the full-card drag handler.
+                // Otherwise a press on a button starts moving its parent panel.
+                if (!TryBeginPinnedNativeControl(cursorX, cursorY, monitorX, monitorY))
+                    TryBeginPinnedNativePanelDrag(cursorX, cursorY, monitorX, monitorY);
+            }
 
             if (leftButtonDown && nativeDraggedPanel != null && nativeDraggedPanelTransform != null)
             {
@@ -3149,12 +3162,109 @@ namespace YummiGameBarWidget
                         false);
                 }
             }
-            else if (!leftButtonDown && nativePanelMouseWasDown && nativeDraggedPanel != null)
+            else if (!leftButtonDown && nativePanelMouseWasDown)
             {
-                EndPinnedNativePanelDrag(true);
+                if (nativePressedPinnedControl != null)
+                {
+                    var control = nativePressedPinnedControl;
+                    var mode = nativePinnedControlCoordinateMode;
+                    nativePressedPinnedControl = null;
+                    nativePinnedControlCoordinateMode = -1;
+                    var point = NativeCursorToRoot(cursorX, cursorY, monitorX, monitorY, mode);
+                    if (PointInsideRootElement(control, point)) ActivatePinnedNativeControl(control);
+                }
+                else if (nativeDraggedPanel != null)
+                {
+                    EndPinnedNativePanelDrag(true);
+                }
             }
 
             nativePanelMouseWasDown = leftButtonDown;
+        }
+
+        private bool TryBeginPinnedNativeControl(int cursorX, int cursorY, int monitorX, int monitorY)
+        {
+            // Try the same DPI and monitor coordinate mappings as native drag.
+            for (var mode = 0; mode < 4; mode++)
+            {
+                var point = NativeCursorToRoot(cursorX, cursorY, monitorX, monitorY, mode);
+                foreach (var panel in new[] { VoiceChatPanel, BrowserPanel, YoutubePanel, ClickNativePanel, PartyPanel, LcuPanel })
+                {
+                    if (panel.Visibility != Visibility.Visible || panel.Opacity <= 0.01 || !PointInsideRootElement(panel, point))
+                        continue;
+                    var control = HitTestPinnedNativeControl(panel, point, 0);
+                    if (control == null) break;
+                    nativePressedPinnedControl = control;
+                    nativePinnedControlCoordinateMode = mode;
+                    App.LogStage("native-input-control-down name=" + (control.Name ?? "") + " mode=" + mode);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private FrameworkElement HitTestPinnedNativeControl(DependencyObject root, Windows.Foundation.Point point, int depth)
+        {
+            if (root == null || depth > 40) return null;
+            var ui = root as UIElement;
+            if (ui != null && ui.Visibility != Visibility.Visible) return null;
+            var frame = root as FrameworkElement;
+            if (frame != null && frame.Opacity <= 0.01) return null;
+            var control = root as Control;
+            if (control != null && !control.IsEnabled) return null;
+            // WebView native surfaces are handled by the separate input forwarder.
+            if (root is WebView || root is Microsoft.UI.Xaml.Controls.WebView2) return null;
+
+            // Later children draw above earlier children. Respect that ordering.
+            int children;
+            try { children = VisualTreeHelper.GetChildrenCount(root); }
+            catch { children = 0; }
+            for (var i = children - 1; i >= 0; i--)
+            {
+                DependencyObject child;
+                try { child = VisualTreeHelper.GetChild(root, i); }
+                catch { continue; }
+                var hit = HitTestPinnedNativeControl(child, point, depth + 1);
+                if (hit != null) return hit;
+            }
+            // NativeHookHitbox has its own independent mouse counter, not Click.
+            if (frame == NativeHookHitbox) return null;
+            if ((root is Button || root is ToggleSwitch) && PointInsideRootElement(frame, point))
+                return frame;
+            return null;
+        }
+
+        private void ActivatePinnedNativeControl(FrameworkElement element)
+        {
+            try
+            {
+                var toggle = element as ToggleSwitch;
+                if (toggle != null)
+                {
+                    toggle.IsOn = !toggle.IsOn;
+                }
+                else
+                {
+                    var button = element as Button;
+                    if (button == null || !button.IsEnabled) return;
+                    var peer = FrameworkElementAutomationPeer.FromElement(button)
+                        ?? FrameworkElementAutomationPeer.CreatePeerForElement(button);
+                    var invoker = peer?.GetPattern(PatternInterface.Invoke) as IInvokeProvider;
+                    if (invoker == null)
+                    {
+                        App.LogStage("native-input-control-no-invoke name=" + (button.Name ?? ""));
+                        return;
+                    }
+                    invoker.Invoke();
+                }
+                App.LogStage("native-input-control-click name=" + (element.Name ?? "") +
+                    " type=" + element.GetType().Name);
+            }
+            catch (Exception ex)
+            {
+                App.LogStage("native-input-control-failed name=" + (element.Name ?? "") +
+                    " error=" + ErrorCode(ex));
+            }
         }
 
         private void TryBeginPinnedNativePanelDrag(int cursorX, int cursorY, int monitorX, int monitorY)
