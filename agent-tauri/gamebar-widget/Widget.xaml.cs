@@ -209,6 +209,7 @@ namespace YummiGameBarWidget
         // F9 is a session-only master visibility gate. It must never rewrite
         // persisted per-panel or global HUD preferences.
         private bool runtimeOverlayHiddenByHotkey;
+        private bool applyingPinFromDisabledOverlay;
         private int foregroundChromeRefreshGeneration;
         private bool foregroundChromeRefreshInFlight;
         private long lastForegroundChromeRefreshAtMs;
@@ -365,17 +366,21 @@ namespace YummiGameBarWidget
             // the right-side panel selector. Its individual OFF switches hide
             // panels in both modes via UpdatePanelChrome below.
             var effectiveHudVisible = hudVisible && (!pinnedOnly || !runtimeOverlayHiddenByHotkey);
-            HudPanel.Visibility = pinnedOnly && !effectiveHudVisible ? Visibility.Collapsed : Visibility.Visible;
+            // An unpinned widget can temporarily report PinnedOnly on a host
+            // transition. Do not render a tint/cursor or accept game input then.
+            var runtimeRenderable = effectiveHudVisible && (!pinnedOnly || (widget != null && widget.Pinned));
+            HudPanel.Visibility = pinnedOnly && !runtimeRenderable ? Visibility.Collapsed : Visibility.Visible;
             HudPanel.Opacity = HudPreferences.Opacity;
-            RootGrid.Background = effectiveHudVisible && HudPreferences.CoverageTint
+            RootGrid.Background = runtimeRenderable && HudPreferences.CoverageTint
                 ? new SolidColorBrush(Color.FromArgb(26, 123, 90, 166))
                 : new SolidColorBrush(Colors.Transparent);
-            ApplyCursorMarkersVisibility(effectiveHudVisible && HudPreferences.NativeCursorMarkersVisible);
+            ApplyCursorMarkersVisibility(runtimeRenderable && HudPreferences.NativeCursorMarkersVisible);
             ApplyVoiceChatPreferences();
             UpdatePanelChrome();
             RefreshWinGPanelSettings();
             ApplyYoutubePreferences();
             ApplyBrowserPreferences();
+            UpdateDisabledStateOverlay();
             // When the built-in YouTube browser is open, an empty saved URL is
             // expected: the user may be searching/browsing for a video there.
             // Do not cover that browser with the legacy "enter a link" prompt.
@@ -545,7 +550,16 @@ namespace YummiGameBarWidget
                 " hidden=" + runtimeOverlayHiddenByHotkey +
                 " configured=" + HudPreferences.Visible +
                 " mode=" + (widget != null ? widget.GameBarDisplayMode.ToString() : "none") +
-                " pinned=" + (widget != null && widget.Pinned));
+                " pinned=" + (widget != null && widget.Pinned) +
+                " rootHitTest=" + IsHitTestVisible +
+                " hud=" + HudPanel.Visibility +
+                " panels=" +
+                    (LcuPanel.Visibility == Visibility.Visible ? "lcu," : "") +
+                    (PartyPanel.Visibility == Visibility.Visible ? "party," : "") +
+                    (YoutubePanel.Visibility == Visibility.Visible ? "youtube," : "") +
+                    (BrowserPanel.Visibility == Visibility.Visible ? "browser," : "") +
+                    (ClickNativePanel.Visibility == Visibility.Visible ? "native," : "") +
+                    (VoiceChatPanel.Visibility == Visibility.Visible ? "voice," : ""));
         }
 
         private void RequestImmediateOverlayUpdateIfForeground(string reason)
@@ -1091,13 +1105,109 @@ namespace YummiGameBarWidget
                 " · 위치 " + Math.Round(bounds.X) + "," + Math.Round(bounds.Y);
         }
 
+        private void RefreshRootHitTesting()
+        {
+            if (widget == null) return;
+            // An invisible pinned HUD must never leave a transparent full-screen
+            // input surface behind. Keep the Win+G editor interactive.
+            if (widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly)
+            {
+                IsHitTestVisible = true;
+                return;
+            }
+            bool hasVisiblePanel = HudPanel.Visibility == Visibility.Visible &&
+                (LcuPanel.Visibility == Visibility.Visible ||
+                 PartyPanel.Visibility == Visibility.Visible ||
+                 YoutubePanel.Visibility == Visibility.Visible ||
+                 BrowserPanel.Visibility == Visibility.Visible ||
+                 ClickNativePanel.Visibility == Visibility.Visible ||
+                 VoiceChatPanel.Visibility == Visibility.Visible);
+            IsHitTestVisible = hasVisiblePanel && widget.Pinned && !widget.ClickThroughEnabled;
+        }
+
+        private void UpdateDisabledStateOverlay()
+        {
+            if (widget == null || DisabledStateOverlay == null) return;
+
+            // Recovery buttons belong to the Win+G editor only. A hidden HUD
+            // must never add a hit-test surface while the game is foreground.
+            var editing = widget.GameBarDisplayMode != XboxGameBarDisplayMode.PinnedOnly;
+            var unpinned = !widget.Pinned;
+            var hidden = runtimeOverlayHiddenByHotkey || !HudPreferences.Visible;
+            var show = editing && (unpinned || hidden);
+            DisabledStateOverlay.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+            if (!show)
+            {
+                DisabledStateStatusText.Visibility = Visibility.Collapsed;
+                DisabledStateStatusText.Text = "";
+                return;
+            }
+
+            // Pin OFF takes priority if the F9 visibility gate is also off.
+            DisabledStateTitle.Text = unpinned
+                ? "고정이 해제되어 있습니다"
+                : "오버레이가 비활성화되어 있습니다";
+            DisabledStateDescription.Text = unpinned
+                ? "게임 화면에 오버레이를 표시하려면 고정해 주세요."
+                : "F9로 숨긴 오버레이입니다. 활성화하면 게임 화면에 다시 표시됩니다.";
+            DisabledStateActionButton.Content = unpinned ? "고정하기" : "활성화하기";
+            DisabledStateActionButton.IsEnabled = !unpinned || !applyingPinFromDisabledOverlay;
+            DisabledStateIcon.Text = unpinned ? "\uE718" : "\uE7E8";
+        }
+
+        private async void DisabledStateActionButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (widget == null || widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly)
+                return;
+
+            if (!widget.Pinned)
+            {
+                if (applyingPinFromDisabledOverlay) return;
+                applyingPinFromDisabledOverlay = true;
+                DisabledStateActionButton.IsEnabled = false;
+                DisabledStateStatusText.Text = "고정 설정을 적용하고 있습니다…";
+                DisabledStateStatusText.Visibility = Visibility.Visible;
+                try
+                {
+                    // Persist pin=ON through the desktop Agent so a saved OFF
+                    // preference cannot undo this button on the next UIA probe.
+                    var rawResponse = await SendAgentCommandAsync("{\"command\":\"enable_gamebar_pin\"}");
+                    var response = JsonObject.Parse(rawResponse ?? "{}");
+                    if (!response.GetNamedBoolean("ok", false))
+                        throw new InvalidOperationException(response.GetNamedString("message", "고정 요청 실패"));
+                    DisabledStateStatusText.Text = "고정을 요청했습니다. 적용 상태를 확인하고 있습니다.";
+                    App.LogStage("disabled-overlay-pin-requested");
+                }
+                catch (Exception ex)
+                {
+                    DisabledStateStatusText.Text = "자동 고정에 실패했습니다. Game Bar 상단의 핀 버튼을 사용해 주세요.";
+                    App.LogStage("disabled-overlay-pin-failed-" + ErrorCode(ex));
+                }
+                finally
+                {
+                    // Even when the host/UI Automation is stuck, allow a retry.
+                    await Task.Delay(1800);
+                    applyingPinFromDisabledOverlay = false;
+                    if (widget != null) UpdateInputState();
+                }
+                return;
+            }
+
+            // Activating an F9-hidden overlay does not alter per-panel settings.
+            runtimeOverlayHiddenByHotkey = false;
+            if (!HudPreferences.Visible) HudPreferences.Visible = true;
+            ApplyPreferences();
+            UpdateInputState();
+            App.LogStage("disabled-overlay-reactivated");
+        }
+
         private void UpdateInputState()
         {
             if (widget == null) return;
             bool pinnedOnly = widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
             UpdatePanelChrome();
+            UpdateDisabledStateOverlay();
             bool passesClicks = pinnedOnly && widget.Pinned && widget.ClickThroughEnabled;
-            IsHitTestVisible = !passesClicks;
             if (passesClicks) InputText.Text = "게임으로 클릭 통과 중";
             else if (!widget.Pinned) InputText.Text = "HUD를 고정하면 게임 위에 표시됩니다";
             else if (!widget.ClickThroughEnabled) InputText.Text = "Game Bar 상단에서 클릭 통과를 켜 주세요";
@@ -2485,6 +2595,7 @@ namespace YummiGameBarWidget
             ApplyClickTestPanelChrome(pinnedOnly);
             UpdateVoiceChatPanelChrome(pinnedOnly);
             ApplyYoutubeRuntimeVisibility(pinnedOnly);
+            RefreshRootHitTesting();
             UpdateNativeInputDiagnosticsMode(false);
         }
 
@@ -2716,7 +2827,9 @@ namespace YummiGameBarWidget
             var pinnedOnly = widget != null && widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
             // Native input is also the runtime drag transport. Keep it alive while
             // the HUD is visible even when the diagnostics panel itself is hidden.
-            var wanted = widget != null && HudPreferences.Visible;
+            // Never activate the native input blocker for an unpinned widget.
+            var wanted = widget != null && widget.Pinned && HudPreferences.Visible &&
+                (!pinnedOnly || !runtimeOverlayHiddenByHotkey);
             nativeInputRuntimeDragWanted = wanted && pinnedOnly;
             var changed = nativeInputDiagnosticsWanted != wanted;
             nativeInputDiagnosticsWanted = wanted;
@@ -2797,8 +2910,8 @@ namespace YummiGameBarWidget
                     if (age > 500)
                     {
                         // The Game Bar UI dispatcher can become temporarily invalid or
-                        // starved across Alt+Tab/host state changes. Keep the Agent-side
-                        // native hitbox alive without depending on any UI/COM objects.
+                        // starved across Alt+Tab/host state changes. Poll the cursor,
+                        // but fail open on input blocking until fresh UI geometry arrives.
                         _ = TryNativeInputKeepaliveAsync();
                         var now = NowMs();
                         if (now - lastNativeInputStaleLogAtMs >= 1000)
@@ -2830,7 +2943,12 @@ namespace YummiGameBarWidget
             if (Interlocked.Exchange(ref nativeInputKeepaliveInFlight, 1) != 0) return;
             try
             {
-                var rawResponse = await SendAgentCommandAsync(payload).ConfigureAwait(false);
+                // This payload is a replay of old UI geometry, not a fresh render.
+                // Never extend native input blocking using stale panel coordinates.
+                var keepalive = JsonObject.Parse(payload);
+                keepalive["blockInput"] = JsonValue.CreateBooleanValue(false);
+                keepalive["blockRects"] = new JsonArray();
+                var rawResponse = await SendAgentCommandAsync(keepalive.Stringify()).ConfigureAwait(false);
                 var response = JsonObject.Parse(rawResponse);
                 if (response.GetNamedBoolean("ok", false))
                 {
@@ -2927,7 +3045,9 @@ namespace YummiGameBarWidget
             var syncGeneration = Interlocked.Increment(ref nativeInputSyncGeneration);
             try
             {
-                var requestedActive = active && HudPreferences.Visible && HudPanel.Visibility == Visibility.Visible;
+                var requestedActive = active && widget.Pinned && HudPreferences.Visible &&
+                    HudPanel.Visibility == Visibility.Visible &&
+                    !(widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly && runtimeOverlayHiddenByHotkey);
                 var diagnosticRequested = requestedActive
                     && ClickNativePanel.Visibility == Visibility.Visible
                     && !HudPreferences.NativeInputPanelClosed && ClickNativePanel.Opacity > 0.0;
@@ -2952,7 +3072,7 @@ namespace YummiGameBarWidget
                 };
                 var pinnedOnly = widget.GameBarDisplayMode == XboxGameBarDisplayMode.PinnedOnly;
                 var inputBlockRects = new JsonArray();
-                if (effectiveActive && pinnedOnly)
+                if (effectiveActive && pinnedOnly && widget.Pinned && !runtimeOverlayHiddenByHotkey)
                 {
                     AddNativeInputBlockPanel(inputBlockRects, LcuPanel);
                     AddNativeInputBlockPanel(inputBlockRects, PartyPanel);

@@ -476,6 +476,73 @@
       </StackPanel>
     </Border>
 
+    <!-- Recovery is visible only in the Win+G editor. In PinnedOnly, hidden
+         and unpinned windows must never hold a transparent input surface. -->
+    <Grid x:Name="DisabledStateOverlay"
+          Visibility="Collapsed"
+          Canvas.ZIndex="21000">
+      <Border>
+        <Border.Background>
+          <AcrylicBrush BackgroundSource="Backdrop"
+                        TintColor="#181021"
+                        TintOpacity="0.88"
+                        FallbackColor="#E8171125"/>
+        </Border.Background>
+      </Border>
+      <Border Width="370"
+              MaxWidth="450"
+              Padding="26,24"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              CornerRadius="16"
+              Background="#F5221A31"
+              BorderBrush="#AA9B80C8"
+              BorderThickness="1">
+        <StackPanel Spacing="13">
+          <Border Width="48" Height="48" CornerRadius="24"
+                  HorizontalAlignment="Center" Background="#503D2C65">
+            <TextBlock x:Name="DisabledStateIcon"
+                       Text="&#xE718;"
+                       FontFamily="Segoe MDL2 Assets"
+                       FontSize="23"
+                       Foreground="#E0CCFF"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center"/>
+          </Border>
+          <TextBlock x:Name="DisabledStateTitle"
+                     Text="고정이 해제되어 있습니다"
+                     Foreground="White"
+                     FontSize="20"
+                     FontWeight="SemiBold"
+                     TextAlignment="Center"
+                     TextWrapping="Wrap"/>
+          <TextBlock x:Name="DisabledStateDescription"
+                     Text="게임 중 오버레이를 보려면 고정해 주세요."
+                     Foreground="#D7CBE5"
+                     FontSize="12"
+                     TextAlignment="Center"
+                     TextWrapping="Wrap"/>
+          <Button x:Name="DisabledStateActionButton"
+                  Content="고정하기"
+                  MinWidth="174"
+                  HorizontalAlignment="Center"
+                  Padding="22,12"
+                  Background="#FF7950BA"
+                  Foreground="White"
+                  FontWeight="SemiBold"
+                  CornerRadius="8"
+                  Click="DisabledStateActionButton_Click"/>
+          <TextBlock x:Name="DisabledStateStatusText"
+                     Text=""
+                     Foreground="#C7B6D8"
+                     FontSize="10"
+                     TextAlignment="Center"
+                     TextWrapping="Wrap"
+                     Visibility="Collapsed"/>
+        </StackPanel>
+      </Border>
+    </Grid>
+
     <Grid x:Name="PinTutorialOverlay"
           Visibility="Collapsed"
           IsHitTestVisible="False"

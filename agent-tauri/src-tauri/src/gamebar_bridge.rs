@@ -16,6 +16,8 @@ use serde_json::Value;
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 use tauri::AppHandle;
+#[cfg(windows)]
+use tauri::Manager;
 use tokio::time::sleep;
 
 use crate::{
@@ -136,11 +138,22 @@ struct NativeInputBlockRect {
 #[derive(Debug, Default)]
 struct NativeInputBlockState {
     active: bool,
+    updated_at_ms: u64,
     left_captured: bool,
     blocked_left_down: bool,
     rects: Vec<NativeInputBlockRect>,
     blocked_down_count: u64,
     blocked_up_count: u64,
+}
+
+// A Game Bar process/dispatcher can stop updating while its last input rectangles
+// remain in the Agent. A stale rectangle must always fail open.
+#[cfg(any(windows, test))]
+const NATIVE_INPUT_BLOCK_TIMEOUT_MS: u64 = 2_000;
+
+#[cfg(any(windows, test))]
+fn native_input_block_fresh(now_ms: u64, updated_at_ms: u64) -> bool {
+    updated_at_ms > 0 && now_ms.saturating_sub(updated_at_ms) < NATIVE_INPUT_BLOCK_TIMEOUT_MS
 }
 
 #[cfg(windows)]
@@ -1192,6 +1205,13 @@ unsafe extern "system" fn native_input_block_hook(
         if message == WM_LBUTTONDOWN || message == WM_LBUTTONDBLCLK || message == WM_LBUTTONUP {
             let hook = &*(lparam.0 as *const MSLLHOOKSTRUCT);
             if let Ok(mut state) = native_input_block_state().lock() {
+                if state.active && !native_input_block_fresh(now_ms(), state.updated_at_ms) {
+                    state.active = false;
+                    state.rects.clear();
+                    state.left_captured = false;
+                    state.blocked_left_down = false;
+                    set_gamebar_input_shield_visible(false);
+                }
                 let inside = |rect: &NativeInputBlockRect| {
                     let x = hook.pt.x as f64;
                     let y = hook.pt.y as f64;
@@ -1753,6 +1773,7 @@ fn sync_external_click_test(parsed: &Value) -> String {
         match native_input_block_state().lock() {
             Ok(mut block) => {
                 block.active = active && block_input && !block_rects.is_empty();
+                block.updated_at_ms = if block.active { now } else { 0 };
                 block.rects = if block.active { block_rects } else { Vec::new() };
                 let hide_shield = !block.active && (block.left_captured || block.blocked_left_down);
                 if hide_shield {
@@ -2570,6 +2591,26 @@ fn handle_command(app: &AppHandle, state: Arc<AppState>, raw: &str) -> String {
             crate::commands::overlay::enforce_clickthrough_from_widget(state).await;
         });
         return json_response(true, "클릭 패스스루 ON 복구를 시작했습니다.");
+    }
+    if command == "enable_gamebar_pin" {
+        // The Win+G recovery CTA intentionally saves the ON preference before
+        // applying it. A one-off UIA toggle would revert after saved pin=OFF.
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let result = crate::commands::overlay::set_overlay_control(
+                app.clone(),
+                app.state::<Arc<AppState>>(),
+                "pin".into(),
+                true,
+            )
+            .await;
+            if let Err(error) = result {
+                state
+                    .report_diagnostic("overlay", "widget_pin_request_failed", &error)
+                    .await;
+            }
+        });
+        return json_response(true, "Game Bar 고정 ON 요청을 접수했습니다.");
     }
     if command == "probe_gamebar_uia" {
         append_uia_probe_log("uia-probe request-received");
@@ -3592,6 +3633,14 @@ mod tests {
         validate_status_message,
     };
     use serde_json::json;
+
+    #[test]
+    fn stale_gamebar_input_rectangles_fail_open() {
+        assert!(!super::native_input_block_fresh(1_000, 0));
+        assert!(super::native_input_block_fresh(2_999, 1_000));
+        assert!(!super::native_input_block_fresh(3_000, 1_000));
+        assert!(!super::native_input_block_fresh(9_000, 1_000));
+    }
 
     #[test]
     fn selects_highest_gamebar_release_independent_of_api_order() {

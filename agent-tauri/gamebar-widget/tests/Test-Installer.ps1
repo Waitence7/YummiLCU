@@ -117,6 +117,14 @@ try {
   if ($bridgeSource -notmatch 'automationId' -or $bridgeSource -notmatch 'HomeBarItemButton' -or $bridgeSource -notmatch [regex]::Escape($yummiOverlayTitle)) { throw 'Win+G automation must select the Yummi overlay entry' }
   if ($bridgeSource -notmatch 'PinToggle' -or $bridgeSource -notmatch 'ClickThroughToggleButton' -or $bridgeSource -notmatch 'UIA_TogglePatternId') { throw 'Win+G automation must enable Yummi pin and click-through through UIA toggle patterns' }
   if ($widgetSource -notmatch 'data.GetNamedBoolean\("ready", false\)' -or $widgetSource -notmatch 'gameBarUiaProbeCompleted = false') { throw 'Win+G automation must retry until ready and rearm for the next Win+G session' }
+  if ($widgetXaml -notmatch 'x:Name="DisabledStateOverlay"' -or $widgetXaml -notmatch '<AcrylicBrush' -or $widgetXaml -notmatch 'Click="DisabledStateActionButton_Click"') { throw 'Unpinned/F9-hidden Win+G must show a frosted recovery layer with a working button' }
+  if ($widgetSource -notmatch '고정이 해제되어 있습니다' -or $widgetSource -notmatch '오버레이가 비활성화되어 있습니다' -or $widgetSource -notmatch 'UpdateDisabledStateOverlay') { throw 'Recovery layer must distinguish unpinned and F9-hidden states' }
+  if ($widgetSource -notmatch 'var show = editing && \(unpinned \|\| hidden\)') { throw 'Recovery layer must not cover PinnedOnly runtime' }
+  if ($widgetSource -notmatch 'widget\.Pinned && HudPreferences\.Visible' -or $widgetSource -notmatch 'if \(effectiveActive && pinnedOnly && widget\.Pinned && !runtimeOverlayHiddenByHotkey\)') { throw 'Unpinned and F9-hidden widgets must never request native input blocking' }
+  if ($widgetSource -notmatch 'runtimeRenderable = effectiveHudVisible && \(!pinnedOnly \|\| \(widget != null && widget\.Pinned\)\)' -or $widgetSource -notmatch 'HudPanel\.Visibility = pinnedOnly && !runtimeRenderable') { throw 'Unpinned PinnedOnly transition must never render the HUD or tint' }
+  if ($bridgeSource -notmatch 'if command == "enable_gamebar_pin"' -or $widgetSource -notmatch 'enable_gamebar_pin' -or $bridgeSource -notmatch 'set_overlay_control') { throw 'Pin recovery CTA must persist ON through the existing Agent control path' }
+  if ($bridgeSource -notmatch 'NATIVE_INPUT_BLOCK_TIMEOUT_MS' -or $bridgeSource -notmatch 'native_input_block_fresh') { throw 'Input blocker must expire stale widget geometry' }
+  Write-Host 'PASS: unpinned/F9 recovery overlays and fail-open native input semantics'
   Write-Host 'PASS: Game Bar UIA auto-selects Yummi and enables pin/click-through using process-scoped AutomationIds'
   Write-Host 'PASS: fresh defaults keep only Discord Chat enabled, Discord shares panel lifecycle, and Win+G has a panel selector'
   Write-Host 'PASS: single-tab browser panel, navigation, and panel lifecycle'
