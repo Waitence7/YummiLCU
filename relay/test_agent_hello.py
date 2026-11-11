@@ -807,6 +807,23 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(manager.get_live_game(42))
         self.assertEqual(websocket.payloads, [])
 
+    async def test_replay_live_game_is_not_cached_or_forwarded(self) -> None:
+        manager = ConnectionManager()
+        manager.subscribe_live_game(42)
+        websocket = _WebSocketStub()
+        await manager.register_bot_ws(websocket)
+        payload = {
+            "client_mode": "spectator",
+            "replay_mode": True,
+            "replay_watch_phase": "WatchInProgress",
+            "participants": [{} for _ in range(10)],
+            "game": {"id": None},
+        }
+
+        self.assertFalse(await manager.forward_live_game_update(42, payload))
+        self.assertIsNone(manager.get_live_game(42))
+        self.assertEqual(websocket.payloads, [])
+
     async def test_live_game_update_is_cached_without_bot_subscription(self) -> None:
         manager = ConnectionManager()
         payload = {

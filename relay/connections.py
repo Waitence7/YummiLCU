@@ -26,6 +26,16 @@ AGENT_SESSION_CONFLICT_CLOSE_CODE = 4009
 GAMEFLOW_EOG_GRACE_SEC = 180.0
 
 
+def _is_replay_live_game(data: dict[str, Any]) -> bool:
+    if data.get("replay_mode") is True:
+        return True
+    watch_phase = data.get("replay_watch_phase")
+    if isinstance(watch_phase, str):
+        normalized = watch_phase.strip()
+        return bool(normalized) and normalized.lower() != "none"
+    return False
+
+
 async def _send_bot_json(ws: WebSocket, payload: dict[str, Any]) -> None:
     await asyncio.wait_for(ws.send_json(payload), timeout=BOT_WS_SEND_TIMEOUT_SEC)
 
@@ -926,6 +936,16 @@ class ConnectionManager:
         game_id = (data.get("game") or {}).get("id") if isinstance(data.get("game"), dict) else None
         participant_count = len(data.get("participants", [])) if isinstance(data.get("participants"), list) else 0
         event_count = len(data.get("events", [])) if isinstance(data.get("events"), list) else 0
+        if _is_replay_live_game(data):
+            async with self._lock:
+                self._live_game.pop(did, None)
+            logger.info(
+                "live_game_update 폐기: discord_id=%s game_id=%s 사유=replay_mode watch_phase=%s",
+                did,
+                game_id,
+                data.get("replay_watch_phase") or "unknown",
+            )
+            return False
         if participant_count != LIVE_GAME_PARTICIPANT_COUNT:
             logger.info(
                 "live_game_update 폐기: discord_id=%s game_id=%s participants=%s 사유=10명 미만 또는 초과",
