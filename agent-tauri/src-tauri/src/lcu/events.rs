@@ -1408,6 +1408,11 @@ fn clear_inactive_phase_snapshots(
     }
 }
 
+fn replay_watch_phase_is_active(phase: &str) -> bool {
+    let normalized = phase.trim();
+    !normalized.is_empty() && !normalized.eq_ignore_ascii_case("none")
+}
+
 fn is_expected_missing_lcu_endpoint(error: &AgentError) -> bool {
     matches!(
         error,
