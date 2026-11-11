@@ -505,7 +505,10 @@ jobs:
           test -n "$exe" && test -s "$exe"
           notes="${RELEASE_NOTES:-Tauri ${release_label} build ${BUILD_ID} (${SOURCE_SHORT})}"
 
+          # Re-sign the validated candidate version, not main's package.json version.
+          # Stable maintenance releases can originate from a different branch.
           node scripts/sync-tauri-agent-version.mjs \
+            --version "$VERSION" \
             --zip "release/tauri-${VERSION}.zip" \
             --exe "$exe" \
             --out release/agent-version.json \
