@@ -2376,6 +2376,8 @@ async def _deliver_guild_match_live(
     discord_id: int,
     payload: dict[str, Any],
     event_id: str | None = None,
+    *,
+    canonical_out: dict[str, Any] | None = None,
 ) -> tuple[bool, bool]:
     """Return (handled, matched). A valid 2xx unmatched response is terminal/handled."""
     api_base = config.tournament_api_base_url()
@@ -2423,6 +2425,24 @@ async def _deliver_guild_match_live(
                     outcome.get("reason") or "unmatched",
                 )
                 return True, False
+            confirmed = outcome.get("canonicalLive")
+            if canonical_out is not None and isinstance(confirmed, dict):
+                snapshot = confirmed.get("data")
+                version = confirmed.get("version")
+                game_id = confirmed.get("gameId")
+                match_id = outcome.get("matchId")
+                if (
+                    isinstance(snapshot, dict)
+                    and isinstance(game_id, str) and game_id
+                    and isinstance(match_id, str) and match_id
+                    and type(version) is int and version > 0
+                ):
+                    canonical_out.update({
+                        "matchId": match_id,
+                        "gameId": game_id,
+                        "version": version,
+                        "data": snapshot,
+                    })
             logger.info(
                 "내전 라이브 LCU ingest OK discord_id=%s match_id=%s overlap=%s promoted=%s",
                 discord_id,
@@ -4363,11 +4383,13 @@ async def _handle_agent_message(
         if not isinstance(full_state, dict):
             return
 
+        canonical: dict[str, Any] = {}
         handled, matched = await _deliver_guild_match_live(
             websocket.app.state.http,
             discord_id,
             full_state,
             event_id,
+            canonical_out=canonical,
         )
         if not handled:
             if prepared.get("legacy") is not True:
@@ -4415,7 +4437,8 @@ async def _handle_agent_message(
             )[:64],
             live_player_count=len(players) if isinstance(players, list) else 0,
         )
-        await conn.forward_live_game_update(discord_id, full_state)
+        # Web returned canonical display after persisting the source snapshot.
+        await conn.forward_live_game_update(discord_id, full_state, canonical=canonical or None)
         _enqueue_tournament_broadcast_lcu(
             websocket.app, discord_id, "live_game", full_state
         )

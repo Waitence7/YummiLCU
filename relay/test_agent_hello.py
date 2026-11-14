@@ -795,6 +795,35 @@ class PendingAgentHelloTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(websocket.payload["type"], "live_game_update")
         self.assertEqual(websocket.payload["data"]["participants"][0]["kills"], 3)
 
+    async def test_live_ws_forwards_and_replays_web_confirmed_snapshot(self) -> None:
+        manager = ConnectionManager()
+        websocket = _WebSocketStub()
+        await manager.register_bot_ws(websocket)
+        manager.subscribe_live_game(42)
+        live = {
+            "game": {"id": "8458112300"},
+            "participants": [{"team": "ORDER", "assists": 26} for _ in range(10)],
+        }
+        canonical = {
+            "matchId": "match-1", "gameId": "8458112300",
+            "version": 1794655957000,
+            "data": {
+                "game": {"id": "8458112300"},
+                "phase": "InProgress",
+                "participants": [{"team": "ORDER", "assists": 27} for _ in range(10)],
+            },
+        }
+        self.assertTrue(await manager.forward_live_game_update(42, live, canonical=canonical))
+        self.assertEqual(websocket.payload["data"], live)
+        self.assertEqual(websocket.payload["canonical"], canonical)
+        self.assertTrue(await manager.replay_live_game_update(42))
+        self.assertEqual(websocket.payload["canonical"], canonical)
+        next_game = {"game": {"id": "8458112301"}, "participants": live["participants"]}
+        self.assertTrue(await manager.forward_live_game_update(42, next_game))
+        self.assertNotIn("canonical", websocket.payload)
+        self.assertTrue(await manager.replay_live_game_update(42))
+        self.assertNotIn("canonical", websocket.payload)
+
     async def test_live_game_subscription_replays_cached_snapshot(self) -> None:
         manager = ConnectionManager()
         websocket = _WebSocketStub()

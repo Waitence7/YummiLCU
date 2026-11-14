@@ -93,6 +93,7 @@ class ConnectionManager:
         self._participant_status_subscribers: set[int] = set()
         self._participant_status: dict[int, dict[str, Any]] = {}
         self._live_game: dict[int, tuple[float, dict[str, Any]]] = {}
+        self._live_game_canonical: dict[int, dict[str, Any]] = {}
         self._live_preview: dict[int, tuple[float, int, int, int, int, bytes]] = {}
         self._live_preview_control_last_at: dict[int, float] = {}
         self._agent_info: dict[int, dict[str, Any]] = {}
@@ -271,6 +272,7 @@ class ConnectionManager:
             self._gameflow.pop(did, None)
             self._party_lobby.pop(did, None)
             self._live_game.pop(did, None)
+            self._live_game_canonical.pop(did, None)
             self._live_preview.pop(did, None)
             self._live_preview_control_last_at.pop(did, None)
             self._cancel_pending_for_discord_locked(did)
@@ -657,6 +659,7 @@ class ConnectionManager:
         did = int(discord_id)
         if not self.live_game_polling_required(did):
             self._live_game.pop(did, None)
+            self._live_game_canonical.pop(did, None)
 
     def subscribe_live_game(self, discord_id: int, recruitment_id: str | None = None) -> None:
         did = int(discord_id)
@@ -789,6 +792,7 @@ class ConnectionManager:
         age = time.monotonic() - received_at
         if age > LIVE_GAME_CACHE_TTL_SEC:
             self._live_game.pop(int(discord_id), None)
+            self._live_game_canonical.pop(int(discord_id), None)
             return None
         return {
             "data": dict(data),
@@ -952,14 +956,11 @@ class ConnectionManager:
         if not isinstance(data, dict):
             return False
         try:
-            await _send_bot_json(
-                ws,
-                {
-                    "type": "live_game_update",
-                    "discord_id": did,
-                    "data": dict(data),
-                }
-            )
+            payload = {"type": "live_game_update", "discord_id": did, "data": dict(data)}
+            canonical = self._live_game_canonical.get(did)
+            if canonical is not None:
+                payload["canonical"] = canonical
+            await _send_bot_json(ws, payload)
             logger.info(
                 "봇 WS live_game_update 캐시 재전송 discord_id=%s age_ms=%s",
                 did,
@@ -1055,7 +1056,10 @@ class ConnectionManager:
             await self.unregister_bot_ws(ws)
             return False
 
-    async def forward_live_game_update(self, discord_id: int, data: dict[str, Any]) -> bool:
+    async def forward_live_game_update(
+        self, discord_id: int, data: dict[str, Any], *,
+        canonical: dict[str, Any] | None = None,
+    ) -> bool:
         did = int(discord_id)
         game_id = (data.get("game") or {}).get("id") if isinstance(data.get("game"), dict) else None
         participant_count = len(data.get("participants", [])) if isinstance(data.get("participants"), list) else 0
@@ -1063,6 +1067,7 @@ class ConnectionManager:
         if _is_replay_live_game(data):
             async with self._lock:
                 self._live_game.pop(did, None)
+                self._live_game_canonical.pop(did, None)
             logger.info(
                 "live_game_update 폐기: discord_id=%s game_id=%s 사유=replay_mode watch_phase=%s",
                 did,
@@ -1080,6 +1085,10 @@ class ConnectionManager:
             return False
         async with self._lock:
             self.set_live_game(did, data)
+            if canonical is not None:
+                self._live_game_canonical[did] = dict(canonical)
+            elif game_id != self._live_game_canonical.get(did, {}).get("gameId"):
+                self._live_game_canonical.pop(did, None)
             recruitment_id = self._live_game_recruitments.get(did)
             # 기존 gameflow 구독 봇도 별도 구독 명령 없이 실시간 경기 정보를 받을 수 있게
             # 하되, 어느 이벤트에도 구독하지 않은 세션으로는 전달하지 않습니다.
@@ -1110,14 +1119,14 @@ class ConnectionManager:
             )
             return False
         try:
-            await _send_bot_json(
-                ws,
-                {
-                    "type": "live_game_update",
-                    "discord_id": did,
-                    "data": data,
-                }
-            )
+            payload: dict[str, Any] = {
+                "type": "live_game_update",
+                "discord_id": did,
+                "data": data,
+            }
+            if canonical is not None:
+                payload["canonical"] = canonical
+            await _send_bot_json(ws, payload)
             logger.info(
                 "live_game_update 전송 완료: discord_id=%s game_id=%s participants=%s events=%s "
                 "전송=봇WS 모집_id=%s 대상=사용자 구독",

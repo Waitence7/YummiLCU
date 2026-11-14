@@ -119,6 +119,57 @@ class GuildMatchLiveIngestTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(matched)
         self.assertEqual(http.posts, 1)
 
+    async def test_matched_commit_exposes_web_confirmed_snapshot_to_relay(self) -> None:
+        web_data = {
+            "phase": "InProgress",
+            "game": {"id": "8458112300"},
+            "participants": [{"team": "ORDER", "kills": 19, "deaths": 7, "assists": 27}],
+        }
+        http = _Http(_Response(200, {
+            "matched": True,
+            "matchId": "match-1",
+            "canonicalLive": {
+                "gameId": "8458112300",
+                "version": 1794655957000,
+                "data": web_data,
+            },
+        }))
+        out: dict = {}
+        with (
+            patch("relay.app.config.tournament_api_base_url", return_value="http://api"),
+            patch("relay.app.config.tournament_bot_internal_token", return_value="token"),
+        ):
+            handled, matched = await _deliver_guild_match_live(
+                http, 42, {"participants": [{} for _ in range(10)]},
+                canonical_out=out,
+            )
+        self.assertTrue(handled)
+        self.assertTrue(matched)
+        self.assertEqual(http.posts, 1)
+        self.assertEqual(out, {
+            "matchId": "match-1",
+            "gameId": "8458112300",
+            "version": 1794655957000,
+            "data": web_data,
+        })
+
+    async def test_unmatched_or_unconfirmed_web_response_never_invents_canonical(self) -> None:
+        for outcome in (
+            {"matched": False, "reason": "unbound"},
+            {"matched": True, "matchId": "match-1"},
+            {"matched": True, "matchId": "match-1", "canonicalLive": {
+                "gameId": "8458112300", "version": "bad", "data": {}
+            }},
+        ):
+            out: dict = {}
+            http = _Http(_Response(200, outcome))
+            with (
+                patch("relay.app.config.tournament_api_base_url", return_value="http://api"),
+                patch("relay.app.config.tournament_bot_internal_token", return_value="token"),
+            ):
+                await _deliver_guild_match_live(http, 42, {"participants": []}, canonical_out=out)
+            self.assertEqual(out, {})
+
     async def test_http_200_matched_true_is_success(self) -> None:
         http = _Http(
             _Response(
