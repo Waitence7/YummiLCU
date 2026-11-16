@@ -115,7 +115,37 @@ impl LcuEventPoller {
         client.gameflow_watch_phase().await.ok().flatten()
     }
 
+    fn clear_eog_recovery(&mut self) {
+        self.last_eog_attempt = None;
+        self.eog_recovery_started_at = None;
+        self.eog_attempt_count = 0;
+        self.eog_expected_game_id = None;
+    }
+
     fn reset_lcu_snapshot(&mut self) {
+        // A League Client restart changes its lockfile PID/port, but the Agent
+        // remains alive. Preserve an unfinished EOG recovery across that
+        // connection generation so a transient eog-stats 404 can be retried
+        // after the client reconnects. Never carry an expired or unidentified
+        // recovery over to an unrelated match.
+        let pending_eog = match (
+            self.eog_recovery_started_at,
+            self.eog_expected_game_id.as_deref(),
+        ) {
+            (Some(started), Some(game_id))
+                if !self.eog_sent
+                    && game_id != "0"
+                    && started.elapsed() <= EOG_POSTGAME_RECOVERY_GRACE =>
+            {
+                Some((
+                    started,
+                    self.last_eog_attempt,
+                    self.eog_attempt_count,
+                    game_id.to_owned(),
+                ))
+            }
+            _ => None,
+        };
         self.gameflow = None;
         self.last_gameflow_emit = None;
         self.ready_check = None;
@@ -124,10 +154,16 @@ impl LcuEventPoller {
         self.participant = None;
         self.live_respawn_samples.clear();
         self.eog_sent = false;
-        self.last_eog_attempt = None;
-        self.eog_recovery_started_at = None;
-        self.eog_attempt_count = 0;
-        self.eog_expected_game_id = None;
+        self.clear_eog_recovery();
+        if let Some((started, last_attempt, attempts, game_id)) = pending_eog {
+            self.eog_recovery_started_at = Some(started);
+            self.last_eog_attempt = last_attempt;
+            self.eog_attempt_count = attempts;
+            self.eog_expected_game_id = Some(game_id.clone());
+            self.diagnostic(format!(
+                "LCU 연결 전환 중 EOG 복구 상태 유지: game_id={game_id} attempts={attempts}"
+            ));
+        }
         self.authoritative_game_id = None;
         self.rofl_match_hint = None;
         self.rofl_preflight_requested_game_id = None;
@@ -763,10 +799,9 @@ impl LcuEventPoller {
         }
         if phase == "InProgress" && previous_phase.as_deref() != Some("InProgress") {
             self.eog_sent = false;
-            self.last_eog_attempt = None;
-            self.eog_recovery_started_at = None;
-            self.eog_attempt_count = 0;
-            self.eog_expected_game_id = None;
+            // A genuinely new game supersedes any previous pending EOG. Do not
+            // mix old-game history with the current game's result.
+            self.clear_eog_recovery();
             self.rofl_match_hint = None;
             self.rofl_preflight_requested_game_id = None;
             self.rofl_preflight_resolved_game_id = None;
@@ -918,10 +953,7 @@ impl LcuEventPoller {
                 phase,
                 EOG_POSTGAME_RECOVERY_GRACE.as_secs()
             ));
-            self.last_eog_attempt = None;
-            self.eog_recovery_started_at = None;
-            self.eog_attempt_count = 0;
-            self.eog_expected_game_id = None;
+            self.clear_eog_recovery();
         } else if !self.eog_sent
             && matches!(phase.as_str(), "ChampSelect" | "Matchmaking" | "GameStart")
             && self.eog_recovery_started_at.is_some()
@@ -932,10 +964,7 @@ impl LcuEventPoller {
                 self.eog_expected_game_id.as_deref().unwrap_or("unknown"),
                 phase
             ));
-            self.last_eog_attempt = None;
-            self.eog_recovery_started_at = None;
-            self.eog_attempt_count = 0;
-            self.eog_expected_game_id = None;
+            self.clear_eog_recovery();
         }
 
         if let Some(hint) = self.rofl_match_hint.clone() {
@@ -1500,6 +1529,34 @@ fn has_recent_match_winner_hint(value: Option<&Value>) -> bool {
         })
 }
 
+fn eog_stats_match_expected_game(eog: Option<&Value>, expected_game_id: Option<&str>) -> bool {
+    match (eog, expected_game_id) {
+        (None, _) | (_, None) => true,
+        (Some(eog), Some(expected)) => {
+            json_scalar_id(eog.get("gameId").or_else(|| eog.get("reportGameId"))).as_deref()
+                == Some(expected)
+        }
+    }
+}
+
+fn eog_persistence_phase<'a>(
+    observed_phase: &'a str,
+    expected_game_id: Option<&str>,
+    has_valid_result_evidence: bool,
+) -> &'a str {
+    // Only the EOG recovery for a known previous game may report completion
+    // after the new League Client has already returned to Lobby / None.
+    // Preserve the observed phase separately for diagnostics.
+    if has_valid_result_evidence
+        && expected_game_id.is_some()
+        && matches!(observed_phase, "Lobby" | "None")
+    {
+        "EndOfGame"
+    } else {
+        observed_phase
+    }
+}
+
 fn eog_result_evidence_source(payload: &Value) -> Option<&'static str> {
     let expected_game_id = json_scalar_id(payload.get("expectedGameId"));
     let payload_game_id = json_scalar_id(payload.get("gameId"));
@@ -1648,7 +1705,12 @@ async fn eog_payload(
         .as_ref()
         .and_then(|value| value.get("teams"))
         .and_then(Value::as_array);
-    if let Some(teams) = teams {
+    // A restarted client may return the *next* game's EOG while we are
+    // recovering the previous game. Such participant rows must never be
+    // attributed to the expected game ID. A matching recent-match history
+    // entry can still be used by the separate, validated fallback below.
+    let eog_matches_expected = eog_stats_match_expected_game(eog.as_ref(), expected_game_id);
+    if let Some(teams) = teams.filter(|_| eog_matches_expected) {
         for team in teams {
             let winning = team.get("isWinningTeam").and_then(Value::as_bool);
             for player in team
@@ -1685,7 +1747,9 @@ async fn eog_payload(
             }
         }
     }
-    if teams.is_none() {
+    if !eog_matches_expected {
+        none_reasons.push("eog_stats_game_id_mismatch");
+    } else if teams.is_none() {
         none_reasons.push("eog_stats_teams_missing");
     }
     if missing_name_count > 0 {
@@ -1708,9 +1772,9 @@ async fn eog_payload(
         .as_ref()
         .and_then(|value| value.pointer("/gameData/gameId"))
         .and_then(|value| json_scalar_id(Some(value)));
-    let game_id = eog_game_id
-        .clone()
-        .or_else(|| expected_game_id.map(str::to_owned))
+    let game_id = expected_game_id
+        .map(str::to_owned)
+        .or_else(|| eog_game_id.clone())
         .or_else(|| session_game_id.clone());
     let end_of_game_timestamp = eog
         .as_ref()
@@ -1734,8 +1798,8 @@ async fn eog_payload(
         "recentMatches": recent_matches,
         "eog_none_reason": (!none_reasons.is_empty()).then(|| none_reasons.join(",")),
         "eogStats": {
-            "gameId": eog_game_id,
-            "endOfGameTimestamp": end_of_game_timestamp
+            "gameId": if eog_matches_expected { eog_game_id.clone() } else { None },
+            "endOfGameTimestamp": if eog_matches_expected { end_of_game_timestamp } else { Value::Null }
         },
         "eogDiagnostics": {
             "attempt": attempt,
@@ -1762,11 +1826,21 @@ async fn eog_payload(
         }
     });
     let evidence_source = eog_result_evidence_source(&payload);
+    // A valid game-bound result recovered after a League Client restart is
+    // still an EOG event, regardless of the current client being in Lobby.
+    // Without this normalization the Web API would skip result-pending
+    // verification, then discard a one-participant recent-match fallback.
+    let persistence_phase =
+        eog_persistence_phase(phase, expected_game_id, evidence_source.is_some());
+    if persistence_phase != phase {
+        payload["gameflowPhase"] = json!(persistence_phase);
+    }
     if let Some(diagnostics) = payload
         .get_mut("eogDiagnostics")
         .and_then(Value::as_object_mut)
     {
         diagnostics.insert("evidenceSource".into(), json!(evidence_source));
+        diagnostics.insert("persistedPhase".into(), json!(persistence_phase));
         diagnostics.insert("usableEvidence".into(), json!(evidence_source.is_some()));
     }
     payload
@@ -3091,6 +3165,117 @@ mod tests {
 
         poller.observe_connection(identity);
         assert_eq!(poller.connection_generation, 3);
+    }
+
+    #[test]
+    fn recovered_postgame_eog_is_verified_as_result_pending() {
+        assert_eq!(
+            eog_persistence_phase("Lobby", Some("8452448851"), true),
+            "EndOfGame"
+        );
+        assert_eq!(
+            eog_persistence_phase("None", Some("8452448851"), true),
+            "EndOfGame"
+        );
+        assert_eq!(
+            eog_persistence_phase("Lobby", Some("8452448851"), false),
+            "Lobby"
+        );
+        assert_eq!(eog_persistence_phase("Lobby", None, true), "Lobby");
+        assert_eq!(
+            eog_persistence_phase("ChampSelect", Some("8452448851"), true),
+            "ChampSelect"
+        );
+    }
+
+    #[test]
+    fn eog_stats_from_other_game_cannot_steal_recovery_identity() {
+        let previous = json!({"gameId": "8452448851"});
+        let next = json!({"gameId": "8452522149"});
+        let unknown = json!({"teams": [{"players": []}]});
+        assert!(eog_stats_match_expected_game(
+            Some(&previous),
+            Some("8452448851")
+        ));
+        assert!(!eog_stats_match_expected_game(
+            Some(&next),
+            Some("8452448851")
+        ));
+        assert!(!eog_stats_match_expected_game(
+            Some(&unknown),
+            Some("8452448851")
+        ));
+        assert!(eog_stats_match_expected_game(None, Some("8452448851")));
+        assert!(eog_stats_match_expected_game(Some(&next), None));
+    }
+
+    #[test]
+    fn unfinished_eog_recovery_survives_client_restart_and_retries_in_lobby() {
+        let mut poller = LcuEventPoller::default();
+        let initial = LcuIdentity {
+            process_id: 10,
+            port: 5000,
+        };
+        poller.observe_connection(initial);
+        let started = Instant::now() - Duration::from_secs(15);
+        poller.eog_recovery_started_at = Some(started);
+        poller.last_eog_attempt = Some(Instant::now() - Duration::from_secs(6));
+        poller.eog_attempt_count = 1;
+        poller.eog_expected_game_id = Some("8452448851".into());
+        poller.gameflow = Some("EndOfGame".into());
+
+        poller.observe_disconnected();
+        assert!(poller.gameflow.is_none());
+        assert_eq!(poller.eog_expected_game_id.as_deref(), Some("8452448851"));
+        assert_eq!(poller.eog_attempt_count, 1);
+        assert_eq!(poller.eog_recovery_started_at, Some(started));
+
+        poller.observe_connection(LcuIdentity {
+            process_id: 11,
+            port: 5001,
+        });
+        assert_eq!(poller.eog_expected_game_id.as_deref(), Some("8452448851"));
+        assert!(should_attempt_eog_recovery(
+            "Lobby",
+            None,
+            poller.eog_sent,
+            poller.last_eog_attempt,
+            poller.eog_recovery_started_at,
+            poller.eog_expected_game_id.as_deref(),
+        ));
+    }
+
+    #[test]
+    fn eog_recovery_does_not_leak_past_grace_or_to_next_game() {
+        let mut poller = LcuEventPoller::default();
+        poller.observe_connection(LcuIdentity {
+            process_id: 10,
+            port: 5000,
+        });
+        poller.eog_recovery_started_at =
+            Some(Instant::now() - EOG_POSTGAME_RECOVERY_GRACE - Duration::from_secs(1));
+        poller.eog_expected_game_id = Some("old-game".into());
+        poller.observe_disconnected();
+        assert!(poller.eog_recovery_started_at.is_none());
+        assert!(poller.eog_expected_game_id.is_none());
+
+        poller.eog_recovery_started_at = Some(Instant::now());
+        poller.eog_expected_game_id = Some("old-game".into());
+        poller.eog_sent = true;
+        poller.observe_connection(LcuIdentity {
+            process_id: 11,
+            port: 5001,
+        });
+        assert!(poller.eog_recovery_started_at.is_none());
+        assert!(poller.eog_expected_game_id.is_none());
+
+        // An actual new match supersedes unfinished recovery, and its own EOG
+        // cannot inherit the old game ID.
+        poller.eog_recovery_started_at = Some(Instant::now());
+        poller.eog_expected_game_id = Some("old-game".into());
+        poller.eog_sent = false;
+        poller.clear_eog_recovery();
+        assert!(poller.eog_expected_game_id.is_none());
     }
 
     #[test]

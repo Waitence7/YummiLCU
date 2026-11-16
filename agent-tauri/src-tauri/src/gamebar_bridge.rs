@@ -2692,6 +2692,69 @@ struct GameBarUpdateTarget {
 }
 
 #[cfg(windows)]
+fn validate_gamebar_update_target_archive(target: &GameBarUpdateTarget) -> Result<(), String> {
+    if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
+    }
+    if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 {
+        return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into());
+    }
+    let parsed =
+        url::Url::parse(&target.url).map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
+    let expected_release_path = format!(
+        "/Waitence7/YummiLCU/releases/download/{}/",
+        target.release_tag
+    );
+    if parsed.scheme() != "https"
+        || parsed.host_str() != Some("github.com")
+        || !parsed.path().starts_with(&expected_release_path)
+        || !parsed.path().ends_with(".zip")
+    {
+        return Err("Game Bar 다운로드 URL이 허용되지 않았습니다.".into());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, windows))]
+mod gamebar_update_target_validation_tests {
+    use super::*;
+
+    fn valid_target() -> GameBarUpdateTarget {
+        GameBarUpdateTarget {
+            version: "0.1.119".to_owned(),
+            release_tag: "gamebar-v0.1.119".to_owned(),
+            build_id: "255".to_owned(),
+            commit: "test".to_owned(),
+            url: "https://github.com/Waitence7/YummiLCU/releases/download/gamebar-v0.1.119/test.zip".to_owned(),
+            sha256: "a".repeat(64),
+            size: 1024,
+        }
+    }
+
+    #[test]
+    fn gamebar_update_rejects_mismatched_or_untrusted_release_assets() {
+        let target = valid_target();
+        assert!(validate_gamebar_update_target_archive(&target).is_ok());
+
+        let mut invalid = valid_target();
+        invalid.sha256 = "xyz".to_owned();
+        assert!(validate_gamebar_update_target_archive(&invalid).is_err());
+
+        invalid = valid_target();
+        invalid.size = 0;
+        assert!(validate_gamebar_update_target_archive(&invalid).is_err());
+
+        invalid = valid_target();
+        invalid.url = "http://github.com/Waitence7/YummiLCU/releases/download/gamebar-v0.1.119/test.zip".to_owned();
+        assert!(validate_gamebar_update_target_archive(&invalid).is_err());
+
+        invalid = valid_target();
+        invalid.url = "https://github.com/Waitence7/YummiLCU/releases/download/gamebar-v0.1.118/test.zip".to_owned();
+        assert!(validate_gamebar_update_target_archive(&invalid).is_err());
+    }
+}
+
+#[cfg(windows)]
 #[derive(Debug, Deserialize, Serialize, Default)]
 struct GameBarUpdateState {
     build_id: String,
@@ -2965,25 +3028,7 @@ async fn check_overlay_update(force_finalize_requested: bool) -> Result<(), Stri
         "최신 오버레이 릴리즈 감지: {selected_release_tag}"
     ));
 
-    if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
-    }
-    if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 {
-        return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into());
-    }
-    let parsed =
-        url::Url::parse(&target.url).map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
-    let expected_release_path = format!(
-        "/Waitence7/YummiLCU/releases/download/{}/",
-        selected_release_tag
-    );
-    if parsed.scheme() != "https"
-        || parsed.host_str() != Some("github.com")
-        || !parsed.path().starts_with(&expected_release_path)
-        || !parsed.path().ends_with(".zip")
-    {
-        return Err("Game Bar 다운로드 URL이 허용되지 않았습니다.".into());
-    }
+    validate_gamebar_update_target_archive(&target)?;
 
     let expected_appx_version = format!("{}.{}", target.version, target.build_id);
     let installed_appx_version = || -> Option<String> {
@@ -3279,26 +3324,7 @@ async fn fetch_verified_overlay_archive() -> Result<(GameBarUpdateTarget, Vec<u8
         .build()
         .map_err(|e| format!("Game Bar 설치 클라이언트 생성 실패: {e}"))?;
     let target = fetch_published_gamebar_target(&client).await?;
-    let selected_release_tag = target.release_tag.clone();
-    if target.sha256.len() != 64 || !target.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err("Game Bar manifest SHA256 형식이 올바르지 않습니다.".into());
-    }
-    if target.size == 0 || target.size > MAX_GAMEBAR_ARCHIVE_BYTES as u64 {
-        return Err("Game Bar ZIP 크기가 허용 범위를 벗어났습니다.".into());
-    }
-    let parsed =
-        url::Url::parse(&target.url).map_err(|e| format!("Game Bar 다운로드 URL 오류: {e}"))?;
-    let expected_release_path = format!(
-        "/Waitence7/YummiLCU/releases/download/{}/",
-        selected_release_tag
-    );
-    if parsed.scheme() != "https"
-        || parsed.host_str() != Some("github.com")
-        || !parsed.path().starts_with(&expected_release_path)
-        || !parsed.path().ends_with(".zip")
-    {
-        return Err("Game Bar 다운로드 URL이 허용되지 않았습니다.".into());
-    }
+    validate_gamebar_update_target_archive(&target)?;
     let response = client
         .get(&target.url)
         .send()
