@@ -1630,6 +1630,15 @@ fn should_attempt_eog_recovery(
     }
 }
 
+fn same_game_session_data<'a>(
+    session: Option<&'a Value>,
+    expected_game_id: Option<&str>,
+) -> Option<&'a Value> {
+    let expected = expected_game_id?;
+    let game_data = session?.get("gameData")?;
+    (json_scalar_id(game_data.get("gameId")).as_deref() == Some(expected)).then_some(game_data)
+}
+
 async fn eog_payload(
     client: &LcuClient,
     phase: &str,
@@ -1786,6 +1795,34 @@ async fn eog_payload(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // A client can enter its next lobby while the previous EOG is recovering.
+    // Never attach the next game's queue/type/map to the prior gameId.
+    let game_data = same_game_session_data(session.as_ref(), game_id.as_deref());
+    let game_queue = game_data.and_then(|data| data.get("queue"));
+    let same_game_eog = eog.as_ref().filter(|_| eog_matches_expected);
+    let queue_id = game_data
+        .and_then(|data| data.get("queueId"))
+        .or_else(|| game_queue.and_then(|queue| queue.get("id")))
+        .or_else(|| same_game_eog.and_then(|data| data.get("queueId")))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let game_type = game_data
+        .and_then(|data| data.get("gameType"))
+        .or_else(|| same_game_eog.and_then(|data| data.get("gameType")))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let game_mode = game_data
+        .and_then(|data| data.get("gameMode"))
+        .or_else(|| same_game_eog.and_then(|data| data.get("gameMode")))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let map_id = game_data
+        .and_then(|data| data.get("mapId"))
+        .or_else(|| game_queue.and_then(|queue| queue.get("mapId")))
+        .or_else(|| same_game_eog.and_then(|data| data.get("mapId")))
+        .cloned()
+        .unwrap_or(Value::Null);
+
     let mut payload = json!({
         "source":"lcu-agent",
         "gameflowPhase": phase,
@@ -1793,6 +1830,10 @@ async fn eog_payload(
         "capturedAtMs": captured_at_ms,
         "gameId": game_id,
         "expectedGameId": expected_game_id,
+        "queueId": queue_id,
+        "gameType": game_type,
+        "gameMode": game_mode,
+        "mapId": map_id,
         "participants": participants,
         "recentMatch": recent_match,
         "recentMatches": recent_matches,
@@ -2717,6 +2758,8 @@ fn live_game_payload_at(
             "game_id": game_data.get("gameId").cloned().unwrap_or(Value::Null),
             "mode": game_data.get("gameMode").cloned().unwrap_or(Value::Null),
             "game_mode": game_data.get("gameMode").cloned().unwrap_or(Value::Null),
+            "game_type": game_data.get("gameType").cloned().unwrap_or(Value::Null),
+            "queue_id": game_data.get("queueId").cloned().unwrap_or(Value::Null),
             "map": game_data.get("mapName").cloned().unwrap_or(Value::Null),
             "map_name": game_data.get("mapName").cloned().unwrap_or(Value::Null),
             "map_number": game_data.get("mapNumber").cloned().unwrap_or(Value::Null),
@@ -2924,6 +2967,21 @@ fn live_player_payload(player: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn gameflow_mode_evidence_requires_the_same_actual_game_id() {
+        let session = json!({"gameData": {
+            "gameId": 8461234568,
+            "queueId": 420,
+            "gameType": "MATCHED_GAME",
+            "gameMode": "CLASSIC",
+            "mapId": 11
+        }});
+        assert!(same_game_session_data(Some(&session), Some("8461234567")).is_none());
+        assert!(same_game_session_data(Some(&session), None).is_none());
+        let same = same_game_session_data(Some(&session), Some("8461234568")).unwrap();
+        assert_eq!(same["queueId"], 420);
+    }
     use super::*;
 
     #[test]

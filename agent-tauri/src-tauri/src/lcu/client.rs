@@ -137,6 +137,10 @@ fn compact_match_history_game(game: &Value) -> Option<Value> {
         "gameCreation": game.get("gameCreation").cloned().unwrap_or(Value::Null),
         "gameCreationDate": game.get("gameCreationDate").cloned().unwrap_or(Value::Null),
         "gameDuration": game.get("gameDuration").cloned().unwrap_or(Value::Null),
+        "queueId": game.get("queueId").cloned().unwrap_or(Value::Null),
+        "gameType": game.get("gameType").cloned().unwrap_or(Value::Null),
+        "gameMode": game.get("gameMode").cloned().unwrap_or(Value::Null),
+        "mapId": game.get("mapId").cloned().unwrap_or(Value::Null),
         "participants": participants
     }))
 }
@@ -711,6 +715,10 @@ mod tests {
     fn compact_match_history_preserves_actual_lane_and_role() {
         let compact = compact_match_history_game(&json!({
             "gameId": 42,
+            "queueId": 0,
+            "gameType": "CUSTOM_GAME",
+            "gameMode": "CLASSIC",
+            "mapId": 11,
             "participantIdentities": [{
                 "participantId": 1,
                 "player": {"gameName": "Player", "tagLine": "KR1"}
@@ -728,6 +736,10 @@ mod tests {
         assert_eq!(participant["role"], "DUO_SUPPORT");
         assert_eq!(participant["teamId"], 100);
         assert_eq!(participant["won"], true);
+        assert_eq!(compact["queueId"], 0);
+        assert_eq!(compact["gameType"], "CUSTOM_GAME");
+        assert_eq!(compact["gameMode"], "CLASSIC");
+        assert_eq!(compact["mapId"], 11);
     }
 
     #[test]
