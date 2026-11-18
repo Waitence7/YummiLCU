@@ -2983,7 +2983,7 @@ mod tests {
     #[test]
     fn gameflow_mode_evidence_requires_the_same_actual_game_id() {
         let session = json!({"gameData": {
-            "gameId": 8461234568,
+            "gameId": 8461234568_i64,
             "queueId": 420,
             "gameType": "MATCHED_GAME",
             "gameMode": "CLASSIC",
