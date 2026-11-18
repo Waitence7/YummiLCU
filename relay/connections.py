@@ -17,6 +17,8 @@ LIVE_GAME_CACHE_TTL_SEC = 15.0
 LIVE_PREVIEW_CACHE_TTL_SEC = 5.0
 LIVE_GAME_PARTICIPANT_COUNT = 10
 BOT_WS_SEND_TIMEOUT_SEC = 2.0
+BOT_WS_SLOW_SEND_SEC = 1.5
+BOT_WS_SLOW_ALERT_COOLDOWN_SEC = 300.0
 AGENT_WS_SEND_TIMEOUT_SEC = 5.0
 AGENT_HEARTBEAT_STALE_SEC = 180.0
 AGENT_QUALITY_HEALTHY_SEC = 40.0
@@ -83,6 +85,8 @@ class ConnectionManager:
         self._bot_ws: WebSocket | None = None
         # Starlette WS sends must be serialized; outbound HTTP handlers run concurrently.
         self._bot_send_lock = asyncio.Lock()
+        self._bot_send_slow_last: dict[str, float] = {}
+        self._bot_send_slow_suppressed: dict[str, int] = {}
         self._champ_select_log_state: dict[int, tuple[tuple[Any, ...], float]] = {}
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._party_lobby: dict[int, tuple[float, dict[str, Any]]] = {}
@@ -565,11 +569,57 @@ class ConnectionManager:
                 pass
             return False
 
+    def _report_bot_ws_send_latency(self, kind: str, elapsed_ms: int, *, failed: bool) -> bool:
+        key = str(kind or 'unknown')[:64]
+        now = time.monotonic()
+        previous = self._bot_send_slow_last.get(key)
+        if previous is not None and now - previous < BOT_WS_SLOW_ALERT_COOLDOWN_SEC:
+            self._bot_send_slow_suppressed[key] = self._bot_send_slow_suppressed.get(key, 0) + 1
+            return False
+        if len(self._bot_send_slow_last) >= 128 and key not in self._bot_send_slow_last:
+            oldest = next(iter(self._bot_send_slow_last))
+            self._bot_send_slow_last.pop(oldest, None)
+            self._bot_send_slow_suppressed.pop(oldest, None)
+        suppressed = self._bot_send_slow_suppressed.pop(key, 0)
+        self._bot_send_slow_last[key] = now
+        # Relay's root DiscordErrorHandler forwards ERROR to the existing webhook.
+        logger.error(
+            'relay_ws_latency direction=relay_to_bot stage=send event_type=%s '
+            'elapsed_ms=%s threshold_ms=%s failed=%s suppressed=%s action=inspect_bot_backpressure',
+            key, elapsed_ms, int(BOT_WS_SLOW_SEND_SEC * 1000), failed, suppressed,
+        )
+        return True
+
     async def _send_bot_serialized(self, ws: WebSocket, payload: dict[str, Any]) -> None:
-        async with self._bot_send_lock:
-            if self._bot_ws is not ws:
-                raise ConnectionError("Bot WebSocket was replaced")
-            await _send_bot_json(ws, payload)
+        kind = str(payload.get('type') or 'unknown')
+        started = time.monotonic()
+        failed = True
+        try:
+            async with self._bot_send_lock:
+                if self._bot_ws is not ws:
+                    raise ConnectionError("Bot WebSocket was replaced")
+                await _send_bot_json(ws, payload)
+                failed = False
+        finally:
+            elapsed_ms = int((time.monotonic() - started) * 1000)
+            if kind != 'relay_ws_latency' and elapsed_ms >= int(BOT_WS_SLOW_SEND_SEC * 1000):
+                reported = self._report_bot_ws_send_latency(kind, elapsed_ms, failed=failed)
+                # Relay may have no direct monitor webhook configured. Deliver
+                # a compact diagnostic to Bot, which already has the error
+                # monitor. Never emit diagnostics for diagnostics themselves.
+                if reported and not failed and self._bot_ws is ws:
+                    uid = payload.get('discord_id')
+                    async def send_diagnostic() -> None:
+                        await self.send_bot_event({
+                            'type': 'relay_ws_latency',
+                            'data': {
+                                'event_type': kind[:64],
+                                'discord_id': uid if type(uid) is int and uid > 0 else 0,
+                                'elapsed_ms': elapsed_ms,
+                                'threshold_ms': int(BOT_WS_SLOW_SEND_SEC * 1000),
+                            },
+                        })
+                    asyncio.create_task(send_diagnostic(), name='relay-ws-latency-diagnostic')
 
     async def _invalidate_bot_ws(self, ws: WebSocket, *, reason: str) -> None:
         """A failed send MUST terminate the transport, not just hide its pointer.
