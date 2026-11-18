@@ -41,6 +41,10 @@ const LIVE_GAME_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const GAMEFLOW_SNAPSHOT_INTERVAL: Duration = Duration::from_secs(8);
 const LOCKFILE_DISCOVERY_INTERVAL: Duration = Duration::from_secs(5);
 const RECENT_MATCH_VERIFICATION_TIMEOUT: Duration = Duration::from_secs(3);
+// The end-of-game stats block can transiently return 404 during the phase
+// transition. Probe more frequently at first, then back off to bound LCU load.
+const EOG_RECOVERY_EARLY_RETRY_INTERVAL: Duration = Duration::from_secs(2);
+const EOG_RECOVERY_EARLY_WINDOW: Duration = Duration::from_secs(20);
 const EOG_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 const EOG_POSTGAME_RECOVERY_GRACE: Duration = Duration::from_secs(90);
 const ROFL_RECOVERY_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -67,7 +71,10 @@ pub(crate) struct LcuEventPoller {
     // None keeps legacy agents compatible until Relay sends the first control message.
     live_game_polling: Option<bool>,
     live_game_delta_enabled: bool,
+    // Complete 10-player result has been collected, so EOG polling can stop.
     eog_sent: bool,
+    // One result hint may be forwarded once, but must not stop full EOG polling.
+    eog_partial_sent: bool,
     last_eog_attempt: Option<Instant>,
     eog_recovery_started_at: Option<Instant>,
     eog_attempt_count: u32,
@@ -116,6 +123,7 @@ impl LcuEventPoller {
     }
 
     fn clear_eog_recovery(&mut self) {
+        self.eog_partial_sent = false;
         self.last_eog_attempt = None;
         self.eog_recovery_started_at = None;
         self.eog_attempt_count = 0;
@@ -141,6 +149,7 @@ impl LcuEventPoller {
                     started,
                     self.last_eog_attempt,
                     self.eog_attempt_count,
+                    self.eog_partial_sent,
                     game_id.to_owned(),
                 ))
             }
@@ -155,10 +164,11 @@ impl LcuEventPoller {
         self.live_respawn_samples.clear();
         self.eog_sent = false;
         self.clear_eog_recovery();
-        if let Some((started, last_attempt, attempts, game_id)) = pending_eog {
+        if let Some((started, last_attempt, attempts, partial_sent, game_id)) = pending_eog {
             self.eog_recovery_started_at = Some(started);
             self.last_eog_attempt = last_attempt;
             self.eog_attempt_count = attempts;
+            self.eog_partial_sent = partial_sent;
             self.eog_expected_game_id = Some(game_id.clone());
             self.diagnostic(format!(
                 "LCU 연결 전환 중 EOG 복구 상태 유지: game_id={game_id} attempts={attempts}"
@@ -893,7 +903,11 @@ impl LcuEventPoller {
                 }
             }
             let evidence_source = eog_result_evidence_source(&payload);
-            self.eog_sent = evidence_source.is_some();
+            let complete_eog = has_complete_eog_result_participants(&payload);
+            // A same-game recentMatch with a single player's win is useful
+            // provisional evidence, not proof that EOG stats were collected.
+            // Keep querying while this game is in the bounded recovery window.
+            self.eog_sent = complete_eog;
             let diagnostics = payload.get("eogDiagnostics").and_then(Value::as_object);
             let eog_status = diagnostics
                 .and_then(|value| value.get("eogRequestStatus"))
@@ -936,10 +950,21 @@ impl LcuEventPoller {
                 attempt_started.elapsed().as_millis(),
             ));
 
-            // Every attempt is archived by the generic EOG path for diagnostics.
-            // Only evidence-bearing payloads are promoted to guild-match result ingest.
-            events.push(("match_eog", payload.clone()));
-            if self.eog_sent {
+            // Send the first hint for SSOT game-ID recovery immediately, but
+            // never flood Relay with the same incomplete payload every 2 s.
+            // Forward a complete EOG again when it finally becomes available.
+            let first_usable_hint = evidence_source.is_some() && !self.eog_partial_sent;
+            if first_usable_hint {
+                self.eog_partial_sent = true;
+            }
+            if self.eog_attempt_count == 1
+                || first_usable_hint
+                || self.eog_sent
+                || self.eog_attempt_count % 5 == 0
+            {
+                events.push(("match_eog", payload.clone()));
+            }
+            if first_usable_hint || self.eog_sent {
                 events.push(("guild_match_eog", payload));
             }
         }
@@ -949,14 +974,18 @@ impl LcuEventPoller {
                 .eog_recovery_started_at
                 .is_some_and(|started| started.elapsed() > EOG_POSTGAME_RECOVERY_GRACE)
         {
-            self.diagnostic(format!(
-                "EOG 복구 시간 초과: attempts={} expected_game_id={} phase={} grace_sec={}",
-                self.eog_attempt_count,
-                self.eog_expected_game_id.as_deref().unwrap_or("unknown"),
-                phase,
-                EOG_POSTGAME_RECOVERY_GRACE.as_secs()
-            ));
-            self.clear_eog_recovery();
+            if self.last_eog_attempt.take().is_some() {
+                self.diagnostic(format!(
+                    "EOG 복구 시간 초과: attempts={} expected_game_id={} phase={} grace_sec={} partial_sent={}",
+                    self.eog_attempt_count,
+                    self.eog_expected_game_id.as_deref().unwrap_or("unknown"),
+                    phase,
+                    EOG_POSTGAME_RECOVERY_GRACE.as_secs(),
+                    self.eog_partial_sent
+                ));
+            }
+            // Keep the expired recovery marker until a new game starts.
+            // Clearing it here would start another 90-second cycle in EOG.
         } else if !self.eog_sent
             && matches!(phase.as_str(), "ChampSelect" | "Matchmaking" | "GameStart")
             && self.eog_recovery_started_at.is_some()
@@ -1589,6 +1618,10 @@ fn should_attempt_eog_recovery(
     if eog_sent {
         return false;
     }
+    let recovery_age = recovery_started_at.map(|started| started.elapsed());
+    if recovery_age.is_some_and(|age| age > EOG_POSTGAME_RECOVERY_GRACE) {
+        return false;
+    }
     let in_eog_phase = is_eog_phase(phase);
     let postgame_grace = matches!(phase, "Lobby" | "None")
         && recovery_started_at
@@ -1614,10 +1647,72 @@ fn should_attempt_eog_recovery(
     if phase == "EndOfGame" && previous_phase != Some("EndOfGame") {
         return true;
     }
+    let retry_interval = if recovery_age.is_some_and(|age| age <= EOG_RECOVERY_EARLY_WINDOW) {
+        EOG_RECOVERY_EARLY_RETRY_INTERVAL
+    } else {
+        EOG_RECOVERY_RETRY_INTERVAL
+    };
     match last_attempt {
         None => true,
-        Some(attempt) => Instant::now().duration_since(attempt) >= EOG_RECOVERY_RETRY_INTERVAL,
+        Some(attempt) => Instant::now().duration_since(attempt) >= retry_interval,
     }
+}
+
+fn same_game_session_data<'a>(
+    session: Option<&'a Value>,
+    expected_game_id: Option<&str>,
+) -> Option<&'a Value> {
+    let expected = expected_game_id?;
+    let game_data = session?.get("gameData")?;
+    (json_scalar_id(game_data.get("gameId")).as_deref() == Some(expected)).then_some(game_data)
+}
+
+// EOG success means the whole game can be attributed, not just that a
+// reporter's recent-match history revealed a single valid win/loss.
+fn has_complete_eog_result_participants(payload: &Value) -> bool {
+    let source = eog_result_evidence_source(payload);
+    let rows = match source {
+        Some("eog_stats") => payload.get("participants"),
+        Some("recent_match") => payload.pointer("/recentMatch/participants"),
+        _ => return false,
+    };
+    let Some(rows) = rows.and_then(Value::as_array) else {
+        return false;
+    };
+    if rows.len() != LIVE_GAME_PARTICIPANT_COUNT
+        || !has_consistent_eog_result_participants(Some(&Value::Array(rows.clone())))
+    {
+        return false;
+    }
+    let mut blue = 0usize;
+    let mut red = 0usize;
+    let mut unique_players = HashSet::new();
+    for row in rows {
+        let (Some(name), Some(tag), Some(side)) = (
+            row.get("gameName").and_then(Value::as_str),
+            row.get("tagLine").and_then(Value::as_str),
+            row.get("teamId").and_then(Value::as_i64),
+        ) else {
+            return false;
+        };
+        if name.trim().is_empty()
+            || tag.trim().is_empty()
+            || !row.get("won").is_some_and(Value::is_boolean)
+            || !unique_players.insert(format!(
+                "{}#{}",
+                name.trim().to_lowercase(),
+                tag.trim().to_lowercase()
+            ))
+        {
+            return false;
+        }
+        match side {
+            100 => blue += 1,
+            200 => red += 1,
+            _ => return false,
+        }
+    }
+    blue == 5 && red == 5
 }
 
 async fn eog_payload(
@@ -1776,6 +1871,34 @@ async fn eog_payload(
         .unwrap_or_default()
         .as_millis() as u64;
 
+    // A client can enter its next lobby while the previous EOG is recovering.
+    // Never attach the next game's queue/type/map to the prior gameId.
+    let game_data = same_game_session_data(session.as_ref(), game_id.as_deref());
+    let game_queue = game_data.and_then(|data| data.get("queue"));
+    let same_game_eog = eog.as_ref().filter(|_| eog_matches_expected);
+    let queue_id = game_data
+        .and_then(|data| data.get("queueId"))
+        .or_else(|| game_queue.and_then(|queue| queue.get("id")))
+        .or_else(|| same_game_eog.and_then(|data| data.get("queueId")))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let game_type = game_data
+        .and_then(|data| data.get("gameType"))
+        .or_else(|| same_game_eog.and_then(|data| data.get("gameType")))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let game_mode = game_data
+        .and_then(|data| data.get("gameMode"))
+        .or_else(|| same_game_eog.and_then(|data| data.get("gameMode")))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let map_id = game_data
+        .and_then(|data| data.get("mapId"))
+        .or_else(|| game_queue.and_then(|queue| queue.get("mapId")))
+        .or_else(|| same_game_eog.and_then(|data| data.get("mapId")))
+        .cloned()
+        .unwrap_or(Value::Null);
+
     let mut payload = json!({
         "source":"lcu-agent",
         "gameflowPhase": phase,
@@ -1783,6 +1906,10 @@ async fn eog_payload(
         "capturedAtMs": captured_at_ms,
         "gameId": game_id,
         "expectedGameId": expected_game_id,
+        "queueId": queue_id,
+        "gameType": game_type,
+        "gameMode": game_mode,
+        "mapId": map_id,
         "participants": participants,
         "recentMatch": recent_match,
         "recentMatches": recent_matches,
@@ -2643,6 +2770,8 @@ fn live_game_payload_at(
             "game_id": game_data.get("gameId").cloned().unwrap_or(Value::Null),
             "mode": game_data.get("gameMode").cloned().unwrap_or(Value::Null),
             "game_mode": game_data.get("gameMode").cloned().unwrap_or(Value::Null),
+            "game_type": game_data.get("gameType").cloned().unwrap_or(Value::Null),
+            "queue_id": game_data.get("queueId").cloned().unwrap_or(Value::Null),
             "map": game_data.get("mapName").cloned().unwrap_or(Value::Null),
             "map_name": game_data.get("mapName").cloned().unwrap_or(Value::Null),
             "map_number": game_data.get("mapNumber").cloned().unwrap_or(Value::Null),
@@ -2850,6 +2979,21 @@ fn live_player_payload(player: &Value) -> Value {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn gameflow_mode_evidence_requires_the_same_actual_game_id() {
+        let session = json!({"gameData": {
+            "gameId": 8461234568,
+            "queueId": 420,
+            "gameType": "MATCHED_GAME",
+            "gameMode": "CLASSIC",
+            "mapId": 11
+        }});
+        assert!(same_game_session_data(Some(&session), Some("8461234567")).is_none());
+        assert!(same_game_session_data(Some(&session), None).is_none());
+        let same = same_game_session_data(Some(&session), Some("8461234568")).unwrap();
+        assert_eq!(same["queueId"], 420);
+    }
     use super::*;
 
     #[test]
@@ -2909,6 +3053,136 @@ mod tests {
             Some(Instant::now()),
             Some("200"),
         ));
+    }
+
+    #[test]
+    fn eog_recovery_polls_every_two_seconds_during_initial_end_transition() {
+        let now = Instant::now();
+        assert!(should_attempt_eog_recovery(
+            "WaitingForStats",
+            Some("WaitingForStats"),
+            false,
+            Some(now - Duration::from_secs(3)),
+            Some(now - Duration::from_secs(10)),
+            Some("8462495671"),
+        ));
+        assert!(!should_attempt_eog_recovery(
+            "WaitingForStats",
+            Some("WaitingForStats"),
+            false,
+            Some(now - Duration::from_secs(1)),
+            Some(now - Duration::from_secs(10)),
+            Some("8462495671"),
+        ));
+    }
+
+    #[test]
+    fn eog_recovery_backs_off_and_stops_after_grace_period() {
+        let now = Instant::now();
+        assert!(!should_attempt_eog_recovery(
+            "EndOfGame",
+            Some("EndOfGame"),
+            false,
+            Some(now - Duration::from_secs(3)),
+            Some(now - Duration::from_secs(30)),
+            Some("8462495671"),
+        ));
+        assert!(should_attempt_eog_recovery(
+            "Lobby",
+            Some("EndOfGame"),
+            false,
+            Some(now - Duration::from_secs(6)),
+            Some(now - Duration::from_secs(30)),
+            Some("8462495671"),
+        ));
+        assert!(!should_attempt_eog_recovery(
+            "EndOfGame",
+            Some("EndOfGame"),
+            false,
+            Some(now - Duration::from_secs(6)),
+            Some(now - EOG_POSTGAME_RECOVERY_GRACE - Duration::from_secs(1)),
+            Some("8462495671"),
+        ));
+    }
+
+    #[test]
+    fn one_recent_match_win_does_not_complete_eog_recovery() {
+        let partial = json!({
+            "gameId": "8462495671",
+            "participants": [],
+            "recentMatch": {
+                "gameId": 8462495671_i64,
+                "participants": [{
+                    "gameName": "검의무희", "tagLine": "CARRY", "teamId": 200, "won": true
+                }]
+            }
+        });
+        assert_eq!(
+            eog_result_evidence_source(&partial),
+            Some("recent_match_game_id")
+        );
+        assert!(!has_complete_eog_result_participants(&partial));
+        assert!(should_attempt_eog_recovery(
+            "WaitingForStats",
+            Some("WaitingForStats"),
+            has_complete_eog_result_participants(&partial),
+            Some(Instant::now() - Duration::from_secs(3)),
+            Some(Instant::now() - Duration::from_secs(10)),
+            Some("8462495671"),
+        ));
+    }
+
+    #[test]
+    fn complete_ten_player_eog_stops_polling_but_rejects_wrong_game_and_duplicates() {
+        let participants = (0..10)
+            .map(|i| {
+                json!({
+                    "gameName": format!("Player{i}"), "tagLine": "KR1",
+                    "teamId": if i < 5 { 100 } else { 200 }, "won": i < 5
+                })
+            })
+            .collect::<Vec<_>>();
+        let payload = json!({"gameId": "8462495671", "expectedGameId": "8462495671", "participants": participants});
+        assert!(has_complete_eog_result_participants(&payload));
+        assert!(!should_attempt_eog_recovery(
+            "EndOfGame",
+            Some("WaitingForStats"),
+            has_complete_eog_result_participants(&payload),
+            None,
+            Some(Instant::now()),
+            Some("8462495671"),
+        ));
+        let mut bad = payload.clone();
+        bad["participants"][9]["gameName"] = json!("Player8");
+        assert!(!has_complete_eog_result_participants(&bad));
+        bad = payload.clone();
+        bad["expectedGameId"] = json!("different_game");
+        assert!(!has_complete_eog_result_participants(&bad));
+        bad = payload;
+        bad["participants"][9]["teamId"] = json!(100);
+        assert!(!has_complete_eog_result_participants(&bad));
+    }
+
+    #[test]
+    fn partial_eog_upload_marker_survives_client_restart_without_stopping_retries() {
+        let mut poller = LcuEventPoller::default();
+        poller.observe_connection(LcuIdentity {
+            process_id: 10,
+            port: 5000,
+        });
+        poller.eog_expected_game_id = Some("8462495671".into());
+        poller.eog_recovery_started_at = Some(Instant::now());
+        poller.eog_partial_sent = true;
+        poller.observe_disconnected();
+        poller.observe_connection(LcuIdentity {
+            process_id: 11,
+            port: 5001,
+        });
+        assert!(poller.eog_partial_sent);
+        assert!(!poller.eog_sent);
+        assert_eq!(poller.eog_expected_game_id.as_deref(), Some("8462495671"));
+        poller.clear_eog_recovery();
+        assert!(!poller.eog_partial_sent);
     }
 
     #[test]
