@@ -173,12 +173,16 @@ jobs:
           $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
           $buildId = "$date.$env:GITHUB_RUN_NUMBER"
           $shortSha = $env:GITHUB_SHA.Substring(0, 7)
-          $releaseLabel = "$version-candidate.$env:GITHUB_RUN_NUMBER"
-          "YUMMI_AGENT_RELEASE_CHANNEL=dev" >> $env:GITHUB_ENV
+          $isStableBackport = $env:GITHUB_REF -eq 'refs/heads/release/stable-0.7.36' -and $version -eq '0.7.37'
+          $releaseChannel = if ($isStableBackport) { 'stable' } else { 'dev' }
+          $releaseLabel = if ($isStableBackport) { $version } else { "$version-candidate.$env:GITHUB_RUN_NUMBER" }
+          # The channel is compiled into the Agent's default update URL, not
+          # only into the server manifest. Never ship a dev-channel binary as stable.
+          "YUMMI_AGENT_RELEASE_CHANNEL=$releaseChannel" >> $env:GITHUB_ENV
           "YUMMI_AGENT_RELEASE_LABEL=$releaseLabel" >> $env:GITHUB_ENV
           "YUMMI_AGENT_BUILD_ID=$buildId" >> $env:GITHUB_ENV
           "YUMMI_AGENT_GIT_COMMIT=$shortSha" >> $env:GITHUB_ENV
-          "channel=dev" >> $env:GITHUB_OUTPUT
+          "channel=$releaseChannel" >> $env:GITHUB_OUTPUT
           "release_label=$releaseLabel" >> $env:GITHUB_OUTPUT
           "build_id=$buildId" >> $env:GITHUB_OUTPUT
 
@@ -308,8 +312,8 @@ jobs:
         id: manifest
         env:
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
-          RELEASE_NOTES: "Verified main candidate"
-          CHANNEL: dev
+          RELEASE_NOTES: ${{ github.ref == 'refs/heads/release/stable-0.7.36' && 'Verified stable 0.7.37 backport candidate' || 'Verified main candidate' }}
+          CHANNEL: ${{ github.ref == 'refs/heads/release/stable-0.7.36' && 'stable' || 'dev' }}
           ROLLOUT_PERCENT: "100"
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
