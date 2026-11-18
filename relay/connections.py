@@ -81,6 +81,8 @@ class ConnectionManager:
         self._pending_results: dict[tuple[int, str], asyncio.Future[dict[str, Any]]] = {}
         self._pending_bot_eog: dict[str, asyncio.Future[bool]] = {}
         self._bot_ws: WebSocket | None = None
+        # Starlette WS sends must be serialized; outbound HTTP handlers run concurrently.
+        self._bot_send_lock = asyncio.Lock()
         self._champ_select_log_state: dict[int, tuple[tuple[Any, ...], float]] = {}
         self._party_subscribers: set[int] = set()  # creator discord_id
         self._party_lobby: dict[int, tuple[float, dict[str, Any]]] = {}
@@ -563,25 +565,59 @@ class ConnectionManager:
                 pass
             return False
 
+    async def _send_bot_serialized(self, ws: WebSocket, payload: dict[str, Any]) -> None:
+        async with self._bot_send_lock:
+            if self._bot_ws is not ws:
+                raise ConnectionError("Bot WebSocket was replaced")
+            await _send_bot_json(ws, payload)
+
+    async def _invalidate_bot_ws(self, ws: WebSocket, *, reason: str) -> None:
+        """A failed send MUST terminate the transport, not just hide its pointer.
+
+        Otherwise the Bot stays in its receive loop forever and never reauths,
+        while Relay reports `botWS없음` for every subsequent event.
+        """
+        await self.unregister_bot_ws(ws)
+        logger.error("봇 WS 연결 강제 종료 reason=%s", reason)
+        try:
+            await asyncio.wait_for(ws.close(code=1011), timeout=1.0)
+        except Exception as exc:
+            logger.warning("봇 WS close 실패 reason=%s error=%s", reason, exc)
+
     async def send_bot_event(self, payload: dict[str, Any]) -> bool:
         async with self._lock:
             ws = self._bot_ws
         if ws is None:
             return False
         try:
-            await _send_bot_json(ws, payload)
+            await self._send_bot_serialized(ws, payload)
             return True
         except Exception:
             logger.exception("봇 WS event 전달 실패 type=%s", payload.get("type"))
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def register_bot_ws(self, ws: WebSocket) -> None:
+        previous: WebSocket | None = None
         async with self._lock:
             if self._bot_ws is not None and self._bot_ws is not ws:
-                logger.info("봇 WS 교체 — 이전 연결 해제")
+                previous = self._bot_ws
+                logger.warning("봇 WS 교체 — 이전 연결 종료")
+                # An EOG ACK waiting on the replaced connection cannot succeed
+                # from that transport. Let the reporter retry instead of waiting
+                # forever on an orphaned pending future.
+                for event_id, fut in list(self._pending_bot_eog.items()):
+                    if not fut.done():
+                        fut.set_result(False)
+                    self._pending_bot_eog.pop(event_id, None)
             self._bot_ws = ws
             logger.info("봇 WS 등록 (party 구독 %s건)", len(self._party_subscribers))
+        if previous is not None:
+            # After registration, old WS's finally cannot erase the new one.
+            try:
+                await asyncio.wait_for(previous.close(code=1001), timeout=1.0)
+            except Exception as exc:
+                logger.warning("교체된 Bot WS close 실패 error=%s", exc)
 
     async def unregister_bot_ws(self, ws: WebSocket) -> None:
         async with self._lock:
@@ -861,7 +897,7 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await _send_bot_json(
+            await self._send_bot_serialized(
                 ws,
                 {
                     "type": "participant_status_update",
@@ -874,7 +910,7 @@ class ConnectionManager:
             logger.exception(
                 "봇 WS participant_status_update 전달 실패 discord_id=%s", discord_id
             )
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def forward_champ_select_update(self, discord_id: int, data: dict[str, Any]) -> bool:
@@ -899,7 +935,7 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await _send_bot_json(
+            await self._send_bot_serialized(
                 ws,
                 {
                     "type": "champ_select_update",
@@ -917,7 +953,7 @@ class ConnectionManager:
             logger.exception(
                 "봇 WS champ_select_update 전달 실패 discord_id=%s", discord_id
             )
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def forward_ready_check_update(self, discord_id: int, data: dict[str, Any]) -> bool:
@@ -928,7 +964,7 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await _send_bot_json(
+            await self._send_bot_serialized(
                 ws,
                 {
                     "type": "ready_check_update",
@@ -939,7 +975,7 @@ class ConnectionManager:
             return True
         except Exception:
             logger.exception("봇 WS ready_check_update 전달 실패 discord_id=%s", discord_id)
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def replay_live_game_update(self, discord_id: int) -> bool:
@@ -960,7 +996,7 @@ class ConnectionManager:
             canonical = self._live_game_canonical.get(did)
             if canonical is not None:
                 payload["canonical"] = canonical
-            await _send_bot_json(ws, payload)
+            await self._send_bot_serialized(ws, payload)
             logger.info(
                 "봇 WS live_game_update 캐시 재전송 discord_id=%s age_ms=%s",
                 did,
@@ -969,7 +1005,7 @@ class ConnectionManager:
             return True
         except Exception:
             logger.exception("봇 WS live_game_update 캐시 재전송 실패 discord_id=%s", did)
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def replay_gameflow_update(self, discord_id: int) -> bool:
@@ -983,7 +1019,7 @@ class ConnectionManager:
         if cached is None or ws is None:
             return False
         try:
-            await _send_bot_json(
+            await self._send_bot_serialized(
                 ws,
                 {
                     "type": "gameflow_update",
@@ -995,7 +1031,7 @@ class ConnectionManager:
             return True
         except Exception:
             logger.exception("봇 WS gameflow_update 캐시 재전송 실패 discord_id=%s", did)
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def forward_gameflow_update(self, discord_id: int, data: dict[str, Any]) -> bool:
@@ -1013,7 +1049,7 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await _send_bot_json(
+            await self._send_bot_serialized(
                 ws,
                 {
                     "type": "gameflow_update",
@@ -1024,7 +1060,7 @@ class ConnectionManager:
             return True
         except Exception:
             logger.exception("봇 WS gameflow_update 전달 실패 discord_id=%s", did)
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def forward_guild_match_eog(
@@ -1049,11 +1085,11 @@ class ConnectionManager:
             }
             if event_id is not None:
                 payload["event_id"] = event_id
-            await _send_bot_json(ws, payload)
+            await self._send_bot_serialized(ws, payload)
             return True
         except Exception:
             logger.exception("봇 WS guild_match_eog 전달 실패 discord_id=%s", discord_id)
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def forward_live_game_update(
@@ -1126,7 +1162,7 @@ class ConnectionManager:
             }
             if canonical is not None:
                 payload["canonical"] = canonical
-            await _send_bot_json(ws, payload)
+            await self._send_bot_serialized(ws, payload)
             logger.info(
                 "live_game_update 전송 완료: discord_id=%s game_id=%s participants=%s events=%s "
                 "전송=봇WS 모집_id=%s 대상=사용자 구독",
@@ -1144,7 +1180,7 @@ class ConnectionManager:
                 game_id,
                 recruitment_id or "없음",
             )
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False
 
     async def forward_party_lobby_update(self, discord_id: int, data: dict[str, Any]) -> bool:
@@ -1155,7 +1191,7 @@ class ConnectionManager:
         if ws is None:
             return False
         try:
-            await _send_bot_json(
+            await self._send_bot_serialized(
                 ws,
                 {
                     "type": "party_lobby_update",
@@ -1166,5 +1202,5 @@ class ConnectionManager:
             return True
         except Exception:
             logger.exception("봇 WS party_lobby_update 전달 실패 discord_id=%s", discord_id)
-            await self.unregister_bot_ws(ws)
+            await self._invalidate_bot_ws(ws, reason="send_failed")
             return False

@@ -2626,6 +2626,63 @@ fn rounded_live_number(value: Option<&Value>) -> Value {
     json!(rounded)
 }
 
+/// The Live Client API's activePlayer identifies the Agent owner, whereas
+/// `allPlayers` contains every player. A unique name match is required when
+/// the activePlayer block omits Riot ID; never guess from roster order.
+fn live_active_player_riot_id(value: &Value, players: &[Value]) -> Option<String> {
+    fn from_row(row: &Value) -> Option<String> {
+        if let Some(id) = row.get("riotId").and_then(Value::as_str) {
+            if id
+                .split_once('#')
+                .is_some_and(|(name, tag)| !name.trim().is_empty() && !tag.trim().is_empty())
+            {
+                return Some(id.trim().to_string());
+            }
+        }
+        let game_name = row
+            .get("riotIdGameName")
+            .or_else(|| row.get("gameName"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty());
+        let tag_line = row
+            .get("riotIdTagLine")
+            .or_else(|| row.get("tagLine"))
+            .and_then(Value::as_str)
+            .filter(|tag| !tag.trim().is_empty());
+        if let (Some(name), Some(tag)) = (game_name, tag_line) {
+            return Some(format!("{}#{}", name.trim(), tag.trim()));
+        }
+        row.get("summonerName")
+            .and_then(Value::as_str)
+            .filter(|name| {
+                name.split_once('#')
+                    .is_some_and(|(n, t)| !n.trim().is_empty() && !t.trim().is_empty())
+            })
+            .map(str::to_owned)
+    }
+    let active = value.get("activePlayer")?.as_object()?;
+    let active = Value::Object(active.clone());
+    if let Some(id) = from_row(&active) {
+        return Some(id);
+    }
+    let active_name = active.get("summonerName")?.as_str()?.trim();
+    if active_name.is_empty() {
+        return None;
+    }
+    let matches = players
+        .iter()
+        .filter(|row| {
+            row.get("summonerName")
+                .and_then(Value::as_str)
+                .is_some_and(|name| name.trim().eq_ignore_ascii_case(active_name))
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return None;
+    }
+    from_row(matches[0])
+}
+
 fn live_game_payload_at(
     value: &Value,
     events: Option<&Value>,
@@ -2649,6 +2706,9 @@ fn live_game_payload_at(
     Some(json!({
         "source": "lcu-agent",
         "client_mode": live_client_mode(value.get("activePlayer")),
+        // Only the local player's verified Riot ID; needed to assign standalone
+        // FreeRank position without trusting a matching Discord display name.
+        "active_player_riot_id": live_active_player_riot_id(value, players),
         "phase": "InProgress",
         "captured_at_ms": captured_at_ms,
         "match_created_at_ms": match_created_at_ms,
@@ -3490,6 +3550,7 @@ mod tests {
         }), None, 1_000_000)
         .unwrap();
         assert_eq!(payload["client_mode"], "player");
+        assert_eq!(payload["active_player_riot_id"], "Me#KR1");
         assert_eq!(payload["game"]["id"], 42);
         assert_eq!(payload["captured_at_ms"], 1_000_000);
         assert_eq!(payload["match_created_at_ms"], 879_877);
@@ -3535,6 +3596,43 @@ mod tests {
         assert!(payload["participants"][0].get("raw").is_none());
         assert!(payload["participants"][0]["items"][0].get("raw").is_none());
         assert!(payload["participants"][0].get("futureSecret").is_none());
+    }
+
+    #[test]
+    fn live_active_player_id_requires_unique_roster_identity() {
+        let players = vec![
+            json!({"summonerName": "Me", "riotId": "Me#KR1"}),
+            json!({"summonerName": "Other", "riotId": "Other#KR1"}),
+        ];
+        assert_eq!(
+            live_active_player_riot_id(&json!({"activePlayer": {"summonerName": "Me"}}), &players),
+            Some("Me#KR1".to_owned())
+        );
+        assert_eq!(
+            live_active_player_riot_id(
+                &json!({"activePlayer": {"riotId": "Explicit#KR1"}}),
+                &players
+            ),
+            Some("Explicit#KR1".to_owned())
+        );
+        assert_eq!(
+            live_active_player_riot_id(
+                &json!({"activePlayer": {"summonerName": "Unknown"}}),
+                &players
+            ),
+            None
+        );
+        let duplicates = vec![
+            json!({"summonerName": "Me", "riotId": "Me#KR1"}),
+            json!({"summonerName": "Me", "riotId": "Alt#KR1"}),
+        ];
+        assert_eq!(
+            live_active_player_riot_id(
+                &json!({"activePlayer": {"summonerName": "Me"}}),
+                &duplicates
+            ),
+            None
+        );
     }
 
     #[test]
