@@ -3791,6 +3791,12 @@ async fn upload_replay_file(
             Ok(response) if response.status().as_u16() == 409 => {
                 return Ok(ReplayUploadOutcome::NotNeeded);
             }
+            Ok(response) if response.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY => {
+                return Err(AgentError::Relay(format!(
+                    "ROFL 원본 파일명과 게임 ID가 일치하지 않아 서버가 거부했습니다: game_id={}",
+                    upload.game_id
+                )));
+            }
             Ok(response) => {
                 last_error = format!(
                     "ROFL 원본 업로드 실패 (method=POST endpoint={upload_url_label} {})",
