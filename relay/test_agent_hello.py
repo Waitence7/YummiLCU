@@ -14,6 +14,8 @@ from relay.app import (
     _agent_error_report,
     _agent_diagnostic_report,
     _agent_log_chunk,
+    _encode_agent_log_entry,
+    _decode_agent_log_entry,
     _agent_update_report,
     _agent_error_last_by_discord,
     _agent_error_recent,
@@ -247,6 +249,17 @@ class AgentHelloTests(unittest.TestCase):
             "chunk_count": 1,
             "content": "x",
         }))
+
+    def test_compressed_agent_log_entries_preserve_legacy_and_roundtrip(self) -> None:
+        original = {"source": "runtime_trace", "content": "반복적인 로그 " * 1600}
+        plain = json.dumps(original, ensure_ascii=False)
+        stored = _encode_agent_log_entry(plain)
+        self.assertTrue(stored.startswith("z:"))
+        self.assertLess(len(stored), len(plain) // 4)
+        self.assertEqual(_decode_agent_log_entry(stored), original)
+        self.assertEqual(_decode_agent_log_entry(plain), original)
+        self.assertEqual(_decode_agent_log_entry(plain.encode()), original)
+        self.assertIsNone(_decode_agent_log_entry("z:not-base64"))
 
     def test_agent_update_report_is_bounded_and_redacted(self) -> None:
         report = _agent_update_report({

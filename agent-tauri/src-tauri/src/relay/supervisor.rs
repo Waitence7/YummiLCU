@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs,
     io::Write,
     panic::AssertUnwindSafe,
@@ -73,6 +73,9 @@ const DIAGNOSTIC_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DIAGNOSTIC_LOG_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DIAGNOSTIC_LOG_SYNC_TIMEOUT: Duration = Duration::from_secs(10);
 const DIAGNOSTIC_LOG_CHUNK_BYTES: usize = 24 * 1024;
+// Keep the last successfully transmitted rolling snapshots only in memory.
+// The server receives only newly appended bytes on later syncs.
+static AGENT_LOG_SENT_SNAPSHOTS: OnceLock<Mutex<HashMap<&'static str, String>>> = OnceLock::new();
 const MAX_REPLAY_UPLOAD_BYTES: u64 = 128 * 1024 * 1024;
 const REPLAY_UPLOAD_ATTEMPTS: u8 = 8;
 const REPLAY_LOCAL_DELETE_DELAY: Duration = Duration::from_secs(5 * 60);
@@ -2974,6 +2977,39 @@ async fn connect_once(
     }
 }
 
+/// Longest suffix of `previous` matching a prefix of `current`. Handles
+/// rolling 128 KiB snapshots and only scans each buffer once.
+fn unseen_log_tail_start(previous: &str, current: &str) -> usize {
+    let bytes = current.as_bytes();
+    if bytes.is_empty() {
+        return 0;
+    }
+    let mut prefix = vec![0usize; bytes.len()];
+    for i in 1..bytes.len() {
+        let mut j = prefix[i - 1];
+        while j > 0 && bytes[i] != bytes[j] {
+            j = prefix[j - 1];
+        }
+        if bytes[i] == bytes[j] {
+            j += 1;
+        }
+        prefix[i] = j;
+    }
+    let mut matched = 0usize;
+    for &b in previous.as_bytes() {
+        while matched > 0 && (matched == bytes.len() || bytes[matched] != b) {
+            matched = prefix[matched - 1];
+        }
+        if matched < bytes.len() && bytes[matched] == b {
+            matched += 1;
+        }
+    }
+    while matched > 0 && !current.is_char_boundary(matched) {
+        matched = prefix[matched - 1];
+    }
+    matched
+}
+
 async fn send_automatic_log_sources<S>(
     state: &Arc<AppState>,
     writer: &SharedRelayWriter<S>,
@@ -2987,22 +3023,32 @@ where
         .map_err(|_| AgentError::Relay("자동 진단 로그 수집 시간 초과".into()))?;
     let mut source_count = 0usize;
     let mut chunk_total = 0usize;
+    let previous_snapshots = AGENT_LOG_SENT_SNAPSHOTS.get_or_init(|| Mutex::new(HashMap::new()));
 
     for (source, content) in sources {
         if content.is_empty() {
             continue;
         }
+        let previous = previous_snapshots.lock().await.get(source).cloned();
+        let delta_start = previous
+            .as_deref()
+            .map(|old| unseen_log_tail_start(old, &content))
+            .unwrap_or(0);
+        let delta = &content[delta_start..];
+        if delta.is_empty() {
+            continue;
+        }
         let mut chunks = Vec::new();
         let mut start = 0usize;
-        while start < content.len() {
-            let mut end = (start + DIAGNOSTIC_LOG_CHUNK_BYTES).min(content.len());
-            while end > start && !content.is_char_boundary(end) {
+        while start < delta.len() {
+            let mut end = (start + DIAGNOSTIC_LOG_CHUNK_BYTES).min(delta.len());
+            while end > start && !delta.is_char_boundary(end) {
                 end -= 1;
             }
             if end == start {
                 return Err(AgentError::Relay("자동 진단 로그 UTF-8 분할 실패".into()));
             }
-            chunks.push(content[start..end].to_owned());
+            chunks.push(delta[start..end].to_owned());
             start = end;
         }
         let batch_id = Uuid::new_v4().to_string();
@@ -3022,6 +3068,9 @@ where
             .await?;
             chunk_total += 1;
         }
+        // Advance the cursor only after every chunk from this source was sent.
+        // A partial transmission must resend the missing tail on next sync.
+        previous_snapshots.lock().await.insert(source, content);
         source_count += 1;
     }
 
@@ -4258,6 +4307,18 @@ async fn wait_for_retry(stop_rx: &mut watch::Receiver<bool>, delay: Duration) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_agent_logs_handle_append_rotation_and_unicode() {
+        assert_eq!(unseen_log_tail_start("hello", "hello world"), 5);
+        assert_eq!(unseen_log_tail_start("abcde", "cdefg"), 3);
+        assert_eq!(unseen_log_tail_start("unchanged", "unchanged"), 9);
+        assert_eq!(unseen_log_tail_start("unrelated", "new"), 0);
+        assert_eq!(
+            unseen_log_tail_start("가나다", "나다라마바사"),
+            "나다".len()
+        );
+    }
 
     #[test]
     fn native_watchdog_does_not_exit_on_resume_before_runtime_ticks() {

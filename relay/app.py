@@ -20,6 +20,7 @@ import re
 import secrets
 import time
 import uuid
+import zlib
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -3263,6 +3264,36 @@ def _agent_log_chunk(data: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+# Older entries are plain JSON. New entries are losslessly compressed, with
+# an ASCII prefix so Redis clients using decode_responses=True remain compatible.
+_AGENT_LOG_COMPRESSED_PREFIX = "z:"
+_AGENT_LOG_DECOMPRESS_LIMIT = 64 * 1024
+
+
+def _encode_agent_log_entry(encoded: str) -> str:
+    compressed = _AGENT_LOG_COMPRESSED_PREFIX + base64.b64encode(
+        zlib.compress(encoded.encode("utf-8"), level=3)
+    ).decode("ascii")
+    return compressed if len(compressed) < len(encoded) else encoded
+
+
+def _decode_agent_log_entry(raw: str | bytes) -> dict[str, Any] | None:
+    try:
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        if raw.startswith(_AGENT_LOG_COMPRESSED_PREFIX):
+            packed = base64.b64decode(raw[len(_AGENT_LOG_COMPRESSED_PREFIX):], validate=True)
+            decoder = zlib.decompressobj()
+            output = decoder.decompress(packed, _AGENT_LOG_DECOMPRESS_LIMIT + 1)
+            if len(output) > _AGENT_LOG_DECOMPRESS_LIMIT or not decoder.eof:
+                return None
+            raw = output.decode("utf-8")
+        obj = json.loads(raw)
+        return obj if isinstance(obj, dict) else None
+    except (ValueError, TypeError, UnicodeDecodeError, zlib.error, binascii.Error):
+        return None
+
+
 async def _remember_agent_log_chunk(
     r: redis.Redis,
     discord_id: int,
@@ -3274,7 +3305,7 @@ async def _remember_agent_log_chunk(
     if not hasattr(r, "lpush"):
         return
     pipe = r.pipeline()
-    pipe.lpush(key, encoded)
+    pipe.lpush(key, _encode_agent_log_entry(encoded))
     pipe.ltrim(key, 0, _AGENT_LOG_MAX_ENTRIES - 1)
     pipe.expire(key, _AGENT_LOG_TTL_SEC)
     await pipe.execute()
@@ -3596,12 +3627,12 @@ async def _handle_agent_message(
             build_id=chunk["build_id"],
             git_commit=chunk["git_commit"],
         )
-        await append_agent_history(
+        # Raw content is retained in relay:agent_logs. Per-chunk permanent
+        # lifecycle events doubled the write amplification and grew without
+        # bounds. Keep a compact event counter/timestamp instead.
+        await observe_agent_event(
             r, discord_id, "log_chunk", occurred_at_ms=chunk["occurred_at_ms"],
-            source=chunk["source"], batch_id=chunk["batch_id"],
-            chunk_index=chunk["chunk_index"], chunk_count=chunk["chunk_count"],
-            app_version=chunk["app_version"], build_id=chunk["build_id"],
-            git_commit=chunk["git_commit"], bytes=len(chunk["content"].encode("utf-8")),
+            message_bytes=len(chunk["content"].encode("utf-8")),
         )
         logger.info(
             "Agent log chunk discord_id=%s source=%s batch_id=%s chunk=%s/%s version=%s build=%s commit=%s bytes=%s",
@@ -5608,11 +5639,8 @@ async def internal_agent_logs(
     rows = await r.lrange(_agent_logs_redis_key(discord_id), 0, _AGENT_LOG_MAX_ENTRIES - 1)
     logs: list[dict[str, Any]] = []
     for raw in rows:
-        try:
-            item = json.loads(raw)
-        except (TypeError, json.JSONDecodeError):
-            continue
-        if not isinstance(item, dict):
+        item = _decode_agent_log_entry(raw)
+        if item is None:
             continue
         if source is not None and item.get("source") != source:
             continue
