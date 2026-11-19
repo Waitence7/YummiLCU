@@ -3514,6 +3514,17 @@ fn replay_upload_request(data: &Value) -> Option<ReplayUploadRequest> {
     if !file_name.to_ascii_lowercase().ends_with(".rofl") {
         file_name = format!("{}.rofl", game_id);
     }
+    // The event must carry the actual local Riot filename, not a different
+    // replay from an earlier game (same participants are not enough).
+    if !crate::lcu::replay_filename_matches_game_id(&path, &game_id)
+        || !crate::lcu::replay_filename_matches_game_id(std::path::Path::new(&file_name), &game_id)
+        || !path
+            .file_name()
+            .and_then(|part| part.to_str())
+            .is_some_and(|actual| actual.eq_ignore_ascii_case(&file_name))
+    {
+        return None;
+    }
     let file_size = data.get("fileSize")?.as_u64()?;
     if file_size == 0 || file_size > MAX_REPLAY_UPLOAD_BYTES {
         return None;
@@ -4637,9 +4648,26 @@ mod tests {
             "fileSize": 16_210_841,
             "fileModifiedAtMs": 1_790_000_000_000_u64,
             "deleteAfterUpload": true,
-        }))
-        .expect("valid replay upload");
-        assert!(!unrelated_path.delete_after_upload);
+        }));
+        assert!(unrelated_path.is_none());
+
+        // Historical production incidents: a previous game's ROFL was handed
+        // to the next game's upload because the same custom-match roster matched.
+        for (current, previous) in [
+            ("8439020424", "8438943425"),
+            ("8445638280", "8445582796"),
+            ("8445780373", "8445746641"),
+        ] {
+            let wrong = format!("KR-{previous}.rofl");
+            assert!(replay_upload_request(&json!({
+                "gameId": current,
+                "path": format!("C:/Users/test/Documents/League of Legends/Replays/{wrong}"),
+                "fileName": wrong,
+                "fileSize": 16_210_841,
+                "deleteAfterUpload": false,
+            }))
+            .is_none());
+        }
 
         let missing_mtime = replay_upload_request(&json!({
             "gameId": "8393991955",

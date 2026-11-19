@@ -17,8 +17,6 @@ const GAME_CHUNK_STREAM: u8 = 1;
 const MAX_REPLAY_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 16 * 1024 * 1024;
 const MAX_DECOMPRESSED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
-const MAX_REPLAY_CANDIDATES: usize = 32;
-const REPLAY_RECENCY_WINDOW: Duration = Duration::from_secs(30 * 60);
 const MOVEMENT_SAMPLE_STEP_MS: u32 = 1_000;
 const MOVEMENT_CHUNK_MS: u32 = 180_000;
 const MAX_MOVEMENT_RECORDS: usize = 500_000;
@@ -32,42 +30,13 @@ const MOVEMENT_OPCODE_26_17: u16 = 0x04ee;
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RoflMatchHint {
     pub(crate) game_id: String,
-    participant_puuids: Vec<String>,
-    participant_riot_ids: Vec<String>,
     replay_dir: Option<PathBuf>,
 }
 
 impl RoflMatchHint {
-    pub(crate) fn from_eog(game_id: String, eog: &Value) -> Self {
-        let mut participant_puuids = Vec::new();
-        let mut participant_riot_ids = Vec::new();
-        for participant in eog
-            .get("participants")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            for key in ["puuid", "PUUID"] {
-                if let Some(value) = participant.get(key).and_then(Value::as_str) {
-                    let normalized = value.trim().to_ascii_lowercase();
-                    if !normalized.is_empty() && !participant_puuids.contains(&normalized) {
-                        participant_puuids.push(normalized);
-                    }
-                }
-            }
-            let game_name = participant.get("gameName").and_then(Value::as_str);
-            let tag_line = participant.get("tagLine").and_then(Value::as_str);
-            if let (Some(game_name), Some(tag_line)) = (game_name, tag_line) {
-                let normalized = normalize_riot_id(game_name, tag_line);
-                if !normalized.is_empty() && !participant_riot_ids.contains(&normalized) {
-                    participant_riot_ids.push(normalized);
-                }
-            }
-        }
+    pub(crate) fn from_eog(game_id: String, _eog: &Value) -> Self {
         Self {
             game_id,
-            participant_puuids,
-            participant_riot_ids,
             replay_dir: None,
         }
     }
@@ -165,11 +134,7 @@ pub(crate) fn find_existing_replay_path(hint: &RoflMatchHint) -> Result<Option<P
             {
                 continue;
             }
-            let file_name_matches = path
-                .file_name()
-                .and_then(|value| value.to_str())
-                .is_some_and(|name| name.contains(&hint.game_id));
-            if !file_name_matches {
+            if !replay_filename_matches_game_id(&path, &hint.game_id) {
                 continue;
             }
             let Ok(metadata) = entry.metadata() else {
@@ -229,14 +194,56 @@ fn replay_events(hint: &RoflMatchHint, path: &Path, bytes: &[u8]) -> Result<Vec<
     Ok(events)
 }
 
-fn viewer_filename_matches(path: &Path, game_id: &str) -> bool {
-    path.extension()
+// Riot stores replay files as KR-<gameId>.rofl, EUW1-<gameId>.rofl,
+// or sometimes just <gameId>.rofl. Never use a roster match as a substitute:
+// consecutive custom games often have the same ten players.
+fn replay_identity_parts(value: &str) -> Option<(Option<&str>, &str)> {
+    let (region, number) = if let Some(separator) = value.rfind(|c| c == '-' || c == '_') {
+        (&value[..separator], &value[separator + 1..])
+    } else {
+        ("", value)
+    };
+    if number.is_empty() || !number.bytes().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    if region.is_empty() {
+        return Some((None, number));
+    }
+    if !(2..=6).contains(&region.len())
+        || !region.bytes().take(2).all(|c| c.is_ascii_alphabetic())
+        || !region.bytes().all(|c| c.is_ascii_alphanumeric())
+    {
+        return None;
+    }
+    Some((Some(region), number))
+}
+
+pub(crate) fn replay_filename_matches_game_id(path: &Path, game_id: &str) -> bool {
+    if !path
+        .extension()
         .and_then(|value| value.to_str())
-        .is_some_and(|value| value.eq_ignore_ascii_case("rofl"))
-        && path
-            .file_stem()
-            .and_then(|value| value.to_str())
-            .is_some_and(|stem| stem.rsplit('-').next() == Some(game_id))
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("rofl"))
+    {
+        return false;
+    }
+    let Some((expected_region, expected_number)) = replay_identity_parts(game_id) else {
+        return false;
+    };
+    let Some((file_region, file_number)) = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .and_then(replay_identity_parts)
+    else {
+        return false;
+    };
+    expected_number == file_number
+        && expected_region.is_none_or(|region| {
+            file_region.is_some_and(|file_region| file_region.eq_ignore_ascii_case(region))
+        })
+}
+
+fn viewer_filename_matches(path: &Path, game_id: &str) -> bool {
+    replay_filename_matches_game_id(path, game_id)
 }
 
 pub(crate) fn replay_for_viewer(game_id: &str, replay_dir: Option<&str>) -> Result<Value, String> {
@@ -335,121 +342,31 @@ fn replay_dirs(hint: &RoflMatchHint) -> Vec<PathBuf> {
 }
 
 fn find_matching_replay(hint: &RoflMatchHint) -> Result<Option<PathBuf>, String> {
-    let now = SystemTime::now();
-    let mut candidates = Vec::new();
+    let mut best: Option<(SystemTime, PathBuf)> = None;
     for dir in replay_dirs(hint) {
         let Ok(entries) = fs::read_dir(&dir) else {
             continue;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path
-                .extension()
-                .and_then(|value| value.to_str())
-                .is_some_and(|value| value.eq_ignore_ascii_case("rofl"))
-            {
+            if !replay_filename_matches_game_id(&path, &hint.game_id) {
                 continue;
             }
             let Ok(meta) = entry.metadata() else {
                 continue;
             };
-            if meta.len() == 0 || meta.len() > MAX_REPLAY_FILE_BYTES {
+            if !meta.is_file() || meta.len() == 0 || meta.len() > MAX_REPLAY_FILE_BYTES {
                 continue;
             }
             let modified = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-            if now
-                .duration_since(modified)
-                .is_ok_and(|age| age > REPLAY_RECENCY_WINDOW)
-            {
-                continue;
+            if best.as_ref().is_none_or(|(time, _)| modified > *time) {
+                best = Some((modified, path));
             }
-            candidates.push((modified, path));
         }
     }
-    candidates.sort_by_key(|(modified, _)| Reverse(*modified));
-    candidates.truncate(MAX_REPLAY_CANDIDATES);
-
-    // Riot's normal replay names contain the numeric game id. Prefer that
-    // deterministic match and avoid reading every recent replay file.
-    if let Some((_, path)) = candidates.iter().find(|(_, path)| {
-        path.file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.contains(&hint.game_id))
-    }) {
-        return Ok(Some(path.clone()));
-    }
-
-    let mut best: Option<(i32, SystemTime, PathBuf)> = None;
-    for (modified, path) in candidates {
-        let Ok(bytes) = read_metadata_window(&path) else {
-            continue;
-        };
-        let Ok(replay) = parse_envelope(&bytes) else {
-            continue;
-        };
-        let filename_matches = path
-            .file_name()
-            .and_then(|value| value.to_str())
-            .is_some_and(|name| name.contains(&hint.game_id));
-        let replay_puuids: HashSet<String> = replay
-            .metadata
-            .participants
-            .iter()
-            .filter_map(|participant| stat_string(participant, "PUUID"))
-            .map(|value| value.to_ascii_lowercase())
-            .collect();
-        let puuid_matches = hint
-            .participant_puuids
-            .iter()
-            .filter(|puuid| replay_puuids.contains(*puuid))
-            .count();
-        let replay_riot_ids: HashSet<String> = replay
-            .metadata
-            .participants
-            .iter()
-            .filter_map(|participant| {
-                Some(normalize_riot_id(
-                    &stat_string(participant, "RIOT_ID_GAME_NAME")?,
-                    &stat_string(participant, "RIOT_ID_TAG_LINE")?,
-                ))
-            })
-            .collect();
-        let riot_id_matches = hint
-            .participant_riot_ids
-            .iter()
-            .filter(|riot_id| replay_riot_ids.contains(*riot_id))
-            .count();
-        // Never bind a replay merely because it is recent and has ten players.
-        // Filename game-id is strongest; otherwise require a majority roster match.
-        if !filename_matches && puuid_matches < 5 && riot_id_matches < 5 {
-            continue;
-        }
-        let mut score = 0i32;
-        if filename_matches {
-            score += 200;
-        }
-        score += puuid_matches as i32 * 25;
-        score += riot_id_matches as i32 * 20;
-        if replay.metadata.participants.len() == 10 {
-            score += 20;
-        }
-        if best.as_ref().is_none_or(|(best_score, best_modified, _)| {
-            score > *best_score || (score == *best_score && modified > *best_modified)
-        }) {
-            best = Some((score, modified, path));
-        }
-    }
-    Ok(best.map(|(_, _, path)| path))
-}
-
-fn read_metadata_window(path: &Path) -> Result<Vec<u8>, String> {
-    // Metadata is at EOF, but the v2 header is at the front. Candidate files are
-    // capped, so a bounded full read keeps the matching path simple and safe.
-    let meta = fs::metadata(path).map_err(|error| error.to_string())?;
-    if meta.len() > MAX_REPLAY_FILE_BYTES {
-        return Err("ROFL too large".into());
-    }
-    fs::read(path).map_err(|error| error.to_string())
+    // If the exact replay is not ready, return None and retry downloading it.
+    // Matching participants are never evidence of the same *game*.
+    Ok(best.map(|(_, path)| path))
 }
 
 fn parse_envelope(bytes: &[u8]) -> Result<ReplayEnvelope, String> {
@@ -1187,24 +1104,6 @@ fn interpolate_path(record: &MovementRecord, elapsed_seconds: f32) -> (f32, f32)
     current
 }
 
-fn normalize_riot_id(game_name: &str, tag_line: &str) -> String {
-    let game_name = game_name
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    let tag_line = tag_line
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    if game_name.is_empty() || tag_line.is_empty() {
-        String::new()
-    } else {
-        format!("{game_name}#{tag_line}")
-    }
-}
-
 fn stat_string(raw: &Map<String, Value>, key: &str) -> Option<String> {
     raw.get(key).and_then(|value| match value {
         Value::String(value) if !value.is_empty() => Some(value.clone()),
@@ -1268,6 +1167,52 @@ mod tests {
         assert!(!viewer_filename_matches(Path::new("KR-1234.rofl"), "123"));
         assert!(!viewer_filename_matches(Path::new("KR-9123.rofl"), "123"));
         assert!(!viewer_filename_matches(Path::new("KR-123.json"), "123"));
+        assert!(!viewer_filename_matches(
+            Path::new("KR-8438943425.rofl"),
+            "8439020424"
+        ));
+        assert!(viewer_filename_matches(
+            Path::new("KR-8439020424.rofl"),
+            "8439020424"
+        ));
+        assert!(viewer_filename_matches(
+            Path::new("8439020424.rofl"),
+            "8439020424"
+        ));
+        assert!(!viewer_filename_matches(
+            Path::new("NA-8439020424.rofl"),
+            "KR-8439020424"
+        ));
+        assert!(viewer_filename_matches(
+            Path::new("EUW1_8439020424.ROFL"),
+            "EUW1-8439020424"
+        ));
+        assert!(!viewer_filename_matches(
+            Path::new("KR-84390204245.rofl"),
+            "8439020424"
+        ));
+    }
+
+    #[test]
+    fn collector_does_not_fall_back_to_previous_match_with_same_players() {
+        let root = std::env::temp_dir().join(format!("yummi-rofl-id-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let older = root.join("KR-8438943425.rofl");
+        let current = root.join("KR-8439020424.rofl");
+        fs::write(&older, b"RIOT old replay").unwrap();
+        let mut hint = RoflMatchHint::from_eog(
+            "8439020424".into(),
+            &serde_json::json!({
+                "participants": [{"puuid": "same-player"}]
+            }),
+        );
+        hint.set_replay_dir(root.to_str().unwrap());
+        assert!(find_matching_replay(&hint).unwrap().is_none());
+        assert!(find_existing_replay_path(&hint).unwrap().is_none());
+        fs::write(&current, b"RIOT expected replay").unwrap();
+        assert_eq!(find_matching_replay(&hint).unwrap(), Some(current.clone()));
+        assert_eq!(find_existing_replay_path(&hint).unwrap(), Some(current));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

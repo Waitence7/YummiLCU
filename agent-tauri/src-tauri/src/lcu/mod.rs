@@ -24,8 +24,8 @@ pub(crate) use remote_replay::{
     start_remote_replay_analysis,
 };
 pub(crate) use rofl::{
-    collect_replay_bundle, collect_replay_file, find_existing_replay_path, replay_for_viewer,
-    RoflMatchHint,
+    collect_replay_bundle, collect_replay_file, find_existing_replay_path,
+    replay_filename_matches_game_id, replay_for_viewer, RoflMatchHint,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
