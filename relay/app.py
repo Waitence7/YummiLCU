@@ -78,6 +78,7 @@ SESSION_DEVICE_FINGERPRINT_KEY = "relay:session_device_fingerprint:{session_id}"
 DEVICE_SEEN_KEY = "relay:device_seen:{discord_id}:{device_key}"
 DEVICE_TRUSTED_KEY = "relay:device_trusted:{discord_id}:{device_key}"
 NEW_DEVICE_NOTICE_KEY = "relay:new_device_notice:{discord_id}:{device_key}"
+NEW_DEVICE_NOTICE_TTL_SEC = 30 * 24 * 60 * 60
 DEVICE_ID_FINGERPRINT_KEY = "relay:device_id_fingerprint:{discord_id}:{device_id}"
 OAUTH_STATE_KEY = "relay:oauth_state:{oauth_state}"
 OAUTH_STATE_TTL_SEC = 600
@@ -2142,6 +2143,49 @@ async def _resolve_lcu_auto_login_identity(
     return discord_id, resolved_riot_id.strip()[:128] if isinstance(resolved_riot_id, str) else None, source
 
 
+async def _claim_new_device_notice(
+    r: redis.Redis, discord_id: int, session_id: str, device_key: str
+) -> tuple[str, tuple[str, ...]] | None:
+    """Reserve the notification once across hello, reconnect, and concurrent sessions.
+
+    The session alias survives the short-lived fingerprint cache and keeps a
+    reconnected bot from treating a known session as another new device.
+    The fingerprint marker deduplicates different sessions on the same device.
+    Reserve *before* handing the event to the bot: a post-DM ACK alone cannot
+    prevent concurrent handlers or lost ACKs from sending duplicate DMs.
+    """
+    session_key = _new_device_notice_redis_key(discord_id, session_id)
+    fingerprint_key = _new_device_notice_redis_key(discord_id, device_key)
+    token = f"queued:{uuid.uuid4()}"
+    if not await r.set(session_key, token, ex=NEW_DEVICE_NOTICE_TTL_SEC, nx=True):
+        return None
+    if fingerprint_key != session_key:
+        if not await r.set(fingerprint_key, token, ex=NEW_DEVICE_NOTICE_TTL_SEC, nx=True):
+            existing = await r.get(fingerprint_key)
+            if isinstance(existing, bytes):
+                existing = existing.decode("ascii", errors="ignore")
+            if existing == "1":
+                # A previous successful dispatch covers this session, too.
+                await r.set(session_key, "1", ex=NEW_DEVICE_NOTICE_TTL_SEC)
+            else:
+                # The first session is only in flight and may fail; don't
+                # suppress a legitimate retry from this session if it does.
+                await _release_new_device_notice_claim(r, token, (session_key,))
+            return None
+    keys = (session_key, fingerprint_key) if session_key != fingerprint_key else (session_key,)
+    return token, keys
+
+
+async def _release_new_device_notice_claim(r: redis.Redis, token: str, keys: tuple[str, ...]) -> None:
+    """Allow a reconnect retry if the relay could not deliver to the bot."""
+    for key in keys:
+        value = await r.get(key)
+        if isinstance(value, bytes):
+            value = value.decode("ascii", errors="ignore")
+        if value == token:
+            await r.delete(key)
+
+
 async def _send_new_device_login_notice(
     conn: ConnectionManager,
     r: redis.Redis,
@@ -2154,14 +2198,35 @@ async def _send_new_device_login_notice(
     source: str,
 ) -> None:
     device_key = await _session_device_key(r, session_id)
-    notice_key = _new_device_notice_redis_key(discord_id, device_key)
-    if await r.exists(notice_key):
-        logger.info("LCU 신규 기기 재접속 알림 생략 discord_id=%s session=%s fingerprint=%s reason=already_notified", discord_id, session_id[:8], device_key[:16])
+    # Prefer the cryptographically verified in-memory identity when the 10-minute
+    # Redis session cache expired. This also covers bot reconnects (no Agent WS
+    # object passed here) without creating a new device identity.
+    fingerprint = (
+        conn.device_fingerprint_for_ws(websocket)
+        if websocket is not None else conn.device_fingerprint_for_discord(discord_id)
+    )
+    if (
+        device_key == session_id
+        and isinstance(fingerprint, str)
+        and re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+    ):
+        device_key = fingerprint
+        await r.set(
+            _session_device_fingerprint_redis_key(session_id),
+            fingerprint,
+            ex=config.relay_session_ttl_sec(),
+        )
+    claim = await _claim_new_device_notice(r, discord_id, session_id, device_key)
+    if claim is None:
+        logger.info("LCU 신규 기기 재접속 알림 생략 discord_id=%s session=%s fingerprint=%s reason=already_dispatched", discord_id, session_id[:8], device_key[:16])
         return
     ip = _trusted_proxy_client_ip(websocket) if websocket is not None else None
-    geo = await _lookup_ip_geo(http, ip)
+    try:
+        geo = await _lookup_ip_geo(http, ip)
+    except Exception:
+        await _release_new_device_notice_claim(r, *claim)
+        raise
     device_id = conn.device_id_for_ws(websocket) if websocket is not None else None
-    fingerprint = conn.device_fingerprint_for_ws(websocket) if websocket is not None else None
     mismatch = False
     if device_id and fingerprint:
         id_key = _device_id_fingerprint_redis_key(discord_id, device_id)
@@ -2187,22 +2252,29 @@ async def _send_new_device_login_notice(
         "LCU 신규 기기 판정 discord_id=%s session=%s fingerprint=%s ip=%s region=%s city=%s isp=%s mismatch=%s",
         discord_id, session_id[:8], (fingerprint or "-")[:16], _mask_ip(ip) or "-", geo.get("region") or "-", geo.get("city") or "-", geo.get("isp") or "-", mismatch,
     )
-    await conn.send_bot_event(
-        {
-            "type": "new_device_login",
-            "discord_id": int(discord_id),
-            "riot_id": riot_id[:128] if isinstance(riot_id, str) else None,
-            "os": "windows",
-            "auth_source": source,
-            "logged_in_at_ms": int(time.time() * 1000),
-            "device_session_id": session_id,
-            "device_fingerprint": device_key if device_key != session_id else None,
-            "approx_region": geo.get("region"),
-            "approx_city": geo.get("city"),
-            "isp": geo.get("isp"),
-            "asn": geo.get("asn"),
-        }
-    )
+    try:
+        accepted = await conn.send_bot_event(
+            {
+                "type": "new_device_login",
+                "discord_id": int(discord_id),
+                "riot_id": riot_id[:128] if isinstance(riot_id, str) else None,
+                "os": "windows",
+                "auth_source": source,
+                "logged_in_at_ms": int(time.time() * 1000),
+                "device_session_id": session_id,
+                "device_fingerprint": device_key if device_key != session_id else None,
+                "approx_region": geo.get("region"),
+                "approx_city": geo.get("city"),
+                "isp": geo.get("isp"),
+                "asn": geo.get("asn"),
+            }
+        )
+    except Exception:
+        await _release_new_device_notice_claim(r, *claim)
+        raise
+    if not accepted:
+        await _release_new_device_notice_claim(r, *claim)
+        logger.warning("LCU 신규 기기 알림 전달 보류 discord_id=%s session=%s reason=bot_disconnected", discord_id, session_id[:8])
 
 
 async def _resolve_discord_join_riot_id(
@@ -4095,17 +4167,6 @@ async def _handle_agent_message(
                             trust_level,
                             auto_login_source,
                         )
-                        if trust_level == "new_device":
-                            await _send_new_device_login_notice(
-                                conn,
-                                r,
-                                http=websocket.app.state.http,
-                                websocket=websocket,
-                                discord_id=discord_id,
-                                session_id=session_id,
-                                riot_id=auto_login_riot_id or info.get("riot_id"),
-                                source=auto_login_source,
-                            )
                     else:
                         logger.info(
                             "LCU 자동 로그인 보류: 기존 정상 Agent 연결 유지 discord_id=%s session=%s",
@@ -4960,11 +5021,13 @@ async def _handle_bot_message(conn: ConnectionManager, r: redis.Redis, msg: str)
             except ValueError:
                 return
             device_key = await _session_device_key(r, session_id)
-            await r.set(
+            # Persist both keys: a delayed ACK must remain valid even if the
+            # session->fingerprint cache expired after the original dispatch.
+            for key in {
+                _new_device_notice_redis_key(raw_id, session_id),
                 _new_device_notice_redis_key(raw_id, device_key),
-                "1",
-                ex=30 * 24 * 60 * 60,
-            )
+            }:
+                await r.set(key, "1", ex=NEW_DEVICE_NOTICE_TTL_SEC)
         return
 
     if msg_type == "voice_chat_message":

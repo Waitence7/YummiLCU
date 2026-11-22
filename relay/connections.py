@@ -355,6 +355,13 @@ class ConnectionManager:
     def device_id_for_ws(self, ws: WebSocket) -> str | None:
         return self._ws_device_id.get(id(ws))
 
+    def device_fingerprint_for_discord(self, discord_id: int) -> str | None:
+        """Verified device identity for an active Agent, including bot reconnects."""
+        ws = self._by_discord.get(int(discord_id))
+        if ws is None or not self._ws_is_fresh(ws):
+            return None
+        return self._ws_device_fingerprint.get(id(ws))
+
     def agent_info_for_ws(self, ws: WebSocket) -> dict[str, Any] | None:
         wid = id(ws)
         discord_id = self._ws_discord.get(wid)
