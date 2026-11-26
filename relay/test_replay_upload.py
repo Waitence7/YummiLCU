@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from relay.app import (
     _authenticate_agent_http,
     _replay_upload_target,
+    _one_off_scrim_replay_target,
+    ONE_OFF_SCRIM_REPLAY_KEY,
     agent_replay_upload_target,
     _session_redis_key,
     _ws_token_redis_key,
@@ -117,6 +119,53 @@ class ReplayUploadAuthTests(unittest.TestCase):
                 target = await _replay_upload_target(SimpleNamespace(), 42, "KR-3")
             self.assertEqual(target, {"upload": False})
 
+        asyncio.run(run())
+
+    def test_one_off_finished_game_can_download_after_web_linkage_delay(self) -> None:
+        import json
+        from time import time
+        host = 229144663720853504
+        now = int(time())
+        record = json.dumps({
+            "guild_id": 1485856315661226109,
+            "created_at": now - 1800, "expires_at": now + 3600,
+            "source_user_ids": [host, 123456789012345678],
+            "games": [{"game_id": "8474323735", "first_seen_at": now - 1200,
+                       "ended": True, "winner": "red"},
+                      {"game_id": "8474397994", "first_seen_at": now - 200,
+                       "rofl_sources": [host]}],
+        })
+        r = _Redis({ONE_OFF_SCRIM_REPLAY_KEY: record})
+
+        async def run() -> None:
+            with patch("relay.app._broadcast_replay_target", new=AsyncMock(return_value={"upload": False})), patch(
+                "relay.app._guild_match_replay_target", new=AsyncMock(return_value={"upload": False})
+            ):
+                for game_id in ("8474323735", "8474397994", "KR-8474397994"):
+                    target = await _replay_upload_target(SimpleNamespace(), host, game_id, r)
+                    self.assertTrue(target["upload"])
+                    self.assertEqual(target["targetKind"], "guild_match")
+                self.assertEqual(await _replay_upload_target(SimpleNamespace(), host, "8474397995", r), {"upload": False})
+                self.assertEqual(await _replay_upload_target(SimpleNamespace(), 123456789012345678, "8474323735", r), {"upload": False})
+                self.assertEqual(await _replay_upload_target(SimpleNamespace(), host, "foo", r), {"upload": False})
+        asyncio.run(run())
+
+    def test_one_off_expired_or_untrusted_session_never_authorizes(self) -> None:
+        import json
+        from time import time
+        host = 229144663720853504
+        now = int(time())
+        session = {"guild_id": 1485856315661226109, "created_at": now - 400,
+                   "expires_at": now + 3600, "source_user_ids": [host],
+                   "games": [{"game_id": "8474323735", "first_seen_at": now - 300}]}
+
+        async def run() -> None:
+            for key, value in (("expires_at", now - 1), ("guild_id", 1485856315661226110),
+                               ("source_user_ids", []), ("games", [])):
+                changed = {**session, key: value}
+                r = _Redis({ONE_OFF_SCRIM_REPLAY_KEY: json.dumps(changed)})
+                self.assertEqual(await _one_off_scrim_replay_target(r, host, "8474323735"), {"upload": False})
+            self.assertEqual(await _one_off_scrim_replay_target(_Redis({}), host, "8474323735"), {"upload": False})
         asyncio.run(run())
 
     def test_agent_http_auth_requires_active_matching_session_token(self) -> None:

@@ -1498,10 +1498,72 @@ async def _guild_match_replay_target(
         return {"upload": False}
 
 
+# This one-off session is already identified by its durable Redis game list.
+# Do not make the regular Agent download depend on asynchronous Web game
+# linkage, which can be delayed past the only postgame ROFL preflight.
+ONE_OFF_SCRIM_REPLAY_KEY = (
+    "yummibot:one_off_lcu_scrim:1485856315661226109:1528021033230270607"
+)
+ONE_OFF_SCRIM_GUILD_ID = "1485856315661226109"
+ONE_OFF_SCRIM_SOURCE_ID = 229144663720853504
+
+
+async def _one_off_scrim_replay_target(
+    r: redis.Redis, discord_id: int, game_id: str,
+) -> dict[str, Any]:
+    """Allow exactly a recorded one-off game from its verified LCU source.
+
+    The Riot replay's identity/filename is still validated by the existing
+    upload endpoint. Unrelated user/game/expired sessions remain ineligible.
+    """
+    if not re.fullmatch(r"(?:KR-)?[0-9]{7,15}", game_id):
+        return {"upload": False}
+    try:
+        raw = await r.get(ONE_OFF_SCRIM_REPLAY_KEY)
+        if not raw:
+            return {"upload": False}
+        session = json.loads(raw)
+        if not isinstance(session, dict):
+            return {"upload": False}
+        now = time.time()
+        if (str(session.get("guild_id")) != ONE_OFF_SCRIM_GUILD_ID
+            or not isinstance(session.get("created_at"), int)
+            or not isinstance(session.get("expires_at"), int)
+            or session["created_at"] > now
+            or session["expires_at"] <= now):
+            return {"upload": False}
+        known_games = session.get("games")
+        if not isinstance(known_games, list) or len(known_games) > 40:
+            return {"upload": False}
+        normalized_id = game_id.removeprefix("KR-")
+        for game in known_games:
+            if not isinstance(game, dict):
+                continue
+            if str(game.get("game_id", "")).removeprefix("KR-") != normalized_id:
+                continue
+            observed = {str(v) for v in (game.get("rofl_sources") or [])}
+            # The host's LCU source was verified for the initial round before
+            # per-game rofl_sources was added to the panel session schema.
+            host_source = (discord_id == ONE_OFF_SCRIM_SOURCE_ID
+                           and discord_id in (session.get("source_user_ids") or []))
+            if str(discord_id) not in observed and not host_source:
+                return {"upload": False}
+            first_seen = game.get("first_seen_at")
+            if not isinstance(first_seen, int) or not session["created_at"] - 120 <= first_seen <= now + 30:
+                return {"upload": False}
+            logger.info("one-off ROFL download authorized game_id=%s discord_id=%s", normalized_id, discord_id)
+            return {"upload": True, "targetKind": "guild_match",
+                    "matchId": game.get("potg_match_id"), "evidence": "one_off_redis_game"}
+    except (ValueError, TypeError, AttributeError, redis.RedisError):
+        logger.warning("one-off ROFL session invalid or unavailable game_id=%s", game_id)
+    return {"upload": False}
+
+
 async def _replay_upload_target(
     http: aiohttp.ClientSession,
     discord_id: int,
     game_id: str,
+    r: redis.Redis | None = None,
 ) -> dict[str, Any]:
     broadcast = await _broadcast_replay_target(http, discord_id)
     if broadcast.get("upload") is True:
@@ -1511,6 +1573,8 @@ async def _replay_upload_target(
     if guild_match.get("upload") is True:
         return {**guild_match, "targetKind": "guild_match"}
 
+    if r is not None:
+        return await _one_off_scrim_replay_target(r, discord_id, game_id)
     return {"upload": False}
 
 
@@ -1641,7 +1705,9 @@ async def agent_replay_upload_target(
     else:
         if not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
             raise HTTPException(400, "invalid game_id")
-        target = await _replay_upload_target(request.app.state.http, discord_id, game_id)
+        target = await _replay_upload_target(
+            request.app.state.http, discord_id, game_id, request.app.state.redis
+        )
     return JSONResponse({
         "upload": target.get("upload") is True,
         "targetKind": target.get("targetKind") if isinstance(target.get("targetKind"), str) else None,
@@ -1661,7 +1727,9 @@ async def agent_replay_upload(
     discord_id = await _authenticate_agent_http(request, session_id)
     if not re.fullmatch(r"[A-Za-z0-9_-]+", game_id):
         raise HTTPException(400, "invalid game_id")
-    target = await _replay_upload_target(request.app.state.http, discord_id, game_id)
+    target = await _replay_upload_target(
+        request.app.state.http, discord_id, game_id, request.app.state.redis
+    )
     if target.get("upload") is not True:
         return JSONResponse({"uploaded": False, "reason": "not_yummi_match"}, status_code=409)
     content_type = (request.headers.get("content-type") or "").split(";", 1)[0].strip().lower()
