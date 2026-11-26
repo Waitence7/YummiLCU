@@ -2431,6 +2431,7 @@ async fn connect_once(
                                 ).await;
                             }
                             IncomingMessage::RoflBackfillRequest { game_id } => {
+                                let game_id = game_id.clone();
                                 // A trusted, authenticated Agent can re-fetch a previous
                                 // game without blocking the WS heartbeat or current LCU poll.
                                 if session_bound && !session_new_device {
@@ -3828,7 +3829,8 @@ async fn oneoff_rofl_backfill(
     if !check_replay_upload_needed(config, session_id, ws_token, game_id).await? {
         return Ok(ReplayUploadOutcome::NotNeeded);
     }
-    let path = lockfile_path_nonblocking(config).await?
+    let path = lockfile_path_nonblocking(config).await
+        .map_err(AgentError::Relay)?
         .ok_or_else(|| AgentError::Relay("League Client is not connected".into()))?;
     let client = LcuClient::from_lockfile(&path)
         .or_else(|_| LcuClient::from_lockfile_legacy(&path))?;
