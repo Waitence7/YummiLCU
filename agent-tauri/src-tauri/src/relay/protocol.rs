@@ -37,6 +37,8 @@ pub(crate) enum IncomingMessage {
         #[serde(default)]
         reason: Option<String>,
     },
+    #[serde(rename = "rofl_backfill_request")]
+    RoflBackfillRequest { game_id: String },
     #[serde(rename = "live_game_polling")]
     LiveGamePolling { enabled: bool },
     #[serde(rename = "live_preview_control")]
@@ -133,6 +135,12 @@ impl IncomingMessage {
                 || !payload.is_object() =>
             {
                 Err("invalid Relay command")
+            }
+            Self::RoflBackfillRequest { game_id }
+                if !(7..=15).contains(&game_id.len())
+                    || !game_id.bytes().all(|value| value.is_ascii_digit()) =>
+            {
+                Err("invalid ROFL backfill game id")
             }
             Self::EventAck { event_id } if Uuid::parse_str(event_id).is_err() => {
                 Err("invalid Relay event ack")
@@ -859,6 +867,16 @@ mod tests {
                 payload: json!({"source": "discord"}),
             }
         );
+    }
+
+    #[test]
+    fn rofl_backfill_request_requires_valid_game_id() {
+        assert_eq!(
+            IncomingMessage::parse(r#"{"type":"rofl_backfill_request","game_id":"8474323735"}"#).unwrap(),
+            IncomingMessage::RoflBackfillRequest { game_id: "8474323735".into() },
+        );
+        assert!(IncomingMessage::parse(r#"{"type":"rofl_backfill_request","game_id":"../oops"}"#).is_err());
+        assert!(IncomingMessage::parse(r#"{"type":"rofl_backfill_request","game_id":"0"}"#).is_err());
     }
 
     #[test]

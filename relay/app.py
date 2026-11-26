@@ -888,6 +888,10 @@ async def _lifespan(app: FastAPI):
     app.state.redis = redis.from_url(config.redis_url(), decode_responses=True)
     app.state.connections = ConnectionManager()
     app.state.livekit_profiles: dict[int, str] = {}
+    # The one-off bridge publishes only finished games without a stored ROFL.
+    app.state.oneoff_rofl_backfill_task = asyncio.create_task(
+        _one_off_rofl_backfill_loop(app), name="one-off-rofl-backfill",
+    )
     app.state.tournament_broadcast_queue = asyncio.Queue(maxsize=TOURNAMENT_BROADCAST_QUEUE_MAX)
     app.state.tournament_broadcast_workers = [
         asyncio.create_task(
@@ -902,6 +906,8 @@ async def _lifespan(app: FastAPI):
     except Exception as e:
         logger.error("Redis 연결 실패: %s", e)
     yield
+    app.state.oneoff_rofl_backfill_task.cancel()
+    await asyncio.gather(app.state.oneoff_rofl_backfill_task, return_exceptions=True)
     workers = list(app.state.tournament_broadcast_workers)
     for worker in workers:
         worker.cancel()
@@ -1557,6 +1563,59 @@ async def _one_off_scrim_replay_target(
     except (ValueError, TypeError, AttributeError, redis.RedisError):
         logger.warning("one-off ROFL session invalid or unavailable game_id=%s", game_id)
     return {"upload": False}
+
+
+ONE_OFF_SCRIM_MISSING_KEY = ONE_OFF_SCRIM_REPLAY_KEY + ":rofl_missing"
+
+
+async def _one_off_rofl_backfill_tick(r: redis.Redis, conn: ConnectionManager) -> int:
+    """Ask a verified online Agent to recover genuinely missing finished ROFLs.
+
+    Redis is merely the bridge's missing-file signal, never the authorization:
+    each game/user must also pass the authoritative one-off session check.
+    """
+    if not conn.is_online(ONE_OFF_SCRIM_SOURCE_ID):
+        return 0
+    if conn.trust_level_for_discord(ONE_OFF_SCRIM_SOURCE_ID) == "new_device":
+        return 0
+    raw = await r.get(ONE_OFF_SCRIM_MISSING_KEY)
+    if not raw:
+        return 0
+    try:
+        missing = json.loads(raw)
+    except (ValueError, TypeError):
+        return 0
+    if not isinstance(missing, list) or len(missing) > 40:
+        return 0
+    sent = 0
+    for game_id in missing:
+        if not isinstance(game_id, str) or not re.fullmatch(r"[0-9]{7,15}", game_id):
+            continue
+        authorized = await _one_off_scrim_replay_target(r, ONE_OFF_SCRIM_SOURCE_ID, game_id)
+        if authorized.get("upload") is not True:
+            continue
+        throttle = f"{ONE_OFF_SCRIM_MISSING_KEY}:retry:{game_id}"
+        if not await r.set(throttle, "1", ex=240, nx=True):
+            continue
+        if await conn.send_command(ONE_OFF_SCRIM_SOURCE_ID, {
+            "type": "rofl_backfill_request", "game_id": game_id,
+        }):
+            logger.info("one-off ROFL retroactive download requested game_id=%s", game_id)
+            sent += 1
+        else:
+            await r.delete(throttle)
+    return sent
+
+
+async def _one_off_rofl_backfill_loop(app: FastAPI) -> None:
+    while True:
+        await asyncio.sleep(20)
+        try:
+            await _one_off_rofl_backfill_tick(app.state.redis, app.state.connections)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("one-off ROFL backfill tick failed")
 
 
 async def _replay_upload_target(

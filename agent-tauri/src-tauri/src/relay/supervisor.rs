@@ -30,7 +30,7 @@ use uuid::Uuid;
 use crate::{
     error::{AgentError, AgentResult},
     http_diagnostics::{safe_url, status_detail, transport_detail},
-    lcu::{lockfile_path, lockfile_path_nonblocking, LcuClient, LcuEventPoller},
+    lcu::{collect_replay_file, lockfile_path, lockfile_path_nonblocking, LcuClient, LcuEventPoller, RoflMatchHint},
     platform::{launch_league_client, league_game_process_ids, open_login_url},
     session,
     state::{
@@ -2430,6 +2430,33 @@ async fn connect_once(
                                     RelayConnectionState::Connected,
                                 ).await;
                             }
+                            IncomingMessage::RoflBackfillRequest { game_id } => {
+                                // A trusted, authenticated Agent can re-fetch a previous
+                                // game without blocking the WS heartbeat or current LCU poll.
+                                if session_bound && !session_new_device {
+                                    let backfill_app = app.clone();
+                                    let backfill_state = Arc::clone(state);
+                                    let backfill_config = config.clone();
+                                    let backfill_session = session.session_id.clone();
+                                    let backfill_token = session.ws_token.clone();
+                                    tokio::spawn(async move {
+                                        let result = oneoff_rofl_backfill(
+                                            &backfill_config, &backfill_session, &backfill_token, &game_id,
+                                        ).await;
+                                        let detail = match result {
+                                            Ok(ReplayUploadOutcome::Uploaded) => "uploaded".to_owned(),
+                                            Ok(ReplayUploadOutcome::NotNeeded) => "not_needed".to_owned(),
+                                            Err(error) => format!("failed: {error}"),
+                                        };
+                                        backfill_state.record_flight(
+                                            "rofl_backfill", format!("game_id={game_id} {detail}"),
+                                        ).await;
+                                        backfill_state.log(&backfill_app,
+                                            format!("ROFL 소급 수집 game_id={game_id}: {detail}"),
+                                        ).await;
+                                    });
+                                }
+                            }
                             IncomingMessage::Command { request_id, .. } => {
                                 // Keep reader/pong processing live while a command waits on
                                 // LCU. Bound concurrency instead of building an unbounded queue.
@@ -3449,7 +3476,8 @@ where
                     .await;
             }
         }
-        IncomingMessage::Pong
+        IncomingMessage::RoflBackfillRequest { .. }
+        | IncomingMessage::Pong
         | IncomingMessage::ForceReconnect { .. }
         | IncomingMessage::ServerHello { .. }
         | IncomingMessage::DeviceChallenge { .. }
@@ -3782,6 +3810,62 @@ async fn check_replay_upload_needed(
     }
 
     Err(AgentError::Relay(last_error))
+}
+
+/// Download an already-finished, server-authorized game from Riot and upload
+/// the exact ROFL. Never delete a pre-existing player replay during backfill.
+async fn oneoff_rofl_backfill(
+    config: &crate::config::Config,
+    session_id: &str,
+    ws_token: &str,
+    game_id: &str,
+) -> AgentResult<ReplayUploadOutcome> {
+    if !(7..=15).contains(&game_id.len()) || !game_id.bytes().all(|c| c.is_ascii_digit()) {
+        return Err(AgentError::Relay("invalid backfill game id".into()));
+    }
+    // A forged or obsolete WS packet must never authorize an arbitrary
+    // client's replay download: the current server must still want this game.
+    if !check_replay_upload_needed(config, session_id, ws_token, game_id).await? {
+        return Ok(ReplayUploadOutcome::NotNeeded);
+    }
+    let path = lockfile_path_nonblocking(config).await?
+        .ok_or_else(|| AgentError::Relay("League Client is not connected".into()))?;
+    let client = LcuClient::from_lockfile(&path)
+        .or_else(|_| LcuClient::from_lockfile_legacy(&path))?;
+    let mut hint = RoflMatchHint::from_eog(game_id.to_owned(), &Value::Null);
+    if let Ok(Some(dir)) = client.replay_directory().await {
+        hint.set_replay_dir(&dir);
+    }
+    let initial_hint = hint.clone();
+    let mut file = tokio::task::spawn_blocking(move || collect_replay_file(&initial_hint))
+        .await.map_err(|error| AgentError::Relay(format!("replay lookup failed: {error}")))?
+        .ok().flatten();
+    if file.is_none() {
+        client.download_history_replay(game_id).await?;
+        for _ in 0..35 {
+            sleep(Duration::from_secs(2)).await;
+            let next_hint = hint.clone();
+            file = tokio::task::spawn_blocking(move || collect_replay_file(&next_hint))
+                .await.map_err(|error| AgentError::Relay(format!("replay lookup failed: {error}")))?
+                .ok().flatten();
+            if file.is_some() { break; }
+        }
+    }
+    let file = file.ok_or_else(|| AgentError::Relay(
+        format!("Riot replay download not available for game {game_id}"),
+    ))?;
+    let file_name = file.path.file_name()
+        .and_then(|name| name.to_str()).unwrap_or("replay.rofl").to_owned();
+    let upload = ReplayUploadRequest {
+        game_id: game_id.to_owned(),
+        path: file.path,
+        file_name,
+        file_size: file.size,
+        file_modified_at_ms: file.modified_at_ms,
+        delete_after_upload: false,
+        baseline_league_process_ids: league_game_process_ids(),
+    };
+    upload_replay_file(config, session_id, ws_token, &upload).await
 }
 
 async fn upload_replay_file(

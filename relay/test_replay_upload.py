@@ -11,6 +11,8 @@ from relay.app import (
     _authenticate_agent_http,
     _replay_upload_target,
     _one_off_scrim_replay_target,
+    _one_off_rofl_backfill_tick,
+    ONE_OFF_SCRIM_MISSING_KEY,
     ONE_OFF_SCRIM_REPLAY_KEY,
     agent_replay_upload_target,
     _session_redis_key,
@@ -166,6 +168,52 @@ class ReplayUploadAuthTests(unittest.TestCase):
                 r = _Redis({ONE_OFF_SCRIM_REPLAY_KEY: json.dumps(changed)})
                 self.assertEqual(await _one_off_scrim_replay_target(r, host, "8474323735"), {"upload": False})
             self.assertEqual(await _one_off_scrim_replay_target(_Redis({}), host, "8474323735"), {"upload": False})
+        asyncio.run(run())
+
+    def test_missing_rofl_backfill_requests_only_valid_finished_game(self) -> None:
+        import json
+        from time import time
+        host = 229144663720853504
+        now = int(time())
+        raw = json.dumps({"guild_id": 1485856315661226109,
+                          "created_at": now - 100, "expires_at": now + 600,
+                          "source_user_ids": [host],
+                          "games": [{"game_id": "8474323735", "first_seen_at": now - 95,
+                                     "ended": True}]})
+        class ReplayRedis(_Redis):
+            def __init__(self):
+                super().__init__({ONE_OFF_SCRIM_REPLAY_KEY: raw,
+                                  ONE_OFF_SCRIM_MISSING_KEY: json.dumps(["8474323735", "8474397994", "bad"])})
+                self.claims = set()
+            async def set(self, key, value, *, ex, nx):
+                if key in self.claims: return False
+                self.claims.add(key)
+                return True
+            async def delete(self, key):
+                self.claims.discard(key)
+        r = ReplayRedis()
+        conn = SimpleNamespace(is_online=lambda did: did == host,
+                               trust_level_for_discord=lambda _: "trusted",
+                               send_command=AsyncMock(return_value=True))
+        async def run():
+            self.assertEqual(await _one_off_rofl_backfill_tick(r, conn), 1)
+            conn.send_command.assert_awaited_once_with(host, {
+                "type": "rofl_backfill_request", "game_id": "8474323735"})
+            self.assertEqual(await _one_off_rofl_backfill_tick(r, conn), 0)
+            conn.send_command.assert_awaited_once()
+        asyncio.run(run())
+
+    def test_missing_rofl_backfill_offline_and_new_device_are_skipped(self) -> None:
+        r = _Redis({ONE_OFF_SCRIM_MISSING_KEY: '["8474323735"]'})
+        conn = SimpleNamespace(is_online=lambda _: False,
+                               trust_level_for_discord=lambda _: "trusted",
+                               send_command=AsyncMock())
+        async def run():
+            self.assertEqual(await _one_off_rofl_backfill_tick(r, conn), 0)
+            conn.is_online = lambda _: True
+            conn.trust_level_for_discord = lambda _: "new_device"
+            self.assertEqual(await _one_off_rofl_backfill_tick(r, conn), 0)
+            conn.send_command.assert_not_awaited()
         asyncio.run(run())
 
     def test_agent_http_auth_requires_active_matching_session_token(self) -> None:
