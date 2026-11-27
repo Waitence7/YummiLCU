@@ -36,7 +36,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 from relay import auth, config, livekit_sfu
 from relay.audit_archive import append_archive_record
-from relay.actions import ALLOWED_ACTIONS, action_policy, validate_web_input_payload
+from relay.actions import ALLOWED_ACTIONS, action_policy, validate_riot_identity_payload, validate_match_friend_presence_payload, validate_web_input_payload
 from relay.connections import (
     AGENT_HEARTBEAT_STALE_SEC,
     AGENT_WS_SEND_TIMEOUT_SEC,
@@ -126,6 +126,9 @@ _LCU_DATA_MESSAGE_TYPES = frozenset({
 })
 _SERVER_CAPABILITIES = frozenset({
     "command_result_v2",
+    "resolve_riot_identity_v1",
+    "match_friend_presence_v1",
+    "add_match_friend_v1",
     "heartbeat",
     "relay_reconnect",
     "event_ack",
@@ -4671,6 +4674,22 @@ async def _handle_agent_message(
         )
         return
 
+    if msg_type == "league_presence_update":
+        did = conn.discord_id_for_ws(websocket)
+        connection_id = conn.ws_connection_id(websocket)
+        payload = data.get("data")
+        if did is None or not connection_id or not conn.is_current_ws(websocket) or not isinstance(payload, dict):
+            return
+        r = websocket.app.state.redis
+        key = league_presence_key(did, connection_id)
+        riot_id = league_presence_riot_id(payload)
+        if riot_id is None:
+            await r.delete(key)
+        else:
+            await r.set(key, riot_id, ex=40)
+        return
+
+
     if msg_type == "participant_status_update":
         discord_id = conn.discord_id_for_ws(websocket)
         payload = data.get("data")
@@ -5543,6 +5562,12 @@ async def internal_command(
         ids = body.payload.get(key)
         if isinstance(ids, list) and len(ids) > max_items:
             raise HTTPException(400, f"{key} max {max_items}")
+    if body.action == "add_match_friend" and (not validate_match_friend_presence_payload(body.payload) or len(body.payload["riot_ids"]) != 1 or body.payload.get("confirmed") is not True):
+        raise HTTPException(400, "invalid friend request")
+    if body.action == "match_friend_presence" and not validate_match_friend_presence_payload(body.payload):
+        raise HTTPException(400, "invalid match_friend_presence payload")
+    if body.action == "resolve_riot_identity" and not validate_riot_identity_payload(body.payload):
+        raise HTTPException(400, "invalid resolve_riot_identity payload")
     if body.action == "web_input" and not validate_web_input_payload(body.payload):
         raise HTTPException(400, "invalid web_input payload")
     conn: ConnectionManager = request.app.state.connections
@@ -5551,6 +5576,22 @@ async def internal_command(
     trust_level = conn.trust_level_for_discord(body.discord_id)
     if trust_level == "new_device" and not policy.allow_new_device:
         raise HTTPException(403, "action not allowed for new device")
+    if body.action == "add_match_friend":
+        agent = conn.agent_info(body.discord_id) or {}
+        if not agent.get("capabilities", {}).get("add_match_friend_v1") or agent.get("lcu_ready") is not True:
+            raise HTTPException(409, "friend request unsupported or LCU not ready")
+        if not await request.app.state.redis.set(f"lcu:friend_add_rate:v1:{body.discord_id}", "1", ex=15, nx=True):
+            raise HTTPException(429, "friend request cooldown")
+    if body.action == "match_friend_presence":
+        agent = conn.agent_info(body.discord_id) or {}
+        if not agent.get("capabilities", {}).get("match_friend_presence_v1") or agent.get("lcu_ready") is not True:
+            raise HTTPException(409, "friend presence unsupported or LCU not ready")
+    if body.action == "resolve_riot_identity":
+        agent = conn.agent_info(body.discord_id) or {}
+        if not agent.get("capabilities", {}).get("resolve_riot_identity_v1"):
+            raise HTTPException(409, "agent update required for resolve_riot_identity")
+        if agent.get("lcu_ready") is not True:
+            raise HTTPException(409, "LCU not ready")
     if body.action == "kick_party_member":
         summoner_id = body.payload.get("summoner_id")
         if (
@@ -5634,6 +5675,154 @@ async def internal_command(
         elapsed_ms=max(0, result_at_ms - command_at_ms),
     )
     return JSONResponse({"ok": True, "request_id": req_id, "result": result})
+
+
+def league_presence_key(discord_id: int, connection_id: str) -> str:
+    return f"lcu:league_presence:v1:{discord_id}:{connection_id}"
+
+
+def league_presence_riot_id(payload: dict[str, Any]) -> str | None:
+    value = payload.get("riot_id")
+    if payload.get("online") is not True or not isinstance(value, str):
+        return None
+    value = value.strip()
+    if len(value) > 128 or value.count("#") != 1 or any(not part.strip() for part in value.split("#")) or any(ord(ch) < 32 or 127 <= ord(ch) <= 159 for ch in value):
+        return None
+    return value
+
+
+@app.get("/internal/league-presence")
+async def internal_league_presence(
+    request: Request,
+    ids: str = Query(..., min_length=1, max_length=4096),
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    conn: ConnectionManager = request.app.state.connections
+    parts = list(dict.fromkeys(part.strip() for part in ids.split(",")))
+    if len(parts) > 50 or not all(part.isascii() and part.isdigit() and 0 < len(part) <= 20 for part in parts):
+        raise HTTPException(400, "invalid ids")
+    keys = {}
+    for part in parts:
+        did = int(part)
+        connection_id = conn.connection_quality(did).get("connection_id")
+        if conn.is_online(did) and connection_id:
+            keys[part] = (connection_id, league_presence_key(did, connection_id))
+    values = await request.app.state.redis.mget([key for _, key in keys.values()]) if keys else []
+    online = {}
+    for (part, (connection_id, _)), value in zip(keys.items(), values):
+        did = int(part)
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        riot_id = league_presence_riot_id({"online": True, "riot_id": value})
+        if riot_id and conn.is_online(did) and conn.connection_quality(did).get("connection_id") == connection_id:
+            online[part] = riot_id
+    return JSONResponse({"online": online}, headers={"Cache-Control": "no-store"})
+
+
+class MatchFriendPresenceBody(BaseModel):
+    match_id: str = Field(min_length=1, max_length=128)
+    actor: str = Field(min_length=1, max_length=20)
+    ids: list[str] = Field(min_length=1, max_length=50)
+    mode: str = Field(default="read", max_length=10)
+    enabled: bool | None = None
+    lease: str | None = Field(default=None, max_length=64)
+    online: dict[str, str] = Field(default_factory=dict)
+    offline: dict[str, str] = Field(default_factory=dict)
+    addable: dict[str, str] = Field(default_factory=dict)
+
+
+@app.post("/internal/match-friend-presence")
+async def internal_match_friend_presence(
+    request: Request, body: MatchFriendPresenceBody,
+    x_relay_internal_secret: str | None = Header(None),
+) -> JSONResponse:
+    await _verify_internal_secret(request, x_relay_internal_secret)
+    conn: ConnectionManager = request.app.state.connections
+    r = request.app.state.redis
+    ids = list(dict.fromkeys(body.ids))
+    if (not all(ch.isascii() and (ch.isalnum() or ch in "_-") for ch in body.match_id)
+        or body.actor not in ids
+        or not all(part.isascii() and part.isdigit() and 0 < len(part) <= 20 for part in ids)
+        or body.mode not in ("read", "consent", "lease", "store")):
+        raise HTTPException(400, "invalid match presence scope")
+    prefix = f"lcu:match_friend_presence:v1:{body.match_id}:"
+    def consent_key(did: str) -> str:
+        return f"{prefix}consent:{did}"
+    def observation_key(did: str, connection_id: str) -> str:
+        return f"{prefix}private-observed:{did}:{connection_id}"
+    actor = int(body.actor)
+    connection_id = conn.connection_quality(actor).get("connection_id")
+    def decode(value):
+        return value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+    if body.mode == "consent":
+        if body.enabled is None:
+            raise HTTPException(400, "enabled required")
+        if body.enabled:
+            # New generation prevents pre-revocation observations from reappearing.
+            await r.set(consent_key(body.actor), secrets.token_hex(12), ex=86400)
+        else:
+            await r.delete(consent_key(body.actor))
+    values = await r.mget([consent_key(did) for did in ids])
+    consent = {did: decode(value) for did, value in zip(ids, values) if value}
+    opted_in = list(consent)
+    base = {"optedIn": opted_in, "observations": {}, "offline": {}, "addable": {}, "lease": None, "privateViewer": body.actor}
+    headers = {"Cache-Control": "no-store"}
+    lease_key = f"lcu:match_friend_presence:lease:v1:{body.actor}"
+    if body.mode == "lease":
+        agent = conn.agent_info(actor) or {}
+        if (body.actor in consent and len(consent) > 1 and connection_id and conn.is_online(actor)
+            and conn.trust_level_for_discord(actor) == "trusted"
+            and agent.get("lcu_ready") is True
+            and agent.get("capabilities", {}).get("match_friend_presence_v1")):
+            token = secrets.token_hex(16)
+            lease_payload = json.dumps({"token":token,"match":body.match_id,"connection":connection_id,"consent":consent})
+            if await r.set(lease_key, lease_payload, ex=20, nx=True):
+                base["lease"] = token
+        return JSONResponse(base, headers=headers)
+    if body.mode == "store":
+        raw_lease = await r.get(lease_key)
+        try:
+            lease = json.loads(decode(raw_lease)) if raw_lease else {}
+        except (ValueError, TypeError):
+            lease = {}
+        if (body.lease and lease.get("token") == body.lease and lease.get("match") == body.match_id
+            and connection_id and lease.get("connection") == connection_id and conn.is_online(actor)
+            and body.actor in consent and lease.get("consent", {}).get(body.actor) == consent[body.actor]):
+            if any(len(rows) > 50 for rows in (body.online, body.offline, body.addable)):
+                raise HTTPException(400, "too many observations")
+            def validate_rows(rows):
+                observations = {}
+                for did, riot_id in rows.items():
+                    valid = league_presence_riot_id({"online":True,"riot_id":riot_id})
+                    if did != body.actor and did in consent and lease["consent"].get(did) == consent[did] and valid:
+                        observations[did] = {"riot_id":valid,"consent":consent[did]}
+                return observations
+            await r.set(observation_key(body.actor, connection_id),
+                        json.dumps({"source_consent":consent[body.actor],"online":validate_rows(body.online),"offline":validate_rows(body.offline),"addable":validate_rows(body.addable)}), ex=40)
+        return JSONResponse(base, headers=headers)
+    # Private view: only the authenticated viewer's own Agent observation.
+    # Never enumerate or merge other participants' observation keys.
+    if body.actor not in consent or not connection_id or not conn.is_online(actor):
+        return JSONResponse(base, headers=headers)
+    raw = await r.get(observation_key(body.actor, connection_id))
+    if not raw or not conn.is_online(actor) or conn.connection_quality(actor).get("connection_id") != connection_id:
+        return JSONResponse(base, headers=headers)
+    try:
+        row = json.loads(decode(raw))
+    except (TypeError, ValueError):
+        return JSONResponse(base, headers=headers)
+    if not isinstance(row, dict) or row.get("source_consent") != consent[body.actor]:
+        return JSONResponse(base, headers=headers)
+    for field, output in (("online","observations"),("offline","offline"),("addable","addable")):
+        observations = {}
+        for target, observation in row.get(field, {}).items():
+            if target != body.actor and target in consent and observation.get("consent") == consent[target]:
+                valid = league_presence_riot_id({"online":True,"riot_id":observation.get("riot_id")})
+                if valid:
+                    observations[target] = [valid]
+        base[output] = observations
+    return JSONResponse(base, headers=headers)
 
 
 @app.get("/internal/participant-status")

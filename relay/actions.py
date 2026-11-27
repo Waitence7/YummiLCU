@@ -44,6 +44,7 @@ ACTION_POLICIES: dict[str, ActionPolicy] = {
     "create_normal_lobby": ActionPolicy("일반(비공개 선택) 로비만 생성", allow_new_device=True),
     "invite_party_members": ActionPolicy(
         "모집 확정 멤버 파티 초대 (payload.riot_ids)",
+        timeout_sec=80.0,
         list_limits=(("riot_ids", 20),),
         allow_new_device=True,
     ),
@@ -52,6 +53,13 @@ ACTION_POLICIES: dict[str, ActionPolicy] = {
         list_limits=(("check_riot_ids", 20),),
         allow_new_device=True,
     ),
+    "resolve_riot_identity": ActionPolicy(
+        "LCU Riot ID 읽기 전용 계정 조회 (payload.riot_ids)",
+        timeout_sec=45.0,
+        list_limits=(("riot_ids", 5),),
+    ),
+    "add_match_friend": ActionPolicy("내전 참가자 친구 요청 (명시적 확인)", timeout_sec=12.0, list_limits=(("riot_ids", 1),)),
+    "match_friend_presence": ActionPolicy("활성 내전 친구 온라인 확인 (read only)", timeout_sec=8.0, list_limits=(("riot_ids", 50),)),
     "kick_party_member": ActionPolicy(
         "파티원 강퇴 (payload.summoner_id)",
         allow_new_device=True,
@@ -90,3 +98,27 @@ def validate_web_input_payload(payload: dict[str, object]) -> bool:
     if value is None or isinstance(value, bool) or isinstance(value, int):
         return True
     return isinstance(value, str) and len(value) <= 256 and "\x00" not in value
+
+
+def validate_riot_identity_payload(payload: dict[str, object]) -> bool:
+    ids = payload.get("riot_ids")
+    return isinstance(ids, list) and 1 <= len(ids) <= 5 and all(
+        isinstance(value, str)
+        and 0 < len(value.encode("utf-8", errors="surrogatepass")) <= 256
+        and value.count("#") == 1
+        and all(part.strip() for part in value.split("#"))
+        and all(ord(ch) >= 32 and not 127 <= ord(ch) <= 159 and not 0xD800 <= ord(ch) <= 0xDFFF for ch in value)
+        for value in ids
+    )
+
+
+def validate_match_friend_presence_payload(payload: dict[str, object]) -> bool:
+    ids = payload.get("riot_ids")
+    return isinstance(ids, list) and 1 <= len(ids) <= 50 and all(
+        isinstance(value, str)
+        and 0 < len(value.encode("utf-8", errors="surrogatepass")) <= 128
+        and value.count("#") == 1
+        and all(part.strip() for part in value.split("#"))
+        and all(ord(ch) >= 32 and not 127 <= ord(ch) <= 159 and not 0xD800 <= ord(ch) <= 0xDFFF for ch in value)
+        for value in ids
+    )

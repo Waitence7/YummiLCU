@@ -415,6 +415,7 @@ export function App() {
               currentReleaseChannel={
                 state.release_channel ?? state.config.UpdateChannel
               }
+              updateMessage={state.update_message ?? null}
               onPatchConfig={actions.patchConfig}
               actionError={
                 actionError?.startsWith("설정 저장 실패:") ? actionError : null

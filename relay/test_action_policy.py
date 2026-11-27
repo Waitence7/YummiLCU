@@ -2,7 +2,7 @@ import re
 import unittest
 from pathlib import Path
 
-from relay.actions import ACTION_POLICIES
+from relay.actions import ACTION_POLICIES, validate_riot_identity_payload
 
 
 class ActionPolicyContractTests(unittest.TestCase):
@@ -22,3 +22,11 @@ class ActionPolicyContractTests(unittest.TestCase):
                 self.assertTrue(key, name)
                 self.assertGreater(limit, 0, name)
                 self.assertLessEqual(limit, 100, name)
+
+    def test_identity_lookup_is_read_only_bounded_and_not_allowed_on_new_devices(self) -> None:
+        policy = ACTION_POLICIES["resolve_riot_identity"]
+        self.assertFalse(policy.allow_new_device)
+        self.assertEqual(policy.list_limits, (("riot_ids", 5),))
+        self.assertTrue(validate_riot_identity_payload({"riot_ids": ["Player#KR1"]}))
+        for ids in ([], ["A#KR1"] * 6, ["A"], ["A#"], ["A#KR1", 42], ["A\n#KR1"], ["A#B#C"]):
+            self.assertFalse(validate_riot_identity_payload({"riot_ids": ids}), ids)

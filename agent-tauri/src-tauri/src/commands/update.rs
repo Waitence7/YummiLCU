@@ -5,7 +5,7 @@ use tauri::{AppHandle, State};
 use crate::{
     platform::open_beta_download_url,
     state::AppState,
-    updater::{beta_release_info, check_and_apply_update, BetaReleaseInfo},
+    updater::{beta_release_info, check_and_apply_beta_update, BetaReleaseInfo},
 };
 
 #[tauri::command]
@@ -31,8 +31,13 @@ pub(crate) async fn apply_beta_update_now(
     config.save().map_err(|error| error.to_string())?;
 
     state.update_config(config.clone()).await;
+    // Unlike a local-only flight record, this is attributed to the connected
+    // Agent account by the relay and can diagnose button-click failures.
     state
-        .record_flight("beta_update", "manual_apply_requested")
+        .report_update_diagnostic("manual_apply_requested", "beta", None)
+        .await;
+    state
+        .set_update_message(&app, Some("베타 업데이트 정보를 확인하고 있습니다."))
         .await;
     state.emit(&app).await;
     drop(guard);
@@ -44,7 +49,7 @@ pub(crate) async fn apply_beta_update_now(
     let app_for_update = app.clone();
     let state_for_update = state.inner().clone();
     tauri::async_runtime::spawn(async move {
-        check_and_apply_update(
+        check_and_apply_beta_update(
             &manifest_url,
             &config,
             &app_for_update,

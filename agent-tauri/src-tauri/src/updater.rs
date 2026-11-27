@@ -299,6 +299,15 @@ fn is_newer_target(
     if channel == "stable" {
         return false;
     }
+    // Explicitly switching from stable/dev to beta must not be mistaken for an
+    // already-installed beta merely because the semver or CI build ID matches.
+    // After the switch has installed the beta release label, normal monotonic
+    // beta sequence comparison applies again.
+    if channel == "beta"
+        && release_sequence(current_release_label, current_version, channel).is_none()
+    {
+        return true;
+    }
 
     // For prerelease channels the published release sequence is the canonical
     // ordering. Build IDs describe a particular CI artifact and are not monotonic
@@ -622,8 +631,12 @@ fn installed_release_identity() -> (String, String, String) {
     let fallback_label = option_env!("YUMMI_AGENT_RELEASE_LABEL")
         .unwrap_or(env!("CARGO_PKG_VERSION"))
         .to_owned();
-    let fallback_build = option_env!("YUMMI_AGENT_BUILD_ID").unwrap_or("local").to_owned();
-    let fallback_commit = option_env!("YUMMI_AGENT_GIT_COMMIT").unwrap_or("unknown").to_owned();
+    let fallback_build = option_env!("YUMMI_AGENT_BUILD_ID")
+        .unwrap_or("local")
+        .to_owned();
+    let fallback_commit = option_env!("YUMMI_AGENT_GIT_COMMIT")
+        .unwrap_or("unknown")
+        .to_owned();
 
     let Some(path) = std::env::current_exe()
         .ok()
@@ -675,15 +688,21 @@ fn persist_release_identity(target_dir: &Path, target: &UpdateTarget) -> AgentRe
     Ok(())
 }
 
+enum ApplyUpdateOutcome {
+    Installed,
+    NoUpdate,
+    Blocked(String),
+}
+
 async fn apply_update(
     manifest: UpdateManifest,
     app: &AppHandle,
     state: &AppState,
     config: &Config,
     reopen_window_after_update: bool,
-) -> AgentResult<bool> {
+) -> AgentResult<ApplyUpdateOutcome> {
     let Some(target_manifest) = manifest.select_tauri() else {
-        return Ok(false);
+        return Ok(ApplyUpdateOutcome::NoUpdate);
     };
     let current_version = env!("CARGO_PKG_VERSION");
     let (current_release_label, current_build_id, _) = installed_release_identity();
@@ -694,7 +713,7 @@ async fn apply_update(
         &current_build_id,
         &config.update_channel,
     ) {
-        return Ok(false);
+        return Ok(ApplyUpdateOutcome::NoUpdate);
     }
     match update_block_reason(config).await {
         Ok(Some(reason)) => {
@@ -710,7 +729,7 @@ async fn apply_update(
                     ),
                 )
                 .await;
-            return Ok(false);
+            return Ok(ApplyUpdateOutcome::Blocked(reason));
         }
         Ok(None) => {}
         Err(error) => {
@@ -765,7 +784,7 @@ async fn apply_update(
         target_manifest.sha256.as_deref()
     };
     let (Some(url), Some(hash)) = (url, hash) else {
-        return Ok(false);
+        return Ok(ApplyUpdateOutcome::NoUpdate);
     };
     let parsed = url::Url::parse(url)
         .map_err(|error| AgentError::Update(format!("업데이트 URL 오류: {error}")))?;
@@ -946,7 +965,7 @@ async fn apply_update(
             Some(target_manifest.version.clone()),
         )
         .await;
-    Ok(true)
+    Ok(ApplyUpdateOutcome::Installed)
 }
 
 pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>) {
@@ -974,14 +993,9 @@ pub(crate) async fn auto_update_on_startup(app: AppHandle, state: Arc<AppState>)
                 .get_webview_window("main")
                 .and_then(|window| window.is_visible().ok())
                 .unwrap_or(false);
-            check_succeeded = check_and_apply_update(
-                &url,
-                &config,
-                &app,
-                &state,
-                reopen_window_after_update,
-            )
-            .await;
+            check_succeeded =
+                check_and_apply_update(&url, &config, &app, &state, reopen_window_after_update)
+                    .await;
             if *shutdown.borrow() {
                 return;
             }
@@ -1004,8 +1018,37 @@ pub(crate) async fn check_and_apply_update(
     state: &AppState,
     reopen_window_after_update: bool,
 ) -> bool {
+    check_and_apply_update_inner(url, config, app, state, reopen_window_after_update, false).await
+}
+
+pub(crate) async fn check_and_apply_beta_update(
+    url: &str,
+    config: &Config,
+    app: &AppHandle,
+    state: &AppState,
+    reopen_window_after_update: bool,
+) -> bool {
+    check_and_apply_update_inner(url, config, app, state, reopen_window_after_update, true).await
+}
+
+async fn check_and_apply_update_inner(
+    url: &str,
+    config: &Config,
+    app: &AppHandle,
+    state: &AppState,
+    reopen_window_after_update: bool,
+    manual_beta: bool,
+) -> bool {
     state
-        .report_update_diagnostic("update_check", "scheduled", None)
+        .report_update_diagnostic(
+            "update_check",
+            if manual_beta {
+                "manual_beta"
+            } else {
+                "scheduled"
+            },
+            None,
+        )
         .await;
     let parsed = match Url::parse(url) {
         Ok(parsed) => parsed,
@@ -1021,6 +1064,14 @@ pub(crate) async fn check_and_apply_update(
             state
                 .report_unexpected_error("updater", "manifest_url_invalid", &summary)
                 .await;
+            if manual_beta {
+                state
+                    .set_update_message(
+                        app,
+                        Some("베타 업데이트 확인에 실패했습니다. 연결 상태와 로그를 확인한 뒤 다시 시도하세요."),
+                    )
+                    .await;
+            }
             return false;
         }
     };
@@ -1046,6 +1097,14 @@ pub(crate) async fn check_and_apply_update(
                 "manifest URL failed security validation",
             )
             .await;
+        if manual_beta {
+            state
+                .set_update_message(
+                    app,
+                    Some("베타 업데이트 확인에 실패했습니다: manifest URL 보안 검증 실패"),
+                )
+                .await;
+        }
         return false;
     }
     let client = match Client::builder()
@@ -1067,10 +1126,41 @@ pub(crate) async fn check_and_apply_update(
             state
                 .report_unexpected_error("updater", "http_client_build_failed", &summary)
                 .await;
+            if manual_beta {
+                state
+                    .set_update_message(
+                        app,
+                        Some("베타 업데이트 확인에 실패했습니다. 연결 상태와 로그를 확인한 뒤 다시 시도하세요."),
+                    )
+                    .await;
+            }
             return false;
         }
     };
-    let bytes = match download_limited(&client, parsed, MAX_UPDATE_MANIFEST_BYTES).await {
+    // Interactive beta apply retries transient network resets (e.g. Windows
+    // 10054); scheduled automatic checks already retry on their own interval.
+    let mut manifest_result =
+        download_limited(&client, parsed.clone(), MAX_UPDATE_MANIFEST_BYTES).await;
+    if manual_beta {
+        for attempt in 1..=2 {
+            let retryable = manifest_result.as_ref().err().is_some_and(|error| {
+                let detail = error.to_string();
+                detail.contains("transport=connect")
+                    || detail.contains("transport=timeout")
+                    || detail.contains("transport=request")
+            });
+            if !retryable {
+                break;
+            }
+            state
+                .report_update_diagnostic("manifest_retry", format!("attempt={attempt}"), None)
+                .await;
+            sleep(Duration::from_secs(attempt * 2)).await;
+            manifest_result =
+                download_limited(&client, parsed.clone(), MAX_UPDATE_MANIFEST_BYTES).await;
+        }
+    }
+    let bytes = match manifest_result {
         Ok(bytes) => bytes,
         Err(error) => {
             let summary = error.to_string();
@@ -1086,6 +1176,14 @@ pub(crate) async fn check_and_apply_update(
             state
                 .log(app, format!("자동 업데이트 확인 실패: {summary}"))
                 .await;
+            if manual_beta {
+                state
+                    .set_update_message(
+                        app,
+                        Some("베타 업데이트 확인에 실패했습니다. 연결 상태와 로그를 확인한 뒤 다시 시도하세요."),
+                    )
+                    .await;
+            }
             return false;
         }
     };
@@ -1113,9 +1211,18 @@ pub(crate) async fn check_and_apply_update(
                     )
                     .await;
             }
+            if manual_beta {
+                state
+                    .set_update_message(
+                        app,
+                        Some("베타 업데이트 확인에 실패했습니다. 연결 상태와 로그를 확인한 뒤 다시 시도하세요."),
+                    )
+                    .await;
+            }
             return false;
         }
     };
+    let mut promoted_matching_build = false;
     if let Some(target) = manifest.tauri.clone() {
         // A promoted beta/stable release may reuse the exact candidate binary.
         // In that case no executable update is necessary, but the runtime release
@@ -1124,6 +1231,7 @@ pub(crate) async fn check_and_apply_update(
             if let Ok(executable) = std::env::current_exe() {
                 if let Some(dir) = executable.parent() {
                     if persist_release_identity(dir, &target).is_ok() {
+                        promoted_matching_build = true;
                         state
                             .set_release_identity(
                                 app,
@@ -1155,15 +1263,46 @@ pub(crate) async fn check_and_apply_update(
         }
     }
     match apply_update(manifest, app, state, config, reopen_window_after_update).await {
-        Ok(true) => {
+        Ok(ApplyUpdateOutcome::Installed) => {
             state.log(app, "새 버전을 설치하고 재시작합니다.").await;
             sleep(Duration::from_secs(1)).await;
             state.begin_shutdown();
             crate::tray::remove(app);
             app.exit(0);
         }
-        Ok(false) => {
+        Ok(ApplyUpdateOutcome::NoUpdate) => {
             state.record_flight("updater", "no_applicable_update").await;
+            if manual_beta {
+                state
+                    .report_update_diagnostic(
+                        "no_applicable_update",
+                        "already_current_or_not_eligible",
+                        None,
+                    )
+                    .await;
+                state
+                    .set_update_message(
+                        app,
+                        Some(if promoted_matching_build {
+                            "현재 설치된 실행 파일이 최신 베타와 동일하여 릴리스 정보와 채널을 갱신했습니다."
+                        } else {
+                            "베타 업데이트 대상이 없습니다. 현재 설치 버전 또는 배포 조건을 확인하세요."
+                        }),
+                    )
+                    .await;
+            }
+        }
+        Ok(ApplyUpdateOutcome::Blocked(reason)) => {
+            if manual_beta {
+                state
+                    .set_update_message(
+                        app,
+                        Some(format!(
+                            "베타 업데이트 보류: {reason}. 게임 종료 후 다시 적용할 수 있습니다."
+                        )),
+                    )
+                    .await;
+            }
         }
         Err(error) => {
             state
@@ -1177,7 +1316,8 @@ pub(crate) async fn check_and_apply_update(
                 .set_update_message(
                     app,
                     Some(format!(
-                        "자동 업데이트에 실패했습니다. 앱을 계속 사용할 수 있습니다: {error}"
+                        "{} 업데이트에 실패했습니다. 앱을 계속 사용할 수 있습니다: {error}",
+                        if manual_beta { "베타" } else { "자동" }
                     )),
                 )
                 .await;
@@ -1376,6 +1516,57 @@ mod tests {
             "0.6.8",
             "0.6.8-beta.0",
             "20260824.0",
+            "beta",
+        ));
+    }
+
+    #[test]
+    fn explicit_switch_from_stable_to_same_semver_beta_is_not_skipped() {
+        let target = UpdateTarget {
+            version: "0.8.0".into(),
+            channel: Some("beta".into()),
+            release_label: Some("0.8.0-beta.65".into()),
+            build_id: Some("20261118.337".into()),
+            commit: Some("16bc42b".into()),
+            rollout_percent: Some(100),
+            min_version: None,
+            blocked_versions: None,
+            url: None,
+            patch_url: None,
+            patch_from: None,
+            sha256: None,
+            patch_sha256: None,
+            executable: None,
+            signature: None,
+            publisher_thumbprint: None,
+            files: None,
+        };
+        assert!(should_apply_target(
+            &target,
+            "0.8.0",
+            "0.8.0",
+            "20261121.999",
+            "beta",
+        ));
+        assert!(should_apply_target(
+            &target,
+            "0.8.0",
+            "0.8.0-candidate.327",
+            "20261121.999",
+            "beta",
+        ));
+        assert!(!should_apply_target(
+            &target,
+            "0.8.0",
+            "0.8.0-beta.65",
+            "20261118.337",
+            "beta",
+        ));
+        assert!(!should_apply_target(
+            &target,
+            "0.8.1",
+            "0.8.1",
+            "20261121.999",
             "beta",
         ));
     }

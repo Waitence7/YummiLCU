@@ -2836,6 +2836,13 @@ async fn connect_once(
             Some(batch) = lcu_poll_rx.recv(), if session_bound => {
                 mark_relay_branch(13);
                 for (message_type, data) in batch.events {
+                    if message_type == "league_presence_update" {
+                        // Ephemeral presence: no durable replay or account IDs in logs.
+                        let data = if state.config.read().await.share_league_online_status { data } else { json!({"online": false}) };
+                        let message = AgentEventMessage::new(message_type, data);
+                        send_shared_relay_message(&writer, Message::Text(serde_json::to_string(&message)?.into()), "Relay presence 전송 실패").await?;
+                        continue;
+                    }
                     if message_type == "match_rofl_candidate" {
                         if let Some(game_id) = replay_game_id(&data) {
                             let preflight_tx = lcu_poll_worker.rofl_preflight.clone();

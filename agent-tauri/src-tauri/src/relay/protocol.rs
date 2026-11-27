@@ -331,6 +331,9 @@ pub(crate) enum Action {
     PlayNormalDraft,
     InvitePartyMembers,
     CheckPartyMembers,
+    AddMatchFriend,
+    MatchFriendPresence,
+    ResolveRiotIdentity,
     KickPartyMember,
     WebInput,
 }
@@ -365,6 +368,9 @@ impl Action {
             "play_normal_draft" => Self::PlayNormalDraft,
             "invite_party_members" => Self::InvitePartyMembers,
             "check_party_members" => Self::CheckPartyMembers,
+            "add_match_friend" => Self::AddMatchFriend,
+            "match_friend_presence" => Self::MatchFriendPresence,
+            "resolve_riot_identity" => Self::ResolveRiotIdentity,
             "kick_party_member" => Self::KickPartyMember,
             "web_input" => Self::WebInput,
             _ => return None,
@@ -400,13 +406,16 @@ impl Action {
             Self::PlayNormalDraft => "play_normal_draft",
             Self::InvitePartyMembers => "invite_party_members",
             Self::CheckPartyMembers => "check_party_members",
+            Self::AddMatchFriend => "add_match_friend",
+            Self::MatchFriendPresence => "match_friend_presence",
+            Self::ResolveRiotIdentity => "resolve_riot_identity",
             Self::KickPartyMember => "kick_party_member",
             Self::WebInput => "web_input",
         }
     }
 
     pub(crate) const fn is_background(self) -> bool {
-        matches!(self, Self::CheckPartyMembers)
+        matches!(self, Self::CheckPartyMembers | Self::MatchFriendPresence)
     }
 
     pub(crate) const fn allowed_on_new_device(self) -> bool {
@@ -538,6 +547,9 @@ pub(crate) struct AgentCapabilities {
     rewards: bool,
     party_invite: bool,
     party_lookup: bool,
+    add_match_friend_v1: bool,
+    match_friend_presence_v1: bool,
+    resolve_riot_identity_v1: bool,
     summoner_spells: bool,
     dodge: bool,
     launch_client: bool,
@@ -569,6 +581,9 @@ impl AgentCapabilities {
             rewards: true,
             party_invite: true,
             party_lookup: true,
+            add_match_friend_v1: true,
+            match_friend_presence_v1: true,
+            resolve_riot_identity_v1: true,
             summoner_spells: true,
             dodge: true,
             launch_client: true,
@@ -1182,6 +1197,9 @@ mod tests {
             "create_normal_lobby",
             "invite_party_members",
             "check_party_members",
+            "resolve_riot_identity",
+            "match_friend_presence",
+            "add_match_friend",
             "kick_party_member",
             "web_input",
         ];

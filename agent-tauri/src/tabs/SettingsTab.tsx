@@ -27,6 +27,7 @@ export function SettingsTab({
   currentReleaseLabel,
   currentBuildId,
   currentReleaseChannel,
+  updateMessage,
   onPatchConfig,
   actionError,
 }: {
@@ -34,6 +35,7 @@ export function SettingsTab({
   currentReleaseLabel: string;
   currentBuildId: string;
   currentReleaseChannel: string;
+  updateMessage: string | null;
   onPatchConfig(patch: Partial<Config>): Promise<boolean>;
   actionError?: string | null;
 }) {
@@ -59,18 +61,16 @@ export function SettingsTab({
             description="챔피언 선택에서 나간 뒤 매칭이 다시 자동으로 잡히는 것을 막습니다."
           />
           <Toggle
-            checked={config.ApplyDefaultStatusOnConnect}
-            onChange={(next) =>
-              void onPatchConfig({ ApplyDefaultStatusOnConnect: next })
-            }
-            label="연결 시 기본 상태 메시지 적용"
-            description="에이전트 연결 시 롤 클라이언트 상태 메시지를 자동 설정합니다."
-          />
-          <Toggle
             checked={config.AutoAcceptMatch}
             onChange={(next) => void onPatchConfig({ AutoAcceptMatch: next })}
             label="매치 자동 수락"
             description="수락 창이 뜨면 자동으로 수락합니다."
+          />
+          <Toggle
+            checked={config.ShareLeagueOnlineStatus}
+            onChange={(next) => void onPatchConfig({ ShareLeagueOnlineStatus: next })}
+            label="내전에서 롤 접속 상태 공유"
+            description="참가 중인 내전의 권한 있는 사용자에게 현재 연결된 롤 계정의 온라인 상태를 표시합니다."
           />
         </div>
       </Card>
@@ -83,6 +83,7 @@ export function SettingsTab({
         currentReleaseLabel={currentReleaseLabel}
         currentBuildId={currentBuildId}
         currentReleaseChannel={currentReleaseChannel}
+        updateMessage={updateMessage}
       />
 
       <AdvancedCard config={config} onPatchConfig={onPatchConfig} />
@@ -130,10 +131,12 @@ function BetaDownloadCard({
   currentReleaseLabel,
   currentBuildId,
   currentReleaseChannel,
+  updateMessage,
 }: {
   currentReleaseLabel: string;
   currentBuildId: string;
   currentReleaseChannel: string;
+  updateMessage: string | null;
 }) {
   const [release, setRelease] = useState<BetaReleaseInfo | null>(null);
   const [loading, setLoading] = useState(true);
@@ -188,6 +191,15 @@ function BetaDownloadCard({
     }
   };
 
+  const updateStopped = Boolean(
+    updateMessage &&
+      (updateMessage.startsWith("베타 업데이트 보류") ||
+        updateMessage.startsWith("베타 업데이트 대상이 없습니다") ||
+        updateMessage.startsWith("베타 업데이트 확인에 실패") ||
+        updateMessage.startsWith("베타 업데이트에 실패")),
+  );
+  const updatePending = applyStarted && !updateStopped;
+
   const betaAlreadyInstalled =
     currentReleaseChannel === "beta" &&
     Boolean(release?.releaseLabel) &&
@@ -240,7 +252,7 @@ function BetaDownloadCard({
                   applying ||
                   betaAlreadyInstalled ||
                   betaIsOlder ||
-                  applyStarted
+                  updatePending
                 }
                 onClick={() => void applyBeta()}
               >
@@ -250,8 +262,8 @@ function BetaDownloadCard({
                     ? "이전 베타"
                     : applying
                       ? "적용 중…"
-                      : applyStarted
-                        ? "적용 시작됨"
+                      : updatePending
+                        ? "업데이트 확인 중"
                         : "베타 적용하기"}
               </Button>
             </div>

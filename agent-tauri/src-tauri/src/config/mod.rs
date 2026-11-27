@@ -57,12 +57,10 @@ pub struct Config {
     pub auth_poll_interval_ms: u64,
     pub lockfile_path: Option<String>,
     pub prevent_queue_after_dodge: bool,
-    // Retained for compatibility until LCU event handling applies this preference.
-    pub apply_default_status_on_connect: bool,
     // Retained for compatibility until ready-check event handling applies this preference.
     pub auto_accept_match: bool,
-    // Retained for compatibility until process-follow behavior is implemented.
-    pub follow_league_client: bool,
+    /// Opt-in League online presence and private match friend status.
+    pub share_league_online_status: bool,
     pub update_manifest_url: Option<String>,
     pub check_updates_on_startup: bool,
     pub auto_update_enabled: bool,
@@ -90,9 +88,8 @@ impl Default for Config {
             auth_poll_interval_ms: 1500,
             lockfile_path: None,
             prevent_queue_after_dodge: true,
-            apply_default_status_on_connect: true,
             auto_accept_match: false,
-            follow_league_client: true,
+            share_league_online_status: false,
             update_manifest_url: Some(public_update_manifest_url(update_channel).into()),
             check_updates_on_startup: true,
             auto_update_enabled: true,
@@ -561,6 +558,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retired_automatic_status_and_follow_settings_are_ignored() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "ApplyDefaultStatusOnConnect": true,
+            "FollowLeagueClient": true,
+            "AutoAcceptMatch": true
+        })).unwrap();
+        assert!(config.auto_accept_match);
+        assert!(!config.share_league_online_status);
+        let json = serde_json::to_value(config).unwrap();
+        assert!(json.get("ApplyDefaultStatusOnConnect").is_none());
+        assert!(json.get("FollowLeagueClient").is_none());
+    }
+
+    #[test]
     fn older_agent_json_uses_defaults_for_missing_fields() {
         let config: Config = serde_json::from_str(
             r#"{
@@ -573,7 +584,7 @@ mod tests {
         assert_eq!(config.relay_public_base_url, "https://relay.example");
         assert!(!config.prevent_queue_after_dodge);
         assert_eq!(config.auth_poll_interval_ms, 1500);
-        assert!(config.follow_league_client);
+        assert!(!config.share_league_online_status);
         assert_eq!(config.update_channel, embedded_release_channel());
         assert_eq!(config.saved_session_max_age_days, 0);
         assert_eq!(config.tray_hide_effect, "book-return-v2");

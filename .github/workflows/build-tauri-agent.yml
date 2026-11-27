@@ -2,7 +2,7 @@ name: Deploy LCU Tauri Agent (manual Actions button)
 
 on:
   push:
-    branches: [main]
+    branches: [main, release/stable-0.7.38]
     paths:
       - "agent-tauri/**"
       - "!agent-tauri/gamebar-widget/**"
@@ -36,9 +36,14 @@ on:
         required: false
         default: "100"
       source_sha:
-        description: "배포할 main 커밋 SHA (비우면 최신 성공 후보)"
+        description: "배포할 커밋 SHA (비우면 최신 성공 main 후보)"
         required: false
         default: ""
+      wait_for_candidate:
+        description: "지정한 SHA의 검증 빌드 완료를 기다린 뒤 배포"
+        required: false
+        type: boolean
+        default: false
 
 # main push 빌드는 최신 것만 남기고, 수동 배포는 서로 취소하지 않고 직렬화한다.
 concurrency:
@@ -168,17 +173,29 @@ jobs:
 
       - name: Configure candidate metadata
         id: release_meta
+        env:
+          RELEASE_BETA_66: ${{ github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release-beta-0.8.0-66]') }}
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
           $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
           $buildId = "$date.$env:GITHUB_RUN_NUMBER"
           $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $releaseChannel = 'dev'
           $releaseLabel = "$version-candidate.$env:GITHUB_RUN_NUMBER"
-          "YUMMI_AGENT_RELEASE_CHANNEL=dev" >> $env:GITHUB_ENV
+          if ($env:GITHUB_REF -eq 'refs/heads/release/stable-0.7.38') {
+            if ($version -ne '0.7.38') { throw "Unexpected stable source version: $version" }
+            $releaseChannel = 'stable'
+            $releaseLabel = $version
+          } elseif ($env:RELEASE_BETA_66 -eq 'true') {
+            if ($version -ne '0.8.0') { throw "Unexpected beta source version: $version" }
+            $releaseChannel = 'beta'
+            $releaseLabel = "$version-beta.66"
+          }
+          "YUMMI_AGENT_RELEASE_CHANNEL=$releaseChannel" >> $env:GITHUB_ENV
           "YUMMI_AGENT_RELEASE_LABEL=$releaseLabel" >> $env:GITHUB_ENV
           "YUMMI_AGENT_BUILD_ID=$buildId" >> $env:GITHUB_ENV
           "YUMMI_AGENT_GIT_COMMIT=$shortSha" >> $env:GITHUB_ENV
-          "channel=dev" >> $env:GITHUB_OUTPUT
+          "channel=$releaseChannel" >> $env:GITHUB_OUTPUT
           "release_label=$releaseLabel" >> $env:GITHUB_OUTPUT
           "build_id=$buildId" >> $env:GITHUB_OUTPUT
 
@@ -309,7 +326,7 @@ jobs:
         env:
           YUMMI_AGENT_MANIFEST_SIGNING_KEY: ${{ secrets.YUMMI_AGENT_MANIFEST_SIGNING_KEY }}
           RELEASE_NOTES: "Verified main candidate"
-          CHANNEL: dev
+          CHANNEL: ${{ steps.release_meta.outputs.channel }}
           ROLLOUT_PERCENT: "100"
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
@@ -354,7 +371,7 @@ jobs:
         continue-on-error: true
         with:
           script: |
-            const keepRuns = 2;
+            const keepRuns = 5;
             const keepRunIds = new Set([context.runId]);
 
             const runs = await github.paginate(
@@ -368,17 +385,11 @@ jobs:
               }
             );
 
+            const candidateRunIds = new Set();
             for (const run of runs) {
-              if (keepRunIds.has(run.id)) continue;
-              const { data } = await github.rest.actions.listJobsForWorkflowRun({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                run_id: run.id,
-              });
-              if (data.jobs.some((job) => job.name === 'build' && job.conclusion === 'success')) {
-                keepRunIds.add(run.id);
-                if (keepRunIds.size >= keepRuns) break;
-              }
+              if (run.event !== 'push' || run.status !== 'completed' || run.conclusion !== 'success') continue;
+              candidateRunIds.add(run.id);
+              if (keepRunIds.size < keepRuns) keepRunIds.add(run.id);
             }
 
             const artifacts = await github.paginate(
@@ -393,7 +404,7 @@ jobs:
             let deleted = 0;
             let freed = 0;
             for (const artifact of artifacts) {
-              if (keepRunIds.has(artifact.workflow_run.id)) continue;
+              if (artifact.name !== "agent-candidate" || !candidateRunIds.has(artifact.workflow_run.id) || keepRunIds.has(artifact.workflow_run.id)) continue;
               await github.rest.actions.deleteArtifact({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -409,6 +420,7 @@ jobs:
     name: Deploy existing verified agent candidate
     if: ${{ github.event_name == 'workflow_dispatch' }}
     runs-on: ubuntu-slim
+    timeout-minutes: 55
     permissions:
       actions: read
       contents: write
@@ -425,10 +437,28 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_VERSION: ${{ github.event.inputs.version }}
           REQUESTED_SHA: ${{ github.event.inputs.source_sha }}
+          WAIT_FOR_CANDIDATE: ${{ inputs.wait_for_candidate }}
+          REQUESTED_CHANNEL: ${{ inputs.channel }}
+          REQUESTED_BETA_NUMBER: ${{ inputs.beta_number }}
         shell: bash
         run: |
           set -euo pipefail
           requested_sha="${REQUESTED_SHA//[[:space:]]/}"
+          if [[ "$WAIT_FOR_CANDIDATE" == 'true' ]]; then
+            [[ "$requested_sha" =~ ^[0-9a-f]{40}$ ]] || { echo "Exact source SHA required for waiting" >&2; exit 1; }
+            for attempt in $(seq 1 150); do
+              runs="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/build-tauri-agent.yml/runs?head_sha=${requested_sha}&event=push&per_page=10")"
+              if jq -e '.workflow_runs[] | select(.status == "completed" and .conclusion == "success")' <<<"$runs" >/dev/null; then
+                break
+              fi
+              if jq -e '.workflow_runs[0] | select(.status == "completed" and .conclusion != "success")' <<<"$runs" >/dev/null; then
+                echo "Candidate verification failed; refusing to publish $requested_sha" >&2
+                exit 1
+              fi
+              if [ "$attempt" -eq 150 ]; then echo "Candidate verification timed out" >&2; exit 1; fi
+              sleep 20
+            done
+          fi
           if [ -n "$requested_sha" ]; then
             runs="$(gh api "/repos/${GITHUB_REPOSITORY}/actions/workflows/build-tauri-agent.yml/runs?head_sha=${requested_sha}&event=push&status=success&per_page=20")"
           else
@@ -461,6 +491,12 @@ jobs:
             exit 1
           }
           jq -e --arg commit "$source_short" '.tauri.commit == $commit' release/agent-version.json >/dev/null
+          if [[ "$WAIT_FOR_CANDIDATE" == 'true' ]]; then
+            jq -e --arg channel "$REQUESTED_CHANNEL" '.tauri.channel == $channel' release/agent-version.json >/dev/null
+            if [[ "$REQUESTED_CHANNEL" == 'beta' ]]; then
+              jq -e --arg label "$REQUESTED_VERSION-beta.$REQUESTED_BETA_NUMBER" '.tauri.releaseLabel == $label' release/agent-version.json >/dev/null
+            fi
+          fi
           test -s "release/Yummi-LCU-Agent-${candidate_version}-setup.exe"
           test -s "release/tauri-${candidate_version}.zip"
 

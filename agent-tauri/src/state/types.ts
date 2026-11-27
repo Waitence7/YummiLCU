@@ -51,9 +51,8 @@ export type Config = {
   AuthPollIntervalMs: number;
   LockfilePath?: string | null;
   PreventQueueAfterDodge: boolean;
-  ApplyDefaultStatusOnConnect: boolean;
   AutoAcceptMatch: boolean;
-  FollowLeagueClient: boolean;
+  ShareLeagueOnlineStatus: boolean;
   UpdateManifestUrl?: string | null;
   CheckUpdatesOnStartup: boolean;
   AutoUpdateEnabled: boolean;
@@ -180,9 +179,8 @@ export const initialState: AgentState = {
     RelayPublicBaseUrl: 'https://yummi.duckdns.org',
     AuthPollIntervalMs: 1500,
     PreventQueueAfterDodge: true,
-    ApplyDefaultStatusOnConnect: true,
     AutoAcceptMatch: false,
-    FollowLeagueClient: true,
+    ShareLeagueOnlineStatus: false,
     UpdateManifestUrl: 'https://yummi.duckdns.org/agent/version.json',
     CheckUpdatesOnStartup: true,
     AutoUpdateEnabled: true,

@@ -59,6 +59,8 @@ pub(crate) struct LcuEventPoller {
     gameflow: Option<String>,
     last_gameflow_emit: Option<Instant>,
     ready_check: Option<String>,
+    online_presence_shared: bool,
+    last_online_presence: Option<Instant>,
     champ_select: Option<String>,
     party: Option<String>,
     participant: Option<String>,
@@ -158,6 +160,7 @@ impl LcuEventPoller {
         self.gameflow = None;
         self.last_gameflow_emit = None;
         self.ready_check = None;
+        self.last_online_presence = None;
         self.champ_select = None;
         self.party = None;
         self.participant = None;
@@ -221,6 +224,11 @@ impl LcuEventPoller {
         events: &mut Vec<(&'static str, Value)>,
         disconnected: bool,
     ) {
+        if self.online_presence_shared {
+            self.online_presence_shared = false;
+            self.last_online_presence = None;
+            events.push(("league_presence_update", json!({"online": false})));
+        }
         let was_available = self.lcu_available == Some(true);
         if disconnected {
             self.observe_disconnected();
@@ -530,6 +538,12 @@ impl LcuEventPoller {
     ) -> Vec<(&'static str, Value)> {
         let mut events = Vec::new();
 
+        if !config.share_league_online_status && self.online_presence_shared {
+            self.online_presence_shared = false;
+            self.last_online_presence = None;
+            events.push(("league_presence_update", json!({"online": false})));
+        }
+
         // Live Client Data is independent of the League Client lockfile. This is
         // especially important for spectators and PC cafes where LCU discovery or
         // gameflow may be unavailable while the local game API is still running.
@@ -744,6 +758,15 @@ impl LcuEventPoller {
             self.diagnostic("LCU gameflow API 연결됨");
         }
         self.lcu_available = Some(true);
+        if config.share_league_online_status && self.last_online_presence.is_none_or(|last| last.elapsed() >= Duration::from_secs(12)) {
+            self.last_online_presence = Some(Instant::now());
+            let riot_id = match timeout(Duration::from_secs(2), client.current_summoner()).await {
+                Ok(Ok(value)) => league_presence_riot_id(&value),
+                _ => None,
+            };
+            self.online_presence_shared = riot_id.is_some();
+            events.push(("league_presence_update", json!({"online": riot_id.is_some(), "riot_id": riot_id})));
+        }
         let previous_phase = self.gameflow.clone();
         if previous_phase.as_deref() != Some(phase.as_str()) {
             self.diagnostic(format!(
@@ -2369,6 +2392,16 @@ fn push_live_item_delta_ops(
     true
 }
 
+fn league_presence_riot_id(value: &Value) -> Option<String> {
+    let name = value.get("gameName").or_else(|| value.get("riotIdGameName"))?.as_str()?.trim();
+    let tag = value.get("tagLine").or_else(|| value.get("riotIdTagLine")).or_else(|| value.get("riotIdTagline"))?.as_str()?.trim();
+    if name.is_empty() || tag.is_empty() || name.contains('#') || tag.contains('#') || name.chars().chain(tag.chars()).any(char::is_control) {
+        return None;
+    }
+    let id = format!("{name}#{tag}");
+    (id.len() <= 128).then_some(id)
+}
+
 fn ready_check_payload(value: &Value) -> Value {
     let state = value.get("state").and_then(Value::as_str).unwrap_or("");
     let player_response = value
@@ -3056,7 +3089,7 @@ mod tests {
     #[test]
     fn gameflow_mode_evidence_requires_the_same_actual_game_id() {
         let session = json!({"gameData": {
-            "gameId": 8461234568,
+            "gameId": 8461234568_i64,
             "queueId": 420,
             "gameType": "MATCHED_GAME",
             "gameMode": "CLASSIC",
