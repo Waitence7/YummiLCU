@@ -423,7 +423,7 @@ impl LcuClient {
             }
         }
         match timeout(Duration::from_secs(4), self.request(Method::POST, FRIEND_REQUESTS_ENDPOINT,
-            Some(json!({"gameName":id.game_name,"tagLine":id.tag_line}))).await {
+            Some(json!({"gameName":id.game_name,"tagLine":id.tag_line})))).await {
             Ok(Ok(_)) => Ok(ActionOutcome::success("친구 요청을 보냈습니다.")),
             _ => Ok(ActionOutcome::failure("친구 요청 결과를 확인하지 못했습니다. 롤에서 확인해 주세요.")),
         }
