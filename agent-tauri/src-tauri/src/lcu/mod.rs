@@ -4,6 +4,7 @@ mod events;
 mod fights;
 mod history;
 mod lockfile;
+mod local_preferences;
 mod party;
 mod remote_replay;
 mod rewards;
@@ -16,6 +17,7 @@ pub(crate) use fights::{
     save_cached_match_fights,
 };
 pub(crate) use history::{empty_match_history, load_cached_match_history, save_match_history_page};
+pub(crate) use local_preferences::watch_local_preferences;
 pub(crate) use lockfile::{
     discover_lockfile_nonblocking, lockfile_path, lockfile_path_nonblocking,
     LockfileDiscovery,

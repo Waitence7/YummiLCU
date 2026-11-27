@@ -174,6 +174,17 @@ impl LcuClient {
             Action::ClaimAllRewards => return self.claim_all_rewards().await,
             Action::InvitePartyMembers => return self.invite_party_members(payload).await,
             Action::CheckPartyMembers => return self.check_party_members(payload).await,
+            Action::ResolveRiotIdentity => return self.resolve_riot_identity(payload).await,
+            Action::AddMatchFriend => {
+                if !config.share_league_online_status { return Ok(ActionOutcome::failure("친구 상태 확인이 비활성화되어 있습니다.")); }
+                return self.add_match_friend(payload).await;
+            }
+            Action::MatchFriendPresence => {
+                if !config.share_league_online_status {
+                    return Ok(ActionOutcome::failure("온라인 상태 공유가 비활성화되어 있습니다."));
+                }
+                return self.match_friend_presence(payload).await;
+            }
             Action::KickPartyMember => return self.kick_party_member(payload).await,
             _ => {}
         }

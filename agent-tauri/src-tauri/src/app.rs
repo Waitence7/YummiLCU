@@ -8,7 +8,7 @@ use crate::{
     commands::agent::start_agent_inner,
     config::Config,
     discord_presence::watch_discord_presence,
-    lcu::{discover_lockfile_nonblocking, LcuClient, LcuConnectionState},
+    lcu::{discover_lockfile_nonblocking, watch_local_preferences, LcuClient, LcuConnectionState},
     platform::sync_windows_startup,
     relay::supervisor::RelaySupervisor,
     state::{AgentEvent, AppState},
@@ -197,7 +197,13 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
                 lcu_state.clone(),
                 "lcu_watcher",
                 "task_panicked",
-                watch_lcu(handle.clone(), lcu_state),
+                watch_lcu(handle.clone(), lcu_state.clone()),
+            );
+            spawn_monitored(
+                lcu_state.clone(),
+                "lcu_watcher",
+                "task_panicked",
+                watch_local_preferences(handle.clone(), lcu_state.clone()),
             );
             spawn_monitored(
                 presence_state.clone(),

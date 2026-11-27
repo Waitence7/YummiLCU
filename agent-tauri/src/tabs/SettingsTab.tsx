@@ -57,16 +57,16 @@ export function SettingsTab({
             description="챔피언 선택에서 나간 뒤 매칭이 다시 자동으로 잡히는 것을 막습니다."
           />
           <Toggle
-            checked={config.ApplyDefaultStatusOnConnect}
-            onChange={(next) => void onPatchConfig({ ApplyDefaultStatusOnConnect: next })}
-            label="연결 시 기본 상태 메시지 적용"
-            description="에이전트 연결 시 롤 클라이언트 상태 메시지를 자동 설정합니다."
-          />
-          <Toggle
             checked={config.AutoAcceptMatch}
             onChange={(next) => void onPatchConfig({ AutoAcceptMatch: next })}
             label="매치 자동 수락"
             description="수락 창이 뜨면 자동으로 수락합니다."
+          />
+          <Toggle
+            checked={config.ShareLeagueOnlineStatus}
+            onChange={(next) => void onPatchConfig({ ShareLeagueOnlineStatus: next })}
+            label="내전에서 롤 접속 상태 공유"
+            description="참가 중인 내전의 권한 있는 사용자에게 현재 연결된 롤 계정의 온라인 상태를 표시합니다."
           />
         </div>
       </Card>

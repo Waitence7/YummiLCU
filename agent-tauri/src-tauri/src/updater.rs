@@ -296,20 +296,35 @@ fn is_newer_target(
     if channel == "stable" {
         return false;
     }
-
-    if let (Some(remote), Some(local)) = (
-        target.build_id.as_deref().and_then(numeric_identifier),
-        numeric_identifier(current_build_id),
-    ) {
-        return remote > local;
+    // Explicitly switching from stable/dev to beta must not be mistaken for an
+    // already-installed beta merely because the semver or CI build ID matches.
+    // After the switch has installed the beta release label, normal monotonic
+    // beta sequence comparison applies again.
+    if channel == "beta"
+        && release_sequence(current_release_label, current_version, channel).is_none()
+    {
+        return true;
     }
 
+    // For prerelease channels the published release sequence is the canonical
+    // ordering. Build IDs describe a particular CI artifact and are not monotonic
+    // across isolated/promoted releases (for example beta.47 may intentionally
+    // reuse or rebuild an older candidate with a smaller run number).
     if let (Some(remote), Some(local)) = (
         target
             .release_label
             .as_deref()
             .and_then(|label| release_sequence(label, &target.version, channel)),
         release_sequence(current_release_label, current_version, channel),
+    ) {
+        return remote > local;
+    }
+
+    // Fall back to build IDs only when either side does not have a comparable
+    // channel release label (developer/candidate builds, legacy manifests, etc.).
+    if let (Some(remote), Some(local)) = (
+        target.build_id.as_deref().and_then(numeric_identifier),
+        numeric_identifier(current_build_id),
     ) {
         return remote > local;
     }
