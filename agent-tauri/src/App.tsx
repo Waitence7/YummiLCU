@@ -213,7 +213,7 @@ export function App() {
 
       <main className={tab === 'history' ? 'min-h-0 flex-1 overflow-hidden bg-white' : 'min-h-0 flex-1 overflow-y-auto bg-slate-50 p-3'}>
         <div hidden={tab !== 'history'} className="h-full">
-          <MatchHistoryTab connected={state.lcu} active={tab === 'history'} />
+          <MatchHistoryTab connected={state.lcu} active={tab === 'history'} discordId={state.discord_id == null ? null : String(state.discord_id)} />
         </div>
         {tab === 'guild' && (
           <GuildMatchTab

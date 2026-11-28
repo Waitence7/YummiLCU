@@ -182,6 +182,8 @@ export async function mockInvoke<T>(
       emit();
       return undefined as T;
     }
+    case "personal_custom_games":
+      return { matches: [] } as T;
     case "recent_match": {
       if (!state.lcu) throw new Error("League Client가 연결되지 않았습니다.");
       const recent: RecentMatch = {

@@ -103,6 +103,8 @@ pub(crate) struct LcuEventPoller {
     live_events_available: Option<bool>,
     live_game_id: Option<String>,
     authoritative_game_id: Option<String>,
+    custom_game_id: Option<String>,
+    custom_active_riot_id: Option<String>,
     connection_identity: Option<LcuIdentity>,
     connection_generation: u64,
     schema_warnings: HashSet<&'static str>,
@@ -178,6 +180,8 @@ impl LcuEventPoller {
             ));
         }
         self.authoritative_game_id = None;
+        self.custom_game_id = None;
+        self.custom_active_riot_id = None;
         self.rofl_match_hint = None;
         self.rofl_preflight_requested_game_id = None;
         self.rofl_preflight_resolved_game_id = None;
@@ -547,7 +551,7 @@ impl LcuEventPoller {
         // Live Client Data is independent of the League Client lockfile. This is
         // especially important for spectators and PC cafes where LCU discovery or
         // gameflow may be unavailable while the local game API is still running.
-        if self.live_game_polling.unwrap_or(true) {
+        if self.live_game_polling.unwrap_or(true) || self.custom_game_id.is_some() {
             let should_poll = self
                 .last_live_game_poll
                 .is_none_or(|last| last.elapsed() >= LIVE_GAME_POLL_INTERVAL);
@@ -617,35 +621,66 @@ impl LcuEventPoller {
                             );
                             let game_id = json_scalar_id(payload.pointer("/game/id"))
                                 .unwrap_or_else(|| "unknown".into());
-                            if self.live_game_id.as_deref() != Some(game_id.as_str()) {
-                                self.live_game = None;
-                                self.live_game_state = None;
-                                self.live_stream_id = None;
-                                self.live_seq = 0;
-                                self.live_respawn_samples.clear();
-                                self.diagnostic(format!(
-                                    "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건",
-                                    payload
-                                        .get("participants")
-                                        .and_then(Value::as_array)
-                                        .map_or(0, Vec::len),
-                                    payload
-                                        .get("events")
-                                        .and_then(Value::as_array)
-                                        .map_or(0, Vec::len),
-                                ));
-                                self.live_game_id = Some(game_id);
+                            let supported_custom = self.custom_game_id.as_deref() == Some(game_id.as_str())
+                                && payload.get("client_mode").and_then(Value::as_str) == Some("player")
+                                && payload.get("replay_mode").and_then(Value::as_bool) != Some(true)
+                                && match (payload.pointer("/game/mode").and_then(Value::as_str),
+                                          payload.pointer("/game/map_number").and_then(Value::as_i64)) {
+                                    (Some("CLASSIC"), Some(11)) => true,
+                                    (Some("ARAM" | "KIWI" | "ARAM_MAYHEM"), Some(12)) => true,
+                                    _ => false,
+                                };
+                            let custom_discovery = supported_custom;
+                            if supported_custom {
+                                payload["game"]["game_type"] = json!("CUSTOM_GAME");
+                                if let Some(active) = value.get("activePlayer") {
+                                    let riot = active.get("riotId").and_then(Value::as_str)
+                                        .filter(|id| id.contains('#')).map(str::to_owned)
+                                        .or_else(|| league_presence_riot_id(active))
+                                        .or_else(|| payload.get("active_player_riot_id").and_then(Value::as_str).map(str::to_owned))
+                                        .or_else(|| self.custom_active_riot_id.clone());
+                                    if let Some(riot) = riot {
+                                        payload["active_player_riot_id"] = json!(riot);
+                                    }
+                                }
                             }
-                            push_live_game_changed(
-                                &mut self.live_game,
-                                &mut self.live_game_state,
-                                &mut self.live_stream_id,
-                                &mut self.live_seq,
-                                self.live_game_delta_enabled,
-                                live_game_fingerprint(&payload, &mut self.live_respawn_samples),
-                                payload,
-                                &mut events,
-                            );
+                            if custom_discovery {
+                                payload["custom_discovery"] = Value::Bool(true);
+                            }
+                            let partial = payload.get("participants").and_then(Value::as_array)
+                                .is_some_and(|rows| rows.len() != LIVE_GAME_PARTICIPANT_COUNT);
+                            if (!partial && self.live_game_polling.unwrap_or(true)) || custom_discovery {
+
+                                if self.live_game_id.as_deref() != Some(game_id.as_str()) {
+                                    self.live_game = None;
+                                    self.live_game_state = None;
+                                    self.live_stream_id = None;
+                                    self.live_seq = 0;
+                                    self.live_respawn_samples.clear();
+                                    self.diagnostic(format!(
+                                        "관전 게임 감지: game_id={game_id}, 참가자={}명, 이벤트={}건",
+                                        payload
+                                            .get("participants")
+                                            .and_then(Value::as_array)
+                                            .map_or(0, Vec::len),
+                                        payload
+                                            .get("events")
+                                            .and_then(Value::as_array)
+                                            .map_or(0, Vec::len),
+                                    ));
+                                    self.live_game_id = Some(game_id);
+                                }
+                                push_live_game_changed(
+                                    &mut self.live_game,
+                                    &mut self.live_game_state,
+                                    &mut self.live_stream_id,
+                                    &mut self.live_seq,
+                                    self.live_game_delta_enabled,
+                                    live_game_fingerprint(&payload, &mut self.live_respawn_samples),
+                                    payload,
+                                    &mut events,
+                                );
+                            }
                         } else {
                             self.live_game = None;
                             self.live_game_state = None;
@@ -781,6 +816,8 @@ impl LcuEventPoller {
             )
         {
             self.authoritative_game_id = None;
+            self.custom_game_id = None;
+            self.custom_active_riot_id = None;
         }
         push_gameflow_snapshot(
             &mut self.gameflow,
@@ -801,6 +838,13 @@ impl LcuEventPoller {
                     self.schema_warnings
                         .remove("live_gameflow_session_request_failed");
                     if let Some(game_id) = gameflow_session_game_id(&session) {
+                        self.custom_game_id = gameflow_is_custom(&session).then(|| game_id.clone());
+                        self.custom_active_riot_id = if self.custom_game_id.is_some() {
+                            match timeout(Duration::from_secs(2), client.current_summoner()).await {
+                                Ok(Ok(value)) => league_presence_riot_id(&value),
+                                _ => None,
+                            }
+                        } else { None };
                         if self.authoritative_game_id.as_deref() != Some(game_id.as_str()) {
                             self.diagnostic(format!(
                                 "게임 ID 확정(Gameflow): {} -> {game_id}",
@@ -1541,6 +1585,13 @@ fn champ_select_game_id(value: &Value) -> Option<String> {
     json_scalar_id(value.get("gameId")).or_else(|| json_scalar_id(value.get("game_id")))
 }
 
+fn gameflow_is_custom(value: &Value) -> bool {
+    value.pointer("/gameData/isCustomGame").and_then(Value::as_bool) == Some(true)
+        || value.pointer("/gameData/queue/isCustom").and_then(Value::as_bool) == Some(true)
+        || value.pointer("/gameData/gameType").and_then(Value::as_str)
+            .is_some_and(|kind| kind.eq_ignore_ascii_case("CUSTOM_GAME"))
+}
+
 fn gameflow_session_game_id(value: &Value) -> Option<String> {
     json_scalar_id(value.pointer("/gameData/gameId"))
         .or_else(|| json_scalar_id(value.pointer("/gameData/game_id")))
@@ -1842,7 +1893,7 @@ async fn eog_payload(
                 if tag.is_none() {
                     missing_tag_count += 1;
                 }
-                participants.push(json!({
+                let mut participant = json!({
                     "gameName": name,
                     "tagLine": tag,
                     "teamId": player.get("teamId").cloned().unwrap_or(Value::Null),
@@ -1851,7 +1902,14 @@ async fn eog_payload(
                     "individualPosition": player.get("individualPosition").cloned().unwrap_or(Value::Null),
                     "lane": player.get("lane").cloned().unwrap_or(Value::Null),
                     "role": player.get("role").cloned().unwrap_or(Value::Null)
-                }));
+                });
+                for (name, stat) in [("kills", "CHAMPIONS_KILLED"), ("deaths", "NUM_DEATHS"), ("assists", "ASSISTS")] {
+                    if let Some(value) = player.pointer(&format!("/stats/{stat}")).and_then(Value::as_u64)
+                        .or_else(|| player.pointer(&format!("/stats/{name}")).and_then(Value::as_u64)) {
+                        participant[name] = json!(value);
+                    }
+                }
+                participants.push(participant);
             }
         }
     }
@@ -2782,7 +2840,10 @@ fn live_game_payload_at(
         .get("allPlayers")
         .or_else(|| value.get("players"))
         .and_then(Value::as_array)?;
-    if players.len() != LIVE_GAME_PARTICIPANT_COUNT {
+    let aram = matches!(game_data.get("gameMode").and_then(Value::as_str), Some("ARAM" | "KIWI" | "ARAM_MAYHEM"))
+        && game_data.get("mapNumber").and_then(Value::as_i64) == Some(12);
+    if players.len() != LIVE_GAME_PARTICIPANT_COUNT
+        && !(aram && !players.is_empty() && players.len() <= 10) {
         return None;
     }
 
@@ -3618,6 +3679,14 @@ mod tests {
         let recovered = poller.take_diagnostics();
         assert_eq!(recovered.len(), 1);
         assert!(recovered[0].contains("복구"));
+    }
+
+    #[test]
+    fn league_presence_requires_complete_current_account_identity() {
+        assert_eq!(league_presence_riot_id(&json!({"gameName":"한 글","tagLine":"KR1"})).as_deref(), Some("한 글#KR1"));
+        assert!(league_presence_riot_id(&json!({"displayName":"OldName"})).is_none());
+        assert!(league_presence_riot_id(&json!({"gameName":"A","tagLine":""})).is_none());
+        assert!(league_presence_riot_id(&json!({"gameName":"A#B","tagLine":"KR1"})).is_none());
     }
 
     #[test]

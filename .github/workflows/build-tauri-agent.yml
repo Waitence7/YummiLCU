@@ -2,7 +2,7 @@ name: Deploy LCU Tauri Agent (manual Actions button)
 
 on:
   push:
-    branches: [main, release/stable-0.7.38]
+    branches: [main, release/stable-0.7.39]
     paths:
       - "agent-tauri/**"
       - "!agent-tauri/gamebar-widget/**"
@@ -182,8 +182,8 @@ jobs:
           $shortSha = $env:GITHUB_SHA.Substring(0, 7)
           $releaseChannel = 'dev'
           $releaseLabel = "$version-candidate.$env:GITHUB_RUN_NUMBER"
-          if ($env:GITHUB_REF -eq 'refs/heads/release/stable-0.7.38') {
-            if ($version -ne '0.7.38') { throw "Unexpected stable source version: $version" }
+          if ($env:GITHUB_REF -eq 'refs/heads/release/stable-0.7.39') {
+            if ($version -ne '0.7.39') { throw "Unexpected stable source version: $version" }
             $releaseChannel = 'stable'
             $releaseLabel = $version
           } elseif ($env:RELEASE_BETA_66 -eq 'true') {

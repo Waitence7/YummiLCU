@@ -117,7 +117,7 @@ fn compact_match_history_game(game: &Value) -> Option<Value> {
                         .or_else(|| timeline.and_then(|value| value.get("role")))
                         .cloned()
                         .unwrap_or(Value::Null);
-                    Some(json!({
+                    let mut result = json!({
                         "gameName": game_name,
                         "tagLine": tag_line,
                         "teamId": team_id,
@@ -126,7 +126,15 @@ fn compact_match_history_game(game: &Value) -> Option<Value> {
                         "individualPosition": individual_position,
                         "lane": lane,
                         "role": role
-                    }))
+                    });
+                    if let Some(stats) = stats_row.and_then(|row| row.get("stats")) {
+                        for name in ["kills", "deaths", "assists"] {
+                            if let Some(value) = stats.get(name).and_then(Value::as_u64) {
+                                result[name] = json!(value);
+                            }
+                        }
+                    }
+                    Some(result)
                 })
                 .collect::<Vec<_>>()
         })

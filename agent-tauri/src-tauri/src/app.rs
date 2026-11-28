@@ -87,6 +87,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::lcu::match_replay,
             crate::commands::lcu::match_replay_analysis,
             crate::commands::lcu::download_match_replay,
+            crate::commands::lcu::personal_custom_games,
             crate::commands::update::get_beta_release_info,
             crate::commands::update::open_beta_download,
             crate::commands::update::apply_beta_update_now,

@@ -17,6 +17,13 @@ use crate::{
 };
 
 #[tauri::command]
+pub(crate) async fn personal_custom_games(state: State<'_, Arc<AppState>>) -> Result<Value,String> {
+    let config = state.config.read().await.clone();
+    let saved = session::load(&config).ok_or_else(|| "Yummi 로그인 세션이 없습니다.".to_owned())?;
+    crate::lcu::remote_custom_games(&config, &saved).await.map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub(crate) async fn recent_match(state: State<'_, Arc<AppState>>) -> Result<Value, String> {
     let config = state.config.read().await.clone();
     let path = lockfile_path_nonblocking(&config)

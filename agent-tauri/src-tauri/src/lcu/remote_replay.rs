@@ -124,6 +124,13 @@ pub(crate) async fn remote_replay_analysis_viewer(
     response_json(response, "ROFL 서버 재생 데이터 조회").await
 }
 
+pub(crate) async fn remote_custom_games(config: &Config, session: &Session) -> AgentResult<Value> {
+    let response = client()?.get(config.custom_games_url(&session.session_id)?)
+        .header("x-yummi-ws-token", &session.ws_token)
+        .send().await.map_err(|error| AgentError::Relay(format!("커스텀 전적 조회 실패: {error}")))?;
+    response_json(response, "커스텀 전적 조회").await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
