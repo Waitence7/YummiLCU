@@ -106,6 +106,7 @@ pub(crate) fn run() -> Result<(), tauri::Error> {
             crate::commands::recording::get_recording_status,
             crate::commands::recording::list_recording_sessions,
             crate::commands::recording::recording_game_context,
+            crate::commands::lcu::personal_custom_games,
             crate::commands::recording::request_borderless_capture_access,
             crate::commands::recording::start_recording,
             crate::commands::recording::stop_recording,

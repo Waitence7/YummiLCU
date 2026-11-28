@@ -174,7 +174,7 @@ jobs:
       - name: Configure candidate metadata
         id: release_meta
         env:
-          RELEASE_BETA_66: ${{ github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release-beta-0.8.0-66]') }}
+          RELEASE_BETA_67: ${{ github.ref == 'refs/heads/main' && contains(github.event.head_commit.message, '[release-beta-0.8.0-67]') }}
         run: |
           $version = (Get-Content agent-tauri/package.json | ConvertFrom-Json).version
           $date = (Get-Date).ToUniversalTime().ToString("yyyyMMdd")
@@ -186,10 +186,10 @@ jobs:
             if ($version -ne '0.7.38') { throw "Unexpected stable source version: $version" }
             $releaseChannel = 'stable'
             $releaseLabel = $version
-          } elseif ($env:RELEASE_BETA_66 -eq 'true') {
+          } elseif ($env:RELEASE_BETA_67 -eq 'true') {
             if ($version -ne '0.8.0') { throw "Unexpected beta source version: $version" }
             $releaseChannel = 'beta'
-            $releaseLabel = "$version-beta.66"
+            $releaseLabel = "$version-beta.67"
           }
           "YUMMI_AGENT_RELEASE_CHANNEL=$releaseChannel" >> $env:GITHUB_ENV
           "YUMMI_AGENT_RELEASE_LABEL=$releaseLabel" >> $env:GITHUB_ENV

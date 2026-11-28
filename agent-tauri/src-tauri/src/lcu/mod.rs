@@ -12,17 +12,17 @@ mod rofl;
 
 pub(crate) use client::{LcuClient, LcuIdentity};
 pub(crate) use events::LcuEventPoller;
+pub(crate) use local_preferences::watch_local_preferences;
 pub(crate) use fights::{
     analyze_replay_fights, attach_cached_match_fights, load_cached_match_fights,
     save_cached_match_fights,
 };
 pub(crate) use history::{empty_match_history, load_cached_match_history, save_match_history_page};
-pub(crate) use local_preferences::watch_local_preferences;
 pub(crate) use lockfile::{
     discover_lockfile_nonblocking, lockfile_path, lockfile_path_nonblocking, LockfileDiscovery,
 };
 pub(crate) use remote_replay::{
-    remote_recording_context, remote_replay_analysis_job, remote_replay_analysis_viewer,
+    remote_custom_games, remote_recording_context, remote_replay_analysis_job, remote_replay_analysis_viewer,
     start_remote_replay_analysis,
 };
 pub(crate) use rofl::{

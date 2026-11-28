@@ -1960,6 +1960,17 @@ async def agent_replay_analysis_job(
     )
 
 
+@app.get("/agent/custom-games")
+@app.get("/lcu/custom-games")
+async def agent_custom_games(
+    request: Request, session_id: str = Query(..., min_length=8, max_length=64),
+) -> Response:
+    discord_id = await _authenticate_agent_http(request, session_id)
+    response = await _proxy_agent_rofl_analysis_get(request, discord_id, "/api/me/custom-games")
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
 @app.get("/agent/recording-context")
 @app.get("/lcu/recording-context")
 async def agent_recording_context(
@@ -2543,7 +2554,7 @@ async def _forward_guild_match_eog(
                     type(exc).__name__,
                 )
                 outcome = None
-            matched = isinstance(outcome, dict) and outcome.get("matched") is True
+            matched = isinstance(outcome, dict) and (outcome.get("matched") is True or outcome.get("archived") is True)
             if not matched:
                 reason = outcome.get("reason") if isinstance(outcome, dict) else "invalid_response"
                 logger.warning(

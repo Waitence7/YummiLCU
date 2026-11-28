@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { matchFights, matchHistory } from "../api/commands";
+import { PersonalCustomGames } from "./PersonalCustomGames";
 import { ChampionPortrait } from "../components/matches/ChampionPortrait";
 import { ItemBuild, SpellPair } from "../components/matches/MatchAssets";
 import { ReplayViewer } from "../components/matches/ReplayViewer";
@@ -60,10 +61,13 @@ function fightOutcome(match: Match, fight: MatchFight) {
 export function MatchHistoryTab({
   connected,
   active,
+  discordId,
 }: {
   connected: boolean;
   active: boolean;
+  discordId?: string | null;
 }) {
+  const [personal, setPersonal] = useState(false);
   const [history, setHistory] = useState<MatchHistory | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -210,6 +214,8 @@ export function MatchHistoryTab({
     [],
   );
 
+  if (personal) return <PersonalCustomGames key={discordId ?? "signed-out"} discordId={discordId} active={active} onBack={() => setPersonal(false)} />;
+
   return (
     <div className={`match-history${selected ? " has-selection" : ""}`}>
       <div className="match-history-heading">
@@ -230,6 +236,7 @@ export function MatchHistoryTab({
           </div>
         </div>
         <div className="match-actions">
+          <button className="match-button" onClick={() => setPersonal(true)}>자동 기록</button>
           {targetRiotId && (
             <button
               className="match-button"

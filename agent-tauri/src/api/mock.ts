@@ -311,6 +311,8 @@ export async function mockInvoke<T>(
       return structuredClone(recordingStatus) as T;
     case "list_recording_sessions":
       return structuredClone(mockRecordingSessions) as T;
+    case "personal_custom_games":
+      return { matches: [] } as T;
     case "recording_game_context":
       return {
         gameId: String(args?.gameId ?? "8393991955"),

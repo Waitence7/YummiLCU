@@ -1188,6 +1188,7 @@ class ConnectionManager:
             if (
                 did not in self._live_game_subscribers
                 and did not in self._gameflow_subscribers
+                and data.get("custom_discovery") is not True
             ):
                 logger.info(
                     "live_game_update 저장만 함: discord_id=%s game_id=%s participants=%s events=%s "

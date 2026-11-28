@@ -1,3 +1,4 @@
+import type { CustomGameRecord } from "../state/custom-games";
 import type {
   AgentState,
   BetaReleaseInfo,
@@ -48,6 +49,7 @@ export const startAgent = () => call<void>("start_agent");
 export const stopAgent = () => call<void>("stop_agent");
 export const logout = () => call<void>("logout");
 export const recentMatch = () => call<RecentMatch>("recent_match");
+export const personalCustomGames = () => call<{matches: CustomGameRecord[]}>("personal_custom_games");
 export const matchHistory = (offset = 0, riotId?: string) =>
   call<MatchHistory>("match_history", { offset, riotId });
 export const matchFights = (gameId: string) =>

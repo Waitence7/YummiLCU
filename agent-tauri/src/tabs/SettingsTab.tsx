@@ -66,6 +66,10 @@ export function SettingsTab({
             label="매치 자동 수락"
             description="수락 창이 뜨면 자동으로 수락합니다."
           />
+          <div className="py-3 text-sm">
+            <p className="font-medium">커스텀 게임 자동 기록 <span className="text-xs text-emerald-600">항상 활성</span></p>
+            <p className="mt-1 text-xs text-slate-500">지원되는 커스텀 경기 전적과 ROFL을 저장합니다. 내 기록은 전적 탭에서 확인할 수 있습니다.</p>
+          </div>
           <Toggle
             checked={config.ShareLeagueOnlineStatus}
             onChange={(next) => void onPatchConfig({ ShareLeagueOnlineStatus: next })}

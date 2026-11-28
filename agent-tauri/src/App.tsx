@@ -390,7 +390,7 @@ export function App() {
           }
         >
           <div hidden={tab !== "history"} className="h-full">
-            <MatchHistoryTab connected={state.lcu} active={tab === "history"} />
+            <MatchHistoryTab connected={state.lcu} active={tab === "history"} discordId={state.discord_id} />
           </div>
           {tab === "recording" && <RecordingTab relayConnected={state.relay} lcuConnected={state.lcu} />}
           {tab === "overlay" && (
